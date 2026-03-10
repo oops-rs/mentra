@@ -1,6 +1,7 @@
 mod agent;
 mod error;
 mod handle;
+mod todo;
 
 use std::sync::{Arc, RwLock};
 
@@ -13,11 +14,12 @@ use crate::{
     tool::{ToolHandler, ToolRegistry},
 };
 
-pub use crate::tool::ToolCall;
 pub use agent::{
     Agent, AgentConfig, AgentEvent, AgentSnapshot, AgentStatus, PendingAssistantTurn,
     PendingToolUseSummary,
 };
+pub(crate) use todo::TODO_TOOL_NAME;
+pub use todo::{TodoItem, TodoStatus};
 
 #[derive(Default)]
 pub struct Runtime {

@@ -20,10 +20,12 @@ pub(super) enum StreamScript {
     Receiver(ProviderEventStream),
 }
 
+#[derive(Clone)]
 pub(super) struct ScriptedProvider {
     kind: ModelProviderKind,
     models: Vec<ModelInfo>,
     scripts: Arc<Mutex<VecDeque<StreamScript>>>,
+    requests: Arc<Mutex<Vec<Request>>>,
 }
 
 impl ScriptedProvider {
@@ -36,7 +38,12 @@ impl ScriptedProvider {
             kind,
             models,
             scripts: Arc::new(Mutex::new(VecDeque::from(scripts))),
+            requests: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub(super) async fn recorded_requests(&self) -> Vec<Request> {
+        self.requests.lock().await.clone()
     }
 }
 
@@ -50,7 +57,8 @@ impl Provider for ScriptedProvider {
         Ok(self.models.clone())
     }
 
-    async fn stream(&self, _request: Request) -> Result<ProviderEventStream, ProviderError> {
+    async fn stream(&self, request: Request) -> Result<ProviderEventStream, ProviderError> {
+        self.requests.lock().await.push(request);
         match self.scripts.lock().await.pop_front() {
             Some(StreamScript::Buffered(items)) => {
                 let (tx, rx) = mpsc::unbounded_channel();

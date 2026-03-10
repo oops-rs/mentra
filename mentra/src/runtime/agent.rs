@@ -14,7 +14,12 @@ use crate::{
         Provider,
         model::{ContentBlock, Message, Role, ToolChoice},
     },
-    runtime::{error::RuntimeError, handle::RuntimeHandle},
+    runtime::{
+        TodoItem,
+        error::RuntimeError,
+        handle::RuntimeHandle,
+        todo::{TODO_REMINDER_TEXT, TODO_REMINDER_THRESHOLD, has_unfinished_todos},
+    },
 };
 
 pub use events::{AgentEvent, AgentSnapshot, AgentStatus, PendingToolUseSummary};
@@ -48,6 +53,8 @@ pub struct Agent {
     name: String,
     config: AgentConfig,
     history: Vec<Message>,
+    todos: Vec<TodoItem>,
+    rounds_since_todo: usize,
     event_tx: broadcast::Sender<AgentEvent>,
     snapshot: AgentSnapshot,
     snapshot_tx: watch::Sender<AgentSnapshot>,
@@ -72,6 +79,8 @@ impl Agent {
             name,
             config,
             history: Vec::new(),
+            todos: Vec::new(),
+            rounds_since_todo: 0,
             event_tx,
             snapshot,
             snapshot_tx,
@@ -112,6 +121,8 @@ impl Agent {
         content: impl Into<Vec<ContentBlock>>,
     ) -> Result<(), RuntimeError> {
         let history_len_before_run = self.history.len();
+        let todos_before_run = self.todos.clone();
+        let rounds_before_run = self.rounds_since_todo;
         self.push_history(Message {
             role: Role::User,
             content: content.into(),
@@ -127,6 +138,7 @@ impl Agent {
             }
             Err(error) => {
                 self.rollback_history(history_len_before_run);
+                self.restore_todo_state(todos_before_run, rounds_before_run);
                 self.clear_pending_turn();
                 let message = format!("{error:?}");
                 self.set_status(AgentStatus::Failed(message.clone()));
@@ -156,6 +168,37 @@ impl Agent {
     fn rollback_history(&mut self, history_len: usize) {
         self.history.truncate(history_len);
         self.sync_history_len();
+    }
+
+    pub(crate) fn effective_system_prompt(&self) -> Option<String> {
+        if self.rounds_since_todo < TODO_REMINDER_THRESHOLD || !has_unfinished_todos(&self.todos) {
+            return self.config.system.clone();
+        }
+
+        Some(match &self.config.system {
+            Some(system) => format!("{TODO_REMINDER_TEXT}\n\n{system}"),
+            None => TODO_REMINDER_TEXT.to_string(),
+        })
+    }
+
+    pub(crate) fn apply_todo_items(&mut self, items: Vec<TodoItem>) {
+        self.todos = items;
+        self.rounds_since_todo = 0;
+        self.snapshot.todos = self.todos.clone();
+        self.publish_snapshot();
+    }
+
+    pub(crate) fn note_round_without_todo(&mut self) {
+        if has_unfinished_todos(&self.todos) {
+            self.rounds_since_todo += 1;
+        }
+    }
+
+    fn restore_todo_state(&mut self, todos: Vec<TodoItem>, rounds_since_todo: usize) {
+        self.todos = todos;
+        self.rounds_since_todo = rounds_since_todo;
+        self.snapshot.todos = self.todos.clone();
+        self.publish_snapshot();
     }
 
     pub(crate) fn emit_event(&self, event: AgentEvent) {

@@ -16,9 +16,11 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new_empty() -> Self {
-        Self {
+        let mut registry = Self {
             tools: HashMap::new(),
-        }
+        };
+        registry.register_tool(builtin::TodoTool);
+        registry
     }
 
     pub fn register_tool<T>(&mut self, tool: T)

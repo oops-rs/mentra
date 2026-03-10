@@ -3,10 +3,12 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+use crate::runtime::TODO_TOOL_NAME;
 use crate::tool::{ToolContext, ToolHandler, ToolResult, ToolSpec};
 
 pub struct BashTool;
 pub struct ReadFileTool;
+pub struct TodoTool;
 
 #[async_trait]
 impl ToolHandler for BashTool {
@@ -108,5 +110,47 @@ impl ToolHandler for ReadFileTool {
         }
 
         Ok(content.join("\n"))
+    }
+}
+
+#[async_trait]
+impl ToolHandler for TodoTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: TODO_TOOL_NAME.to_string(),
+            description: Some("Update task list. Track progress on multi-step tasks.".into()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Stable identifier for the todo item"
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "Short description of the todo item"
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Current status of the todo item"
+                                }
+                            },
+                            "required": ["id", "text", "status"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }),
+        }
+    }
+
+    async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
+        Err("todo is handled directly by the agent runtime".to_string())
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     provider::model::{Message, Request, Role},
-    runtime::error::RuntimeError,
+    runtime::{self, TODO_TOOL_NAME, error::RuntimeError},
 };
 
 use super::{Agent, AgentEvent, AgentStatus, PendingAssistantTurn};
@@ -18,7 +18,7 @@ impl<'a> TurnRunner<'a> {
         loop {
             let request = Request {
                 model: self.agent.model.clone(),
-                system: self.agent.config.system.clone(),
+                system: self.agent.effective_system_prompt(),
                 messages: self.agent.history.clone(),
                 tools: self.agent.runtime.tools(),
                 tool_choice: self.agent.config.tool_choice.clone(),
@@ -32,10 +32,12 @@ impl<'a> TurnRunner<'a> {
 
             let tool_calls = pending.ready_tool_calls()?;
             if tool_calls.is_empty() {
+                self.agent.note_round_without_todo();
                 return Ok(());
             }
 
             let mut tool_results = Vec::new();
+            let mut successful_todo = false;
             for call in tool_calls {
                 self.agent.set_status(AgentStatus::ExecutingTool {
                     id: call.id.clone(),
@@ -44,10 +46,15 @@ impl<'a> TurnRunner<'a> {
                 self.agent
                     .emit_event(AgentEvent::ToolExecutionStarted { call: call.clone() });
 
-                let result = self.agent.runtime.execute_tool(call).await;
+                let (result, todo_succeeded) = if call.name == TODO_TOOL_NAME {
+                    self.execute_todo(call)
+                } else {
+                    (self.agent.runtime.execute_tool(call).await, false)
+                };
                 self.agent.emit_event(AgentEvent::ToolExecutionFinished {
                     result: result.clone(),
                 });
+                successful_todo |= todo_succeeded;
                 tool_results.push(result);
             }
 
@@ -55,6 +62,9 @@ impl<'a> TurnRunner<'a> {
                 role: Role::User,
                 content: tool_results,
             });
+            if !successful_todo {
+                self.agent.note_round_without_todo();
+            }
             self.agent.clear_pending_turn();
         }
     }
@@ -100,5 +110,33 @@ impl<'a> TurnRunner<'a> {
                 message: assistant_message,
             });
         Ok(())
+    }
+
+    fn execute_todo(
+        &mut self,
+        call: crate::tool::ToolCall,
+    ) -> (crate::provider::model::ContentBlock, bool) {
+        match runtime::todo::parse_todo_input(call.input) {
+            Ok(items) => {
+                let rendered = runtime::todo::render_todos(&items);
+                self.agent.apply_todo_items(items);
+                (
+                    crate::provider::model::ContentBlock::ToolResult {
+                        tool_use_id: call.id,
+                        content: rendered,
+                        is_error: false,
+                    },
+                    true,
+                )
+            }
+            Err(content) => (
+                crate::provider::model::ContentBlock::ToolResult {
+                    tool_use_id: call.id,
+                    content,
+                    is_error: true,
+                },
+                false,
+            ),
+        }
     }
 }

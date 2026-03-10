@@ -1,5 +1,6 @@
 use crate::{
     provider::model::{ContentBlock, Message},
+    runtime::TodoItem,
     tool::ToolCall,
 };
 
@@ -31,6 +32,7 @@ pub struct AgentSnapshot {
     pub history_len: usize,
     pub current_text: String,
     pub pending_tool_uses: Vec<PendingToolUseSummary>,
+    pub todos: Vec<TodoItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

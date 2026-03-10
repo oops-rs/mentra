@@ -2,7 +2,8 @@ use std::io::Write;
 
 use mentra::{
     provider::model::{ContentBlock, ModelInfo, ModelProviderKind},
-    runtime::{Agent, AgentConfig, AgentEvent, Runtime, ToolCall},
+    runtime::{Agent, AgentConfig, AgentEvent, Runtime, TodoItem, TodoStatus},
+    tool::ToolCall,
 };
 
 #[tokio::main]
@@ -60,29 +61,46 @@ async fn pick_model(runtime: &Runtime) -> ModelInfo {
 
 fn subscribe_events(agent: &Agent) -> tokio::task::JoinHandle<()> {
     let mut events = agent.subscribe_events();
+    let mut snapshot = agent.watch_snapshot();
 
     tokio::spawn(async move {
         let mut assistant_line_open = false;
+        let mut last_rendered_todos = render_todos(&snapshot.borrow().todos);
 
-        while let Ok(event) = events.recv().await {
-            match event {
-                AgentEvent::TextDelta { delta, .. } => {
-                    assistant_line_open = true;
-                    print!("{delta}");
-                    std::io::stdout().flush().expect("Failed to flush stdout");
+        loop {
+            tokio::select! {
+                event = events.recv() => match event {
+                    Ok(AgentEvent::TextDelta { delta, .. }) => {
+                        assistant_line_open = true;
+                        print!("{delta}");
+                        std::io::stdout().flush().expect("Failed to flush stdout");
+                    }
+                    Ok(AgentEvent::ToolUseReady { call, .. }) => {
+                        end_assistant_line(&mut assistant_line_open);
+                        println!("\x1b[33m$ {}\x1b[0m", describe_tool_call(&call));
+                    }
+                    Ok(AgentEvent::RunFinished) => {
+                        end_assistant_line(&mut assistant_line_open);
+                    }
+                    Ok(AgentEvent::RunFailed { error }) => {
+                        end_assistant_line(&mut assistant_line_open);
+                        eprintln!("Agent failed: {error}");
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                },
+                changed = snapshot.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+
+                    let rendered_todos = render_todos(&snapshot.borrow().todos);
+                    if rendered_todos != last_rendered_todos {
+                        end_assistant_line(&mut assistant_line_open);
+                        print_todos(&rendered_todos);
+                        last_rendered_todos = rendered_todos;
+                    }
                 }
-                AgentEvent::ToolUseReady { call, .. } => {
-                    end_assistant_line(&mut assistant_line_open);
-                    println!("\x1b[33m$ {}\x1b[0m", describe_tool_call(&call));
-                }
-                AgentEvent::RunFinished => {
-                    end_assistant_line(&mut assistant_line_open);
-                }
-                AgentEvent::RunFailed { error } => {
-                    end_assistant_line(&mut assistant_line_open);
-                    eprintln!("Agent failed: {error}");
-                }
-                _ => {}
             }
         }
     })
@@ -105,6 +123,12 @@ fn describe_tool_call(call: &ToolCall) -> String {
         return format!("read_file {} (all lines)", path);
     }
 
+    if call.name == "todo"
+        && let Some(items) = call.input.get("items").and_then(|value| value.as_array())
+    {
+        return format!("todo {} item(s)", items.len());
+    }
+
     format!("{} {}", call.name, call.input)
 }
 
@@ -113,4 +137,32 @@ fn end_assistant_line(assistant_line_open: &mut bool) {
         println!();
         *assistant_line_open = false;
     }
+}
+
+fn print_todos(rendered_todos: &str) {
+    if rendered_todos.is_empty() {
+        return;
+    }
+
+    println!("\x1b[36mTodos\x1b[0m");
+    println!("{rendered_todos}");
+}
+
+fn render_todos(todos: &[TodoItem]) -> String {
+    if todos.is_empty() {
+        return String::new();
+    }
+
+    todos
+        .iter()
+        .map(|item| {
+            let marker = match item.status {
+                TodoStatus::Pending => "[ ]",
+                TodoStatus::InProgress => "[>]",
+                TodoStatus::Completed => "[x]",
+            };
+            format!("{marker} {}: {}", item.id, item.text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

@@ -5,6 +5,7 @@ use crate::{
         ContentBlock, ContentBlockDelta, ContentBlockStart, Message, ProviderEvent, Role,
     },
     runtime::{AgentEvent, PendingAssistantTurn},
+    tool::ToolCall,
 };
 
 #[test]
@@ -95,7 +96,7 @@ fn tool_use_turn_emits_ready_event_and_parses_call() {
         derived,
         vec![AgentEvent::ToolUseReady {
             index: 0,
-            call: crate::runtime::ToolCall {
+            call: ToolCall {
                 id: "tool-1".to_string(),
                 name: "echo_tool".to_string(),
                 input: json!({ "value": "hi" }),
