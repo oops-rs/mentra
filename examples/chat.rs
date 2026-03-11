@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use dotenvy::dotenv;
 use mentra::{
     provider::model::{ContentBlock, ModelInfo, ModelProviderKind},
     runtime::{Agent, AgentConfig, AgentEvent, Runtime, TodoItem, TodoStatus},
@@ -8,6 +9,8 @@ use mentra::{
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
+
     let mut runtime = Runtime::default();
 
     let mut configured_providers = Vec::new();
