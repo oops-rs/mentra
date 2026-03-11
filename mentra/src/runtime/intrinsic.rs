@@ -1,15 +1,14 @@
-use serde_json::json;
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::{
     ContentBlock,
     runtime::{
         Agent, AgentEvent, ContextCompactionTrigger, SpawnedAgentStatus, TASK_CREATE_TOOL_NAME,
-        TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
-        TEAM_BROADCAST_TOOL_NAME, TEAM_LIST_REQUESTS_TOOL_NAME, TEAM_READ_INBOX_TOOL_NAME,
-        TEAM_REQUEST_TOOL_NAME, TEAM_RESPOND_TOOL_NAME, TEAM_SEND_TOOL_NAME,
-        TEAM_SPAWN_TOOL_NAME, TeamProtocolStatus, task, task_graph,
-        team::TeamRequestDirection, error::RuntimeError,
+        TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME, TEAM_BROADCAST_TOOL_NAME,
+        TEAM_LIST_REQUESTS_TOOL_NAME, TEAM_READ_INBOX_TOOL_NAME, TEAM_REQUEST_TOOL_NAME,
+        TEAM_RESPOND_TOOL_NAME, TEAM_SEND_TOOL_NAME, TEAM_SPAWN_TOOL_NAME, TeamProtocolStatus,
+        error::RuntimeError, task, task_graph, team::TeamRequestDirection,
     },
     tool::{ToolCall, ToolSpec},
 };
@@ -76,7 +75,8 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: TEAM_SEND_TOOL_NAME.to_string(),
             description: Some(
-                "Send a mailbox message to the lead or a persistent teammate.".into(),
+                "Send a normal mailbox message to the lead or a persistent teammate. Use this to ask a teammate for work or a proposal; do not use team_request when you are simply asking them to submit a plan back to you."
+                    .into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -106,7 +106,7 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: TEAM_BROADCAST_TOOL_NAME.to_string(),
             description: Some(
-                "Send the same mailbox message to every other known agent on the team.".into(),
+                "Lead-only team announcement tool. Send the same mailbox message to every other known agent on the team.".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -122,7 +122,7 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: TEAM_REQUEST_TOOL_NAME.to_string(),
             description: Some(
-                "Create a structured team request with a generated request_id and durable status."
+                "Create a structured team request with a generated request_id and durable status. Use this when you are the requester and expect the other side to answer with team_respond. For built-in plan review, the teammate doing risky work should send protocol `plan_approval` to the lead; the lead should usually ask for the plan with team_send, then answer the inbound request with team_respond."
                     .into(),
             ),
             input_schema: json!({
@@ -199,7 +199,10 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: TASK_CREATE_TOOL_NAME.to_string(),
-            description: Some("Create a persisted task in the task graph.".into()),
+            description: Some(
+                "Lead-oriented project planning tool. Create a persisted task in the task graph."
+                    .into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -226,7 +229,10 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: TASK_UPDATE_TOOL_NAME.to_string(),
-            description: Some("Update a persisted task and its dependency edges.".into()),
+            description: Some(
+                "Lead-oriented project planning tool. Update a persisted task and its dependency edges."
+                    .into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -488,9 +494,10 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
                     }
                 }
                 Err(error) => {
-                    if let Some(finished) = agent
-                        .finish_subagent(child.id(), SpawnedAgentStatus::Failed(format!("{error:?}")))
-                    {
+                    if let Some(finished) = agent.finish_subagent(
+                        child.id(),
+                        SpawnedAgentStatus::Failed(format!("{error:?}")),
+                    ) {
                         agent.emit_event(AgentEvent::SubagentFinished { agent: finished });
                     }
                     let _ = agent.refresh_tasks_from_disk();
@@ -523,7 +530,10 @@ async fn execute_team_spawn(agent: &mut Agent, call: ToolCall) -> ContentBlock {
         }
     };
 
-    match agent.spawn_teammate(input.name, input.role, input.prompt).await {
+    match agent
+        .spawn_teammate(input.name, input.role, input.prompt)
+        .await
+    {
         Ok(teammate) => ContentBlock::ToolResult {
             tool_use_id: call.id,
             content: format!(
@@ -663,7 +673,11 @@ fn execute_team_respond(agent: &mut Agent, call: ToolCall) -> ContentBlock {
             tool_use_id: call.id,
             content: format!(
                 "{} team request '{}' ({})",
-                if input.approve { "Approved" } else { "Rejected" },
+                if input.approve {
+                    "Approved"
+                } else {
+                    "Rejected"
+                },
                 request.request_id,
                 request.protocol
             ),

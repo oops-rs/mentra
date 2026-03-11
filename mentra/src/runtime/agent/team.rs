@@ -3,13 +3,12 @@ use std::{borrow::Cow, sync::Arc};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::runtime::{
-    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamProtocolRequestSummary,
-    TeamProtocolStatus,
+    TASK_CREATE_TOOL_NAME, TASK_UPDATE_TOOL_NAME, TeamDispatch, TeamMemberStatus,
+    TeamMemberSummary, TeamProtocolRequestSummary, TeamProtocolStatus,
     error::RuntimeError,
     team::{
-        TEAM_SPAWN_TOOL_NAME, TEAMMATE_MAX_ROUNDS, TeamMessage, TeamRequestDirection,
-        TeamRequestFilter, build_teammate_system_prompt,
-        teammate_actor_loop,
+        TEAM_BROADCAST_TOOL_NAME, TEAM_SPAWN_TOOL_NAME, TEAMMATE_MAX_ROUNDS, TeamMessage,
+        TeamRequestDirection, TeamRequestFilter, build_teammate_system_prompt, teammate_actor_loop,
     },
 };
 
@@ -41,7 +40,7 @@ impl Agent {
         }
 
         let mut hidden_tools = self.hidden_tools.clone();
-        hidden_tools.insert(TEAM_SPAWN_TOOL_NAME.to_string());
+        hidden_tools.extend(teammate_hidden_tools());
 
         let mut config = self.config.clone();
         config.system = Some(build_teammate_system_prompt(
@@ -197,4 +196,13 @@ impl Agent {
             Some(crate::runtime::task::SUBAGENT_MAX_ROUNDS),
         )
     }
+}
+
+fn teammate_hidden_tools() -> [String; 4] {
+    [
+        TEAM_SPAWN_TOOL_NAME.to_string(),
+        TEAM_BROADCAST_TOOL_NAME.to_string(),
+        TASK_CREATE_TOOL_NAME.to_string(),
+        TASK_UPDATE_TOOL_NAME.to_string(),
+    ]
 }

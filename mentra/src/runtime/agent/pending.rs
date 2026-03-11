@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    provider::{ContentBlockDelta, ProviderEvent},
     Message, Role,
+    provider::{ContentBlockDelta, ProviderEvent},
     runtime::error::RuntimeError,
     tool::ToolCall,
 };

@@ -7,8 +7,8 @@ mod pending_block;
 mod runner;
 mod snapshot;
 mod subagent;
-mod team;
 mod task_state;
+mod team;
 #[cfg(test)]
 mod tests;
 
@@ -23,13 +23,10 @@ use std::{
 use tokio::sync::{broadcast, watch};
 
 use crate::{
-    provider::{Provider, ToolChoice},
     Message,
+    provider::{Provider, ToolChoice},
     runtime::{
-        TaskItem,
-        background::BackgroundNotification,
-        error::RuntimeError,
-        handle::RuntimeHandle,
+        TaskItem, background::BackgroundNotification, error::RuntimeError, handle::RuntimeHandle,
         team::TeamMessage,
     },
 };

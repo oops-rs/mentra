@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::{
-    provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     ContentBlock, Message, ModelProviderKind, Role,
+    provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{
         AgentConfig, ContextCompactionConfig, Runtime, TaskGraphConfig, TaskItem, TaskStatus,
         task_graph::TASK_REMINDER_TEXT,

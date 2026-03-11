@@ -80,7 +80,10 @@ pub(super) fn read_and_drain_messages(path: &Path) -> Result<Vec<TeamMessage>, R
     Ok(messages)
 }
 
-pub(super) fn has_pending_messages(team_dir: &Path, agent_name: &str) -> Result<bool, RuntimeError> {
+pub(super) fn has_pending_messages(
+    team_dir: &Path,
+    agent_name: &str,
+) -> Result<bool, RuntimeError> {
     ensure_team_dirs(team_dir)?;
     let path = inbox_path(team_dir, agent_name);
     if !path.exists() {
@@ -91,6 +94,23 @@ pub(super) fn has_pending_messages(team_dir: &Path, agent_name: &str) -> Result<
         .map_err(RuntimeError::FailedToLoadTeam)?
         .trim()
         .is_empty())
+}
+
+pub(super) fn unread_message_count(
+    team_dir: &Path,
+    agent_name: &str,
+) -> Result<usize, RuntimeError> {
+    ensure_team_dirs(team_dir)?;
+    let path = inbox_path(team_dir, agent_name);
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    Ok(fs::read_to_string(path)
+        .map_err(RuntimeError::FailedToLoadTeam)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count())
 }
 
 pub(super) fn requeue_messages(

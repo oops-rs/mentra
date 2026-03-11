@@ -6,7 +6,9 @@ use std::{
 };
 
 use super::{
-    input::{TaskCreateInput, parse_task_create_input, parse_task_list_input, parse_task_update_input},
+    input::{
+        TaskCreateInput, parse_task_create_input, parse_task_list_input, parse_task_update_input,
+    },
     store::TaskStore,
     types::TaskStatus,
 };

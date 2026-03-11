@@ -10,8 +10,8 @@ use crate::{
         background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
         error::RuntimeError,
         team::{
-            TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage,
-            TeamProtocolRequestSummary, TeamRequestFilter,
+            TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
+            TeamRequestFilter,
         },
     },
     tool::{ToolCall, ToolContext, ToolHandler, ToolRegistry, ToolSpec},
@@ -107,8 +107,12 @@ impl RuntimeHandle {
         snapshot_tx: watch::Sender<AgentSnapshot>,
         snapshot: Arc<Mutex<AgentSnapshot>>,
     ) -> Result<(), RuntimeError> {
-        self.background_tasks
-            .register_agent(agent_id, events.clone(), snapshot_tx.clone(), Arc::clone(&snapshot));
+        self.background_tasks.register_agent(
+            agent_id,
+            events.clone(),
+            snapshot_tx.clone(),
+            Arc::clone(&snapshot),
+        );
         self.team
             .register_agent(agent_name, team_dir, events, snapshot_tx, snapshot)?;
         Ok(())

@@ -14,7 +14,7 @@ pub(crate) const TASK_CREATE_TOOL_NAME: &str = "task_create";
 pub(crate) const TASK_UPDATE_TOOL_NAME: &str = "task_update";
 pub(crate) const TASK_LIST_TOOL_NAME: &str = "task_list";
 pub(crate) const TASK_GET_TOOL_NAME: &str = "task_get";
-pub(crate) const TASK_REMINDER_TEXT: &str = "Reminder: update the task graph with task_create, task_update, task_list, or task_get before continuing multi-step work.";
+pub(crate) const TASK_REMINDER_TEXT: &str = "Reminder: use task_create, task_update, task_list, or task_get only for persisted project-task tracking. Do not use task graph tools to manage persistent teammates or team protocol flows.";
 
 pub(crate) use graph::has_unfinished_tasks;
 pub(crate) use store::{TaskDiskState, TaskStore};

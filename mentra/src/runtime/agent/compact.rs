@@ -5,11 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{
-    provider::Request,
-    ContentBlock, Message, Role,
-    runtime::error::RuntimeError,
-};
+use crate::{ContentBlock, Message, Role, provider::Request, runtime::error::RuntimeError};
 
 use super::{Agent, ContextCompactionDetails, ContextCompactionTrigger};
 

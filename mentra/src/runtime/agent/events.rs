@@ -64,6 +64,7 @@ pub struct AgentSnapshot {
     pub history_len: usize,
     pub current_text: String,
     pub pending_tool_uses: Vec<PendingToolUseSummary>,
+    pub pending_team_messages: usize,
     pub tasks: Vec<TaskItem>,
     pub subagents: Vec<SpawnedAgentSummary>,
     pub teammates: Vec<TeamMemberSummary>,
@@ -94,6 +95,9 @@ pub enum AgentEvent {
     },
     TeamProtocolResolved {
         request: TeamProtocolRequestSummary,
+    },
+    TeamInboxUpdated {
+        unread_count: usize,
     },
     BackgroundTaskStarted {
         task: BackgroundTaskSummary,

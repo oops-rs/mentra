@@ -1,13 +1,10 @@
 use std::borrow::Cow;
 
 use crate::{
-    provider::Request,
     ContentBlock, Message, Role,
+    provider::Request,
     runtime::{
-        background::BackgroundNotification,
-        error::RuntimeError,
-        intrinsic,
-        team::format_inbox,
+        background::BackgroundNotification, error::RuntimeError, intrinsic, team::format_inbox,
     },
 };
 
@@ -139,10 +136,7 @@ impl<'a> TurnRunner<'a> {
         Ok(())
     }
 
-    fn unavailable_tool_result(
-        &self,
-        call: crate::tool::ToolCall,
-    ) -> ContentBlock {
+    fn unavailable_tool_result(&self, call: crate::tool::ToolCall) -> ContentBlock {
         ContentBlock::ToolResult {
             tool_use_id: call.id,
             content: format!("Tool '{}' is not available for this agent", call.name),
@@ -176,8 +170,11 @@ impl Agent {
 
     pub(super) fn requeue_inflight_team_messages(&mut self) -> Result<(), RuntimeError> {
         let messages = std::mem::take(&mut self.inflight_team_messages);
-        self.runtime
-            .requeue_team_messages(self.config.team.team_dir.as_path(), &self.name, messages)
+        self.runtime.requeue_team_messages(
+            self.config.team.team_dir.as_path(),
+            &self.name,
+            messages,
+        )
     }
 
     pub(super) fn inject_background_notifications(&mut self) {

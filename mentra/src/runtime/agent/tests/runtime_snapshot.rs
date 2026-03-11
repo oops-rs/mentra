@@ -1,8 +1,8 @@
 use tokio::sync::watch;
 
 use crate::{
-    provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     ContentBlock, ModelProviderKind, Role,
+    provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     runtime::{AgentSnapshot, AgentStatus, BackgroundTaskStatus, Runtime},
 };
 

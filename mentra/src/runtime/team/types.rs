@@ -136,11 +136,7 @@ pub(crate) struct TeamRequestFilter {
 }
 
 impl TeamRequestFilter {
-    pub(crate) fn matches(
-        &self,
-        agent_name: &str,
-        request: &TeamProtocolRequestSummary,
-    ) -> bool {
+    pub(crate) fn matches(&self, agent_name: &str, request: &TeamProtocolRequestSummary) -> bool {
         if let Some(status) = &self.status
             && &request.status != status
         {

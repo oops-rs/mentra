@@ -1,7 +1,7 @@
 use serde::Serialize;
 
-use super::types::TaskItem;
 use super::TaskGraphError;
+use super::types::TaskItem;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

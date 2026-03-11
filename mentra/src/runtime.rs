@@ -6,8 +6,8 @@ mod handle;
 mod intrinsic;
 mod skill;
 mod task;
-mod team;
 mod task_graph;
+mod team;
 
 use std::{collections::HashSet, path::Path};
 
@@ -25,15 +25,15 @@ pub use agent::{
 pub use background::{BackgroundTaskStatus, BackgroundTaskSummary};
 pub(crate) use handle::RuntimeHandle;
 pub(crate) use intrinsic::TASK_TOOL_NAME;
-pub(crate) use team::{
-    TEAM_BROADCAST_TOOL_NAME, TEAM_LIST_REQUESTS_TOOL_NAME, TEAM_READ_INBOX_TOOL_NAME,
-    TEAM_REQUEST_TOOL_NAME, TEAM_RESPOND_TOOL_NAME, TEAM_SEND_TOOL_NAME, TEAM_SPAWN_TOOL_NAME,
-};
 pub(crate) use task_graph::{
     TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
     TaskDiskState, TaskGraphError,
 };
 pub use task_graph::{TaskItem, TaskStatus};
+pub(crate) use team::{
+    TEAM_BROADCAST_TOOL_NAME, TEAM_LIST_REQUESTS_TOOL_NAME, TEAM_READ_INBOX_TOOL_NAME,
+    TEAM_REQUEST_TOOL_NAME, TEAM_RESPOND_TOOL_NAME, TEAM_SEND_TOOL_NAME, TEAM_SPAWN_TOOL_NAME,
+};
 pub use team::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
     TeamProtocolStatus,

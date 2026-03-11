@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::{
-    provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent, Request},
     ContentBlock, Message, ModelProviderKind, Role,
+    provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent, Request},
     runtime::{
         AgentConfig, AgentEvent, ContextCompactionConfig, ContextCompactionTrigger, Runtime,
     },

@@ -1198,8 +1198,7 @@ async fn persistent_teammate_processes_mail_and_reports_back_to_lead() {
         )
         .unwrap();
 
-    lead
-        .spawn_teammate("alice", "researcher", None)
+    lead.spawn_teammate("alice", "researcher", None)
         .await
         .expect("spawn teammate");
     lead.send_team_message("alice", "Check the task graph")
@@ -1208,23 +1207,26 @@ async fn persistent_teammate_processes_mail_and_reports_back_to_lead() {
     wait_for_recorded_requests(&provider_handle, 2).await;
     wait_for_teammate_status(&lead, TeamMemberStatus::Idle).await;
 
-    lead
-        .send(vec![ContentBlock::Text {
-            text: "status?".to_string(),
-        }])
-        .await
-        .unwrap();
+    lead.send(vec![ContentBlock::Text {
+        text: "status?".to_string(),
+    }])
+    .await
+    .unwrap();
 
     let requests = provider_handle.recorded_requests().await;
     assert_eq!(requests.len(), 3);
     let child_tools = tool_names(&requests[0]);
     assert!(child_tools.contains("team_send"));
-    assert!(child_tools.contains("broadcast"));
     assert!(child_tools.contains("team_read_inbox"));
     assert!(child_tools.contains("team_request"));
     assert!(child_tools.contains("team_respond"));
     assert!(child_tools.contains("team_list_requests"));
     assert!(!child_tools.contains("team_spawn"));
+    assert!(!child_tools.contains("broadcast"));
+    assert!(!child_tools.contains("task_create"));
+    assert!(!child_tools.contains("task_update"));
+    assert!(child_tools.contains("task_list"));
+    assert!(child_tools.contains("task_get"));
 
     let inbox = latest_team_inbox_text(&requests[2]).expect("team inbox");
     assert!(inbox.contains("alice"));
@@ -1292,12 +1294,11 @@ async fn broadcast_tool_sends_to_every_other_known_agent() {
         )
         .unwrap();
 
-    lead
-        .send(vec![ContentBlock::Text {
-            text: "tell everyone about the sync".to_string(),
-        }])
-        .await
-        .unwrap();
+    lead.send(vec![ContentBlock::Text {
+        text: "tell everyone about the sync".to_string(),
+    }])
+    .await
+    .unwrap();
 
     let alice_inbox = alice.read_team_inbox().expect("alice inbox");
     let bob_inbox = bob.read_team_inbox().expect("bob inbox");
@@ -1327,6 +1328,136 @@ async fn broadcast_tool_sends_to_every_other_known_agent() {
     assert!(tool_result.contains("2 recipient(s)"));
     assert!(tool_result.contains("alice"));
     assert!(tool_result.contains("bob"));
+}
+
+#[tokio::test]
+async fn teammate_message_updates_lead_unread_count_before_next_turn() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "child-send",
+                "team_send",
+                r#"{"to":"lead","content":"plan is ready"}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: temp_team_dir("lead-unread-message"),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let mut events = lead.subscribe_events();
+
+    lead.spawn_teammate(
+        "alice",
+        "researcher",
+        Some("Send me an update.".to_string()),
+    )
+    .await
+    .expect("spawn teammate");
+
+    wait_for_recorded_requests(&provider_handle, 2).await;
+    wait_for_pending_team_messages(&lead, 1).await;
+
+    assert_eq!(lead.watch_snapshot().borrow().pending_team_messages, 1);
+    assert_eq!(provider_handle.recorded_requests().await.len(), 2);
+
+    let events = collect_events(&mut events);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TeamInboxUpdated { unread_count } if *unread_count == 1
+    )));
+}
+
+#[tokio::test]
+async fn protocol_messages_update_lead_unread_count_and_clear_on_drain() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "bob-plan",
+                "team_request",
+                r#"{"to":"lead","protocol":"plan_approval","content":"risky refactor plan"}"#,
+            ),
+            text_stream(&model.id, "waiting"),
+            text_stream(&model.id, "lead handled it"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: temp_team_dir("lead-unread-protocol"),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let mut events = lead.subscribe_events();
+
+    lead.spawn_teammate(
+        "bob",
+        "refactorer",
+        Some("Send me a plan request.".to_string()),
+    )
+    .await
+    .expect("spawn teammate");
+
+    wait_for_recorded_requests(&provider_handle, 2).await;
+    wait_for_pending_team_messages(&lead, 1).await;
+
+    let request_id = lead.watch_snapshot().borrow().protocol_requests[0]
+        .request_id
+        .clone();
+    lead.respond_team_protocol(&request_id, false, Some("too risky".to_string()))
+        .expect("reject plan");
+
+    lead.send(vec![ContentBlock::Text {
+        text: "review inbox".to_string(),
+    }])
+    .await
+    .unwrap();
+
+    assert_eq!(lead.watch_snapshot().borrow().pending_team_messages, 0);
+
+    let events = collect_events(&mut events);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TeamInboxUpdated { unread_count } if *unread_count == 1
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TeamInboxUpdated { unread_count } if *unread_count == 0
+    )));
 }
 
 #[tokio::test]
@@ -1479,12 +1610,11 @@ async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
         .unwrap();
     let mut events = lead.subscribe_events();
 
-    lead
-        .send(vec![ContentBlock::Text {
-            text: "review the plan".to_string(),
-        }])
-        .await
-        .unwrap();
+    lead.send(vec![ContentBlock::Text {
+        text: "review the plan".to_string(),
+    }])
+    .await
+    .unwrap();
 
     wait_for_recorded_requests(&provider_handle, 2).await;
 
@@ -1578,12 +1708,11 @@ async fn team_list_requests_tool_filters_visible_requests() {
     lead.respond_team_protocol(&resolved.request_id, false, Some("not now".to_string()))
         .expect("resolve request");
 
-    lead
-        .send(vec![ContentBlock::Text {
-            text: "list pending reviews".to_string(),
-        }])
-        .await
-        .unwrap();
+    lead.send(vec![ContentBlock::Text {
+        text: "list pending reviews".to_string(),
+    }])
+    .await
+    .unwrap();
 
     let tool_result = lead
         .history()
@@ -1597,7 +1726,10 @@ async fn team_list_requests_tool_filters_visible_requests() {
     let listed: serde_json::Value = serde_json::from_str(&tool_result).expect("parse tool output");
     let listed = listed.as_array().expect("array");
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0]["request_id"].as_str(), Some(pending.request_id.as_str()));
+    assert_eq!(
+        listed[0]["request_id"].as_str(),
+        Some(pending.request_id.as_str())
+    );
 }
 
 #[tokio::test]
@@ -1637,10 +1769,13 @@ async fn plan_approval_request_response_keeps_teammate_alive() {
         )
         .unwrap();
 
-    lead
-        .spawn_teammate("bob", "refactorer", Some("Propose your plan first.".to_string()))
-        .await
-        .expect("spawn teammate");
+    lead.spawn_teammate(
+        "bob",
+        "refactorer",
+        Some("Propose your plan first.".to_string()),
+    )
+    .await
+    .expect("spawn teammate");
 
     wait_for_recorded_requests(&provider_handle, 2).await;
     let requests = lead.watch_snapshot().borrow().protocol_requests.clone();
@@ -1688,8 +1823,7 @@ async fn shutdown_approval_shuts_down_teammate_after_current_wake_cycle() {
         )
         .unwrap();
 
-    lead
-        .spawn_teammate("alice", "coder", None)
+    lead.spawn_teammate("alice", "coder", None)
         .await
         .expect("spawn teammate");
 
@@ -1731,7 +1865,10 @@ async fn shutdown_approval_shuts_down_teammate_after_current_wake_cycle() {
     let requests = lead.watch_snapshot().borrow().protocol_requests.clone();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].status, TeamProtocolStatus::Approved);
-    assert_eq!(requests[0].resolution_reason.as_deref(), Some("wrapping up"));
+    assert_eq!(
+        requests[0].resolution_reason.as_deref(),
+        Some("wrapping up")
+    );
 
     let config = load_team_config(&team_dir);
     assert_eq!(config["members"][0]["status"].as_str(), Some("shutdown"));
@@ -1804,12 +1941,19 @@ async fn failed_run_requeues_protocol_messages_and_preserves_request_state() {
         }])
         .await
         .expect_err("run should fail");
-    assert!(matches!(error, crate::runtime::error::RuntimeError::FailedToStreamResponse(_)));
+    assert!(matches!(
+        error,
+        crate::runtime::error::RuntimeError::FailedToStreamResponse(_)
+    ));
+    assert_eq!(lead.watch_snapshot().borrow().pending_team_messages, 1);
 
     let inbox = lead.read_team_inbox().expect("requeued inbox");
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].kind, "request");
-    assert_eq!(inbox[0].request_id.as_deref(), Some(request.request_id.as_str()));
+    assert_eq!(
+        inbox[0].request_id.as_deref(),
+        Some(request.request_id.as_str())
+    );
 
     let requests = lead.watch_snapshot().borrow().protocol_requests.clone();
     assert_eq!(requests.len(), 1);
@@ -1872,11 +2016,121 @@ async fn persisted_protocol_requests_load_on_restart() {
         .unwrap();
 
     assert_eq!(lead.watch_snapshot().borrow().protocol_requests.len(), 1);
-    assert_eq!(restarted.watch_snapshot().borrow().protocol_requests.len(), 1);
+    assert_eq!(
+        restarted.watch_snapshot().borrow().protocol_requests.len(),
+        1
+    );
     assert_eq!(
         restarted.watch_snapshot().borrow().protocol_requests[0].status,
         TeamProtocolStatus::Pending
     );
+    assert_eq!(restarted.watch_snapshot().borrow().pending_team_messages, 1);
+}
+
+#[tokio::test]
+async fn persisted_teammates_reload_as_shutdown_without_live_actor() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
+
+    let team_dir = temp_team_dir("teammate-restart-status");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    lead.spawn_teammate("alice", "researcher", None)
+        .await
+        .expect("spawn teammate");
+
+    let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let restarted = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig { team_dir },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    let teammates = restarted.watch_snapshot().borrow().teammates.clone();
+    assert_eq!(teammates.len(), 1);
+    assert_eq!(teammates[0].name, "alice");
+    assert_eq!(teammates[0].status, TeamMemberStatus::Shutdown);
+}
+
+#[tokio::test]
+async fn team_spawn_revives_shutdown_teammate_name_after_restart() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
+
+    let team_dir = temp_team_dir("teammate-revive");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    lead.spawn_teammate("bob", "researcher", None)
+        .await
+        .expect("spawn teammate");
+
+    let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut restarted = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    restarted
+        .spawn_teammate("bob", "refactor specialist", None)
+        .await
+        .expect("revive teammate");
+
+    let teammates = restarted.watch_snapshot().borrow().teammates.clone();
+    assert_eq!(teammates.len(), 1);
+    assert_eq!(teammates[0].name, "bob");
+    assert_eq!(teammates[0].role, "refactor specialist");
+    assert_eq!(teammates[0].status, TeamMemberStatus::Idle);
 }
 
 fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
@@ -1885,6 +2139,17 @@ fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -
         events.push(event);
     }
     events
+}
+
+async fn wait_for_pending_team_messages(agent: &Agent, expected_count: usize) {
+    for _ in 0..200 {
+        if agent.watch_snapshot().borrow().pending_team_messages == expected_count {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!("timed out waiting for {expected_count} pending team messages");
 }
 
 async fn wait_for_background_task_count(agent: &Agent, expected_count: usize) {
@@ -2039,7 +2304,8 @@ fn temp_team_dir(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("mentra-runtime-team-{label}-{timestamp}-{unique}"));
+    let path =
+        std::env::temp_dir().join(format!("mentra-runtime-team-{label}-{timestamp}-{unique}"));
     fs::create_dir_all(&path).expect("create team dir");
     path
 }

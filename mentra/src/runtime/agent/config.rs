@@ -1,6 +1,12 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::provider::ToolChoice;
+
+#[cfg(test)]
+static NEXT_TEST_TRANSCRIPT_DIR_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskGraphConfig {
@@ -25,7 +31,7 @@ pub struct TeamConfig {
 impl Default for TeamConfig {
     fn default() -> Self {
         Self {
-            team_dir: PathBuf::from(".team"),
+            team_dir: default_team_dir(),
         }
     }
 }
@@ -44,11 +50,37 @@ impl Default for ContextCompactionConfig {
         Self {
             keep_recent_tool_results: 3,
             auto_compact_threshold_tokens: Some(50_000),
-            transcript_dir: PathBuf::from(".transcripts"),
+            transcript_dir: default_transcript_dir(),
             summary_max_input_chars: 80_000,
             summary_max_output_tokens: 2_000,
         }
     }
+}
+
+#[cfg(not(test))]
+fn default_team_dir() -> PathBuf {
+    PathBuf::from(".team")
+}
+
+#[cfg(test)]
+fn default_team_dir() -> PathBuf {
+    let suffix = NEXT_TEST_TRANSCRIPT_DIR_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join("mentra-test-team")
+        .join(format!("process-{}-{suffix}", std::process::id()))
+}
+
+#[cfg(not(test))]
+fn default_transcript_dir() -> PathBuf {
+    PathBuf::from(".transcripts")
+}
+
+#[cfg(test)]
+fn default_transcript_dir() -> PathBuf {
+    let suffix = NEXT_TEST_TRANSCRIPT_DIR_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join("mentra-test-transcripts")
+        .join(format!("process-{}-{suffix}", std::process::id()))
 }
 
 #[derive(Debug, Clone)]
