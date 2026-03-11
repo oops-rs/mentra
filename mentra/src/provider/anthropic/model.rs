@@ -69,9 +69,11 @@ pub(crate) struct AnthropicResponse {
     stop_reason: Option<String>,
 }
 
-impl From<AnthropicResponse> for Response {
-    fn from(response: AnthropicResponse) -> Self {
-        Response {
+impl TryFrom<AnthropicResponse> for Response {
+    type Error = ProviderError;
+
+    fn try_from(response: AnthropicResponse) -> Result<Self, Self::Error> {
+        Ok(Response {
             id: response.id,
             model: response.model,
             role: match response.role.as_str() {
@@ -82,10 +84,10 @@ impl From<AnthropicResponse> for Response {
             content: response
                 .content
                 .into_iter()
-                .map(|block| block.into())
-                .collect(),
+                .map(ContentBlock::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
             stop_reason: response.stop_reason,
-        }
+        })
     }
 }
 
@@ -203,12 +205,14 @@ impl From<&ContentBlock> for AnthropicContentBlock {
     }
 }
 
-impl From<AnthropicContentBlock> for ContentBlock {
-    fn from(block: AnthropicContentBlock) -> Self {
-        match block {
+impl TryFrom<AnthropicContentBlock> for ContentBlock {
+    type Error = ProviderError;
+
+    fn try_from(block: AnthropicContentBlock) -> Result<Self, Self::Error> {
+        Ok(match block {
             AnthropicContentBlock::Text { text } => ContentBlock::Text { text },
             AnthropicContentBlock::Image { source } => ContentBlock::Image {
-                source: source.into(),
+                source: source.try_into()?,
             },
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 ContentBlock::ToolUse { id, name, input }
@@ -222,7 +226,7 @@ impl From<AnthropicContentBlock> for ContentBlock {
                 content,
                 is_error,
             },
-        }
+        })
     }
 }
 
@@ -244,14 +248,20 @@ impl From<ImageSource> for AnthropicImageSource {
     }
 }
 
-impl From<AnthropicImageSource> for ImageSource {
-    fn from(value: AnthropicImageSource) -> Self {
+impl TryFrom<AnthropicImageSource> for ImageSource {
+    type Error = ProviderError;
+
+    fn try_from(value: AnthropicImageSource) -> Result<Self, Self::Error> {
         match value {
-            AnthropicImageSource::Base64 { media_type, data } => ImageSource::Bytes {
-                media_type,
-                data: STANDARD.decode(data).unwrap_or_default(),
-            },
-            AnthropicImageSource::Url { url } => ImageSource::Url { url },
+            AnthropicImageSource::Base64 { media_type, data } => {
+                let data = STANDARD.decode(data).map_err(|error| {
+                    ProviderError::InvalidResponse(format!(
+                        "invalid Anthropic image payload for media type {media_type}: {error}"
+                    ))
+                })?;
+                Ok(ImageSource::Bytes { media_type, data })
+            }
+            AnthropicImageSource::Url { url } => Ok(ImageSource::Url { url }),
         }
     }
 }
@@ -311,9 +321,9 @@ mod tests {
 
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-    use crate::provider::model::{ContentBlock, Message, Request, Role, ToolChoice};
+    use crate::provider::model::{ContentBlock, Message, ProviderError, Request, Role, ToolChoice};
 
-    use super::{AnthropicModel, AnthropicRequest};
+    use super::{AnthropicContentBlock, AnthropicImageSource, AnthropicModel, AnthropicRequest};
 
     #[test]
     fn converts_rfc3339_timestamp_to_offset_datetime() {
@@ -384,5 +394,24 @@ mod tests {
             .as_f64()
             .expect("temperature should be numeric");
         assert!((temperature - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rejects_invalid_base64_image_payloads() {
+        let error = ContentBlock::try_from(AnthropicContentBlock::Image {
+            source: AnthropicImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: "!not-base64!".to_string(),
+            },
+        })
+        .expect_err("invalid base64 should fail");
+
+        match error {
+            ProviderError::InvalidResponse(message) => {
+                assert!(message.contains("invalid Anthropic image payload"));
+                assert!(message.contains("image/png"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

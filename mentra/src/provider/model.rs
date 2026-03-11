@@ -47,6 +47,7 @@ pub enum ProviderError {
     Serialize(serde_json::Error),
     Deserialize(serde_json::Error),
     InvalidRequest(String),
+    InvalidResponse(String),
     MalformedStream(String),
 }
 
