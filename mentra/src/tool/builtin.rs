@@ -9,6 +9,8 @@ use crate::runtime::{
 use crate::tool::{ToolContext, ToolHandler, ToolResult, ToolSpec};
 
 pub struct BashTool;
+pub struct BackgroundRunTool;
+pub struct CheckBackgroundTool;
 pub struct CompactTool;
 pub struct LoadSkillTool;
 pub struct ReadFileTool;
@@ -61,6 +63,68 @@ impl ToolHandler for BashTool {
             };
             Err(message)
         }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for BackgroundRunTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "background_run".to_string(),
+            description: Some(
+                "Start a bash command in the background and return a task ID immediately.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute in the background"
+                    }
+                },
+                "required": ["command"]
+            }),
+        }
+    }
+
+    async fn invoke(&self, ctx: ToolContext, input: Value) -> ToolResult {
+        let command = input
+            .get("command")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "Command is required".to_string())?;
+
+        let task = ctx.start_background_task(command.to_string());
+        Ok(format!(
+            "Started background task {} for `{}`",
+            task.id, task.command
+        ))
+    }
+}
+
+#[async_trait]
+impl ToolHandler for CheckBackgroundTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "check_background".to_string(),
+            description: Some(
+                "Check one background task by ID, or list all background tasks when omitted."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Optional background task ID to inspect"
+                    }
+                }
+            }),
+        }
+    }
+
+    async fn invoke(&self, ctx: ToolContext, input: Value) -> ToolResult {
+        let task_id = input.get("task_id").and_then(|value| value.as_str());
+        ctx.check_background_task(task_id)
     }
 }
 

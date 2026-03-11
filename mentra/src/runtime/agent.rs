@@ -14,7 +14,7 @@ mod tests;
 use std::{
     collections::HashSet,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -26,7 +26,9 @@ use crate::{
         Provider,
         model::{Message, ToolChoice},
     },
-    runtime::{TaskItem, error::RuntimeError, handle::RuntimeHandle},
+    runtime::{
+        TaskItem, background::BackgroundNotification, error::RuntimeError, handle::RuntimeHandle,
+    },
 };
 
 pub use config::{AgentConfig, ContextCompactionConfig, TaskGraphConfig};
@@ -49,11 +51,12 @@ pub struct Agent {
     tasks: Vec<TaskItem>,
     rounds_since_task_graph: usize,
     event_tx: broadcast::Sender<AgentEvent>,
-    snapshot: AgentSnapshot,
+    snapshot: Arc<Mutex<AgentSnapshot>>,
     snapshot_tx: watch::Sender<AgentSnapshot>,
     provider: Arc<dyn Provider>,
     hidden_tools: HashSet<String>,
     max_rounds: Option<usize>,
+    inflight_background_notifications: Vec<BackgroundNotification>,
 }
 
 impl Agent {
@@ -68,7 +71,9 @@ impl Agent {
     ) -> Result<Self, RuntimeError> {
         let (event_tx, _) = broadcast::channel(256);
         let snapshot = AgentSnapshot::default();
-        let (snapshot_tx, _) = watch::channel(snapshot.clone());
+        let snapshot = Arc::new(Mutex::new(snapshot));
+        let (snapshot_tx, _) =
+            watch::channel(snapshot.lock().expect("agent snapshot poisoned").clone());
         let mut agent = Self {
             id: format!("agent-{}", NEXT_AGENT_ID.fetch_add(1, Ordering::Relaxed)),
             runtime,
@@ -84,7 +89,14 @@ impl Agent {
             provider,
             hidden_tools,
             max_rounds,
+            inflight_background_notifications: Vec::new(),
         };
+        agent.runtime.register_agent(
+            &agent.id,
+            agent.event_tx.clone(),
+            agent.snapshot_tx.clone(),
+            Arc::clone(&agent.snapshot),
+        );
         agent.refresh_tasks_from_disk()?;
         Ok(agent)
     }

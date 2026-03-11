@@ -48,8 +48,10 @@ impl Agent {
             .load_all()
             .map_err(map_task_graph_error_for_load)?;
         self.tasks = tasks;
-        self.snapshot.tasks = self.tasks.clone();
-        self.publish_snapshot();
+        let tasks = self.tasks.clone();
+        self.mutate_snapshot(|snapshot| {
+            snapshot.tasks = tasks;
+        });
         Ok(())
     }
 
@@ -70,8 +72,10 @@ impl Agent {
             .map_err(map_task_graph_error_for_restore)?;
         self.tasks = tasks;
         self.rounds_since_task_graph = rounds_since_task_graph;
-        self.snapshot.tasks = self.tasks.clone();
-        self.publish_snapshot();
+        let tasks = self.tasks.clone();
+        self.mutate_snapshot(|snapshot| {
+            snapshot.tasks = tasks;
+        });
         Ok(())
     }
 }

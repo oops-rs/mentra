@@ -14,15 +14,17 @@ impl Agent {
     }
 
     pub(crate) fn clear_pending_turn(&mut self) {
-        self.snapshot.current_text.clear();
-        self.snapshot.pending_tool_uses.clear();
-        self.publish_snapshot();
+        self.mutate_snapshot(|snapshot| {
+            snapshot.current_text.clear();
+            snapshot.pending_tool_uses.clear();
+        });
     }
 
     pub(crate) fn publish_pending_turn(&mut self, pending: &PendingAssistantTurn) {
-        self.snapshot.current_text = pending.current_text().to_string();
-        self.snapshot.pending_tool_uses = pending.pending_tool_use_summaries();
-        self.publish_snapshot();
+        self.mutate_snapshot(|snapshot| {
+            snapshot.current_text = pending.current_text().to_string();
+            snapshot.pending_tool_uses = pending.pending_tool_use_summaries();
+        });
     }
 
     pub(crate) fn emit_event(&self, event: AgentEvent) {
@@ -30,8 +32,9 @@ impl Agent {
     }
 
     pub(crate) fn set_status(&mut self, status: AgentStatus) {
-        self.snapshot.status = status;
-        self.publish_snapshot();
+        self.mutate_snapshot(|snapshot| {
+            snapshot.status = status;
+        });
     }
 
     pub(super) fn restore_history(&mut self, history: Vec<Message>) {
@@ -40,11 +43,26 @@ impl Agent {
     }
 
     fn sync_history_len(&mut self) {
-        self.snapshot.history_len = self.history.len();
-        self.publish_snapshot();
+        let history_len = self.history.len();
+        self.mutate_snapshot(|snapshot| {
+            snapshot.history_len = history_len;
+        });
     }
 
     pub(super) fn publish_snapshot(&self) {
-        self.snapshot_tx.send_replace(self.snapshot.clone());
+        let snapshot = self
+            .snapshot
+            .lock()
+            .expect("agent snapshot poisoned")
+            .clone();
+        self.snapshot_tx.send_replace(snapshot);
+    }
+
+    pub(super) fn mutate_snapshot(&self, update: impl FnOnce(&mut crate::runtime::AgentSnapshot)) {
+        {
+            let mut snapshot = self.snapshot.lock().expect("agent snapshot poisoned");
+            update(&mut snapshot);
+        }
+        self.publish_snapshot();
     }
 }

@@ -23,12 +23,14 @@ impl Agent {
 
         match TurnRunner::new(self).run().await {
             Ok(()) => {
+                self.clear_inflight_background_notifications();
                 self.clear_pending_turn();
                 self.set_status(AgentStatus::Finished);
                 self.emit_event(AgentEvent::RunFinished);
                 Ok(())
             }
             Err(error) => {
+                self.requeue_inflight_background_notifications();
                 self.restore_history(history_before_run);
                 self.restore_task_state(tasks_before_run, rounds_before_run, &task_disk_state)?;
                 self.clear_pending_turn();

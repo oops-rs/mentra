@@ -1,9 +1,11 @@
 use std::borrow::Cow;
 
 use crate::{
-    provider::model::{Message, Request, Role},
+    provider::model::{ContentBlock, Message, Request, Role},
     runtime::{
-        self, COMPACT_TOOL_NAME, TASK_TOOL_NAME, TaskStore, error::RuntimeError,
+        self, COMPACT_TOOL_NAME, TASK_TOOL_NAME, TaskStore,
+        background::BackgroundNotification,
+        error::RuntimeError,
         is_task_graph_tool,
         task_graph::{
             parse_task_create_input, parse_task_get_input, parse_task_list_input,
@@ -62,7 +64,10 @@ impl<'a> TurnRunner<'a> {
                 } else if is_task_graph_tool(&call.name) {
                     self.execute_task_graph(call)
                 } else {
-                    (self.agent.runtime.execute_tool(call).await, false)
+                    (
+                        self.agent.runtime.execute_tool(self.agent.id(), call).await,
+                        false,
+                    )
                 };
                 self.agent.emit_event(AgentEvent::ToolExecutionFinished {
                     result: result.clone(),
@@ -85,6 +90,7 @@ impl<'a> TurnRunner<'a> {
     }
 
     async fn stream_turn(&mut self) -> Result<PendingAssistantTurn, RuntimeError> {
+        self.agent.inject_background_notifications();
         self.agent.set_status(AgentStatus::AwaitingModel);
         self.agent.refresh_tasks_from_disk()?;
         self.agent.auto_compact_if_needed().await?;
@@ -145,15 +151,12 @@ impl<'a> TurnRunner<'a> {
     ) -> (crate::provider::model::ContentBlock, bool) {
         let store = TaskStore::new(self.agent.config().task_graph.tasks_dir.clone());
         let output = match call.name.as_str() {
-            runtime::TASK_CREATE_TOOL_NAME => parse_task_create_input(call.input).and_then(|input| {
-                store.create(input).map_err(|error| error.to_string())
-            }),
-            runtime::TASK_UPDATE_TOOL_NAME => parse_task_update_input(call.input).and_then(|input| {
-                store.update(input).map_err(|error| error.to_string())
-            }),
-            runtime::TASK_GET_TOOL_NAME => parse_task_get_input(call.input).and_then(|input| {
-                store.get(input.task_id).map_err(|error| error.to_string())
-            }),
+            runtime::TASK_CREATE_TOOL_NAME => parse_task_create_input(call.input)
+                .and_then(|input| store.create(input).map_err(|error| error.to_string())),
+            runtime::TASK_UPDATE_TOOL_NAME => parse_task_update_input(call.input)
+                .and_then(|input| store.update(input).map_err(|error| error.to_string())),
+            runtime::TASK_GET_TOOL_NAME => parse_task_get_input(call.input)
+                .and_then(|input| store.get(input.task_id).map_err(|error| error.to_string())),
             runtime::TASK_LIST_TOOL_NAME => parse_task_list_input(call.input)
                 .and_then(|()| store.list().map_err(|error| error.to_string())),
             _ => Err(format!("Tool '{}' is not a task graph tool", call.name)),
@@ -307,4 +310,54 @@ impl<'a> TurnRunner<'a> {
             is_error: true,
         }
     }
+}
+
+impl Agent {
+    pub(super) fn inject_background_notifications(&mut self) {
+        let notifications = self.runtime.drain_background_notifications(&self.id);
+        if notifications.is_empty() {
+            return;
+        }
+
+        self.inflight_background_notifications
+            .extend(notifications.iter().cloned());
+        self.push_history(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format_background_results(&notifications),
+            }],
+        });
+    }
+
+    pub(super) fn clear_inflight_background_notifications(&mut self) {
+        self.inflight_background_notifications.clear();
+    }
+
+    pub(super) fn requeue_inflight_background_notifications(&mut self) {
+        let notifications = std::mem::take(&mut self.inflight_background_notifications);
+        self.runtime
+            .requeue_background_notifications(&self.id, notifications);
+    }
+}
+
+fn format_background_results(notifications: &[BackgroundNotification]) -> String {
+    let lines = notifications
+        .iter()
+        .map(|notification| {
+            format!(
+                "[bg:{}] status={} command=\"{}\" output=\"{}\"",
+                notification.task_id,
+                notification.status.as_str(),
+                escape_background_field(&notification.command),
+                escape_background_field(&notification.output_preview),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("<background-results>\n{lines}\n</background-results>")
+}
+
+fn escape_background_field(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }

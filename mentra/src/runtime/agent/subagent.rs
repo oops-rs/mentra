@@ -1,9 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use crate::{
-    provider::{
-        model::{ContentBlock, Role},
-    },
+    provider::model::{ContentBlock, Role},
     runtime::{
         TASK_TOOL_NAME,
         error::RuntimeError,
@@ -41,8 +39,10 @@ impl Agent {
             model: agent.model.clone(),
             status: SpawnedAgentStatus::Running,
         };
-        self.snapshot.subagents.push(summary.clone());
-        self.publish_snapshot();
+        let summary_for_snapshot = summary.clone();
+        self.mutate_snapshot(|snapshot| {
+            snapshot.subagents.push(summary_for_snapshot);
+        });
         summary
     }
 
@@ -51,15 +51,14 @@ impl Agent {
         id: &str,
         status: SpawnedAgentStatus,
     ) -> Option<SpawnedAgentSummary> {
-        let summary = self
-            .snapshot
-            .subagents
-            .iter_mut()
-            .find(|agent| agent.id == id)?;
-        summary.status = status;
-        let summary = summary.clone();
-        self.publish_snapshot();
-        Some(summary)
+        let mut finished = None;
+        self.mutate_snapshot(|snapshot| {
+            if let Some(summary) = snapshot.subagents.iter_mut().find(|agent| agent.id == id) {
+                summary.status = status;
+                finished = Some(summary.clone());
+            }
+        });
+        finished
     }
 
     pub(crate) fn final_text_summary(&self) -> String {

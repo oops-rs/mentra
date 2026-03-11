@@ -1,4 +1,5 @@
 mod agent;
+mod background;
 mod builder;
 mod error;
 mod handle;
@@ -22,6 +23,7 @@ pub use agent::{
     ContextCompactionDetails, ContextCompactionTrigger, PendingAssistantTurn,
     PendingToolUseSummary, SpawnedAgentStatus, SpawnedAgentSummary, TaskGraphConfig,
 };
+pub use background::{BackgroundTaskStatus, BackgroundTaskSummary};
 pub(crate) use handle::RuntimeHandle;
 pub(crate) const COMPACT_TOOL_NAME: &str = "compact";
 pub(crate) use task::TASK_TOOL_NAME;

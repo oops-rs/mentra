@@ -1,8 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    fmt,
-    fs,
-    io,
+    fmt, fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,8 +12,7 @@ pub(crate) const TASK_CREATE_TOOL_NAME: &str = "task_create";
 pub(crate) const TASK_UPDATE_TOOL_NAME: &str = "task_update";
 pub(crate) const TASK_LIST_TOOL_NAME: &str = "task_list";
 pub(crate) const TASK_GET_TOOL_NAME: &str = "task_get";
-pub(crate) const TASK_REMINDER_TEXT: &str =
-    "Reminder: update the task graph with task_create, task_update, task_list, or task_get before continuing multi-step work.";
+pub(crate) const TASK_REMINDER_TEXT: &str = "Reminder: update the task graph with task_create, task_update, task_list, or task_get before continuing multi-step work.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -174,7 +171,9 @@ pub(crate) fn parse_task_list_input(input: Value) -> Result<(), String> {
 }
 
 pub(crate) fn has_unfinished_tasks(tasks: &[TaskItem]) -> bool {
-    tasks.iter().any(|task| task.status != TaskStatus::Completed)
+    tasks
+        .iter()
+        .any(|task| task.status != TaskStatus::Completed)
 }
 
 pub(crate) fn is_task_graph_tool(name: &str) -> bool {
@@ -530,7 +529,10 @@ fn add_dependency(
             )));
         }
 
-        insert_id(&mut find_task_mut(tasks, dependent_id)?.blocked_by, blocker_id);
+        insert_id(
+            &mut find_task_mut(tasks, dependent_id)?.blocked_by,
+            blocker_id,
+        );
     }
 
     Ok(())
@@ -545,7 +547,10 @@ fn remove_dependency(
     find_task(tasks, dependent_id)?;
 
     remove_id(&mut find_task_mut(tasks, blocker_id)?.blocks, dependent_id);
-    remove_id(&mut find_task_mut(tasks, dependent_id)?.blocked_by, blocker_id);
+    remove_id(
+        &mut find_task_mut(tasks, dependent_id)?.blocked_by,
+        blocker_id,
+    );
     Ok(())
 }
 
@@ -643,15 +648,17 @@ fn validate_unblocked_status(task: &TaskItem) -> Result<(), TaskGraphError> {
 }
 
 fn find_task(tasks: &[TaskItem], task_id: u64) -> Result<&TaskItem, TaskGraphError> {
-    tasks.iter().find(|task| task.id == task_id).ok_or_else(|| {
-        TaskGraphError::Validation(format!("Task {task_id} does not exist"))
-    })
+    tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .ok_or_else(|| TaskGraphError::Validation(format!("Task {task_id} does not exist")))
 }
 
 fn find_task_mut(tasks: &mut [TaskItem], task_id: u64) -> Result<&mut TaskItem, TaskGraphError> {
-    tasks.iter_mut().find(|task| task.id == task_id).ok_or_else(|| {
-        TaskGraphError::Validation(format!("Task {task_id} does not exist"))
-    })
+    tasks
+        .iter_mut()
+        .find(|task| task.id == task_id)
+        .ok_or_else(|| TaskGraphError::Validation(format!("Task {task_id} does not exist")))
 }
 
 fn sort_and_dedup_ids(ids: &mut Vec<u64>) {
@@ -806,18 +813,22 @@ mod tests {
             })
             .expect("create task 3");
         store
-            .update(parse_task_update_input(serde_json::json!({
-                "taskId": 3,
-                "status": "in_progress"
-            }))
-            .expect("parse update"))
+            .update(
+                parse_task_update_input(serde_json::json!({
+                    "taskId": 3,
+                    "status": "in_progress"
+                }))
+                .expect("parse update"),
+            )
             .expect("update task 3");
         store
-            .update(parse_task_update_input(serde_json::json!({
-                "taskId": 1,
-                "status": "completed"
-            }))
-            .expect("parse update"))
+            .update(
+                parse_task_update_input(serde_json::json!({
+                    "taskId": 1,
+                    "status": "completed"
+                }))
+                .expect("parse update"),
+            )
             .expect("complete task 1");
 
         let listed = store.list().expect("list tasks");
@@ -853,26 +864,36 @@ mod tests {
             .expect("create task 2");
 
         let completed = store
-            .update(parse_task_update_input(serde_json::json!({
-                "taskId": 1,
-                "status": "completed"
-            }))
-            .expect("parse update"))
+            .update(
+                parse_task_update_input(serde_json::json!({
+                    "taskId": 1,
+                    "status": "completed"
+                }))
+                .expect("parse update"),
+            )
             .expect("complete task 1");
         let completed =
             serde_json::from_str::<serde_json::Value>(&completed).expect("parse completed");
-        assert_eq!(completed["unblocked"].as_array().expect("unblocked").len(), 1);
+        assert_eq!(
+            completed["unblocked"].as_array().expect("unblocked").len(),
+            1
+        );
 
         let reopened = store
-            .update(parse_task_update_input(serde_json::json!({
-                "taskId": 1,
-                "status": "pending"
-            }))
-            .expect("parse update"))
+            .update(
+                parse_task_update_input(serde_json::json!({
+                    "taskId": 1,
+                    "status": "pending"
+                }))
+                .expect("parse update"),
+            )
             .expect("reopen task 1");
         let reopened =
             serde_json::from_str::<serde_json::Value>(&reopened).expect("parse reopened");
-        assert_eq!(reopened["reblocked"].as_array().expect("reblocked").len(), 1);
+        assert_eq!(
+            reopened["reblocked"].as_array().expect("reblocked").len(),
+            1
+        );
     }
 
     #[test]
@@ -897,11 +918,13 @@ mod tests {
             .expect("create task 2");
 
         let error = store
-            .update(parse_task_update_input(serde_json::json!({
-                "taskId": 1,
-                "addBlockedBy": [2]
-            }))
-            .expect("parse update"))
+            .update(
+                parse_task_update_input(serde_json::json!({
+                    "taskId": 1,
+                    "addBlockedBy": [2]
+                }))
+                .expect("parse update"),
+            )
             .expect_err("cycle should fail");
         assert!(error.to_string().contains("would create a cycle"));
     }
@@ -928,19 +951,27 @@ mod tests {
             .expect("create task 2");
 
         let error = store
-            .update(parse_task_update_input(serde_json::json!({
-                "taskId": 2,
-                "status": "in_progress"
-            }))
-            .expect("parse update"))
+            .update(
+                parse_task_update_input(serde_json::json!({
+                    "taskId": 2,
+                    "status": "in_progress"
+                }))
+                .expect("parse update"),
+            )
             .expect_err("blocked task should fail");
-        assert!(error.to_string().contains("cannot be InProgress while blocked"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be InProgress while blocked")
+        );
     }
 
     #[test]
     fn parse_helpers_reject_bad_input() {
         assert!(parse_task_create_input(serde_json::json!({ "subject": "" })).is_err());
-        assert!(parse_task_update_input(serde_json::json!({ "taskId": 1, "bogus": true })).is_err());
+        assert!(
+            parse_task_update_input(serde_json::json!({ "taskId": 1, "bogus": true })).is_err()
+        );
         assert!(parse_task_list_input(serde_json::json!({ "bogus": true })).is_err());
     }
 
@@ -957,11 +988,13 @@ mod tests {
             })
             .expect("create task 1");
         store
-            .update(parse_task_update_input(serde_json::json!({
-                "taskId": 1,
-                "status": "completed"
-            }))
-            .expect("parse update"))
+            .update(
+                parse_task_update_input(serde_json::json!({
+                    "taskId": 1,
+                    "status": "completed"
+                }))
+                .expect("parse update"),
+            )
             .expect("complete task 1");
         store
             .create(TaskCreateInput {

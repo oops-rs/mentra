@@ -237,6 +237,22 @@ fn subscribe_events(agent: &Agent) -> tokio::task::JoinHandle<()> {
                             agent.name, agent.status
                         );
                     }
+                    Ok(AgentEvent::BackgroundTaskStarted { task }) => {
+                        end_assistant_line(&mut assistant_line_open);
+                        println!(
+                            "\x1b[34mstarted background task\x1b[0m {} {}",
+                            task.id, task.command
+                        );
+                    }
+                    Ok(AgentEvent::BackgroundTaskFinished { task }) => {
+                        end_assistant_line(&mut assistant_line_open);
+                        println!(
+                            "\x1b[34mfinished background task\x1b[0m {} ({}) {}",
+                            task.id,
+                            task.status.as_str(),
+                            task.output_preview.as_deref().unwrap_or("(no output)")
+                        );
+                    }
                     Ok(AgentEvent::ContextCompacted { details }) => {
                         end_assistant_line(&mut assistant_line_open);
                         println!(
@@ -277,6 +293,20 @@ fn describe_tool_call(call: &ToolCall) -> String {
         && let Some(command) = call.input.get("command").and_then(|value| value.as_str())
     {
         return command.to_string();
+    }
+
+    if call.name == "background_run"
+        && let Some(command) = call.input.get("command").and_then(|value| value.as_str())
+    {
+        return format!("background_run {}", command);
+    }
+
+    if call.name == "check_background" {
+        if let Some(task_id) = call.input.get("task_id").and_then(|value| value.as_str()) {
+            return format!("check_background {task_id}");
+        }
+
+        return "check_background".to_string();
     }
 
     if call.name == "read_file"

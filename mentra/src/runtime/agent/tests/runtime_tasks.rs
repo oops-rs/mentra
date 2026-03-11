@@ -25,12 +25,14 @@ async fn task_graph_updates_snapshot_and_persists_for_new_agents() {
     let provider = ScriptedProvider::new(
         ModelProviderKind::Anthropic,
         vec![model.clone()],
-        vec![task_tool_stream(
-            "tool-1",
-            "task_create",
-            r#"{"subject":"Plan work","owner":"agent-a"}"#,
-        ),
-        text_stream("created")],
+        vec![
+            task_tool_stream(
+                "tool-1",
+                "task_create",
+                r#"{"subject":"Plan work","owner":"agent-a"}"#,
+            ),
+            text_stream("created"),
+        ],
     );
 
     let runtime = Runtime::builder()
@@ -257,7 +259,11 @@ fn task_graph_config(tasks_dir: PathBuf) -> AgentConfig {
     }
 }
 
-fn task_tool_stream(tool_id: &str, tool_name: &str, input_json: &str) -> super::support::StreamScript {
+fn task_tool_stream(
+    tool_id: &str,
+    tool_name: &str,
+    input_json: &str,
+) -> super::support::StreamScript {
     ok_stream(vec![
         ProviderEvent::MessageStarted {
             id: format!("msg-{tool_id}"),

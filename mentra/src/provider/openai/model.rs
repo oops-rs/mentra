@@ -388,7 +388,10 @@ mod tests {
         );
         assert_eq!(payload["input"][1]["role"], "assistant");
         assert_eq!(payload["input"][1]["content"][0]["type"], "output_text");
-        assert_eq!(payload["input"][1]["content"][0]["text"], "I'll inspect that.");
+        assert_eq!(
+            payload["input"][1]["content"][0]["text"],
+            "I'll inspect that."
+        );
         assert_eq!(payload["input"][2]["type"], "function_call");
         assert_eq!(payload["input"][2]["call_id"], "call_123");
         assert_eq!(payload["input"][2]["name"], "read_file");

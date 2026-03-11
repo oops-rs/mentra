@@ -2,8 +2,14 @@ use std::{collections::HashSet, sync::Arc, sync::RwLock};
 
 use crate::{
     provider::model::ContentBlock,
+    runtime::{
+        AgentEvent, AgentSnapshot,
+        background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
+    },
     tool::{ToolCall, ToolContext, ToolHandler, ToolRegistry, ToolSpec},
 };
+use std::sync::Mutex;
+use tokio::sync::{broadcast, watch};
 
 use super::skill::SkillLoader;
 
@@ -11,6 +17,7 @@ use super::skill::SkillLoader;
 pub struct RuntimeHandle {
     pub(crate) tool_registry: Arc<RwLock<ToolRegistry>>,
     pub(crate) skill_loader: Arc<RwLock<Option<SkillLoader>>>,
+    pub(crate) background_tasks: BackgroundTaskManager,
 }
 
 impl RuntimeHandle {
@@ -18,6 +25,7 @@ impl RuntimeHandle {
         Self {
             tool_registry: Arc::new(RwLock::new(ToolRegistry::new_empty())),
             skill_loader: Arc::new(RwLock::new(None)),
+            background_tasks: BackgroundTaskManager::default(),
         }
     }
 
@@ -80,7 +88,43 @@ impl RuntimeHandle {
         loader.get_content(name)
     }
 
-    pub async fn execute_tool(&self, tool_call: ToolCall) -> ContentBlock {
+    pub fn register_agent(
+        &self,
+        agent_id: &str,
+        events: broadcast::Sender<AgentEvent>,
+        snapshot_tx: watch::Sender<AgentSnapshot>,
+        snapshot: Arc<Mutex<AgentSnapshot>>,
+    ) {
+        self.background_tasks
+            .register_agent(agent_id, events, snapshot_tx, snapshot);
+    }
+
+    pub fn start_background_task(&self, agent_id: &str, command: String) -> BackgroundTaskSummary {
+        self.background_tasks.start_task(agent_id, command)
+    }
+
+    pub fn check_background_task(
+        &self,
+        agent_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<String, String> {
+        self.background_tasks.check_task(agent_id, task_id)
+    }
+
+    pub fn drain_background_notifications(&self, agent_id: &str) -> Vec<BackgroundNotification> {
+        self.background_tasks.drain_notifications(agent_id)
+    }
+
+    pub fn requeue_background_notifications(
+        &self,
+        agent_id: &str,
+        notifications: Vec<BackgroundNotification>,
+    ) {
+        self.background_tasks
+            .requeue_notifications(agent_id, notifications);
+    }
+
+    pub async fn execute_tool(&self, agent_id: &str, tool_call: ToolCall) -> ContentBlock {
         let tool = self
             .tool_registry
             .read()
@@ -91,6 +135,7 @@ impl RuntimeHandle {
             match tool
                 .invoke(
                     ToolContext {
+                        agent_id: agent_id.to_string(),
                         tool_call_id: tool_call.id.clone(),
                         tool_name: tool_call.name.clone(),
                         runtime: self.clone(),
