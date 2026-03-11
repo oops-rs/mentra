@@ -3,10 +3,12 @@ use std::{borrow::Cow, sync::Arc};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::runtime::{
-    TeamDispatch, TeamMemberStatus, TeamMemberSummary,
+    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamProtocolRequestSummary,
+    TeamProtocolStatus,
     error::RuntimeError,
     team::{
-        TEAM_SPAWN_TOOL_NAME, TEAMMATE_MAX_ROUNDS, TeamMessage, build_teammate_system_prompt,
+        TEAM_SPAWN_TOOL_NAME, TEAMMATE_MAX_ROUNDS, TeamMessage, TeamRequestDirection,
+        TeamRequestFilter, build_teammate_system_prompt,
         teammate_actor_loop,
     },
 };
@@ -111,9 +113,69 @@ impl Agent {
         )
     }
 
+    pub fn broadcast_team_message(
+        &self,
+        content: impl Into<String>,
+    ) -> Result<Vec<TeamDispatch>, RuntimeError> {
+        self.runtime.broadcast_team_message(
+            self.config.team.team_dir.as_path(),
+            &self.name,
+            content.into(),
+        )
+    }
+
     pub fn read_team_inbox(&self) -> Result<Vec<TeamMessage>, RuntimeError> {
         self.runtime
             .read_team_inbox(self.config.team.team_dir.as_path(), &self.name)
+    }
+
+    pub fn request_team_protocol(
+        &self,
+        to: &str,
+        protocol: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Result<TeamProtocolRequestSummary, RuntimeError> {
+        self.runtime.create_team_request(
+            self.config.team.team_dir.as_path(),
+            &self.name,
+            to,
+            protocol.into(),
+            content.into(),
+        )
+    }
+
+    pub fn respond_team_protocol(
+        &self,
+        request_id: &str,
+        approve: bool,
+        reason: Option<String>,
+    ) -> Result<TeamProtocolRequestSummary, RuntimeError> {
+        self.runtime.resolve_team_request(
+            self.config.team.team_dir.as_path(),
+            &self.name,
+            request_id,
+            approve,
+            reason,
+        )
+    }
+
+    pub(crate) fn list_team_protocol_requests(
+        &self,
+        status: Option<TeamProtocolStatus>,
+        protocol: Option<String>,
+        counterparty: Option<String>,
+        direction: TeamRequestDirection,
+    ) -> Result<Vec<TeamProtocolRequestSummary>, RuntimeError> {
+        self.runtime.list_team_requests(
+            self.config.team.team_dir.as_path(),
+            &self.name,
+            TeamRequestFilter {
+                status,
+                protocol,
+                counterparty,
+                direction,
+            },
+        )
     }
 
     pub(crate) fn spawn_disposable_subagent(&self) -> Result<Self, RuntimeError> {

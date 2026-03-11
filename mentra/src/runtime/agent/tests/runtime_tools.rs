@@ -13,12 +13,13 @@ use crate::{
     },
     runtime::{
         Agent, AgentConfig, AgentEvent, BackgroundTaskStatus, Runtime, SpawnedAgentStatus,
-        TeamConfig, TeamMemberStatus,
+        TeamConfig, TeamMemberStatus, TeamProtocolStatus,
     },
 };
 
 use super::support::{
-    ScriptedProvider, StaticTool, StreamScript, erroring_stream, model_info, ok_stream,
+    ScriptedProvider, StaticTool, StreamScript, controlled_stream, erroring_stream, model_info,
+    ok_stream,
 };
 
 #[tokio::test]
@@ -1147,7 +1148,11 @@ async fn team_spawn_tool_registers_persistent_teammate() {
     let requests = provider_handle.recorded_requests().await;
     assert!(tool_names(&requests[0]).contains("team_spawn"));
     assert!(tool_names(&requests[0]).contains("team_send"));
+    assert!(tool_names(&requests[0]).contains("broadcast"));
     assert!(tool_names(&requests[0]).contains("team_read_inbox"));
+    assert!(tool_names(&requests[0]).contains("team_request"));
+    assert!(tool_names(&requests[0]).contains("team_respond"));
+    assert!(tool_names(&requests[0]).contains("team_list_requests"));
 
     let events = collect_events(&mut events);
     assert!(
@@ -1214,7 +1219,11 @@ async fn persistent_teammate_processes_mail_and_reports_back_to_lead() {
     assert_eq!(requests.len(), 3);
     let child_tools = tool_names(&requests[0]);
     assert!(child_tools.contains("team_send"));
+    assert!(child_tools.contains("broadcast"));
     assert!(child_tools.contains("team_read_inbox"));
+    assert!(child_tools.contains("team_request"));
+    assert!(child_tools.contains("team_respond"));
+    assert!(child_tools.contains("team_list_requests"));
     assert!(!child_tools.contains("team_spawn"));
 
     let inbox = latest_team_inbox_text(&requests[2]).expect("team inbox");
@@ -1224,6 +1233,650 @@ async fn persistent_teammate_processes_mail_and_reports_back_to_lead() {
     let teammates = lead.watch_snapshot().borrow().teammates.clone();
     assert_eq!(teammates.len(), 1);
     assert_eq!(teammates[0].status, TeamMemberStatus::Idle);
+}
+
+#[tokio::test]
+async fn broadcast_tool_sends_to_every_other_known_agent() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "broadcast-tool",
+                "broadcast",
+                r#"{"content":"team sync at noon"}"#,
+            ),
+            text_stream(&model.id, "broadcasted"),
+        ],
+    );
+
+    let team_dir = temp_team_dir("broadcast-tool");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let alice = runtime
+        .spawn_with_config(
+            "alice",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let bob = runtime
+        .spawn_with_config(
+            "bob",
+            model,
+            AgentConfig {
+                team: TeamConfig { team_dir },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    lead
+        .send(vec![ContentBlock::Text {
+            text: "tell everyone about the sync".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    let alice_inbox = alice.read_team_inbox().expect("alice inbox");
+    let bob_inbox = bob.read_team_inbox().expect("bob inbox");
+    let lead_inbox = lead.read_team_inbox().expect("lead inbox");
+
+    assert_eq!(alice_inbox.len(), 1);
+    assert_eq!(alice_inbox[0].sender, "lead");
+    assert_eq!(alice_inbox[0].content, "team sync at noon");
+    assert_eq!(alice_inbox[0].kind, "broadcast");
+
+    assert_eq!(bob_inbox.len(), 1);
+    assert_eq!(bob_inbox[0].sender, "lead");
+    assert_eq!(bob_inbox[0].content, "team sync at noon");
+    assert_eq!(bob_inbox[0].kind, "broadcast");
+
+    assert!(lead_inbox.is_empty());
+
+    let tool_result = lead
+        .history()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("broadcast tool result");
+    assert!(tool_result.contains("2 recipient(s)"));
+    assert!(tool_result.contains("alice"));
+    assert!(tool_result.contains("bob"));
+}
+
+#[tokio::test]
+async fn team_request_tool_persists_pending_request_and_updates_snapshot() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "team-request",
+                "team_request",
+                r#"{"to":"lead","protocol":"shutdown","content":"Please shut down gracefully."}"#,
+            ),
+            text_stream(&model.id, "request queued"),
+        ],
+    );
+
+    let team_dir = temp_team_dir("protocol-request-tool");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "queue a shutdown request".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    let requests = agent.watch_snapshot().borrow().protocol_requests.clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].protocol, "shutdown");
+    assert_eq!(requests[0].status, TeamProtocolStatus::Pending);
+    assert_eq!(requests[0].to, "lead");
+
+    let config = load_team_config(&team_dir);
+    assert_eq!(config["requests"].as_array().map(Vec::len), Some(1));
+    assert_eq!(config["requests"][0]["status"].as_str(), Some("pending"));
+
+    let events = collect_events(&mut events);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TeamProtocolRequested { request }
+            if request.protocol == "shutdown" && request.status == TeamProtocolStatus::Pending
+    )));
+}
+
+#[tokio::test]
+async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let team_dir = temp_team_dir("protocol-respond-tool");
+    let runtime = Runtime::builder()
+        .with_provider_instance(ScriptedProvider::new(
+            ModelProviderKind::Anthropic,
+            vec![model.clone()],
+            vec![],
+        ))
+        .build()
+        .expect("build runtime");
+    let _lead = runtime
+        .spawn_with_config(
+            "lead",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let requester = runtime
+        .spawn_with_config(
+            "reviewer",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    let request = requester
+        .request_team_protocol("lead", "plan_approval", "risky refactor plan")
+        .expect("create request");
+    let request_id = request.request_id.clone();
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "team-respond",
+                "team_respond",
+                &format!(
+                    r#"{{"request_id":"{}","approve":true,"reason":"looks good"}}"#,
+                    request_id
+                ),
+            ),
+            text_stream(&model.id, "approved"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let requester = runtime
+        .spawn_with_config(
+            "reviewer",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let mut events = lead.subscribe_events();
+
+    lead
+        .send(vec![ContentBlock::Text {
+            text: "review the plan".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    wait_for_recorded_requests(&provider_handle, 2).await;
+
+    let protocol_requests = lead.watch_snapshot().borrow().protocol_requests.clone();
+    assert_eq!(protocol_requests.len(), 1);
+    assert_eq!(protocol_requests[0].status, TeamProtocolStatus::Approved);
+    assert_eq!(
+        protocol_requests[0].resolution_reason.as_deref(),
+        Some("looks good")
+    );
+
+    let inbox = requester.read_team_inbox().expect("reviewer inbox");
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].kind, "response");
+    assert_eq!(inbox[0].request_id.as_deref(), Some(request_id.as_str()));
+    assert_eq!(inbox[0].approve, Some(true));
+
+    let events = collect_events(&mut events);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TeamProtocolResolved { request }
+            if request.request_id == request_id.as_str()
+    )));
+}
+
+#[tokio::test]
+async fn team_list_requests_tool_filters_visible_requests() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "team-list",
+                "team_list_requests",
+                r#"{"status":"pending","protocol":"plan_approval","direction":"inbound"}"#,
+            ),
+            text_stream(&model.id, "listed"),
+        ],
+    );
+
+    let team_dir = temp_team_dir("protocol-list-tool");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let reviewer = runtime
+        .spawn_with_config(
+            "reviewer",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let architect = runtime
+        .spawn_with_config(
+            "architect",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    let pending = reviewer
+        .request_team_protocol("lead", "plan_approval", "plan A")
+        .expect("pending request");
+    let resolved = architect
+        .request_team_protocol("lead", "shutdown", "stop")
+        .expect("resolved request");
+    lead.respond_team_protocol(&resolved.request_id, false, Some("not now".to_string()))
+        .expect("resolve request");
+
+    lead
+        .send(vec![ContentBlock::Text {
+            text: "list pending reviews".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    let tool_result = lead
+        .history()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("team_list_requests tool result");
+    let listed: serde_json::Value = serde_json::from_str(&tool_result).expect("parse tool output");
+    let listed = listed.as_array().expect("array");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["request_id"].as_str(), Some(pending.request_id.as_str()));
+}
+
+#[tokio::test]
+async fn plan_approval_request_response_keeps_teammate_alive() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "bob-plan",
+                "team_request",
+                r#"{"to":"lead","protocol":"plan_approval","content":"risky refactor plan"}"#,
+            ),
+            text_stream(&model.id, "waiting for review"),
+            text_stream(&model.id, "plan rejected, continuing safely"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let team_dir = temp_team_dir("plan-approval");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    lead
+        .spawn_teammate("bob", "refactorer", Some("Propose your plan first.".to_string()))
+        .await
+        .expect("spawn teammate");
+
+    wait_for_recorded_requests(&provider_handle, 2).await;
+    let requests = lead.watch_snapshot().borrow().protocol_requests.clone();
+    assert_eq!(requests.len(), 1);
+    let request_id = requests[0].request_id.clone();
+    assert_eq!(requests[0].status, TeamProtocolStatus::Pending);
+
+    lead.respond_team_protocol(&request_id, false, Some("too risky".to_string()))
+        .expect("respond to plan");
+
+    wait_for_recorded_requests(&provider_handle, 3).await;
+    wait_for_teammate_status(&lead, TeamMemberStatus::Idle).await;
+
+    let requests = lead.watch_snapshot().borrow().protocol_requests.clone();
+    assert_eq!(requests[0].status, TeamProtocolStatus::Rejected);
+    assert_eq!(requests[0].resolution_reason.as_deref(), Some("too risky"));
+}
+
+#[tokio::test]
+async fn shutdown_approval_shuts_down_teammate_after_current_wake_cycle() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let (stream, tx) = controlled_stream();
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![stream, text_stream(&model.id, "shutting down now")],
+    );
+    let provider_handle = provider.clone();
+
+    let team_dir = temp_team_dir("shutdown-protocol");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    lead
+        .spawn_teammate("alice", "coder", None)
+        .await
+        .expect("spawn teammate");
+
+    let request = lead
+        .request_team_protocol("alice", "shutdown", "Please stop after this turn.")
+        .expect("shutdown request");
+
+    tx.send(Ok(ProviderEvent::MessageStarted {
+        id: "msg-shutdown".to_string(),
+        model: "model".to_string(),
+        role: Role::Assistant,
+    }))
+    .expect("message start");
+    tx.send(Ok(ProviderEvent::ContentBlockStarted {
+        index: 0,
+        kind: ContentBlockStart::ToolUse {
+            id: "shutdown-response".to_string(),
+            name: "team_respond".to_string(),
+        },
+    }))
+    .expect("tool start");
+    tx.send(Ok(ProviderEvent::ContentBlockDelta {
+        index: 0,
+        delta: ContentBlockDelta::ToolUseInputJson(format!(
+            r#"{{"request_id":"{}","approve":true,"reason":"wrapping up"}}"#,
+            request.request_id
+        )),
+    }))
+    .expect("tool delta");
+    tx.send(Ok(ProviderEvent::ContentBlockStopped { index: 0 }))
+        .expect("tool stop");
+    tx.send(Ok(ProviderEvent::MessageStopped))
+        .expect("message stop");
+    drop(tx);
+
+    wait_for_recorded_requests(&provider_handle, 2).await;
+    wait_for_teammate_status(&lead, TeamMemberStatus::Shutdown).await;
+
+    let requests = lead.watch_snapshot().borrow().protocol_requests.clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].status, TeamProtocolStatus::Approved);
+    assert_eq!(requests[0].resolution_reason.as_deref(), Some("wrapping up"));
+
+    let config = load_team_config(&team_dir);
+    assert_eq!(config["members"][0]["status"].as_str(), Some("shutdown"));
+    assert_eq!(config["requests"][0]["status"].as_str(), Some("approved"));
+}
+
+#[tokio::test]
+async fn failed_run_requeues_protocol_messages_and_preserves_request_state() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![erroring_stream(
+            vec![
+                ProviderEvent::MessageStarted {
+                    id: "msg-error".to_string(),
+                    model: model.id.clone(),
+                    role: Role::Assistant,
+                },
+                ProviderEvent::ContentBlockStarted {
+                    index: 0,
+                    kind: ContentBlockStart::Text,
+                },
+                ProviderEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::Text("starting".to_string()),
+                },
+            ],
+            ProviderError::InvalidResponse("boom".to_string()),
+        )],
+    );
+
+    let team_dir = temp_team_dir("protocol-requeue");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let reviewer = runtime
+        .spawn_with_config(
+            "reviewer",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    let request = reviewer
+        .request_team_protocol("lead", "plan_approval", "please review")
+        .expect("create request");
+
+    let error = lead
+        .send(vec![ContentBlock::Text {
+            text: "handle inbox".to_string(),
+        }])
+        .await
+        .expect_err("run should fail");
+    assert!(matches!(error, crate::runtime::error::RuntimeError::FailedToStreamResponse(_)));
+
+    let inbox = lead.read_team_inbox().expect("requeued inbox");
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].kind, "request");
+    assert_eq!(inbox[0].request_id.as_deref(), Some(request.request_id.as_str()));
+
+    let requests = lead.watch_snapshot().borrow().protocol_requests.clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].status, TeamProtocolStatus::Pending);
+}
+
+#[tokio::test]
+async fn persisted_protocol_requests_load_on_restart() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
+
+    let team_dir = temp_team_dir("protocol-restart");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let lead = runtime
+        .spawn_with_config(
+            "lead",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let reviewer = runtime
+        .spawn_with_config(
+            "reviewer",
+            model.clone(),
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: team_dir.clone(),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    reviewer
+        .request_team_protocol("lead", "plan_approval", "plan one")
+        .expect("create request");
+
+    let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let restarted = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig { team_dir },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(lead.watch_snapshot().borrow().protocol_requests.len(), 1);
+    assert_eq!(restarted.watch_snapshot().borrow().protocol_requests.len(), 1);
+    assert_eq!(
+        restarted.watch_snapshot().borrow().protocol_requests[0].status,
+        TeamProtocolStatus::Pending
+    );
 }
 
 fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
@@ -1389,6 +2042,13 @@ fn temp_team_dir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("mentra-runtime-team-{label}-{timestamp}-{unique}"));
     fs::create_dir_all(&path).expect("create team dir");
     path
+}
+
+fn load_team_config(team_dir: &Path) -> serde_json::Value {
+    serde_json::from_str(
+        &fs::read_to_string(team_dir.join("config.json")).expect("read team config"),
+    )
+    .expect("parse team config")
 }
 
 fn write_skill(root: &Path, name: &str, content: &str) {

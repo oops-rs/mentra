@@ -13,7 +13,7 @@ The repository is organized as a small workspace:
 - tool execution through an async `ToolHandler` API
 - builtin `bash`, `background_run`, `check_background`, and `read_file` tools
 - builtin `task` subagents with isolated child context and parent-side tracking
-- persistent agent teams with `team_spawn`, `team_send`, and `team_read_inbox`
+- persistent agent teams with `team_spawn`, `team_send`, `broadcast`, `team_read_inbox`, and generic request-response protocols via `team_request`, `team_respond`, and `team_list_requests`
 - three-layer context compaction with silent tool-result shrinking, auto-summary compaction, and a builtin `compact` tool
 - agent events and snapshots for CLI or UI watchers
 - Anthropic provider support

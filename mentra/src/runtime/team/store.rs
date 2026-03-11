@@ -7,11 +7,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::error::RuntimeError;
 
-use super::{TeamMemberSummary, TeamMessage};
+use super::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(super) struct TeamDiskState {
+    #[serde(default)]
     pub(super) members: Vec<TeamMemberSummary>,
+    #[serde(default)]
+    pub(super) requests: Vec<TeamProtocolRequestSummary>,
 }
 
 pub(super) fn ensure_team_dirs(team_dir: &Path) -> Result<(), RuntimeError> {
@@ -35,10 +38,12 @@ pub(super) fn load_team_state(team_dir: &Path) -> Result<TeamDiskState, RuntimeE
 pub(super) fn persist_team_state(
     team_dir: &Path,
     members: &[TeamMemberSummary],
+    requests: &[TeamProtocolRequestSummary],
 ) -> Result<(), RuntimeError> {
     ensure_team_dirs(team_dir)?;
     let content = serde_json::to_string_pretty(&TeamDiskState {
         members: members.to_vec(),
+        requests: requests.to_vec(),
     })
     .map_err(RuntimeError::FailedToSerializeTeam)?;
     fs::write(config_path(team_dir), content).map_err(RuntimeError::FailedToWriteTeam)

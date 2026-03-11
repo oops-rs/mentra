@@ -6,8 +6,10 @@ use crate::{
     runtime::{
         Agent, AgentEvent, ContextCompactionTrigger, SpawnedAgentStatus, TASK_CREATE_TOOL_NAME,
         TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
-        TEAM_READ_INBOX_TOOL_NAME, TEAM_SEND_TOOL_NAME, TEAM_SPAWN_TOOL_NAME, task, task_graph,
-        error::RuntimeError,
+        TEAM_BROADCAST_TOOL_NAME, TEAM_LIST_REQUESTS_TOOL_NAME, TEAM_READ_INBOX_TOOL_NAME,
+        TEAM_REQUEST_TOOL_NAME, TEAM_RESPOND_TOOL_NAME, TEAM_SEND_TOOL_NAME,
+        TEAM_SPAWN_TOOL_NAME, TeamProtocolStatus, task, task_graph,
+        team::TeamRequestDirection, error::RuntimeError,
     },
     tool::{ToolCall, ToolSpec},
 };
@@ -99,6 +101,100 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             input_schema: json!({
                 "type": "object",
                 "properties": {}
+            }),
+        },
+        ToolSpec {
+            name: TEAM_BROADCAST_TOOL_NAME.to_string(),
+            description: Some(
+                "Send the same mailbox message to every other known agent on the team.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Message body to deliver to every other teammate"
+                    }
+                },
+                "required": ["content"]
+            }),
+        },
+        ToolSpec {
+            name: TEAM_REQUEST_TOOL_NAME.to_string(),
+            description: Some(
+                "Create a structured team request with a generated request_id and durable status."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient teammate or lead name"
+                    },
+                    "protocol": {
+                        "type": "string",
+                        "description": "Open-ended protocol kind such as shutdown or plan_approval"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Request body or plan text"
+                    }
+                },
+                "required": ["to", "protocol", "content"]
+            }),
+        },
+        ToolSpec {
+            name: TEAM_RESPOND_TOOL_NAME.to_string(),
+            description: Some(
+                "Approve or reject a pending team request by request_id.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "request_id": {
+                        "type": "string",
+                        "description": "Correlated request identifier"
+                    },
+                    "approve": {
+                        "type": "boolean",
+                        "description": "Whether to approve the request"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional explanation or feedback"
+                    }
+                },
+                "required": ["request_id", "approve"]
+            }),
+        },
+        ToolSpec {
+            name: TEAM_LIST_REQUESTS_TOOL_NAME.to_string(),
+            description: Some(
+                "List visible team protocol requests with optional filters.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "approved", "rejected"],
+                        "description": "Optional request status filter"
+                    },
+                    "protocol": {
+                        "type": "string",
+                        "description": "Optional protocol kind filter"
+                    },
+                    "counterparty": {
+                        "type": "string",
+                        "description": "Optional other participant filter"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["inbound", "outbound", "any"],
+                        "description": "Filter relative to the current agent"
+                    }
+                }
             }),
         },
         ToolSpec {
@@ -226,6 +322,22 @@ pub(crate) async fn execute(agent: &mut Agent, call: ToolCall) -> Option<Intrins
             result: execute_team_read_inbox(agent, call),
             touched_task_graph: false,
         }),
+        TEAM_BROADCAST_TOOL_NAME => Some(IntrinsicOutcome {
+            result: execute_team_broadcast(agent, call),
+            touched_task_graph: false,
+        }),
+        TEAM_REQUEST_TOOL_NAME => Some(IntrinsicOutcome {
+            result: execute_team_request(agent, call),
+            touched_task_graph: false,
+        }),
+        TEAM_RESPOND_TOOL_NAME => Some(IntrinsicOutcome {
+            result: execute_team_respond(agent, call),
+            touched_task_graph: false,
+        }),
+        TEAM_LIST_REQUESTS_TOOL_NAME => Some(IntrinsicOutcome {
+            result: execute_team_list_requests(agent, call),
+            touched_task_graph: false,
+        }),
         name if task_graph::is_task_graph_tool(name) => Some(execute_task_graph(agent, call)),
         _ => None,
     }
@@ -242,6 +354,33 @@ struct TeamSpawnInput {
 struct TeamSendInput {
     to: String,
     content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamBroadcastInput {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamRequestInput {
+    to: String,
+    protocol: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamRespondInput {
+    request_id: String,
+    approve: bool,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamListRequestsInput {
+    status: Option<String>,
+    protocol: Option<String>,
+    counterparty: Option<String>,
+    direction: Option<String>,
 }
 
 fn execute_task_graph(agent: &mut Agent, call: ToolCall) -> IntrinsicOutcome {
@@ -439,6 +578,160 @@ fn execute_team_read_inbox(agent: &mut Agent, call: ToolCall) -> ContentBlock {
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
             content: format!("Failed to read team inbox: {error:?}"),
+            is_error: true,
+        },
+    }
+}
+
+fn execute_team_broadcast(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+    let input = match serde_json::from_value::<TeamBroadcastInput>(call.input) {
+        Ok(input) => input,
+        Err(error) => {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Invalid broadcast input: {error}"),
+                is_error: true,
+            };
+        }
+    };
+
+    match agent.broadcast_team_message(input.content) {
+        Ok(dispatches) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!(
+                "Broadcast message sent to {} recipient(s): {}",
+                dispatches.len(),
+                dispatches
+                    .into_iter()
+                    .map(|dispatch| dispatch.teammate)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            is_error: false,
+        },
+        Err(error) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!("Failed to broadcast team message: {error:?}"),
+            is_error: true,
+        },
+    }
+}
+
+fn execute_team_request(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+    let input = match serde_json::from_value::<TeamRequestInput>(call.input) {
+        Ok(input) => input,
+        Err(error) => {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Invalid team_request input: {error}"),
+                is_error: true,
+            };
+        }
+    };
+
+    match agent.request_team_protocol(&input.to, input.protocol, input.content) {
+        Ok(request) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!(
+                "Created team request '{}' for '{}' using protocol '{}'",
+                request.request_id, request.to, request.protocol
+            ),
+            is_error: false,
+        },
+        Err(error) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!("Failed to create team request: {error:?}"),
+            is_error: true,
+        },
+    }
+}
+
+fn execute_team_respond(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+    let input = match serde_json::from_value::<TeamRespondInput>(call.input) {
+        Ok(input) => input,
+        Err(error) => {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Invalid team_respond input: {error}"),
+                is_error: true,
+            };
+        }
+    };
+
+    match agent.respond_team_protocol(&input.request_id, input.approve, input.reason) {
+        Ok(request) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!(
+                "{} team request '{}' ({})",
+                if input.approve { "Approved" } else { "Rejected" },
+                request.request_id,
+                request.protocol
+            ),
+            is_error: false,
+        },
+        Err(error) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!("Failed to respond to team request: {error:?}"),
+            is_error: true,
+        },
+    }
+}
+
+fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+    let input = match serde_json::from_value::<TeamListRequestsInput>(call.input) {
+        Ok(input) => input,
+        Err(error) => {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Invalid team_list_requests input: {error}"),
+                is_error: true,
+            };
+        }
+    };
+
+    let status = match input.status.as_deref() {
+        Some("pending") => Some(TeamProtocolStatus::Pending),
+        Some("approved") => Some(TeamProtocolStatus::Approved),
+        Some("rejected") => Some(TeamProtocolStatus::Rejected),
+        Some(value) => {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Invalid team_list_requests status '{value}'"),
+                is_error: true,
+            };
+        }
+        None => None,
+    };
+
+    let direction = match input.direction.as_deref() {
+        Some("inbound") => TeamRequestDirection::Inbound,
+        Some("outbound") => TeamRequestDirection::Outbound,
+        Some("any") | None => TeamRequestDirection::Any,
+        Some(value) => {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Invalid team_list_requests direction '{value}'"),
+                is_error: true,
+            };
+        }
+    };
+
+    match agent.list_team_protocol_requests(status, input.protocol, input.counterparty, direction) {
+        Ok(requests) => match serde_json::to_string_pretty(&requests) {
+            Ok(content) => ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content,
+                is_error: false,
+            },
+            Err(error) => ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Failed to serialize team requests: {error:?}"),
+                is_error: true,
+            },
+        },
+        Err(error) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!("Failed to list team requests: {error:?}"),
             is_error: true,
         },
     }

@@ -19,16 +19,29 @@ pub(crate) async fn teammate_actor_loop(
     agent: Arc<AsyncMutex<Agent>>,
     mut wake_rx: mpsc::UnboundedReceiver<()>,
 ) {
+    let mut should_shutdown = false;
     while wake_rx.recv().await.is_some() {
         loop {
             match manager.has_pending_messages(&team_dir, &teammate_name) {
                 Ok(true) => {}
                 Ok(false) => {
-                    let _ = manager.update_member_status(
-                        &team_dir,
-                        &teammate_name,
-                        TeamMemberStatus::Idle,
-                    );
+                    match manager.take_shutdown_signal(&team_dir, &teammate_name) {
+                        Ok(true) => {
+                            should_shutdown = true;
+                            break;
+                        }
+                        Ok(false) => {
+                            let _ = manager.update_member_status(
+                                &team_dir,
+                                &teammate_name,
+                                TeamMemberStatus::Idle,
+                            );
+                        }
+                        Err(error) => {
+                            let _ = mark_failed(&manager, &team_dir, &teammate_name, error);
+                            break;
+                        }
+                    }
                     break;
                 }
                 Err(error) => {
@@ -52,6 +65,10 @@ pub(crate) async fn teammate_actor_loop(
                 let _ = mark_failed(&manager, &team_dir, &teammate_name, error);
                 break;
             }
+        }
+
+        if should_shutdown {
+            break;
         }
     }
 

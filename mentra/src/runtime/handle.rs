@@ -9,7 +9,10 @@ use crate::{
         AgentEvent, AgentSnapshot,
         background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
         error::RuntimeError,
-        team::{TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage},
+        team::{
+            TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage,
+            TeamProtocolRequestSummary, TeamRequestFilter,
+        },
     },
     tool::{ToolCall, ToolContext, ToolHandler, ToolRegistry, ToolSpec},
 };
@@ -160,6 +163,15 @@ impl RuntimeHandle {
         self.team.send_message(team_dir, sender, to, content)
     }
 
+    pub fn broadcast_team_message(
+        &self,
+        team_dir: &Path,
+        sender: &str,
+        content: String,
+    ) -> Result<Vec<TeamDispatch>, RuntimeError> {
+        self.team.broadcast_message(team_dir, sender, content)
+    }
+
     pub fn read_team_inbox(
         &self,
         team_dir: &Path,
@@ -175,6 +187,39 @@ impl RuntimeHandle {
         messages: Vec<TeamMessage>,
     ) -> Result<(), RuntimeError> {
         self.team.requeue_messages(team_dir, agent_name, messages)
+    }
+
+    pub fn create_team_request(
+        &self,
+        team_dir: &Path,
+        sender: &str,
+        to: &str,
+        protocol: String,
+        content: String,
+    ) -> Result<TeamProtocolRequestSummary, RuntimeError> {
+        self.team
+            .create_request(team_dir, sender, to, protocol, content)
+    }
+
+    pub fn resolve_team_request(
+        &self,
+        team_dir: &Path,
+        responder: &str,
+        request_id: &str,
+        approve: bool,
+        reason: Option<String>,
+    ) -> Result<TeamProtocolRequestSummary, RuntimeError> {
+        self.team
+            .resolve_request(team_dir, responder, request_id, approve, reason)
+    }
+
+    pub fn list_team_requests(
+        &self,
+        team_dir: &Path,
+        agent_name: &str,
+        filter: TeamRequestFilter,
+    ) -> Result<Vec<TeamProtocolRequestSummary>, RuntimeError> {
+        self.team.list_requests(team_dir, agent_name, filter)
     }
 
     pub async fn execute_tool(&self, agent_id: &str, tool_call: ToolCall) -> ContentBlock {
