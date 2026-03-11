@@ -1,10 +1,14 @@
 use std::{borrow::Cow, collections::BTreeMap};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    provider::model::{ContentBlock, Message, ModelInfo, ModelProviderKind, Request, ToolChoice},
+    provider::model::{
+        ContentBlock, ImageSource, Message, ModelInfo, ModelProviderKind, ProviderError, Request,
+        Role, ToolChoice,
+    },
     tool::ToolSpec,
 };
 
@@ -54,15 +58,17 @@ pub(crate) struct OpenAIResponsesRequest {
     metadata: BTreeMap<String, String>,
 }
 
-impl<'a> From<Request<'a>> for OpenAIResponsesRequest {
-    fn from(value: Request<'a>) -> Self {
+impl<'a> TryFrom<Request<'a>> for OpenAIResponsesRequest {
+    type Error = ProviderError;
+
+    fn try_from(value: Request<'a>) -> Result<Self, Self::Error> {
         let mut input = Vec::new();
 
         for message in value.messages.iter() {
-            input.extend(OpenAIInputItem::from_message(message));
+            input.extend(OpenAIInputItem::from_message(message)?);
         }
 
-        OpenAIResponsesRequest {
+        Ok(OpenAIResponsesRequest {
             model: value.model.into_owned(),
             instructions: value.system.map(Cow::into_owned),
             input,
@@ -71,7 +77,7 @@ impl<'a> From<Request<'a>> for OpenAIResponsesRequest {
             temperature: value.temperature,
             max_output_tokens: value.max_output_tokens,
             metadata: value.metadata.into_owned(),
-        }
+        })
     }
 }
 
@@ -84,15 +90,20 @@ pub(crate) enum OpenAIInputItem {
 }
 
 impl OpenAIInputItem {
-    fn from_message(message: &Message) -> Vec<Self> {
+    fn from_message(message: &Message) -> Result<Vec<Self>, ProviderError> {
         let mut items = Vec::new();
+        let mut content = Vec::new();
         let mut text_buffer = String::new();
 
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => text_buffer.push_str(text),
+                ContentBlock::Image { source } => {
+                    Self::flush_text(&mut text_buffer, &mut content);
+                    content.push(OpenAIMessageContentPart::try_from((source, &message.role))?);
+                }
                 ContentBlock::ToolUse { id, name, input } => {
-                    Self::flush_text(message, &mut text_buffer, &mut items);
+                    Self::flush_message(message, &mut text_buffer, &mut content, &mut items);
                     items.push(OpenAIInputItem::FunctionCall(OpenAIFunctionCallInput {
                         kind: "function_call",
                         call_id: id.clone(),
@@ -102,37 +113,49 @@ impl OpenAIInputItem {
                 }
                 ContentBlock::ToolResult {
                     tool_use_id,
-                    content,
+                    content: tool_output,
                     is_error,
                 } => {
-                    Self::flush_text(message, &mut text_buffer, &mut items);
+                    Self::flush_message(message, &mut text_buffer, &mut content, &mut items);
                     items.push(OpenAIInputItem::FunctionCallOutput(
                         OpenAIFunctionCallOutputInput {
                             kind: "function_call_output",
                             call_id: tool_use_id.clone(),
-                            output: render_tool_output(content, *is_error),
+                            output: render_tool_output(tool_output, *is_error),
                         },
                     ));
                 }
             }
         }
 
-        Self::flush_text(message, &mut text_buffer, &mut items);
-        items
+        Self::flush_message(message, &mut text_buffer, &mut content, &mut items);
+        Ok(items)
     }
 
-    fn flush_text(message: &Message, text_buffer: &mut String, items: &mut Vec<Self>) {
+    fn flush_text(text_buffer: &mut String, content: &mut Vec<OpenAIMessageContentPart>) {
         if text_buffer.is_empty() {
             return;
         }
 
+        content.push(OpenAIMessageContentPart::InputText {
+            text: std::mem::take(text_buffer),
+        });
+    }
+
+    fn flush_message(
+        message: &Message,
+        text_buffer: &mut String,
+        content: &mut Vec<OpenAIMessageContentPart>,
+        items: &mut Vec<Self>,
+    ) {
+        Self::flush_text(text_buffer, content);
+        if content.is_empty() {
+            return;
+        }
+
         items.push(OpenAIInputItem::Message(OpenAIMessageInput {
-            role: match &message.role {
-                crate::provider::model::Role::User => "user".to_string(),
-                crate::provider::model::Role::Assistant => "assistant".to_string(),
-                crate::provider::model::Role::Unknown(role) => role.clone(),
-            },
-            content: std::mem::take(text_buffer),
+            role: role_name(&message.role).to_string(),
+            content: std::mem::take(content),
         }));
     }
 }
@@ -148,7 +171,36 @@ fn render_tool_output(content: &str, is_error: bool) -> String {
 #[derive(Serialize)]
 pub(crate) struct OpenAIMessageInput {
     role: String,
-    content: String,
+    content: Vec<OpenAIMessageContentPart>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum OpenAIMessageContentPart {
+    InputText { text: String },
+    InputImage { image_url: String },
+}
+
+impl TryFrom<(&ImageSource, &Role)> for OpenAIMessageContentPart {
+    type Error = ProviderError;
+
+    fn try_from(value: (&ImageSource, &Role)) -> Result<Self, Self::Error> {
+        let (source, role) = value;
+        if !matches!(role, Role::User) {
+            return Err(ProviderError::InvalidRequest(
+                "OpenAI image inputs are only supported in user messages".to_string(),
+            ));
+        }
+
+        let image_url = match source {
+            ImageSource::Bytes { media_type, data } => {
+                format!("data:{media_type};base64,{}", STANDARD.encode(data))
+            }
+            ImageSource::Url { url } => url.clone(),
+        };
+
+        Ok(OpenAIMessageContentPart::InputImage { image_url })
+    }
 }
 
 #[derive(Serialize)]
@@ -229,6 +281,14 @@ impl From<ToolChoice> for OpenAIToolChoice {
     }
 }
 
+fn role_name(role: &Role) -> &str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Unknown(role) => role.as_str(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{borrow::Cow, collections::BTreeMap};
@@ -251,9 +311,7 @@ mod tests {
             messages: Cow::Owned(vec![
                 Message {
                     role: Role::User,
-                    content: vec![ContentBlock::Text {
-                        text: "What files changed?".to_string(),
-                    }],
+                    content: vec![ContentBlock::text("What files changed?")],
                 },
                 Message {
                     role: Role::Assistant,
@@ -293,13 +351,17 @@ mod tests {
             )])),
         };
 
-        let payload = serde_json::to_value(OpenAIResponsesRequest::from(request))
+        let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
             .expect("request should serialize");
 
         assert_eq!(payload["model"], "gpt-5");
         assert_eq!(payload["instructions"], "Be helpful.");
         assert_eq!(payload["input"][0]["role"], "user");
-        assert_eq!(payload["input"][0]["content"], "What files changed?");
+        assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            payload["input"][0]["content"][0]["text"],
+            "What files changed?"
+        );
         assert_eq!(payload["input"][1]["type"], "function_call");
         assert_eq!(payload["input"][1]["call_id"], "call_123");
         assert_eq!(payload["input"][1]["name"], "read_file");
@@ -336,11 +398,46 @@ mod tests {
             metadata: Cow::Owned(BTreeMap::new()),
         };
 
-        let payload = serde_json::to_value(OpenAIResponsesRequest::from(request))
+        let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
             .expect("request should serialize");
 
         assert_eq!(payload["input"][0]["output"], "Tool error: No such file");
         assert_eq!(payload["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn serializes_inline_images_as_input_image_parts() {
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::text("What is in this image?"),
+                    ContentBlock::image_bytes("image/png", [1_u8, 2, 3]),
+                ],
+            }]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+        };
+
+        let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["input"][0]["role"], "user");
+        assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            payload["input"][0]["content"][0]["text"],
+            "What is in this image?"
+        );
+        assert_eq!(payload["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            payload["input"][0]["content"][1]["image_url"],
+            "data:image/png;base64,AQID"
+        );
     }
 
     #[test]

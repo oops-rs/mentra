@@ -1,12 +1,14 @@
 use std::borrow::Cow;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     provider::model::{
-        ContentBlock, Message, ModelInfo, ModelProviderKind, Request, Response, Role, ToolChoice,
+        ContentBlock, ImageSource, Message, ModelInfo, ModelProviderKind, ProviderError, Request,
+        Response, Role, ToolChoice,
     },
     tool::ToolSpec,
 };
@@ -39,30 +41,6 @@ impl From<AnthropicModel> for ModelInfo {
                 .as_deref()
                 .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-
-    use super::AnthropicModel;
-
-    #[test]
-    fn converts_rfc3339_timestamp_to_offset_datetime() {
-        let raw = "2025-03-04T12:34:56Z";
-        let model = AnthropicModel {
-            id: "claude-test".to_string(),
-            display_name: None,
-            created_at: Some(raw.to_string()),
-        };
-
-        let info = crate::provider::model::ModelInfo::from(model);
-
-        assert_eq!(
-            info.created_at,
-            Some(OffsetDateTime::parse(raw, &Rfc3339).expect("valid rfc3339"))
-        );
     }
 }
 
@@ -111,21 +89,23 @@ impl From<AnthropicResponse> for Response {
     }
 }
 
-impl<'a> From<Request<'a>> for AnthropicRequest {
-    fn from(value: Request<'a>) -> Self {
-        AnthropicRequest {
+impl<'a> TryFrom<Request<'a>> for AnthropicRequest {
+    type Error = ProviderError;
+
+    fn try_from(value: Request<'a>) -> Result<Self, Self::Error> {
+        Ok(AnthropicRequest {
             model: value.model.into_owned(),
             system: value.system.map(Cow::into_owned),
             messages: value
                 .messages
                 .iter()
-                .map(|message| message.into())
-                .collect(),
+                .map(AnthropicMessage::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
             tools: value.tools.iter().map(|tool| tool.into()).collect(),
             tool_choice: value.tool_choice.map(|choice| choice.into()),
             temperature: value.temperature,
             max_output_tokens: value.max_output_tokens,
-        }
+        })
     }
 }
 
@@ -135,22 +115,32 @@ struct AnthropicMessage {
     content: Vec<AnthropicContentBlock>,
 }
 
-impl From<Message> for AnthropicMessage {
-    fn from(message: Message) -> Self {
-        AnthropicMessage::from(&message)
+impl TryFrom<Message> for AnthropicMessage {
+    type Error = ProviderError;
+
+    fn try_from(message: Message) -> Result<Self, Self::Error> {
+        AnthropicMessage::try_from(&message)
     }
 }
 
-impl From<&Message> for AnthropicMessage {
-    fn from(message: &Message) -> Self {
-        AnthropicMessage {
+impl TryFrom<&Message> for AnthropicMessage {
+    type Error = ProviderError;
+
+    fn try_from(message: &Message) -> Result<Self, Self::Error> {
+        if !matches!(message.role, Role::User) && message_has_image(message) {
+            return Err(ProviderError::InvalidRequest(
+                "Anthropic image inputs are only supported in user messages".to_string(),
+            ));
+        }
+
+        Ok(AnthropicMessage {
             role: match &message.role {
                 Role::User => "user".to_string(),
                 Role::Assistant => "assistant".to_string(),
                 Role::Unknown(role) => role.clone(),
             },
             content: message.content.iter().map(|block| block.into()).collect(),
-        }
+        })
     }
 }
 
@@ -159,6 +149,9 @@ impl From<&Message> for AnthropicMessage {
 enum AnthropicContentBlock {
     Text {
         text: String,
+    },
+    Image {
+        source: AnthropicImageSource,
     },
     ToolUse {
         id: String,
@@ -172,6 +165,13 @@ enum AnthropicContentBlock {
     },
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
+}
+
 impl From<ContentBlock> for AnthropicContentBlock {
     fn from(block: ContentBlock) -> Self {
         AnthropicContentBlock::from(&block)
@@ -182,6 +182,9 @@ impl From<&ContentBlock> for AnthropicContentBlock {
     fn from(block: &ContentBlock) -> Self {
         match block {
             ContentBlock::Text { text } => AnthropicContentBlock::Text { text: text.clone() },
+            ContentBlock::Image { source } => AnthropicContentBlock::Image {
+                source: source.into(),
+            },
             ContentBlock::ToolUse { id, name, input } => AnthropicContentBlock::ToolUse {
                 id: id.clone(),
                 name: name.clone(),
@@ -204,6 +207,9 @@ impl From<AnthropicContentBlock> for ContentBlock {
     fn from(block: AnthropicContentBlock) -> Self {
         match block {
             AnthropicContentBlock::Text { text } => ContentBlock::Text { text },
+            AnthropicContentBlock::Image { source } => ContentBlock::Image {
+                source: source.into(),
+            },
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 ContentBlock::ToolUse { id, name, input }
             }
@@ -216,6 +222,36 @@ impl From<AnthropicContentBlock> for ContentBlock {
                 content,
                 is_error,
             },
+        }
+    }
+}
+
+impl From<&ImageSource> for AnthropicImageSource {
+    fn from(value: &ImageSource) -> Self {
+        match value {
+            ImageSource::Bytes { media_type, data } => AnthropicImageSource::Base64 {
+                media_type: media_type.clone(),
+                data: STANDARD.encode(data),
+            },
+            ImageSource::Url { url } => AnthropicImageSource::Url { url: url.clone() },
+        }
+    }
+}
+
+impl From<ImageSource> for AnthropicImageSource {
+    fn from(value: ImageSource) -> Self {
+        AnthropicImageSource::from(&value)
+    }
+}
+
+impl From<AnthropicImageSource> for ImageSource {
+    fn from(value: AnthropicImageSource) -> Self {
+        match value {
+            AnthropicImageSource::Base64 { media_type, data } => ImageSource::Bytes {
+                media_type,
+                data: STANDARD.decode(data).unwrap_or_default(),
+            },
+            AnthropicImageSource::Url { url } => ImageSource::Url { url },
         }
     }
 }
@@ -259,5 +295,94 @@ impl From<ToolChoice> for AnthropicToolChoice {
             ToolChoice::Any => AnthropicToolChoice::Any,
             ToolChoice::Tool { name } => AnthropicToolChoice::Tool { name },
         }
+    }
+}
+
+fn message_has_image(message: &Message) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{borrow::Cow, collections::BTreeMap};
+
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+    use crate::provider::model::{ContentBlock, Message, Request, Role, ToolChoice};
+
+    use super::{AnthropicModel, AnthropicRequest};
+
+    #[test]
+    fn converts_rfc3339_timestamp_to_offset_datetime() {
+        let raw = "2025-03-04T12:34:56Z";
+        let model = AnthropicModel {
+            id: "claude-test".to_string(),
+            display_name: None,
+            created_at: Some(raw.to_string()),
+        };
+
+        let info = crate::provider::model::ModelInfo::from(model);
+
+        assert_eq!(
+            info.created_at,
+            Some(OffsetDateTime::parse(raw, &Rfc3339).expect("valid rfc3339"))
+        );
+    }
+
+    #[test]
+    fn serializes_inline_images_into_anthropic_content_blocks() {
+        let request = Request {
+            model: Cow::Borrowed("claude-sonnet"),
+            system: None,
+            messages: Cow::Owned(vec![Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::text("Describe this"),
+                    ContentBlock::image_bytes("image/png", [1_u8, 2, 3]),
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: "ok".to_string(),
+                        is_error: false,
+                    },
+                ],
+            }]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: Some(0.1),
+            max_output_tokens: Some(512),
+            metadata: Cow::Owned(BTreeMap::new()),
+        };
+
+        let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["messages"][0]["role"], "user");
+        assert_eq!(payload["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            payload["messages"][0]["content"][0]["text"],
+            "Describe this"
+        );
+        assert_eq!(payload["messages"][0]["content"][1]["type"], "image");
+        assert_eq!(
+            payload["messages"][0]["content"][1]["source"]["type"],
+            "base64"
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][1]["source"]["media_type"],
+            "image/png"
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][1]["source"]["data"],
+            "AQID"
+        );
+        assert_eq!(payload["messages"][0]["content"][2]["type"], "tool_result");
+        assert_eq!(payload["max_tokens"], 512);
+        let temperature = payload["temperature"]
+            .as_f64()
+            .expect("temperature should be numeric");
+        assert!((temperature - 0.1).abs() < 1e-6);
     }
 }

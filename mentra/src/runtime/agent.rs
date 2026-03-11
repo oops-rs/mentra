@@ -222,6 +222,7 @@ impl Agent {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
                 _ => None,
             })
             .collect::<Vec<_>>()

@@ -84,7 +84,7 @@ impl OpenAIProvider {
         request: Request<'_>,
         stream: bool,
     ) -> Result<reqwest::Response, ProviderError> {
-        let request = model::OpenAIResponsesRequest::from(request);
+        let request = model::OpenAIResponsesRequest::try_from(request)?;
         let mut body = serde_json::to_value(request).map_err(ProviderError::Serialize)?;
         if stream {
             body["stream"] = Value::Bool(true);

@@ -16,6 +16,24 @@ The repository is organized as a small workspace:
 - agent events and snapshots for CLI or UI watchers
 - Anthropic provider support
 - OpenAI provider support via the Responses API
+- image inputs for OpenAI and Anthropic models
+
+## Sending Images
+
+You can attach image blocks alongside text when sending a user turn:
+
+```rust
+use mentra::provider::model::ContentBlock;
+
+agent
+    .send(vec![
+        ContentBlock::text("What is happening in this screenshot?"),
+        ContentBlock::image_bytes("image/png", std::fs::read("screenshot.png")?),
+    ])
+    .await?;
+```
+
+For already-hosted assets, use `ContentBlock::image_url(...)` instead.
 
 ## Run The Example
 

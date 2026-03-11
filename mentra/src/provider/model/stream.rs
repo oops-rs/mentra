@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use super::{ContentBlock, ProviderError, Response, Role};
+use super::{ContentBlock, ImageSource, ProviderError, Response, Role};
 
 pub type ProviderEventStream = mpsc::UnboundedReceiver<Result<ProviderEvent, ProviderError>>;
 
@@ -31,6 +31,7 @@ pub enum ProviderEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlockStart {
     Text,
+    Image { source: ImageSource },
     ToolUse { id: String, name: String },
     ToolResult { tool_use_id: String, is_error: bool },
 }
@@ -92,6 +93,13 @@ impl ContentBlock {
                 events.push(ProviderEvent::ContentBlockStopped { index });
                 events
             }
+            ContentBlock::Image { source } => vec![
+                ProviderEvent::ContentBlockStarted {
+                    index,
+                    kind: ContentBlockStart::Image { source },
+                },
+                ProviderEvent::ContentBlockStopped { index },
+            ],
             ContentBlock::ToolUse { id, name, input } => {
                 let mut events = vec![ProviderEvent::ContentBlockStarted {
                     index,

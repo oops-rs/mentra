@@ -46,6 +46,7 @@ pub enum ProviderError {
     Decode(reqwest::Error),
     Serialize(serde_json::Error),
     Deserialize(serde_json::Error),
+    InvalidRequest(String),
     MalformedStream(String),
 }
 
@@ -103,6 +104,9 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    Image {
+        source: ImageSource,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -113,6 +117,43 @@ pub enum ContentBlock {
         content: String,
         is_error: bool,
     },
+}
+
+impl ContentBlock {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn image_bytes(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self::Image {
+            source: ImageSource::bytes(media_type, data),
+        }
+    }
+
+    pub fn image_url(url: impl Into<String>) -> Self {
+        Self::Image {
+            source: ImageSource::url(url),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageSource {
+    Bytes { media_type: String, data: Vec<u8> },
+    Url { url: String },
+}
+
+impl ImageSource {
+    pub fn bytes(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+
+    pub fn url(url: impl Into<String>) -> Self {
+        Self::Url { url: url.into() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

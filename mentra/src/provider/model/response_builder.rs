@@ -107,6 +107,10 @@ enum StreamingContentBlock {
         text: String,
         complete: bool,
     },
+    Image {
+        source: super::ImageSource,
+        complete: bool,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -152,6 +156,7 @@ impl StreamingContentBlock {
     fn mark_complete(&mut self) {
         match self {
             StreamingContentBlock::Text { complete, .. }
+            | StreamingContentBlock::Image { complete, .. }
             | StreamingContentBlock::ToolUse { complete, .. }
             | StreamingContentBlock::ToolResult { complete, .. } => *complete = true,
         }
@@ -160,6 +165,7 @@ impl StreamingContentBlock {
     fn is_complete(&self) -> bool {
         match self {
             StreamingContentBlock::Text { complete, .. }
+            | StreamingContentBlock::Image { complete, .. }
             | StreamingContentBlock::ToolUse { complete, .. }
             | StreamingContentBlock::ToolResult { complete, .. } => *complete,
         }
@@ -168,6 +174,7 @@ impl StreamingContentBlock {
     fn try_into_content_block(self) -> Result<ContentBlock, ProviderError> {
         match self {
             StreamingContentBlock::Text { text, .. } => Ok(ContentBlock::Text { text }),
+            StreamingContentBlock::Image { source, .. } => Ok(ContentBlock::Image { source }),
             StreamingContentBlock::ToolUse {
                 id,
                 name,
@@ -194,6 +201,7 @@ impl StreamingContentBlock {
     fn kind_name(&self) -> &'static str {
         match self {
             StreamingContentBlock::Text { .. } => "text",
+            StreamingContentBlock::Image { .. } => "image",
             StreamingContentBlock::ToolUse { .. } => "tool_use",
             StreamingContentBlock::ToolResult { .. } => "tool_result",
         }
@@ -205,6 +213,10 @@ impl From<ContentBlockStart> for StreamingContentBlock {
         match value {
             ContentBlockStart::Text => StreamingContentBlock::Text {
                 text: String::new(),
+                complete: false,
+            },
+            ContentBlockStart::Image { source } => StreamingContentBlock::Image {
+                source,
                 complete: false,
             },
             ContentBlockStart::ToolUse { id, name } => StreamingContentBlock::ToolUse {
