@@ -1,7 +1,7 @@
 mod response_builder;
 mod stream;
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use serde_json::Value;
 
@@ -42,15 +42,30 @@ pub enum ProviderError {
 }
 
 #[derive(Debug, Clone)]
-pub struct Request {
-    pub model: String,
-    pub system: Option<String>,
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolSpec>,
+pub struct Request<'a> {
+    pub model: Cow<'a, str>,
+    pub system: Option<Cow<'a, str>>,
+    pub messages: Cow<'a, [Message]>,
+    pub tools: Cow<'a, [ToolSpec]>,
     pub tool_choice: Option<ToolChoice>,
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: Cow<'a, BTreeMap<String, String>>,
+}
+
+impl Request<'_> {
+    pub fn into_owned(self) -> Request<'static> {
+        Request {
+            model: Cow::Owned(self.model.into_owned()),
+            system: self.system.map(|system| Cow::Owned(system.into_owned())),
+            messages: Cow::Owned(self.messages.into_owned()),
+            tools: Cow::Owned(self.tools.into_owned()),
+            tool_choice: self.tool_choice,
+            temperature: self.temperature,
+            max_output_tokens: self.max_output_tokens,
+            metadata: Cow::Owned(self.metadata.into_owned()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

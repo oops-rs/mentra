@@ -11,7 +11,7 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
-    pub fn tools(&self) -> Vec<ToolSpec> {
+    pub fn tools(&self) -> Arc<[ToolSpec]> {
         self.tool_registry
             .read()
             .expect("tool registry poisoned")

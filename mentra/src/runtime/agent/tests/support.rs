@@ -25,7 +25,7 @@ pub(super) struct ScriptedProvider {
     kind: ModelProviderKind,
     models: Vec<ModelInfo>,
     scripts: Arc<Mutex<VecDeque<StreamScript>>>,
-    requests: Arc<Mutex<Vec<Request>>>,
+    requests: Arc<Mutex<Vec<Request<'static>>>>,
 }
 
 impl ScriptedProvider {
@@ -42,7 +42,7 @@ impl ScriptedProvider {
         }
     }
 
-    pub(super) async fn recorded_requests(&self) -> Vec<Request> {
+    pub(super) async fn recorded_requests(&self) -> Vec<Request<'static>> {
         self.requests.lock().await.clone()
     }
 }
@@ -57,8 +57,8 @@ impl Provider for ScriptedProvider {
         Ok(self.models.clone())
     }
 
-    async fn stream(&self, request: Request) -> Result<ProviderEventStream, ProviderError> {
-        self.requests.lock().await.push(request);
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        self.requests.lock().await.push(request.into_owned());
         match self.scripts.lock().await.pop_front() {
             Some(StreamScript::Buffered(items)) => {
                 let (tx, rx) = mpsc::unbounded_channel();

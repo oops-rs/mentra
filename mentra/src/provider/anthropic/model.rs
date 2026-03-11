@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,17 +80,17 @@ impl From<AnthropicResponse> for Response {
     }
 }
 
-impl From<Request> for AnthropicRequest {
-    fn from(value: Request) -> Self {
+impl<'a> From<Request<'a>> for AnthropicRequest {
+    fn from(value: Request<'a>) -> Self {
         AnthropicRequest {
-            model: value.model,
-            system: value.system,
+            model: value.model.into_owned(),
+            system: value.system.map(Cow::into_owned),
             messages: value
                 .messages
-                .into_iter()
+                .iter()
                 .map(|message| message.into())
                 .collect(),
-            tools: value.tools.into_iter().map(|tool| tool.into()).collect(),
+            tools: value.tools.iter().map(|tool| tool.into()).collect(),
             tool_choice: value.tool_choice.map(|choice| choice.into()),
             temperature: value.temperature,
             max_output_tokens: value.max_output_tokens,
@@ -104,17 +106,19 @@ struct AnthropicMessage {
 
 impl From<Message> for AnthropicMessage {
     fn from(message: Message) -> Self {
+        AnthropicMessage::from(&message)
+    }
+}
+
+impl From<&Message> for AnthropicMessage {
+    fn from(message: &Message) -> Self {
         AnthropicMessage {
-            role: match message.role {
+            role: match &message.role {
                 Role::User => "user".to_string(),
                 Role::Assistant => "assistant".to_string(),
-                Role::Unknown(role) => role,
+                Role::Unknown(role) => role.clone(),
             },
-            content: message
-                .content
-                .into_iter()
-                .map(|block| block.into())
-                .collect(),
+            content: message.content.iter().map(|block| block.into()).collect(),
         }
     }
 }
@@ -139,19 +143,27 @@ enum AnthropicContentBlock {
 
 impl From<ContentBlock> for AnthropicContentBlock {
     fn from(block: ContentBlock) -> Self {
+        AnthropicContentBlock::from(&block)
+    }
+}
+
+impl From<&ContentBlock> for AnthropicContentBlock {
+    fn from(block: &ContentBlock) -> Self {
         match block {
-            ContentBlock::Text { text } => AnthropicContentBlock::Text { text },
-            ContentBlock::ToolUse { id, name, input } => {
-                AnthropicContentBlock::ToolUse { id, name, input }
-            }
+            ContentBlock::Text { text } => AnthropicContentBlock::Text { text: text.clone() },
+            ContentBlock::ToolUse { id, name, input } => AnthropicContentBlock::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            },
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
             } => AnthropicContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
+                tool_use_id: tool_use_id.clone(),
+                content: content.clone(),
+                is_error: *is_error,
             },
         }
     }
@@ -187,10 +199,16 @@ struct AnthropicTool {
 
 impl From<ToolSpec> for AnthropicTool {
     fn from(tool: ToolSpec) -> Self {
+        AnthropicTool::from(&tool)
+    }
+}
+
+impl From<&ToolSpec> for AnthropicTool {
+    fn from(tool: &ToolSpec) -> Self {
         AnthropicTool {
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.input_schema,
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
         }
     }
 }

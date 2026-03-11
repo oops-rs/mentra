@@ -12,12 +12,14 @@ struct RegisteredTool {
 
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
+    tool_specs: Arc<[ToolSpec]>,
 }
 
 impl ToolRegistry {
     pub fn new_empty() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
+            tool_specs: Arc::from([]),
         };
         registry.register_tool(builtin::TodoTool);
         registry
@@ -31,14 +33,24 @@ impl ToolRegistry {
         let spec = handler.spec();
         self.tools
             .insert(spec.name.clone(), RegisteredTool { spec, handler });
+        self.refresh_tool_specs();
     }
 
-    pub fn tools(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|tool| tool.spec.clone()).collect()
+    pub fn tools(&self) -> Arc<[ToolSpec]> {
+        Arc::clone(&self.tool_specs)
     }
 
     pub fn get_tool(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
         self.tools.get(name).map(|tool| Arc::clone(&tool.handler))
+    }
+
+    fn refresh_tool_specs(&mut self) {
+        self.tool_specs = self
+            .tools
+            .values()
+            .map(|tool| tool.spec.clone())
+            .collect::<Vec<_>>()
+            .into();
     }
 }
 

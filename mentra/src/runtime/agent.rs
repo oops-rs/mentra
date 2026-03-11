@@ -5,7 +5,7 @@ mod runner;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 use tokio::sync::{broadcast, watch};
 
@@ -170,14 +170,14 @@ impl Agent {
         self.sync_history_len();
     }
 
-    pub(crate) fn effective_system_prompt(&self) -> Option<String> {
+    pub(crate) fn effective_system_prompt(&self) -> Option<Cow<'_, str>> {
         if self.rounds_since_todo < TODO_REMINDER_THRESHOLD || !has_unfinished_todos(&self.todos) {
-            return self.config.system.clone();
+            return self.config.system.as_deref().map(Cow::Borrowed);
         }
 
         Some(match &self.config.system {
-            Some(system) => format!("{TODO_REMINDER_TEXT}\n\n{system}"),
-            None => TODO_REMINDER_TEXT.to_string(),
+            Some(system) => Cow::Owned(format!("{TODO_REMINDER_TEXT}\n\n{system}")),
+            None => Cow::Borrowed(TODO_REMINDER_TEXT),
         })
     }
 

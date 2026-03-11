@@ -19,9 +19,9 @@ pub trait Provider: Send + Sync {
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
 
-    async fn stream(&self, request: Request) -> Result<ProviderEventStream, ProviderError>;
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError>;
 
-    async fn send(&self, request: Request) -> Result<Response, ProviderError> {
+    async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
         collect_response_from_stream(self.stream(request).await?).await
     }
 }

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::{
     provider::model::{Message, Request, Role},
     runtime::{self, TODO_TOOL_NAME, error::RuntimeError},
@@ -16,18 +18,7 @@ impl<'a> TurnRunner<'a> {
 
     pub(super) async fn run(&mut self) -> Result<(), RuntimeError> {
         loop {
-            let request = Request {
-                model: self.agent.model.clone(),
-                system: self.agent.effective_system_prompt(),
-                messages: self.agent.history.clone(),
-                tools: self.agent.runtime.tools(),
-                tool_choice: self.agent.config.tool_choice.clone(),
-                temperature: self.agent.config.temperature,
-                max_output_tokens: self.agent.config.max_output_tokens,
-                metadata: self.agent.config.metadata.clone(),
-            };
-
-            let pending = self.stream_turn(request).await?;
+            let pending = self.stream_turn().await?;
             self.commit_assistant_message(&pending)?;
 
             let tool_calls = pending.ready_tool_calls()?;
@@ -71,15 +62,26 @@ impl<'a> TurnRunner<'a> {
 
     async fn stream_turn(
         &mut self,
-        request: Request,
     ) -> Result<PendingAssistantTurn, RuntimeError> {
         self.agent.set_status(AgentStatus::AwaitingModel);
-        let mut stream = self
-            .agent
-            .provider
-            .stream(request)
-            .await
-            .map_err(RuntimeError::FailedToStreamResponse)?;
+        let provider = self.agent.provider.clone();
+        let tools = self.agent.runtime.tools();
+        let mut stream = {
+            let request = Request {
+                model: self.agent.model.as_str().into(),
+                system: self.agent.effective_system_prompt(),
+                messages: self.agent.history.as_slice().into(),
+                tools: tools.as_ref().into(),
+                tool_choice: self.agent.config.tool_choice.clone(),
+                temperature: self.agent.config.temperature,
+                max_output_tokens: self.agent.config.max_output_tokens,
+                metadata: Cow::Borrowed(&self.agent.config.metadata),
+            };
+            provider
+                .stream(request)
+                .await
+                .map_err(RuntimeError::FailedToStreamResponse)?
+        };
 
         let mut pending = PendingAssistantTurn::default();
         self.agent.set_status(AgentStatus::Streaming);

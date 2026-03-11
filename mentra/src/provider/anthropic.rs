@@ -94,7 +94,7 @@ impl Provider for AnthropicProvider {
         Ok(models)
     }
 
-    async fn stream(&self, request: Request) -> Result<ProviderEventStream, ProviderError> {
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
         let response = self.send_message(request, true).await?;
         Ok(sse::spawn_event_stream(response))
     }
@@ -103,7 +103,7 @@ impl Provider for AnthropicProvider {
 impl AnthropicProvider {
     async fn send_message(
         &self,
-        request: Request,
+        request: Request<'_>,
         stream: bool,
     ) -> Result<reqwest::Response, ProviderError> {
         let request = model::AnthropicRequest::from(request);
