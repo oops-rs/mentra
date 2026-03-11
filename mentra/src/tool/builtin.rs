@@ -1,27 +1,16 @@
-use std::sync::{Arc, RwLock};
-
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::runtime::TODO_TOOL_NAME;
-use crate::skill::SkillLoader;
 use crate::tool::{ToolContext, ToolHandler, ToolResult, ToolSpec};
 
 pub struct BashTool;
-pub struct LoadSkillTool {
-    skills: Arc<RwLock<Option<SkillLoader>>>,
-}
+pub struct LoadSkillTool;
 pub struct ReadFileTool;
 pub struct TaskTool;
 pub struct TodoTool;
-
-impl LoadSkillTool {
-    pub fn new(skills: Arc<RwLock<Option<SkillLoader>>>) -> Self {
-        Self { skills }
-    }
-}
 
 #[async_trait]
 impl ToolHandler for BashTool {
@@ -145,18 +134,13 @@ impl ToolHandler for LoadSkillTool {
         }
     }
 
-    async fn invoke(&self, _ctx: ToolContext, input: Value) -> ToolResult {
+    async fn invoke(&self, ctx: ToolContext, input: Value) -> ToolResult {
         let name = input
             .get("name")
             .and_then(|value| value.as_str())
             .ok_or_else(|| "Skill name is required".to_string())?;
 
-        let skills = self.skills.read().expect("skill loader poisoned");
-        let Some(loader) = skills.as_ref() else {
-            return Err("Skill loader is not available".to_string());
-        };
-
-        loader.get_content(name)
+        ctx.load_skill(name)
     }
 }
 

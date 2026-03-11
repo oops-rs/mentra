@@ -3,16 +3,41 @@ use std::{collections::HashSet, sync::Arc, sync::RwLock};
 use crate::{
     provider::model::ContentBlock,
     skill::SkillLoader,
-    tool::{ToolCall, ToolContext, ToolRegistry, ToolSpec},
+    tool::{ToolCall, ToolContext, ToolHandler, ToolRegistry, ToolSpec},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct RuntimeHandle {
     pub(crate) tool_registry: Arc<RwLock<ToolRegistry>>,
     pub(crate) skill_loader: Arc<RwLock<Option<SkillLoader>>>,
 }
 
 impl RuntimeHandle {
+    pub fn new_empty() -> Self {
+        Self {
+            tool_registry: Arc::new(RwLock::new(ToolRegistry::new_empty())),
+            skill_loader: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn register_tool<T>(&self, tool: T)
+    where
+        T: ToolHandler + 'static,
+    {
+        self.tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .register_tool(tool);
+    }
+
+    pub fn register_skill_loader(&self, loader: SkillLoader) {
+        *self.skill_loader.write().expect("skill loader poisoned") = Some(loader);
+        self.tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .register_tool(crate::tool::builtin::LoadSkillTool);
+    }
+
     pub fn tools(&self) -> Arc<[ToolSpec]> {
         self.tool_registry
             .read()
@@ -45,6 +70,15 @@ impl RuntimeHandle {
             .filter(|descriptions| !descriptions.is_empty())
     }
 
+    pub fn load_skill(&self, name: &str) -> Result<String, String> {
+        let skills = self.skill_loader.read().expect("skill loader poisoned");
+        let Some(loader) = skills.as_ref() else {
+            return Err("Skill loader is not available".to_string());
+        };
+
+        loader.get_content(name)
+    }
+
     pub async fn execute_tool(&self, tool_call: ToolCall) -> ContentBlock {
         let tool = self
             .tool_registry
@@ -58,6 +92,7 @@ impl RuntimeHandle {
                     ToolContext {
                         tool_call_id: tool_call.id.clone(),
                         tool_name: tool_call.name.clone(),
+                        runtime: self.clone(),
                     },
                     tool_call.input,
                 )

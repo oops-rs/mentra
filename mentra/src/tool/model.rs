@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::runtime::RuntimeHandle;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: String,
@@ -15,10 +17,21 @@ pub struct ToolCall {
     pub input: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub tool_call_id: String,
     pub tool_name: String,
+    pub(crate) runtime: RuntimeHandle,
+}
+
+impl ToolContext {
+    pub fn load_skill(&self, name: &str) -> Result<String, String> {
+        self.runtime.load_skill(name)
+    }
+
+    pub fn skill_descriptions(&self) -> Option<String> {
+        self.runtime.skill_descriptions()
+    }
 }
 
 pub type ToolResult = Result<String, String>;

@@ -4,53 +4,31 @@ mod handle;
 mod task;
 mod todo;
 
-use std::{
-    collections::HashSet,
-    path::Path,
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashSet, path::Path};
 
 use crate::{
     provider::{
         Provider, ProviderRegistry,
         model::{ModelInfo, ModelProviderKind},
     },
-    runtime::{error::RuntimeError, handle::RuntimeHandle},
+    runtime::error::RuntimeError,
     skill::{SkillLoadError, SkillLoader},
-    tool::{ToolHandler, ToolRegistry},
+    tool::ToolHandler,
 };
 
 pub use agent::{
     Agent, AgentConfig, AgentEvent, AgentSnapshot, AgentStatus, PendingAssistantTurn,
     PendingToolUseSummary, SpawnedAgentStatus, SpawnedAgentSummary,
 };
+pub(crate) use handle::RuntimeHandle;
 pub(crate) use task::TASK_TOOL_NAME;
 pub(crate) use todo::TODO_TOOL_NAME;
 pub use todo::{TodoItem, TodoStatus};
 
+#[derive(Default)]
 pub struct Runtime {
-    tool_registry: Arc<RwLock<ToolRegistry>>,
-    skill_loader: Arc<RwLock<Option<SkillLoader>>>,
+    handle: RuntimeHandle,
     provider_registry: ProviderRegistry,
-}
-
-impl From<&Runtime> for RuntimeHandle {
-    fn from(runtime: &Runtime) -> Self {
-        Self {
-            tool_registry: Arc::clone(&runtime.tool_registry),
-            skill_loader: Arc::clone(&runtime.skill_loader),
-        }
-    }
-}
-
-impl Default for Runtime {
-    fn default() -> Self {
-        Self {
-            tool_registry: Arc::new(RwLock::new(ToolRegistry::default())),
-            skill_loader: Arc::new(RwLock::new(None)),
-            provider_registry: ProviderRegistry::default(),
-        }
-    }
 }
 
 impl Runtime {
@@ -60,8 +38,7 @@ impl Runtime {
 
     pub fn new_empty() -> Self {
         Self {
-            tool_registry: Arc::new(RwLock::new(ToolRegistry::new_empty())),
-            skill_loader: Arc::new(RwLock::new(None)),
+            handle: RuntimeHandle::new_empty(),
             provider_registry: ProviderRegistry::default(),
         }
     }
@@ -70,20 +47,11 @@ impl Runtime {
     where
         T: ToolHandler + 'static,
     {
-        self.tool_registry
-            .write()
-            .expect("tool registry poisoned")
-            .register_tool(tool);
+        self.handle.register_tool(tool);
     }
 
     pub fn register_skill_loader(&self, loader: SkillLoader) {
-        *self.skill_loader.write().expect("skill loader poisoned") = Some(loader);
-        self.tool_registry
-            .write()
-            .expect("tool registry poisoned")
-            .register_tool(crate::tool::builtin::LoadSkillTool::new(Arc::clone(
-                &self.skill_loader,
-            )));
+        self.handle.register_skill_loader(loader);
     }
 
     pub fn register_skills_dir(&self, path: impl AsRef<Path>) -> Result<(), SkillLoadError> {
@@ -102,7 +70,7 @@ impl Runtime {
         config: AgentConfig,
     ) -> Result<Agent, RuntimeError> {
         Ok(Agent::new(
-            self.into(),
+            self.handle.clone(),
             model.id,
             name.into(),
             config,
