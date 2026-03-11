@@ -1,35 +1,13 @@
-use std::{borrow::Cow, sync::Arc};
-
 use crate::{
     ContentBlock, Role,
-    runtime::{
-        TASK_TOOL_NAME,
-        error::RuntimeError,
-        task::{SUBAGENT_MAX_ROUNDS, build_subagent_system_prompt},
-    },
+    runtime::error::RuntimeError,
 };
 
 use super::{Agent, SpawnedAgentStatus, SpawnedAgentSummary};
 
 impl Agent {
     pub(crate) fn spawn_subagent(&self) -> Result<Self, RuntimeError> {
-        let mut hidden_tools = self.hidden_tools.clone();
-        hidden_tools.insert(TASK_TOOL_NAME.to_string());
-
-        let mut config = self.config.clone();
-        config.system = Some(build_subagent_system_prompt(
-            self.config.system.as_deref().map(Cow::Borrowed),
-        ));
-
-        Self::new(
-            self.runtime.clone(),
-            self.model.clone(),
-            format!("{}::task", self.name),
-            config,
-            Arc::clone(&self.provider),
-            hidden_tools,
-            Some(SUBAGENT_MAX_ROUNDS),
-        )
+        self.spawn_disposable_subagent()
     }
 
     pub(crate) fn register_subagent(&mut self, agent: &Agent) -> SpawnedAgentSummary {

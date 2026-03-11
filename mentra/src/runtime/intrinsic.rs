@@ -1,10 +1,13 @@
 use serde_json::json;
+use serde::Deserialize;
 
 use crate::{
     ContentBlock,
     runtime::{
         Agent, AgentEvent, ContextCompactionTrigger, SpawnedAgentStatus, TASK_CREATE_TOOL_NAME,
-        TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME, task, task_graph,
+        TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
+        TEAM_READ_INBOX_TOOL_NAME, TEAM_SEND_TOOL_NAME, TEAM_SPAWN_TOOL_NAME, task, task_graph,
+        error::RuntimeError,
     },
     tool::{ToolCall, ToolSpec},
 };
@@ -41,6 +44,61 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
                     }
                 },
                 "required": ["prompt"]
+            }),
+        },
+        ToolSpec {
+            name: TEAM_SPAWN_TOOL_NAME.to_string(),
+            description: Some(
+                "Create a persistent teammate that can receive mailbox messages across turns."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Unique teammate name"
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "Short responsibility or specialty for this teammate"
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Optional kickoff message to send immediately after spawning"
+                    }
+                },
+                "required": ["name", "role"]
+            }),
+        },
+        ToolSpec {
+            name: TEAM_SEND_TOOL_NAME.to_string(),
+            description: Some(
+                "Send a mailbox message to the lead or a persistent teammate.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient teammate or lead name"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Message body to deliver"
+                    }
+                },
+                "required": ["to", "content"]
+            }),
+        },
+        ToolSpec {
+            name: TEAM_READ_INBOX_TOOL_NAME.to_string(),
+            description: Some(
+                "Read and drain any currently pending mailbox messages for this agent.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
             }),
         },
         ToolSpec {
@@ -156,9 +214,34 @@ pub(crate) async fn execute(agent: &mut Agent, call: ToolCall) -> Option<Intrins
             result: execute_task(agent, call).await,
             touched_task_graph: false,
         }),
+        TEAM_SPAWN_TOOL_NAME => Some(IntrinsicOutcome {
+            result: execute_team_spawn(agent, call).await,
+            touched_task_graph: false,
+        }),
+        TEAM_SEND_TOOL_NAME => Some(IntrinsicOutcome {
+            result: execute_team_send(agent, call),
+            touched_task_graph: false,
+        }),
+        TEAM_READ_INBOX_TOOL_NAME => Some(IntrinsicOutcome {
+            result: execute_team_read_inbox(agent, call),
+            touched_task_graph: false,
+        }),
         name if task_graph::is_task_graph_tool(name) => Some(execute_task_graph(agent, call)),
         _ => None,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamSpawnInput {
+    name: String,
+    role: String,
+    prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamSendInput {
+    to: String,
+    content: String,
 }
 
 fn execute_task_graph(agent: &mut Agent, call: ToolCall) -> IntrinsicOutcome {
@@ -284,6 +367,78 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
         Err(content) => ContentBlock::ToolResult {
             tool_use_id: call.id,
             content,
+            is_error: true,
+        },
+    }
+}
+
+async fn execute_team_spawn(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+    let input = match serde_json::from_value::<TeamSpawnInput>(call.input) {
+        Ok(input) => input,
+        Err(error) => {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Invalid team_spawn input: {error}"),
+                is_error: true,
+            };
+        }
+    };
+
+    match agent.spawn_teammate(input.name, input.role, input.prompt).await {
+        Ok(teammate) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!(
+                "Spawned persistent teammate '{}' (role: {}, status: {:?})",
+                teammate.name, teammate.role, teammate.status
+            ),
+            is_error: false,
+        },
+        Err(error) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!("Failed to spawn teammate: {error:?}"),
+            is_error: true,
+        },
+    }
+}
+
+fn execute_team_send(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+    let input = match serde_json::from_value::<TeamSendInput>(call.input) {
+        Ok(input) => input,
+        Err(error) => {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Invalid team_send input: {error}"),
+                is_error: true,
+            };
+        }
+    };
+
+    match agent.send_team_message(&input.to, input.content) {
+        Ok(dispatch) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!("Sent message to '{}'", dispatch.teammate),
+            is_error: false,
+        },
+        Err(error) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!("Failed to send team message: {error:?}"),
+            is_error: true,
+        },
+    }
+}
+
+fn execute_team_read_inbox(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+    match agent.read_team_inbox().and_then(|messages| {
+        serde_json::to_string_pretty(&messages).map_err(RuntimeError::FailedToSerializeTeam)
+    }) {
+        Ok(content) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content,
+            is_error: false,
+        },
+        Err(error) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: format!("Failed to read team inbox: {error:?}"),
             is_error: true,
         },
     }

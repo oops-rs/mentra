@@ -7,6 +7,7 @@ mod pending_block;
 mod runner;
 mod snapshot;
 mod subagent;
+mod team;
 mod task_state;
 #[cfg(test)]
 mod tests;
@@ -25,11 +26,15 @@ use crate::{
     provider::{Provider, ToolChoice},
     Message,
     runtime::{
-        TaskItem, background::BackgroundNotification, error::RuntimeError, handle::RuntimeHandle,
+        TaskItem,
+        background::BackgroundNotification,
+        error::RuntimeError,
+        handle::RuntimeHandle,
+        team::TeamMessage,
     },
 };
 
-pub use config::{AgentConfig, ContextCompactionConfig, TaskGraphConfig};
+pub use config::{AgentConfig, ContextCompactionConfig, TaskGraphConfig, TeamConfig};
 pub use events::{
     AgentEvent, AgentSnapshot, AgentStatus, ContextCompactionDetails, ContextCompactionTrigger,
     PendingToolUseSummary, SpawnedAgentStatus, SpawnedAgentSummary,
@@ -55,6 +60,7 @@ pub struct Agent {
     hidden_tools: HashSet<String>,
     max_rounds: Option<usize>,
     inflight_background_notifications: Vec<BackgroundNotification>,
+    inflight_team_messages: Vec<TeamMessage>,
 }
 
 impl Agent {
@@ -88,13 +94,16 @@ impl Agent {
             hidden_tools,
             max_rounds,
             inflight_background_notifications: Vec::new(),
+            inflight_team_messages: Vec::new(),
         };
         agent.runtime.register_agent(
             &agent.id,
+            &agent.name,
+            agent.config.team.team_dir.as_path(),
             agent.event_tx.clone(),
             agent.snapshot_tx.clone(),
             Arc::clone(&agent.snapshot),
-        );
+        )?;
         agent.refresh_tasks_from_disk()?;
         Ok(agent)
     }

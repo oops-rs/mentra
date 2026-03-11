@@ -11,7 +11,10 @@ use crate::{
     provider::{
         ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, Request, ToolChoice,
     },
-    runtime::{Agent, AgentConfig, AgentEvent, BackgroundTaskStatus, Runtime, SpawnedAgentStatus},
+    runtime::{
+        Agent, AgentConfig, AgentEvent, BackgroundTaskStatus, Runtime, SpawnedAgentStatus,
+        TeamConfig, TeamMemberStatus,
+    },
 };
 
 use super::support::{
@@ -1086,6 +1089,143 @@ async fn task_tool_returns_error_when_child_hits_round_limit() {
     assert_eq!(requests.len(), 32);
 }
 
+#[tokio::test]
+async fn team_spawn_tool_registers_persistent_teammate() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "team-spawn",
+                "team_spawn",
+                r#"{"name":"alice","role":"researcher"}"#,
+            ),
+            text_stream(&model.id, "team ready"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: temp_team_dir("spawn-tool"),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "build a team".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        &agent.history()[2].content[0],
+        ContentBlock::ToolResult { content, is_error: false, .. }
+            if content.contains("Spawned persistent teammate 'alice'")
+    ));
+
+    let teammates = agent.watch_snapshot().borrow().teammates.clone();
+    assert_eq!(teammates.len(), 1);
+    assert_eq!(teammates[0].name, "alice");
+    assert_eq!(teammates[0].role, "researcher");
+    assert_eq!(teammates[0].status, TeamMemberStatus::Idle);
+
+    let requests = provider_handle.recorded_requests().await;
+    assert!(tool_names(&requests[0]).contains("team_spawn"));
+    assert!(tool_names(&requests[0]).contains("team_send"));
+    assert!(tool_names(&requests[0]).contains("team_read_inbox"));
+
+    let events = collect_events(&mut events);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TeammateSpawned { teammate } if teammate.name == "alice"))
+    );
+}
+
+#[tokio::test]
+async fn persistent_teammate_processes_mail_and_reports_back_to_lead() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "child-send",
+                "team_send",
+                r#"{"to":"lead","content":"investigation complete"}"#,
+            ),
+            text_stream(&model.id, "done"),
+            text_stream(&model.id, "thanks"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut lead = runtime
+        .spawn_with_config(
+            "lead",
+            model,
+            AgentConfig {
+                team: TeamConfig {
+                    team_dir: temp_team_dir("mailbox"),
+                },
+                ..AgentConfig::default()
+            },
+        )
+        .unwrap();
+
+    lead
+        .spawn_teammate("alice", "researcher", None)
+        .await
+        .expect("spawn teammate");
+    lead.send_team_message("alice", "Check the task graph")
+        .expect("send message");
+
+    wait_for_recorded_requests(&provider_handle, 2).await;
+    wait_for_teammate_status(&lead, TeamMemberStatus::Idle).await;
+
+    lead
+        .send(vec![ContentBlock::Text {
+            text: "status?".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    let requests = provider_handle.recorded_requests().await;
+    assert_eq!(requests.len(), 3);
+    let child_tools = tool_names(&requests[0]);
+    assert!(child_tools.contains("team_send"));
+    assert!(child_tools.contains("team_read_inbox"));
+    assert!(!child_tools.contains("team_spawn"));
+
+    let inbox = latest_team_inbox_text(&requests[2]).expect("team inbox");
+    assert!(inbox.contains("alice"));
+    assert!(inbox.contains("investigation complete"));
+
+    let teammates = lead.watch_snapshot().borrow().teammates.clone();
+    assert_eq!(teammates.len(), 1);
+    assert_eq!(teammates[0].status, TeamMemberStatus::Idle);
+}
+
 fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
     let mut events = Vec::new();
     while let Ok(event) = receiver.try_recv() {
@@ -1136,6 +1276,18 @@ fn latest_background_results_text<'a>(request: &'a Request<'a>) -> Option<&'a st
             ContentBlock::Text { text } if text.contains("<background-results>") => {
                 Some(text.as_str())
             }
+            _ => None,
+        })
+}
+
+fn latest_team_inbox_text<'a>(request: &'a Request<'a>) -> Option<&'a str> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::Text { text } if text.contains("<team-inbox>") => Some(text.as_str()),
             _ => None,
         })
 }
@@ -1228,8 +1380,42 @@ fn temp_skills_dir(label: &str) -> PathBuf {
     path
 }
 
+fn temp_team_dir(label: &str) -> PathBuf {
+    let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("mentra-runtime-team-{label}-{timestamp}-{unique}"));
+    fs::create_dir_all(&path).expect("create team dir");
+    path
+}
+
 fn write_skill(root: &Path, name: &str, content: &str) {
     let skill_dir = root.join(name);
     fs::create_dir_all(&skill_dir).expect("create skill dir");
     fs::write(skill_dir.join("SKILL.md"), content).expect("write skill");
+}
+
+async fn wait_for_recorded_requests(provider: &ScriptedProvider, expected: usize) {
+    for _ in 0..200 {
+        if provider.recorded_requests().await.len() >= expected {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!("timed out waiting for {expected} recorded requests");
+}
+
+async fn wait_for_teammate_status(agent: &Agent, expected: TeamMemberStatus) {
+    for _ in 0..200 {
+        let teammates = agent.watch_snapshot().borrow().teammates.clone();
+        if teammates.len() == 1 && teammates[0].status == expected {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!("timed out waiting for teammate status {:?}", expected);
 }

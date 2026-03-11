@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use crate::provider::{anthropic::AnthropicProvider, openai::OpenAIProvider};
 
 pub mod anthropic;
-pub mod openai;
 mod model;
+pub mod openai;
 
 pub use model::{
     ContentBlock, ContentBlockDelta, ContentBlockStart, ImageSource, Message, ModelInfo,

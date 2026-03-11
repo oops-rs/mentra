@@ -13,7 +13,12 @@ pub enum RuntimeError {
     FailedToWriteTasks(std::io::Error),
     FailedToSerializeTasks(serde_json::Error),
     FailedToRestoreTasks(std::io::Error),
+    FailedToLoadTeam(std::io::Error),
+    FailedToWriteTeam(std::io::Error),
+    FailedToSerializeTeam(serde_json::Error),
+    FailedToDeserializeTeam(serde_json::Error),
     InvalidTaskGraph(String),
+    InvalidTeam(String),
     MaxRoundsExceeded(usize),
     InvalidToolUseInput {
         id: String,

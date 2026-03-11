@@ -18,6 +18,19 @@ impl Default for TaskGraphConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamConfig {
+    pub team_dir: PathBuf,
+}
+
+impl Default for TeamConfig {
+    fn default() -> Self {
+        Self {
+            team_dir: PathBuf::from(".team"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextCompactionConfig {
     pub keep_recent_tool_results: usize,
     pub auto_compact_threshold_tokens: Option<usize>,
@@ -45,6 +58,7 @@ pub struct AgentConfig {
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
     pub metadata: BTreeMap<String, String>,
+    pub team: TeamConfig,
     pub task_graph: TaskGraphConfig,
     pub context_compaction: ContextCompactionConfig,
 }
@@ -57,6 +71,7 @@ impl Default for AgentConfig {
             temperature: None,
             max_output_tokens: Some(8192),
             metadata: BTreeMap::new(),
+            team: TeamConfig::default(),
             task_graph: TaskGraphConfig::default(),
             context_compaction: ContextCompactionConfig::default(),
         }

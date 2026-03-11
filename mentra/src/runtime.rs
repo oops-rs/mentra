@@ -6,6 +6,7 @@ mod handle;
 mod intrinsic;
 mod skill;
 mod task;
+mod team;
 mod task_graph;
 
 use std::{collections::HashSet, path::Path};
@@ -19,16 +20,18 @@ use crate::{
 pub use agent::{
     Agent, AgentConfig, AgentEvent, AgentSnapshot, AgentStatus, ContextCompactionConfig,
     ContextCompactionDetails, ContextCompactionTrigger, PendingAssistantTurn,
-    PendingToolUseSummary, SpawnedAgentStatus, SpawnedAgentSummary, TaskGraphConfig,
+    PendingToolUseSummary, SpawnedAgentStatus, SpawnedAgentSummary, TaskGraphConfig, TeamConfig,
 };
 pub use background::{BackgroundTaskStatus, BackgroundTaskSummary};
 pub(crate) use handle::RuntimeHandle;
 pub(crate) use intrinsic::TASK_TOOL_NAME;
+pub(crate) use team::{TEAM_READ_INBOX_TOOL_NAME, TEAM_SEND_TOOL_NAME, TEAM_SPAWN_TOOL_NAME};
 pub(crate) use task_graph::{
     TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
     TaskDiskState, TaskGraphError,
 };
 pub use task_graph::{TaskItem, TaskStatus};
+pub use team::{TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage};
 
 pub struct Runtime {
     handle: RuntimeHandle,

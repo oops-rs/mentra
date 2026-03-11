@@ -1,10 +1,15 @@
-use std::{sync::Arc, sync::RwLock};
+use std::{
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 use crate::{
     ContentBlock,
     runtime::{
         AgentEvent, AgentSnapshot,
         background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
+        error::RuntimeError,
+        team::{TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage},
     },
     tool::{ToolCall, ToolContext, ToolHandler, ToolRegistry, ToolSpec},
 };
@@ -18,6 +23,7 @@ pub struct RuntimeHandle {
     pub(crate) tool_registry: Arc<RwLock<ToolRegistry>>,
     pub(crate) skill_loader: Arc<RwLock<Option<SkillLoader>>>,
     pub(crate) background_tasks: BackgroundTaskManager,
+    pub(crate) team: TeamManager,
     pub(crate) runtime_intrinsics_enabled: bool,
 }
 
@@ -27,6 +33,7 @@ impl RuntimeHandle {
             tool_registry: Arc::new(RwLock::new(ToolRegistry::default())),
             skill_loader: Arc::new(RwLock::new(None)),
             background_tasks: BackgroundTaskManager::default(),
+            team: TeamManager::default(),
             runtime_intrinsics_enabled: true,
         }
     }
@@ -36,6 +43,7 @@ impl RuntimeHandle {
             tool_registry: Arc::new(RwLock::new(ToolRegistry::new_empty())),
             skill_loader: Arc::new(RwLock::new(None)),
             background_tasks: BackgroundTaskManager::default(),
+            team: TeamManager::default(),
             runtime_intrinsics_enabled: false,
         }
     }
@@ -90,12 +98,17 @@ impl RuntimeHandle {
     pub fn register_agent(
         &self,
         agent_id: &str,
+        agent_name: &str,
+        team_dir: &Path,
         events: broadcast::Sender<AgentEvent>,
         snapshot_tx: watch::Sender<AgentSnapshot>,
         snapshot: Arc<Mutex<AgentSnapshot>>,
-    ) {
+    ) -> Result<(), RuntimeError> {
         self.background_tasks
-            .register_agent(agent_id, events, snapshot_tx, snapshot);
+            .register_agent(agent_id, events.clone(), snapshot_tx.clone(), Arc::clone(&snapshot));
+        self.team
+            .register_agent(agent_name, team_dir, events, snapshot_tx, snapshot)?;
+        Ok(())
     }
 
     pub fn start_background_task(&self, agent_id: &str, command: String) -> BackgroundTaskSummary {
@@ -121,6 +134,47 @@ impl RuntimeHandle {
     ) {
         self.background_tasks
             .requeue_notifications(agent_id, notifications);
+    }
+
+    pub fn team_manager(&self) -> TeamManager {
+        self.team.clone()
+    }
+
+    pub fn register_teammate(
+        &self,
+        team_dir: &Path,
+        summary: TeamMemberSummary,
+        wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
+        task: std::thread::JoinHandle<()>,
+    ) -> Result<TeamMemberSummary, RuntimeError> {
+        self.team.spawn_teammate(team_dir, summary, wake_tx, task)
+    }
+
+    pub fn send_team_message(
+        &self,
+        team_dir: &Path,
+        sender: &str,
+        to: &str,
+        content: String,
+    ) -> Result<TeamDispatch, RuntimeError> {
+        self.team.send_message(team_dir, sender, to, content)
+    }
+
+    pub fn read_team_inbox(
+        &self,
+        team_dir: &Path,
+        agent_name: &str,
+    ) -> Result<Vec<TeamMessage>, RuntimeError> {
+        self.team.read_inbox(team_dir, agent_name)
+    }
+
+    pub fn requeue_team_messages(
+        &self,
+        team_dir: &Path,
+        agent_name: &str,
+        messages: Vec<TeamMessage>,
+    ) -> Result<(), RuntimeError> {
+        self.team.requeue_messages(team_dir, agent_name, messages)
     }
 
     pub async fn execute_tool(&self, agent_id: &str, tool_call: ToolCall) -> ContentBlock {
