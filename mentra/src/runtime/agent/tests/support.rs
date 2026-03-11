@@ -80,6 +80,7 @@ pub(super) fn model_info(id: &str, provider: ModelProviderKind) -> ModelInfo {
         provider,
         display_name: None,
         description: None,
+        created_at: None,
     }
 }
 

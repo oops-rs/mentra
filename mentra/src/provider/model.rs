@@ -4,6 +4,7 @@ mod stream;
 use std::{borrow::Cow, collections::BTreeMap, fmt::Display};
 
 use serde_json::Value;
+use time::OffsetDateTime;
 
 use crate::tool::ToolSpec;
 
@@ -32,6 +33,7 @@ pub struct ModelInfo {
     pub provider: ModelProviderKind,
     pub display_name: Option<String>,
     pub description: Option<String>,
+    pub created_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug)]

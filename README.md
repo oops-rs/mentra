@@ -19,7 +19,7 @@ The repository is organized as a small workspace:
 
 ## Run The Example
 
-Set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, then run. The example will list available models and let you choose one interactively:
+Set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, then run. The example will let you choose a provider, then show up to 10 models from that provider ordered newest to oldest:
 
 ```bash
 cargo run -p mentra-examples --example chat

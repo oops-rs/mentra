@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     provider::model::{
@@ -22,6 +23,8 @@ pub(crate) struct AnthropicModel {
     pub(crate) id: String,
     #[serde(default)]
     pub(crate) display_name: Option<String>,
+    #[serde(default)]
+    pub(crate) created_at: Option<String>,
 }
 
 impl From<AnthropicModel> for ModelInfo {
@@ -31,7 +34,35 @@ impl From<AnthropicModel> for ModelInfo {
             provider: ModelProviderKind::Anthropic,
             display_name: model.display_name,
             description: None,
+            created_at: model
+                .created_at
+                .as_deref()
+                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+    use super::AnthropicModel;
+
+    #[test]
+    fn converts_rfc3339_timestamp_to_offset_datetime() {
+        let raw = "2025-03-04T12:34:56Z";
+        let model = AnthropicModel {
+            id: "claude-test".to_string(),
+            display_name: None,
+            created_at: Some(raw.to_string()),
+        };
+
+        let info = crate::provider::model::ModelInfo::from(model);
+
+        assert_eq!(
+            info.created_at,
+            Some(OffsetDateTime::parse(raw, &Rfc3339).expect("valid rfc3339"))
+        );
     }
 }
 

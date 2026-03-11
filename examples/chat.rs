@@ -6,6 +6,7 @@ use mentra::{
     runtime::{Agent, AgentConfig, AgentEvent, Runtime, TodoItem, TodoStatus},
     tool::ToolCall,
 };
+use time::format_description::well_known::Rfc3339;
 
 #[tokio::main]
 async fn main() {
@@ -20,6 +21,11 @@ async fn main() {
     if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
         runtime.register_provider(ModelProviderKind::Anthropic, api_key);
     }
+
+    assert!(
+        !runtime.providers().is_empty(),
+        "Set OPENAI_API_KEY or ANTHROPIC_API_KEY before running this example"
+    );
 
     let mut agent = runtime
         .spawn_with_config(
@@ -54,39 +60,43 @@ async fn main() {
 }
 
 async fn pick_model(runtime: &Runtime) -> ModelInfo {
-    let mut discovered_models = Vec::new();
+    let providers = runtime.providers();
+    let provider = pick_provider(&providers);
+    let mut discovered_models = match runtime.list_models(Some(provider)).await {
+        Ok(models) => models,
+        Err(error) => {
+            println!("Failed to list models for provider {provider}: {error:?}");
+            return prompt_manual_model(provider);
+        }
+    };
 
-    for provider in runtime.providers() {
-        let models = runtime
-            .list_models(Some(provider))
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "{}",
-                    format!("Failed to list models for provider {provider}").to_string()
-                )
-            });
+    discovered_models.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    discovered_models.truncate(10);
 
-        discovered_models.extend(models);
+    if discovered_models.is_empty() {
+        println!("No models were returned for provider {provider}.");
+        return prompt_manual_model(provider);
     }
 
-    assert!(
-        !discovered_models.is_empty(),
-        "No models found for configured providers"
-    );
-
-    println!("Available models:");
+    println!("Available models for {provider} (newest to oldest):");
     for (index, model) in discovered_models.iter().enumerate() {
         let display_name = model.display_name.as_deref().unwrap_or(&model.id);
-        println!(
-            "  {}. {} [{}]",
-            index + 1,
-            display_name,
-            provider_name(model.provider)
-        );
+        println!("  {}. {}", index + 1, display_name);
 
         if display_name != model.id {
             println!("     id: {}", model.id);
+        }
+
+        if let Some(created_at) = model.created_at {
+            let created_at = created_at
+                .format(&Rfc3339)
+                .unwrap_or_else(|_| created_at.unix_timestamp().to_string());
+            println!("     created_at: {}", created_at);
         }
     }
 
@@ -103,11 +113,7 @@ async fn pick_model(runtime: &Runtime) -> ModelInfo {
         match selection {
             Ok(index) if (1..=discovered_models.len()).contains(&index) => {
                 let model = discovered_models[index - 1].clone();
-                println!(
-                    "Picked model: {} ({})",
-                    model.id,
-                    provider_name(model.provider)
-                );
+                println!("Picked model: {} ({provider})", model.id);
                 return model;
             }
             _ => {
@@ -120,11 +126,66 @@ async fn pick_model(runtime: &Runtime) -> ModelInfo {
     }
 }
 
-fn provider_name(provider: ModelProviderKind) -> &'static str {
-    match provider {
-        ModelProviderKind::Anthropic => "Anthropic",
-        ModelProviderKind::OpenAI => "OpenAI",
-        ModelProviderKind::Gemini => "Gemini",
+fn prompt_manual_model(provider: ModelProviderKind) -> ModelInfo {
+    println!("Enter a model ID manually for {provider}.");
+
+    loop {
+        print!("Model ID: ");
+        std::io::stdout().flush().expect("Failed to flush stdout");
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read line");
+
+        let model_id = input.trim();
+        if model_id.is_empty() {
+            println!("Model ID cannot be empty.");
+            continue;
+        }
+
+        return ModelInfo {
+            id: model_id.to_string(),
+            provider,
+            display_name: None,
+            description: Some("Entered manually".to_string()),
+            created_at: None,
+        };
+    }
+}
+
+fn pick_provider(providers: &[ModelProviderKind]) -> ModelProviderKind {
+    if providers.len() == 1 {
+        let provider = providers[0];
+        println!("Using provider: {provider}");
+        return provider;
+    }
+
+    println!("Available providers:");
+    for (index, provider) in providers.iter().enumerate() {
+        println!("  {}. {}", index + 1, provider);
+    }
+
+    loop {
+        print!("Pick a provider by number: ");
+        std::io::stdout().flush().expect("Failed to flush stdout");
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read line");
+
+        let selection = input.trim().parse::<usize>();
+        match selection {
+            Ok(index) if (1..=providers.len()).contains(&index) => {
+                let provider = providers[index - 1];
+                println!("Using provider: {provider}");
+                return provider;
+            }
+            _ => {
+                println!("Please enter a number between 1 and {}.", providers.len());
+            }
+        }
     }
 }
 

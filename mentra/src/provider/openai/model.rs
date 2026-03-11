@@ -1,6 +1,7 @@
 use std::{borrow::Cow, collections::BTreeMap};
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::{
     provider::model::{ContentBlock, Message, ModelInfo, ModelProviderKind, Request, ToolChoice},
@@ -17,6 +18,8 @@ pub(crate) struct OpenAIModel {
     pub(crate) id: String,
     #[serde(default)]
     pub(crate) owned_by: Option<String>,
+    #[serde(default)]
+    pub(crate) created: Option<u64>,
 }
 
 impl From<OpenAIModel> for ModelInfo {
@@ -26,6 +29,9 @@ impl From<OpenAIModel> for ModelInfo {
             provider: ModelProviderKind::OpenAI,
             display_name: None,
             description: model.owned_by.map(|owner| format!("Owned by {owner}")),
+            created_at: model
+                .created
+                .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp as i64).ok()),
         }
     }
 }
@@ -228,13 +234,14 @@ mod tests {
     use std::{borrow::Cow, collections::BTreeMap};
 
     use serde_json::json;
+    use time::OffsetDateTime;
 
     use crate::{
         provider::model::{ContentBlock, Message, Request, Role, ToolChoice},
         tool::ToolSpec,
     };
 
-    use super::OpenAIResponsesRequest;
+    use super::{OpenAIModel, OpenAIResponsesRequest};
 
     #[test]
     fn converts_request_to_responses_payload() {
@@ -334,5 +341,21 @@ mod tests {
 
         assert_eq!(payload["input"][0]["output"], "Tool error: No such file");
         assert_eq!(payload["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn converts_openai_unix_timestamp_to_offset_datetime() {
+        let model = OpenAIModel {
+            id: "gpt-5".to_string(),
+            owned_by: None,
+            created: Some(1_741_049_700),
+        };
+
+        let info = crate::provider::model::ModelInfo::from(model);
+
+        assert_eq!(
+            info.created_at,
+            Some(OffsetDateTime::from_unix_timestamp(1_741_049_700).expect("valid timestamp"))
+        );
     }
 }
