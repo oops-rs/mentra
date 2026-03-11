@@ -13,6 +13,7 @@ use crate::runtime::{
     AgentEvent, AgentSnapshot,
     error::RuntimeError,
     execution_context::ExecutionContextStore,
+    handle::{AgentExecutionConfig, AgentObserver},
     task::{TaskItem, TaskStore},
 };
 
@@ -73,30 +74,26 @@ impl TeamManager {
     pub(crate) fn register_agent(
         &self,
         agent_name: &str,
-        team_dir: &Path,
-        tasks_dir: &Path,
-        contexts_dir: &Path,
-        events: broadcast::Sender<AgentEvent>,
-        snapshot_tx: watch::Sender<AgentSnapshot>,
-        snapshot: Arc<Mutex<AgentSnapshot>>,
+        config: &AgentExecutionConfig,
+        observer: &AgentObserver,
     ) -> Result<(), RuntimeError> {
         let (members, requests, unread_count) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&mut state, config.team_dir.as_path())?;
             team.known_agents.insert(agent_name.to_string());
             team.unread_counts.insert(
                 agent_name.to_string(),
-                unread_message_count(team_dir, agent_name)?,
+                unread_message_count(config.team_dir.as_path(), agent_name)?,
             );
             team.observers
                 .retain(|observer| observer.agent_name != agent_name);
             team.observers.push(TeamObserver {
                 agent_name: agent_name.to_string(),
-                tasks_dir: tasks_dir.to_path_buf(),
-                contexts_dir: contexts_dir.to_path_buf(),
-                events,
-                snapshot_tx: snapshot_tx.clone(),
-                snapshot: Arc::clone(&snapshot),
+                tasks_dir: config.tasks_dir.clone(),
+                contexts_dir: config.contexts_dir.clone(),
+                events: observer.events.clone(),
+                snapshot_tx: observer.snapshot_tx.clone(),
+                snapshot: Arc::clone(&observer.snapshot),
             });
             (
                 team.members.clone(),
@@ -109,15 +106,19 @@ impl TeamManager {
         };
 
         Self::publish_snapshot(
-            Arc::clone(&snapshot),
-            tasks_dir,
-            contexts_dir,
+            Arc::clone(&observer.snapshot),
+            config.tasks_dir.as_path(),
+            config.contexts_dir.as_path(),
             &members,
             &requests,
             unread_count,
         );
-        let snapshot = snapshot.lock().expect("agent snapshot poisoned").clone();
-        snapshot_tx.send_replace(snapshot);
+        let snapshot = observer
+            .snapshot
+            .lock()
+            .expect("agent snapshot poisoned")
+            .clone();
+        observer.snapshot_tx.send_replace(snapshot);
         Ok(())
     }
 

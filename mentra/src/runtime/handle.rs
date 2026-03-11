@@ -36,14 +36,22 @@ pub struct RuntimeHandle {
     agent_contexts: Arc<RwLock<HashMap<String, AgentExecutionConfig>>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct AgentObserver {
+    pub(crate) events: broadcast::Sender<AgentEvent>,
+    pub(crate) snapshot_tx: watch::Sender<AgentSnapshot>,
+    pub(crate) snapshot: Arc<Mutex<AgentSnapshot>>,
+}
+
 #[derive(Debug, Clone)]
-struct AgentExecutionConfig {
-    name: String,
-    tasks_dir: PathBuf,
-    base_dir: PathBuf,
-    contexts_dir: PathBuf,
-    auto_route_shell: bool,
-    is_teammate: bool,
+pub(crate) struct AgentExecutionConfig {
+    pub(crate) name: String,
+    pub(crate) team_dir: PathBuf,
+    pub(crate) tasks_dir: PathBuf,
+    pub(crate) base_dir: PathBuf,
+    pub(crate) contexts_dir: PathBuf,
+    pub(crate) auto_route_shell: bool,
+    pub(crate) is_teammate: bool,
 }
 
 impl RuntimeHandle {
@@ -122,45 +130,15 @@ impl RuntimeHandle {
         &self,
         agent_id: &str,
         agent_name: &str,
-        team_dir: &Path,
-        tasks_dir: &Path,
-        contexts_dir: &Path,
-        base_dir: &Path,
-        auto_route_shell: bool,
-        is_teammate: bool,
-        events: broadcast::Sender<AgentEvent>,
-        snapshot_tx: watch::Sender<AgentSnapshot>,
-        snapshot: Arc<Mutex<AgentSnapshot>>,
+        config: AgentExecutionConfig,
+        observer: &AgentObserver,
     ) -> Result<(), RuntimeError> {
-        self.background_tasks.register_agent(
-            agent_id,
-            events.clone(),
-            snapshot_tx.clone(),
-            Arc::clone(&snapshot),
-        );
-        self.team.register_agent(
-            agent_name,
-            team_dir,
-            tasks_dir,
-            contexts_dir,
-            events,
-            snapshot_tx,
-            snapshot,
-        )?;
+        self.background_tasks.register_agent(agent_id, observer);
+        self.team.register_agent(agent_name, &config, observer)?;
         self.agent_contexts
             .write()
             .expect("agent context registry poisoned")
-            .insert(
-                agent_id.to_string(),
-                AgentExecutionConfig {
-                    name: agent_name.to_string(),
-                    tasks_dir: tasks_dir.to_path_buf(),
-                    base_dir: base_dir.to_path_buf(),
-                    contexts_dir: contexts_dir.to_path_buf(),
-                    auto_route_shell,
-                    is_teammate,
-                },
-            );
+            .insert(agent_id.to_string(), config);
         Ok(())
     }
 

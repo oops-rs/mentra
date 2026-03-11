@@ -14,7 +14,7 @@ use tokio::{
     sync::{broadcast, watch},
 };
 
-use crate::runtime::{AgentEvent, AgentSnapshot};
+use crate::runtime::{AgentEvent, AgentSnapshot, handle::AgentObserver};
 
 const OUTPUT_PREVIEW_MAX_CHARS: usize = 500;
 
@@ -87,9 +87,7 @@ impl BackgroundTaskManager {
     pub(crate) fn register_agent(
         &self,
         agent_id: &str,
-        events: broadcast::Sender<AgentEvent>,
-        snapshot_tx: watch::Sender<AgentSnapshot>,
-        snapshot: Arc<Mutex<AgentSnapshot>>,
+        observer: &AgentObserver,
     ) {
         let tasks = {
             let mut state = self
@@ -99,16 +97,20 @@ impl BackgroundTaskManager {
                 .expect("background manager poisoned");
             let agent = state.agents.entry(agent_id.to_string()).or_default();
             agent.observer = Some(BackgroundObserver {
-                events,
-                snapshot_tx: snapshot_tx.clone(),
-                snapshot: Arc::clone(&snapshot),
+                events: observer.events.clone(),
+                snapshot_tx: observer.snapshot_tx.clone(),
+                snapshot: Arc::clone(&observer.snapshot),
             });
             agent.tasks.clone()
         };
 
-        Self::publish_snapshot(Arc::clone(&snapshot), &tasks);
-        let snapshot = snapshot.lock().expect("agent snapshot poisoned").clone();
-        snapshot_tx.send_replace(snapshot);
+        Self::publish_snapshot(Arc::clone(&observer.snapshot), &tasks);
+        let snapshot = observer
+            .snapshot
+            .lock()
+            .expect("agent snapshot poisoned")
+            .clone();
+        observer.snapshot_tx.send_replace(snapshot);
     }
 
     pub(crate) fn start_task(

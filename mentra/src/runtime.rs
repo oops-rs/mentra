@@ -28,6 +28,7 @@ pub use execution_context::{
     ExecutionContextBackendKind, ExecutionContextDiskState, ExecutionContextItem,
     ExecutionContextStatus,
 };
+pub(crate) use agent::AgentSpawnOptions;
 pub(crate) use handle::RuntimeHandle;
 pub(crate) use intrinsic::TASK_TOOL_NAME;
 pub(crate) use task::{
@@ -85,9 +86,10 @@ impl Runtime {
             self.provider_registry
                 .get_provider(Some(model.provider))
                 .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider)))?,
-            HashSet::new(),
-            None,
-            None,
+            AgentSpawnOptions {
+                hidden_tools: HashSet::new(),
+                ..AgentSpawnOptions::default()
+            },
         )
     }
 }

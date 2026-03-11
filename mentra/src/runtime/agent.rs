@@ -26,7 +26,8 @@ use crate::{
     Message,
     provider::{Provider, ToolChoice},
     runtime::{
-        TaskItem, background::BackgroundNotification, error::RuntimeError, handle::RuntimeHandle,
+        TaskItem, background::BackgroundNotification, error::RuntimeError,
+        handle::{AgentExecutionConfig, AgentObserver, RuntimeHandle},
         team::TeamMessage,
     },
 };
@@ -72,6 +73,13 @@ pub(crate) struct TeammateIdentity {
     pub(crate) lead: String,
 }
 
+#[derive(Default)]
+pub(crate) struct AgentSpawnOptions {
+    pub(crate) hidden_tools: HashSet<String>,
+    pub(crate) max_rounds: Option<usize>,
+    pub(crate) teammate_identity: Option<TeammateIdentity>,
+}
+
 impl Agent {
     pub(crate) fn new(
         runtime: RuntimeHandle,
@@ -79,10 +87,13 @@ impl Agent {
         name: String,
         config: AgentConfig,
         provider: Arc<dyn Provider>,
-        hidden_tools: HashSet<String>,
-        max_rounds: Option<usize>,
-        teammate_identity: Option<TeammateIdentity>,
+        options: AgentSpawnOptions,
     ) -> Result<Self, RuntimeError> {
+        let AgentSpawnOptions {
+            hidden_tools,
+            max_rounds,
+            teammate_identity,
+        } = options;
         let (event_tx, _) = broadcast::channel(256);
         let snapshot = AgentSnapshot::default();
         let snapshot = Arc::new(Mutex::new(snapshot));
@@ -108,19 +119,23 @@ impl Agent {
             teammate_identity,
             idle_requested: false,
         };
-        agent.runtime.register_agent(
-            &agent.id,
-            &agent.name,
-            agent.config.team.team_dir.as_path(),
-            agent.config.task.tasks_dir.as_path(),
-            agent.config.execution_context.contexts_dir.as_path(),
-            agent.config.execution_context.base_dir.as_path(),
-            agent.config.execution_context.auto_route_shell,
-            agent.teammate_identity.is_some(),
-            agent.event_tx.clone(),
-            agent.snapshot_tx.clone(),
-            Arc::clone(&agent.snapshot),
-        )?;
+        let execution_config = AgentExecutionConfig {
+            name: agent.name.clone(),
+            team_dir: agent.config.team.team_dir.clone(),
+            tasks_dir: agent.config.task.tasks_dir.clone(),
+            base_dir: agent.config.execution_context.base_dir.clone(),
+            contexts_dir: agent.config.execution_context.contexts_dir.clone(),
+            auto_route_shell: agent.config.execution_context.auto_route_shell,
+            is_teammate: agent.teammate_identity.is_some(),
+        };
+        let observer = AgentObserver {
+            events: agent.event_tx.clone(),
+            snapshot_tx: agent.snapshot_tx.clone(),
+            snapshot: Arc::clone(&agent.snapshot),
+        };
+        agent
+            .runtime
+            .register_agent(&agent.id, &agent.name, execution_config, &observer)?;
         agent.refresh_tasks_from_disk()?;
         agent.refresh_execution_contexts_from_disk()?;
         Ok(agent)

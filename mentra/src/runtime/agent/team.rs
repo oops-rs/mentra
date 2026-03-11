@@ -14,7 +14,7 @@ use crate::runtime::{
     },
 };
 
-use super::{Agent, TeammateIdentity};
+use super::{Agent, AgentSpawnOptions, TeammateIdentity};
 
 const SUBAGENT_MAX_ROUNDS: usize = 30;
 const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent working for another agent. Solve the delegated task, use tools when helpful, and finish with a concise final answer for the parent agent.";
@@ -61,12 +61,14 @@ impl Agent {
             name.clone(),
             config,
             Arc::clone(&self.provider),
-            hidden_tools,
-            Some(TEAMMATE_MAX_ROUNDS),
-            Some(TeammateIdentity {
-                role: role.clone(),
-                lead: self.name.clone(),
-            }),
+            AgentSpawnOptions {
+                hidden_tools,
+                max_rounds: Some(TEAMMATE_MAX_ROUNDS),
+                teammate_identity: Some(TeammateIdentity {
+                    role: role.clone(),
+                    lead: self.name.clone(),
+                }),
+            },
         )?;
 
         let summary = TeamMemberSummary {
@@ -205,9 +207,11 @@ impl Agent {
             format!("{}::task", self.name),
             config,
             Arc::clone(&self.provider),
-            hidden_tools,
-            Some(SUBAGENT_MAX_ROUNDS),
-            self.teammate_identity.clone(),
+            AgentSpawnOptions {
+                hidden_tools,
+                max_rounds: Some(SUBAGENT_MAX_ROUNDS),
+                teammate_identity: self.teammate_identity.clone(),
+            },
         )
     }
 }
