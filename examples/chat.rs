@@ -330,19 +330,3 @@ fn render_todos(todos: &[TodoItem]) -> String {
 fn example_skills_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills")
 }
-
-#[cfg(test)]
-mod tests {
-    use mentra::skill::SkillLoader;
-
-    use super::example_skills_dir;
-
-    #[test]
-    fn checked_in_example_skills_are_loadable() {
-        let loader = SkillLoader::from_dir(example_skills_dir()).expect("load example skills");
-        let descriptions = loader.get_descriptions();
-
-        assert!(descriptions.contains("  - git: Git workflow helpers"));
-        assert!(descriptions.contains("  - test: Testing best practices"));
-    }
-}

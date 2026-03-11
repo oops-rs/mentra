@@ -2,9 +2,10 @@ use std::{collections::HashSet, sync::Arc, sync::RwLock};
 
 use crate::{
     provider::model::ContentBlock,
-    skill::SkillLoader,
     tool::{ToolCall, ToolContext, ToolHandler, ToolRegistry, ToolSpec},
 };
+
+use super::skill::SkillLoader;
 
 #[derive(Clone, Default)]
 pub struct RuntimeHandle {

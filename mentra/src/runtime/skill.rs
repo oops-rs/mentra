@@ -9,7 +9,7 @@ use std::{
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SkillLoader {
+pub(crate) struct SkillLoader {
     skills: BTreeMap<String, SkillEntry>,
 }
 
@@ -81,7 +81,7 @@ struct SkillFrontmatter {
 }
 
 impl SkillLoader {
-    pub fn from_dir(path: impl AsRef<Path>) -> Result<Self, SkillLoadError> {
+    pub(crate) fn from_dir(path: impl AsRef<Path>) -> Result<Self, SkillLoadError> {
         let root = path.as_ref().to_path_buf();
         let mut files = Vec::new();
         collect_skill_files(&root, &mut files)?;
@@ -125,11 +125,7 @@ impl SkillLoader {
         Ok(Self { skills })
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.skills.is_empty()
-    }
-
-    pub fn get_descriptions(&self) -> String {
+    pub(crate) fn get_descriptions(&self) -> String {
         if self.skills.is_empty() {
             return String::new();
         }
@@ -145,7 +141,7 @@ impl SkillLoader {
         lines.join("\n")
     }
 
-    pub fn get_content(&self, name: &str) -> Result<String, String> {
+    pub(crate) fn get_content(&self, name: &str) -> Result<String, String> {
         let Some(skill) = self.skills.get(name) else {
             return Err(format!("Unknown skill '{name}'"));
         };

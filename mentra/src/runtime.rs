@@ -1,6 +1,7 @@
 mod agent;
 mod error;
 mod handle;
+mod skill;
 mod task;
 mod todo;
 
@@ -12,7 +13,7 @@ use crate::{
         model::{ModelInfo, ModelProviderKind},
     },
     runtime::error::RuntimeError,
-    skill::{SkillLoadError, SkillLoader},
+    runtime::skill::SkillLoadError,
     tool::ToolHandler,
 };
 
@@ -50,12 +51,9 @@ impl Runtime {
         self.handle.register_tool(tool);
     }
 
-    pub fn register_skill_loader(&self, loader: SkillLoader) {
-        self.handle.register_skill_loader(loader);
-    }
-
     pub fn register_skills_dir(&self, path: impl AsRef<Path>) -> Result<(), SkillLoadError> {
-        self.register_skill_loader(SkillLoader::from_dir(path)?);
+        self.handle
+            .register_skill_loader(skill::SkillLoader::from_dir(path)?);
         Ok(())
     }
 
