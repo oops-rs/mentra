@@ -59,6 +59,7 @@ impl Default for ToolRegistry {
         let mut registry = Self::new_empty();
         registry.register_tool(builtin::BashTool);
         registry.register_tool(builtin::ReadFileTool);
+        registry.register_tool(builtin::TaskTool);
         registry
     }
 }

@@ -6,6 +6,7 @@ pub enum RuntimeError {
     FailedToSendRequest(ProviderError),
     FailedToListModels(ProviderError),
     FailedToStreamResponse(ProviderError),
+    MaxRoundsExceeded(usize),
     InvalidToolUseInput {
         id: String,
         name: String,

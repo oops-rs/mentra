@@ -8,6 +8,7 @@ use crate::tool::{ToolContext, ToolHandler, ToolResult, ToolSpec};
 
 pub struct BashTool;
 pub struct ReadFileTool;
+pub struct TaskTool;
 pub struct TodoTool;
 
 #[async_trait]
@@ -152,5 +153,31 @@ impl ToolHandler for TodoTool {
 
     async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
         Err("todo is handled directly by the agent runtime".to_string())
+    }
+}
+
+#[async_trait]
+impl ToolHandler for TaskTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "task".to_string(),
+            description: Some(
+                "Spawn a fresh subagent to work a subtask and return a concise summary.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Delegated task prompt for the subagent"
+                    }
+                },
+                "required": ["prompt"]
+            }),
+        }
+    }
+
+    async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
+        Err("task is handled directly by the agent runtime".to_string())
     }
 }

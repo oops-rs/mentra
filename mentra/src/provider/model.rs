@@ -107,9 +107,12 @@ pub enum ContentBlock {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ToolChoice {
+    #[default]
     Auto,
     Any,
-    Tool { name: String },
+    Tool {
+        name: String,
+    },
 }

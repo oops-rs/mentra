@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::{collections::HashSet, sync::Arc, sync::RwLock};
 
 use crate::{
     provider::model::ContentBlock,
@@ -16,6 +16,22 @@ impl RuntimeHandle {
             .read()
             .expect("tool registry poisoned")
             .tools()
+    }
+
+    pub fn tools_excluding(&self, hidden_tools: &HashSet<String>) -> Arc<[ToolSpec]> {
+        if hidden_tools.is_empty() {
+            return self.tools();
+        }
+
+        self.tool_registry
+            .read()
+            .expect("tool registry poisoned")
+            .tools()
+            .iter()
+            .filter(|tool| !hidden_tools.contains(&tool.name))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
     }
 
     pub async fn execute_tool(&self, tool_call: ToolCall) -> ContentBlock {

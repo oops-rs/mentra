@@ -79,6 +79,20 @@ fn subscribe_events(agent: &Agent) -> tokio::task::JoinHandle<()> {
                         end_assistant_line(&mut assistant_line_open);
                         println!("\x1b[33m$ {}\x1b[0m", describe_tool_call(&call));
                     }
+                    Ok(AgentEvent::SubagentSpawned { agent }) => {
+                        end_assistant_line(&mut assistant_line_open);
+                        println!(
+                            "\x1b[35mspawned subagent\x1b[0m {} ({})",
+                            agent.name, agent.id
+                        );
+                    }
+                    Ok(AgentEvent::SubagentFinished { agent }) => {
+                        end_assistant_line(&mut assistant_line_open);
+                        println!(
+                            "\x1b[35mfinished subagent\x1b[0m {} ({:?})",
+                            agent.name, agent.status
+                        );
+                    }
                     Ok(AgentEvent::RunFinished) => {
                         end_assistant_line(&mut assistant_line_open);
                     }
@@ -127,6 +141,12 @@ fn describe_tool_call(call: &ToolCall) -> String {
         && let Some(items) = call.input.get("items").and_then(|value| value.as_array())
     {
         return format!("todo {} item(s)", items.len());
+    }
+
+    if call.name == "task"
+        && let Some(prompt) = call.input.get("prompt").and_then(|value| value.as_str())
+    {
+        return format!("task \"{prompt}\"");
     }
 
     format!("{} {}", call.name, call.input)

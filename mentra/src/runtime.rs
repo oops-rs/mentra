@@ -1,9 +1,13 @@
 mod agent;
 mod error;
 mod handle;
+mod task;
 mod todo;
 
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, RwLock},
+};
 
 use crate::{
     provider::{
@@ -16,8 +20,9 @@ use crate::{
 
 pub use agent::{
     Agent, AgentConfig, AgentEvent, AgentSnapshot, AgentStatus, PendingAssistantTurn,
-    PendingToolUseSummary,
+    PendingToolUseSummary, SpawnedAgentStatus, SpawnedAgentSummary,
 };
+pub(crate) use task::TASK_TOOL_NAME;
 pub(crate) use todo::TODO_TOOL_NAME;
 pub use todo::{TodoItem, TodoStatus};
 
@@ -98,6 +103,8 @@ impl Runtime {
             self.provider_registry
                 .get_provider(Some(model.provider))
                 .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider)))?,
+            HashSet::new(),
+            None,
         ))
     }
 }

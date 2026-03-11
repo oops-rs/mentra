@@ -5,7 +5,14 @@ mod runner;
 #[cfg(test)]
 mod tests;
 
-use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use tokio::sync::{broadcast, watch};
 
@@ -15,16 +22,22 @@ use crate::{
         model::{ContentBlock, Message, Role, ToolChoice},
     },
     runtime::{
-        TodoItem,
+        TASK_TOOL_NAME, TodoItem,
         error::RuntimeError,
         handle::RuntimeHandle,
+        task::{SUBAGENT_MAX_ROUNDS, build_subagent_system_prompt},
         todo::{TODO_REMINDER_TEXT, TODO_REMINDER_THRESHOLD, has_unfinished_todos},
     },
 };
 
-pub use events::{AgentEvent, AgentSnapshot, AgentStatus, PendingToolUseSummary};
+pub use events::{
+    AgentEvent, AgentSnapshot, AgentStatus, PendingToolUseSummary, SpawnedAgentStatus,
+    SpawnedAgentSummary,
+};
 pub use pending::PendingAssistantTurn;
 use runner::TurnRunner;
+
+static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -39,7 +52,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             system: None,
-            tool_choice: Some(ToolChoice::Auto),
+            tool_choice: Some(ToolChoice::default()),
             temperature: None,
             max_output_tokens: Some(8192),
             metadata: BTreeMap::new(),
@@ -48,6 +61,7 @@ impl Default for AgentConfig {
 }
 
 pub struct Agent {
+    id: String,
     runtime: RuntimeHandle,
     model: String,
     name: String,
@@ -59,6 +73,8 @@ pub struct Agent {
     snapshot: AgentSnapshot,
     snapshot_tx: watch::Sender<AgentSnapshot>,
     provider: Arc<dyn Provider>,
+    hidden_tools: HashSet<String>,
+    max_rounds: Option<usize>,
 }
 
 impl Agent {
@@ -68,12 +84,15 @@ impl Agent {
         name: String,
         config: AgentConfig,
         provider: Arc<dyn Provider>,
+        hidden_tools: HashSet<String>,
+        max_rounds: Option<usize>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         let snapshot = AgentSnapshot::default();
         let (snapshot_tx, _) = watch::channel(snapshot.clone());
 
         Self {
+            id: format!("agent-{}", NEXT_AGENT_ID.fetch_add(1, Ordering::Relaxed)),
             runtime,
             model,
             name,
@@ -85,11 +104,17 @@ impl Agent {
             snapshot,
             snapshot_tx,
             provider,
+            hidden_tools,
+            max_rounds,
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn model(&self) -> &str {
@@ -114,6 +139,99 @@ impl Agent {
 
     pub fn watch_snapshot(&self) -> watch::Receiver<AgentSnapshot> {
         self.snapshot_tx.subscribe()
+    }
+
+    pub(crate) fn tools(&self) -> Arc<[crate::tool::ToolSpec]> {
+        self.runtime.tools_excluding(&self.hidden_tools)
+    }
+
+    pub(crate) fn can_use_tool(&self, name: &str) -> bool {
+        !self.hidden_tools.contains(name)
+    }
+
+    pub(crate) fn max_rounds(&self) -> Option<usize> {
+        self.max_rounds
+    }
+
+    pub(crate) fn tool_choice(&self) -> Option<ToolChoice> {
+        match self.config.tool_choice.clone() {
+            Some(ToolChoice::Tool { name }) if self.hidden_tools.contains(&name) => {
+                Some(ToolChoice::Auto)
+            }
+            other => other,
+        }
+    }
+
+    pub(crate) fn spawn_subagent(&self) -> Self {
+        let mut hidden_tools = self.hidden_tools.clone();
+        hidden_tools.insert(TASK_TOOL_NAME.to_string());
+
+        let mut config = self.config.clone();
+        config.system = Some(build_subagent_system_prompt(self.effective_system_prompt()));
+
+        Self::new(
+            self.runtime.clone(),
+            self.model.clone(),
+            format!("{}::task", self.name),
+            config,
+            Arc::clone(&self.provider),
+            hidden_tools,
+            Some(SUBAGENT_MAX_ROUNDS),
+        )
+    }
+
+    pub(crate) fn register_subagent(&mut self, agent: &Agent) -> SpawnedAgentSummary {
+        let summary = SpawnedAgentSummary {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            model: agent.model.clone(),
+            status: SpawnedAgentStatus::Running,
+        };
+        self.snapshot.subagents.push(summary.clone());
+        self.publish_snapshot();
+        summary
+    }
+
+    pub(crate) fn finish_subagent(
+        &mut self,
+        id: &str,
+        status: SpawnedAgentStatus,
+    ) -> Option<SpawnedAgentSummary> {
+        let summary = self
+            .snapshot
+            .subagents
+            .iter_mut()
+            .find(|agent| agent.id == id)?;
+        summary.status = status;
+        let summary = summary.clone();
+        self.publish_snapshot();
+        Some(summary)
+    }
+
+    pub(crate) fn final_text_summary(&self) -> String {
+        let Some(message) = self.last_message() else {
+            return "(no summary)".to_string();
+        };
+
+        if message.role != Role::Assistant {
+            return "(no summary)".to_string();
+        }
+
+        let text = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        if text.is_empty() {
+            "(no summary)".to_string()
+        } else {
+            text
+        }
     }
 
     pub async fn send(

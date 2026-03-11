@@ -12,6 +12,7 @@ The repository is organized as a small workspace:
 - streaming model response handling
 - tool execution through an async `ToolHandler` API
 - builtin `bash` and `read_file` tools
+- builtin `task` subagents with isolated child context and parent-side tracking
 - agent events and snapshots for CLI or UI watchers
 - Anthropic provider support
 
