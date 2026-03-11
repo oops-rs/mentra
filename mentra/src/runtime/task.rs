@@ -3,7 +3,6 @@ use std::borrow::Cow;
 use serde::Deserialize;
 use serde_json::Value;
 
-pub(crate) const TASK_TOOL_NAME: &str = "task";
 pub(crate) const SUBAGENT_MAX_ROUNDS: usize = 30;
 const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent working for another agent. Solve the delegated task, use tools when helpful, and finish with a concise final answer for the parent agent.";
 

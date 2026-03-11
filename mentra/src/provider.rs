@@ -2,18 +2,17 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
-use crate::provider::{
-    anthropic::AnthropicProvider,
-    model::{
-        ModelInfo, ModelProviderKind, ProviderError, ProviderEventStream, Request, Response,
-        collect_response_from_stream,
-    },
-    openai::OpenAIProvider,
-};
+use crate::provider::{anthropic::AnthropicProvider, openai::OpenAIProvider};
 
 pub mod anthropic;
-pub mod model;
 pub mod openai;
+mod model;
+
+pub use model::{
+    ContentBlock, ContentBlockDelta, ContentBlockStart, ImageSource, Message, ModelInfo,
+    ModelProviderKind, ProviderError, ProviderEvent, ProviderEventStream, Request, Response, Role,
+    ToolChoice, collect_response_from_stream, provider_event_stream_from_response,
+};
 
 #[async_trait]
 pub trait Provider: Send + Sync {

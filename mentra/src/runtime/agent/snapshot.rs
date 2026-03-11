@@ -1,4 +1,4 @@
-use crate::{provider::model::Message, runtime::AgentEvent};
+use crate::{Message, runtime::AgentEvent};
 
 use super::{Agent, AgentStatus, PendingAssistantTurn};
 

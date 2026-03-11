@@ -1,8 +1,6 @@
 use crate::{
-    provider::model::{
-        ContentBlock, ContentBlockDelta, ContentBlockStart, Message, ModelProviderKind,
-        ProviderError, ProviderEvent, Role,
-    },
+    provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
+    ContentBlock, Message, ModelProviderKind, Role,
     runtime::{AgentConfig, AgentEvent, AgentStatus, Runtime},
 };
 

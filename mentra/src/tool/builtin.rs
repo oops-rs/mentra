@@ -3,22 +3,13 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::runtime::{
-    TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
-};
 use crate::tool::{ToolContext, ToolHandler, ToolResult, ToolSpec};
 
 pub struct BashTool;
 pub struct BackgroundRunTool;
 pub struct CheckBackgroundTool;
-pub struct CompactTool;
 pub struct LoadSkillTool;
 pub struct ReadFileTool;
-pub struct TaskTool;
-pub struct TaskCreateTool;
-pub struct TaskGetTool;
-pub struct TaskListTool;
-pub struct TaskUpdateTool;
 
 #[async_trait]
 impl ToolHandler for BashTool {
@@ -129,24 +120,6 @@ impl ToolHandler for CheckBackgroundTool {
 }
 
 #[async_trait]
-impl ToolHandler for CompactTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "compact".to_string(),
-            description: Some("Compress older conversation context into a summary.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {}
-            }),
-        }
-    }
-
-    async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
-        Err("compact is handled directly by the agent runtime".to_string())
-    }
-}
-
-#[async_trait]
 impl ToolHandler for ReadFileTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
@@ -229,171 +202,5 @@ impl ToolHandler for LoadSkillTool {
             .ok_or_else(|| "Skill name is required".to_string())?;
 
         ctx.load_skill(name)
-    }
-}
-
-#[async_trait]
-impl ToolHandler for TaskTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "task".to_string(),
-            description: Some(
-                "Spawn a fresh subagent to work a subtask and return a concise summary.".into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Delegated task prompt for the subagent"
-                    }
-                },
-                "required": ["prompt"]
-            }),
-        }
-    }
-
-    async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
-        Err("task is handled directly by the agent runtime".to_string())
-    }
-}
-
-#[async_trait]
-impl ToolHandler for TaskCreateTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: TASK_CREATE_TOOL_NAME.to_string(),
-            description: Some("Create a persisted task in the task graph.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "subject": {
-                        "type": "string",
-                        "description": "Short title for the task"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Optional extra detail for the task"
-                    },
-                    "owner": {
-                        "type": "string",
-                        "description": "Optional owner label for the task"
-                    },
-                    "blockedBy": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Task IDs that must finish before this task is ready"
-                    }
-                },
-                "required": ["subject"]
-            }),
-        }
-    }
-
-    async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
-        Err("task_create is handled directly by the agent runtime".to_string())
-    }
-}
-
-#[async_trait]
-impl ToolHandler for TaskUpdateTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: TASK_UPDATE_TOOL_NAME.to_string(),
-            description: Some("Update a persisted task and its dependency edges.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "taskId": {
-                        "type": "integer",
-                        "description": "Stable identifier for the task"
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Updated task subject"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Updated task description"
-                    },
-                    "owner": {
-                        "type": "string",
-                        "description": "Updated task owner"
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "completed"],
-                        "description": "Updated task status"
-                    },
-                    "addBlockedBy": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Add dependency edges from blocker tasks into this task"
-                    },
-                    "removeBlockedBy": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Remove dependency edges from blocker tasks into this task"
-                    },
-                    "addBlocks": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Add dependency edges from this task into dependent tasks"
-                    },
-                    "removeBlocks": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Remove dependency edges from this task into dependent tasks"
-                    }
-                },
-                "required": ["taskId"]
-            }),
-        }
-    }
-
-    async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
-        Err("task_update is handled directly by the agent runtime".to_string())
-    }
-}
-
-#[async_trait]
-impl ToolHandler for TaskListTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: TASK_LIST_TOOL_NAME.to_string(),
-            description: Some("List the persisted task graph grouped by readiness.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {}
-            }),
-        }
-    }
-
-    async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
-        Err("task_list is handled directly by the agent runtime".to_string())
-    }
-}
-
-#[async_trait]
-impl ToolHandler for TaskGetTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: TASK_GET_TOOL_NAME.to_string(),
-            description: Some("Get one persisted task by ID.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "taskId": {
-                        "type": "integer",
-                        "description": "Stable identifier for the task"
-                    }
-                },
-                "required": ["taskId"]
-            }),
-        }
-    }
-
-    async fn invoke(&self, _ctx: ToolContext, _input: Value) -> ToolResult {
-        Err("task_get is handled directly by the agent runtime".to_string())
     }
 }

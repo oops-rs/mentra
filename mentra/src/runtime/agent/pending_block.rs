@@ -1,5 +1,6 @@
 use crate::{
-    provider::model::{ContentBlock, ContentBlockStart, ImageSource},
+    provider::ContentBlockStart,
+    ContentBlock, ImageSource,
     runtime::error::RuntimeError,
 };
 

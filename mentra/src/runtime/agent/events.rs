@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::{
-    provider::model::{ContentBlock, Message},
+    ContentBlock, Message,
     runtime::{BackgroundTaskSummary, TaskItem},
     tool::ToolCall,
 };

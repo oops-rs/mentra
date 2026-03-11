@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::{
-    provider::{Provider, ProviderRegistry, model::ModelProviderKind},
+    provider::{ModelProviderKind, Provider, ProviderRegistry},
     runtime::{RuntimeHandle, error::RuntimeError, skill::SkillLoadError},
     tool::ToolHandler,
 };

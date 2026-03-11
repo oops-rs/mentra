@@ -58,13 +58,7 @@ impl Default for ToolRegistry {
         registry.register_tool(builtin::BashTool);
         registry.register_tool(builtin::BackgroundRunTool);
         registry.register_tool(builtin::CheckBackgroundTool);
-        registry.register_tool(builtin::CompactTool);
         registry.register_tool(builtin::ReadFileTool);
-        registry.register_tool(builtin::TaskTool);
-        registry.register_tool(builtin::TaskCreateTool);
-        registry.register_tool(builtin::TaskUpdateTool);
-        registry.register_tool(builtin::TaskListTool);
-        registry.register_tool(builtin::TaskGetTool);
         registry
     }
 }

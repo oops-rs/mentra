@@ -3,6 +3,7 @@ mod background;
 mod builder;
 mod error;
 mod handle;
+mod intrinsic;
 mod skill;
 mod task;
 mod task_graph;
@@ -10,10 +11,7 @@ mod task_graph;
 use std::{collections::HashSet, path::Path};
 
 use crate::{
-    provider::{
-        Provider, ProviderRegistry,
-        model::{ModelInfo, ModelProviderKind},
-    },
+    provider::{ModelInfo, ModelProviderKind, Provider, ProviderRegistry},
     runtime::{builder::RuntimeBuilder, error::RuntimeError, skill::SkillLoadError},
     tool::ToolHandler,
 };
@@ -25,11 +23,10 @@ pub use agent::{
 };
 pub use background::{BackgroundTaskStatus, BackgroundTaskSummary};
 pub(crate) use handle::RuntimeHandle;
-pub(crate) const COMPACT_TOOL_NAME: &str = "compact";
-pub(crate) use task::TASK_TOOL_NAME;
+pub(crate) use intrinsic::TASK_TOOL_NAME;
 pub(crate) use task_graph::{
     TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
-    TaskDiskState, TaskGraphError, TaskStore, is_task_graph_tool,
+    TaskDiskState, TaskGraphError,
 };
 pub use task_graph::{TaskItem, TaskStatus};
 

@@ -24,7 +24,7 @@ The repository is organized as a small workspace:
 You can attach image blocks alongside text when sending a user turn:
 
 ```rust
-use mentra::provider::model::ContentBlock;
+use mentra::ContentBlock;
 
 agent
     .send(vec![
@@ -41,7 +41,7 @@ For already-hosted assets, use `ContentBlock::image_url(...)` instead.
 Use `Runtime::builder()` for the standard builtin tools, or `Runtime::empty_builder()` when you want to opt into tools explicitly:
 
 ```rust
-use mentra::{provider::model::ModelProviderKind, runtime::Runtime};
+use mentra::{ModelProviderKind, runtime::Runtime};
 
 let runtime = Runtime::builder()
     .with_provider(ModelProviderKind::OpenAI, std::env::var("OPENAI_API_KEY")?)

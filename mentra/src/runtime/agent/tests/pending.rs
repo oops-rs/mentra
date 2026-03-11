@@ -1,9 +1,8 @@
 use serde_json::json;
 
 use crate::{
-    provider::model::{
-        ContentBlock, ContentBlockDelta, ContentBlockStart, Message, ProviderEvent, Role,
-    },
+    provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
+    ContentBlock, Message, Role,
     runtime::{AgentEvent, PendingAssistantTurn},
     tool::ToolCall,
 };

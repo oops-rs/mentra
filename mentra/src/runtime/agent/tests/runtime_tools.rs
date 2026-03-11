@@ -7,9 +7,9 @@ use std::{
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    provider::model::{
-        ContentBlock, ContentBlockDelta, ContentBlockStart, Message, ModelProviderKind,
-        ProviderError, ProviderEvent, Request, Role, ToolChoice,
+    ContentBlock, Message, ModelProviderKind, Role,
+    provider::{
+        ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, Request, ToolChoice,
     },
     runtime::{Agent, AgentConfig, AgentEvent, BackgroundTaskStatus, Runtime, SpawnedAgentStatus},
 };

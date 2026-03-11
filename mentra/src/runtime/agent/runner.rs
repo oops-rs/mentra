@@ -1,20 +1,16 @@
 use std::borrow::Cow;
 
 use crate::{
-    provider::model::{ContentBlock, Message, Request, Role},
+    provider::Request,
+    ContentBlock, Message, Role,
     runtime::{
-        self, COMPACT_TOOL_NAME, TASK_TOOL_NAME, TaskStore,
         background::BackgroundNotification,
         error::RuntimeError,
-        is_task_graph_tool,
-        task_graph::{
-            parse_task_create_input, parse_task_get_input, parse_task_list_input,
-            parse_task_update_input,
-        },
+        intrinsic,
     },
 };
 
-use super::{Agent, AgentEvent, AgentStatus, PendingAssistantTurn, SpawnedAgentStatus};
+use super::{Agent, AgentEvent, AgentStatus, PendingAssistantTurn};
 
 pub(super) struct TurnRunner<'a> {
     agent: &'a mut Agent,
@@ -57,12 +53,8 @@ impl<'a> TurnRunner<'a> {
 
                 let (result, task_graph_succeeded) = if !self.agent.can_use_tool(&call.name) {
                     (self.unavailable_tool_result(call), false)
-                } else if call.name == COMPACT_TOOL_NAME {
-                    (self.execute_compact(call).await, false)
-                } else if call.name == TASK_TOOL_NAME {
-                    (self.execute_task(call).await, false)
-                } else if is_task_graph_tool(&call.name) {
-                    self.execute_task_graph(call)
+                } else if let Some(outcome) = intrinsic::execute(self.agent, call.clone()).await {
+                    (outcome.result, outcome.touched_task_graph)
                 } else {
                     (
                         self.agent.runtime.execute_tool(self.agent.id(), call).await,
@@ -145,166 +137,11 @@ impl<'a> TurnRunner<'a> {
         Ok(())
     }
 
-    fn execute_task_graph(
-        &mut self,
-        call: crate::tool::ToolCall,
-    ) -> (crate::provider::model::ContentBlock, bool) {
-        let store = TaskStore::new(self.agent.config().task_graph.tasks_dir.clone());
-        let output = match call.name.as_str() {
-            runtime::TASK_CREATE_TOOL_NAME => parse_task_create_input(call.input)
-                .and_then(|input| store.create(input).map_err(|error| error.to_string())),
-            runtime::TASK_UPDATE_TOOL_NAME => parse_task_update_input(call.input)
-                .and_then(|input| store.update(input).map_err(|error| error.to_string())),
-            runtime::TASK_GET_TOOL_NAME => parse_task_get_input(call.input)
-                .and_then(|input| store.get(input.task_id).map_err(|error| error.to_string())),
-            runtime::TASK_LIST_TOOL_NAME => parse_task_list_input(call.input)
-                .and_then(|()| store.list().map_err(|error| error.to_string())),
-            _ => Err(format!("Tool '{}' is not a task graph tool", call.name)),
-        };
-
-        match output {
-            Ok(content) => match self.agent.refresh_tasks_from_disk() {
-                Ok(()) => (
-                    crate::provider::model::ContentBlock::ToolResult {
-                        tool_use_id: call.id,
-                        content,
-                        is_error: false,
-                    },
-                    true,
-                ),
-                Err(error) => (
-                    crate::provider::model::ContentBlock::ToolResult {
-                        tool_use_id: call.id,
-                        content: format!("Task graph refresh failed: {error:?}"),
-                        is_error: true,
-                    },
-                    false,
-                ),
-            },
-            Err(content) => (
-                crate::provider::model::ContentBlock::ToolResult {
-                    tool_use_id: call.id,
-                    content,
-                    is_error: true,
-                },
-                false,
-            ),
-        }
-    }
-
-    async fn execute_compact(
-        &mut self,
-        call: crate::tool::ToolCall,
-    ) -> crate::provider::model::ContentBlock {
-        match self
-            .agent
-            .compact_history(
-                self.agent.history.len().saturating_sub(1),
-                super::ContextCompactionTrigger::Manual,
-            )
-            .await
-        {
-            Ok(Some(details)) => crate::provider::model::ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: format!(
-                    "Context compacted. Transcript saved to {}",
-                    details.transcript_path.display()
-                ),
-                is_error: false,
-            },
-            Ok(None) => crate::provider::model::ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content:
-                    "Context compaction skipped because there was no older history to summarize."
-                        .to_string(),
-                is_error: false,
-            },
-            Err(error) => crate::provider::model::ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: format!("Context compaction failed: {error:?}"),
-                is_error: true,
-            },
-        }
-    }
-
-    async fn execute_task(
-        &mut self,
-        call: crate::tool::ToolCall,
-    ) -> crate::provider::model::ContentBlock {
-        match runtime::task::parse_task_input(call.input) {
-            Ok(prompt) => {
-                let mut child = match self.agent.spawn_subagent() {
-                    Ok(child) => child,
-                    Err(error) => {
-                        return crate::provider::model::ContentBlock::ToolResult {
-                            tool_use_id: call.id,
-                            content: format!("Failed to spawn subagent: {error:?}"),
-                            is_error: true,
-                        };
-                    }
-                };
-                let started = self.agent.register_subagent(&child);
-                self.agent
-                    .emit_event(AgentEvent::SubagentSpawned { agent: started });
-
-                match Box::pin(child.send(vec![crate::provider::model::ContentBlock::Text {
-                    text: prompt,
-                }]))
-                .await
-                {
-                    Ok(()) => {
-                        if let Some(finished) = self
-                            .agent
-                            .finish_subagent(child.id(), SpawnedAgentStatus::Finished)
-                        {
-                            self.agent
-                                .emit_event(AgentEvent::SubagentFinished { agent: finished });
-                        }
-                        if let Err(error) = self.agent.refresh_tasks_from_disk() {
-                            return crate::provider::model::ContentBlock::ToolResult {
-                                tool_use_id: call.id,
-                                content: format!("Task graph refresh failed: {error:?}"),
-                                is_error: true,
-                            };
-                        }
-
-                        crate::provider::model::ContentBlock::ToolResult {
-                            tool_use_id: call.id,
-                            content: child.final_text_summary(),
-                            is_error: false,
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(finished) = self.agent.finish_subagent(
-                            child.id(),
-                            SpawnedAgentStatus::Failed(format!("{error:?}")),
-                        ) {
-                            self.agent
-                                .emit_event(AgentEvent::SubagentFinished { agent: finished });
-                        }
-                        let _ = self.agent.refresh_tasks_from_disk();
-
-                        crate::provider::model::ContentBlock::ToolResult {
-                            tool_use_id: call.id,
-                            content: format!("Subagent failed: {error:?}"),
-                            is_error: true,
-                        }
-                    }
-                }
-            }
-            Err(content) => crate::provider::model::ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content,
-                is_error: true,
-            },
-        }
-    }
-
     fn unavailable_tool_result(
         &self,
         call: crate::tool::ToolCall,
-    ) -> crate::provider::model::ContentBlock {
-        crate::provider::model::ContentBlock::ToolResult {
+    ) -> ContentBlock {
+        ContentBlock::ToolResult {
             tool_use_id: call.id,
             content: format!("Tool '{}' is not available for this agent", call.name),
             is_error: true,

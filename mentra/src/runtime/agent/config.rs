@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
-use crate::provider::model::ToolChoice;
+use crate::provider::ToolChoice;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskGraphConfig {

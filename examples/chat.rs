@@ -2,7 +2,7 @@ use std::{io::Write, path::PathBuf};
 
 use dotenvy::dotenv;
 use mentra::{
-    provider::model::{ContentBlock, ModelInfo, ModelProviderKind},
+    ContentBlock, ModelInfo, ModelProviderKind,
     runtime::{
         Agent, AgentConfig, AgentEvent, ContextCompactionConfig, Runtime, TaskItem, TaskStatus,
     },

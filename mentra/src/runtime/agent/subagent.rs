@@ -1,7 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use crate::{
-    provider::model::{ContentBlock, Role},
+    ContentBlock, Role,
     runtime::{
         TASK_TOOL_NAME,
         error::RuntimeError,

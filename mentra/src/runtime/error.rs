@@ -1,4 +1,4 @@
-use crate::provider::model::{ModelProviderKind, ProviderError};
+use crate::provider::{ModelProviderKind, ProviderError};
 
 #[derive(Debug)]
 pub enum RuntimeError {

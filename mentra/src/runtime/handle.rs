@@ -1,7 +1,7 @@
-use std::{collections::HashSet, sync::Arc, sync::RwLock};
+use std::{sync::Arc, sync::RwLock};
 
 use crate::{
-    provider::model::ContentBlock,
+    ContentBlock,
     runtime::{
         AgentEvent, AgentSnapshot,
         background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
@@ -13,19 +13,30 @@ use tokio::sync::{broadcast, watch};
 
 use super::skill::SkillLoader;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RuntimeHandle {
     pub(crate) tool_registry: Arc<RwLock<ToolRegistry>>,
     pub(crate) skill_loader: Arc<RwLock<Option<SkillLoader>>>,
     pub(crate) background_tasks: BackgroundTaskManager,
+    pub(crate) runtime_intrinsics_enabled: bool,
 }
 
 impl RuntimeHandle {
+    pub fn new() -> Self {
+        Self {
+            tool_registry: Arc::new(RwLock::new(ToolRegistry::default())),
+            skill_loader: Arc::new(RwLock::new(None)),
+            background_tasks: BackgroundTaskManager::default(),
+            runtime_intrinsics_enabled: true,
+        }
+    }
+
     pub fn new_empty() -> Self {
         Self {
             tool_registry: Arc::new(RwLock::new(ToolRegistry::new_empty())),
             skill_loader: Arc::new(RwLock::new(None)),
             background_tasks: BackgroundTaskManager::default(),
+            runtime_intrinsics_enabled: false,
         }
     }
 
@@ -54,20 +65,8 @@ impl RuntimeHandle {
             .tools()
     }
 
-    pub fn tools_excluding(&self, hidden_tools: &HashSet<String>) -> Arc<[ToolSpec]> {
-        if hidden_tools.is_empty() {
-            return self.tools();
-        }
-
-        self.tool_registry
-            .read()
-            .expect("tool registry poisoned")
-            .tools()
-            .iter()
-            .filter(|tool| !hidden_tools.contains(&tool.name))
-            .cloned()
-            .collect::<Vec<_>>()
-            .into()
+    pub fn runtime_intrinsics_enabled(&self) -> bool {
+        self.runtime_intrinsics_enabled
     }
 
     pub fn skill_descriptions(&self) -> Option<String> {
@@ -162,5 +161,11 @@ impl RuntimeHandle {
                 is_error: true,
             }
         }
+    }
+}
+
+impl Default for RuntimeHandle {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -1,5 +1,5 @@
 use crate::{
-    provider::model::{ContentBlock, Message, Role},
+    ContentBlock, Message, Role,
     runtime::error::RuntimeError,
 };
 

@@ -6,7 +6,8 @@ use std::{
 };
 
 use crate::{
-    provider::model::{ContentBlock, Message, Request, Role},
+    provider::Request,
+    ContentBlock, Message, Role,
     runtime::error::RuntimeError,
 };
 
@@ -57,10 +58,11 @@ impl Agent {
             }
 
             let tool_name = tool_names
-                .get(tool_use_id)
+                .get(tool_use_id.as_str())
                 .map(String::as_str)
                 .unwrap_or("tool");
-            *content = format!("[Previous: used {tool_name}]");
+            content.clear();
+            content.push_str(&format!("[Previous: used {tool_name}]"));
         }
 
         history

@@ -6,11 +6,8 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     provider::{
-        Provider,
-        model::{
-            ModelInfo, ModelProviderKind, ProviderError, ProviderEvent, ProviderEventStream,
-            Request,
-        },
+        ModelInfo, ModelProviderKind, Provider, ProviderError, ProviderEvent, ProviderEventStream,
+        Request,
     },
     tool::{ToolContext, ToolHandler, ToolResult, ToolSpec},
 };
@@ -38,7 +35,7 @@ impl ScriptedProvider {
             kind,
             models,
             scripts: Arc::new(Mutex::new(VecDeque::from(scripts))),
-            requests: Arc::new(Mutex::new(Vec::new())),
+            requests: Arc::new(Mutex::new(Vec::<Request<'static>>::new())),
         }
     }
 

@@ -22,10 +22,8 @@ use std::{
 use tokio::sync::{broadcast, watch};
 
 use crate::{
-    provider::{
-        Provider,
-        model::{Message, ToolChoice},
-    },
+    provider::{Provider, ToolChoice},
+    Message,
     runtime::{
         TaskItem, background::BackgroundNotification, error::RuntimeError, handle::RuntimeHandle,
     },
@@ -134,7 +132,20 @@ impl Agent {
     }
 
     pub(crate) fn tools(&self) -> Arc<[crate::tool::ToolSpec]> {
-        self.runtime.tools_excluding(&self.hidden_tools)
+        let mut tools = if self.runtime.runtime_intrinsics_enabled() {
+            crate::runtime::intrinsic::specs()
+        } else {
+            Vec::new()
+        };
+        tools.extend(
+            self.runtime
+                .tools()
+                .iter()
+                .filter(|tool| !self.hidden_tools.contains(&tool.name))
+                .cloned(),
+        );
+        tools.retain(|tool| !self.hidden_tools.contains(&tool.name));
+        tools.into()
     }
 
     pub(crate) fn can_use_tool(&self, name: &str) -> bool {
