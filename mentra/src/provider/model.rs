@@ -1,7 +1,7 @@
 mod response_builder;
 mod stream;
 
-use std::{borrow::Cow, collections::BTreeMap};
+use std::{borrow::Cow, collections::BTreeMap, fmt::Display};
 
 use serde_json::Value;
 
@@ -18,6 +18,12 @@ pub enum ModelProviderKind {
     Anthropic,
     OpenAI,
     Gemini,
+}
+
+impl Display for ModelProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

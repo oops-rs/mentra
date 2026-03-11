@@ -19,7 +19,7 @@ The repository is organized as a small workspace:
 
 ## Run The Example
 
-Set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, then run:
+Set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, then run. The example will list available models and let you choose one interactively:
 
 ```bash
 cargo run -p mentra-examples --example chat

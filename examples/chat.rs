@@ -13,27 +13,18 @@ async fn main() {
 
     let mut runtime = Runtime::default();
 
-    let mut configured_providers = Vec::new();
-
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
         runtime.register_provider(ModelProviderKind::OpenAI, api_key);
-        configured_providers.push(ModelProviderKind::OpenAI);
     }
 
     if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
         runtime.register_provider(ModelProviderKind::Anthropic, api_key);
-        configured_providers.push(ModelProviderKind::Anthropic);
     }
-
-    assert!(
-        !configured_providers.is_empty(),
-        "Set OPENAI_API_KEY or ANTHROPIC_API_KEY before running this example"
-    );
 
     let mut agent = runtime
         .spawn_with_config(
             "Foo",
-            pick_model(&runtime, &configured_providers).await,
+            pick_model(&runtime).await,
             AgentConfig {
                 system: Some("You are a helpful CLI agent.".to_string()),
                 ..AgentConfig::default()
@@ -62,20 +53,79 @@ async fn main() {
     }
 }
 
-async fn pick_model(runtime: &Runtime, providers: &[ModelProviderKind]) -> ModelInfo {
-    for provider in providers {
-        let models = runtime
-            .list_models(Some(*provider))
-            .await
-            .expect("Failed to list models");
+async fn pick_model(runtime: &Runtime) -> ModelInfo {
+    let mut discovered_models = Vec::new();
 
-        if let Some(model) = models.first() {
-            println!("Picked model: {:?}", model);
-            return model.clone();
+    for provider in runtime.providers() {
+        let models = runtime
+            .list_models(Some(provider))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    format!("Failed to list models for provider {provider}").to_string()
+                )
+            });
+
+        discovered_models.extend(models);
+    }
+
+    assert!(
+        !discovered_models.is_empty(),
+        "No models found for configured providers"
+    );
+
+    println!("Available models:");
+    for (index, model) in discovered_models.iter().enumerate() {
+        let display_name = model.display_name.as_deref().unwrap_or(&model.id);
+        println!(
+            "  {}. {} [{}]",
+            index + 1,
+            display_name,
+            provider_name(model.provider)
+        );
+
+        if display_name != model.id {
+            println!("     id: {}", model.id);
         }
     }
 
-    panic!("No models found for configured providers");
+    loop {
+        print!("Pick a model by number: ");
+        std::io::stdout().flush().expect("Failed to flush stdout");
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read line");
+
+        let selection = input.trim().parse::<usize>();
+        match selection {
+            Ok(index) if (1..=discovered_models.len()).contains(&index) => {
+                let model = discovered_models[index - 1].clone();
+                println!(
+                    "Picked model: {} ({})",
+                    model.id,
+                    provider_name(model.provider)
+                );
+                return model;
+            }
+            _ => {
+                println!(
+                    "Please enter a number between 1 and {}.",
+                    discovered_models.len()
+                );
+            }
+        }
+    }
+}
+
+fn provider_name(provider: ModelProviderKind) -> &'static str {
+    match provider {
+        ModelProviderKind::Anthropic => "Anthropic",
+        ModelProviderKind::OpenAI => "OpenAI",
+        ModelProviderKind::Gemini => "Gemini",
+    }
 }
 
 fn subscribe_events(agent: &Agent) -> tokio::task::JoinHandle<()> {

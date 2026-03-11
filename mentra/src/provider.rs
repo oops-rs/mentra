@@ -35,7 +35,11 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    pub fn register_provider(&mut self, kind: ModelProviderKind, api_key: impl Into<String>) {
+    pub(crate) fn register_provider(
+        &mut self,
+        kind: ModelProviderKind,
+        api_key: impl Into<String>,
+    ) {
         let api_key = api_key.into();
         let provider: Arc<dyn Provider> = match kind {
             ModelProviderKind::Anthropic => Arc::new(AnthropicProvider::new(api_key)),
@@ -50,7 +54,7 @@ impl ProviderRegistry {
         self.providers.insert(kind, provider);
     }
 
-    pub fn register_provider_instance<P>(&mut self, provider: P)
+    pub(crate) fn register_provider_instance<P>(&mut self, provider: P)
     where
         P: Provider + 'static,
     {
@@ -63,7 +67,10 @@ impl ProviderRegistry {
         self.providers.insert(kind, Arc::new(provider));
     }
 
-    pub fn get_provider(&self, kind: Option<ModelProviderKind>) -> Option<Arc<dyn Provider>> {
+    pub(crate) fn get_provider(
+        &self,
+        kind: Option<ModelProviderKind>,
+    ) -> Option<Arc<dyn Provider>> {
         kind.and_then(|kind| self.providers.get(&kind).cloned())
             .or_else(|| {
                 self.default_provider
@@ -71,8 +78,7 @@ impl ProviderRegistry {
             })
     }
 
-    pub fn get_default_provider(&self) -> Option<Arc<dyn Provider>> {
-        self.default_provider
-            .and_then(|kind| self.providers.get(&kind).cloned())
+    pub(crate) fn providers(&self) -> Vec<ModelProviderKind> {
+        self.providers.keys().cloned().collect()
     }
 }

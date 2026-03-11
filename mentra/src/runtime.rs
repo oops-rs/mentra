@@ -52,29 +52,6 @@ impl Runtime {
         }
     }
 
-    pub fn register_provider(&mut self, kind: ModelProviderKind, api_key: impl Into<String>) {
-        self.provider_registry.register_provider(kind, api_key);
-    }
-
-    pub fn register_provider_instance<P>(&mut self, provider: P)
-    where
-        P: Provider + 'static,
-    {
-        self.provider_registry.register_provider_instance(provider);
-    }
-
-    pub async fn list_models(
-        &self,
-        provider: Option<ModelProviderKind>,
-    ) -> Result<Vec<ModelInfo>, RuntimeError> {
-        self.provider_registry
-            .get_provider(provider)
-            .ok_or(RuntimeError::ProviderNotFound(provider))?
-            .list_models()
-            .await
-            .map_err(RuntimeError::FailedToListModels)
-    }
-
     pub fn register_tool<T>(&self, tool: T)
     where
         T: ToolHandler + 'static,
@@ -106,5 +83,34 @@ impl Runtime {
             HashSet::new(),
             None,
         ))
+    }
+}
+
+impl Runtime {
+    pub fn providers(&self) -> Vec<ModelProviderKind> {
+        self.provider_registry.providers()
+    }
+
+    pub fn register_provider(&mut self, kind: ModelProviderKind, api_key: impl Into<String>) {
+        self.provider_registry.register_provider(kind, api_key);
+    }
+
+    pub fn register_provider_instance<P>(&mut self, provider: P)
+    where
+        P: Provider + 'static,
+    {
+        self.provider_registry.register_provider_instance(provider);
+    }
+
+    pub async fn list_models(
+        &self,
+        provider: Option<ModelProviderKind>,
+    ) -> Result<Vec<ModelInfo>, RuntimeError> {
+        self.provider_registry
+            .get_provider(provider)
+            .ok_or(RuntimeError::ProviderNotFound(provider))?
+            .list_models()
+            .await
+            .map_err(RuntimeError::FailedToListModels)
     }
 }
