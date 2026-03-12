@@ -47,10 +47,20 @@ pub struct TeamProtocolRequestSummary {
     pub resolution_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum TeamMessageKind {
+    Message,
+    Broadcast,
+    Request,
+    Response,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamMessage {
     #[serde(rename = "type")]
-    pub kind: String,
+    pub kind: TeamMessageKind,
     #[serde(rename = "from")]
     pub sender: String,
     pub content: String,
@@ -66,7 +76,7 @@ pub struct TeamMessage {
 impl TeamMessage {
     pub(crate) fn message(sender: String, content: String) -> Self {
         Self {
-            kind: "message".to_string(),
+            kind: TeamMessageKind::Message,
             sender,
             content,
             timestamp: unix_timestamp_secs(),
@@ -78,7 +88,7 @@ impl TeamMessage {
 
     pub(crate) fn broadcast(sender: String, content: String) -> Self {
         Self {
-            kind: "broadcast".to_string(),
+            kind: TeamMessageKind::Broadcast,
             sender,
             content,
             timestamp: unix_timestamp_secs(),
@@ -90,7 +100,7 @@ impl TeamMessage {
 
     pub(crate) fn request(sender: String, request: &TeamProtocolRequestSummary) -> Self {
         Self {
-            kind: "request".to_string(),
+            kind: TeamMessageKind::Request,
             sender,
             content: request.content.clone(),
             timestamp: unix_timestamp_secs(),
@@ -107,7 +117,7 @@ impl TeamMessage {
         reason: String,
     ) -> Self {
         Self {
-            kind: "response".to_string(),
+            kind: TeamMessageKind::Response,
             sender,
             content: reason,
             timestamp: unix_timestamp_secs(),

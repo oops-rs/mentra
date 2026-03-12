@@ -459,10 +459,10 @@ fn describe_tool_call(call: &ToolCall) -> String {
         return "team_read_inbox".to_string();
     }
 
-    if call.name == "broadcast"
+    if call.name == "team_broadcast"
         && let Some(content) = call.input.get("content").and_then(|value| value.as_str())
     {
-        return format!("broadcast \"{content}\"");
+        return format!("team_broadcast \"{content}\"");
     }
 
     if call.name == "task_create"

@@ -35,18 +35,16 @@ pub use control::{
 };
 pub use error::RuntimeError;
 pub(crate) use handle::RuntimeHandle;
-pub(crate) use intrinsic::TASK_TOOL_NAME;
+pub(crate) use intrinsic::RuntimeIntrinsicTool;
 pub(crate) use store::{
     LoadedAgentState, PersistedAgentRecord, PersistedPendingTurn, TaskStateSnapshot,
 };
 pub use store::{RuntimeStore, SqliteRuntimeStore};
-pub(crate) use task::{
-    TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
-};
+pub(crate) use task::TaskIntrinsicTool;
 pub use task::{TaskItem, TaskStatus};
 pub use team::{
-    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
-    TeamProtocolStatus,
+    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
+    TeamProtocolRequestSummary, TeamProtocolStatus,
 };
 
 /// Entry point for configuring providers, tools, and agent lifecycles.

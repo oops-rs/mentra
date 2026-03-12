@@ -27,7 +27,7 @@ use crate::{
     Message,
     provider::{Provider, ProviderId, ToolChoice},
     runtime::{
-        LoadedAgentState, TaskItem,
+        LoadedAgentState, RuntimeIntrinsicTool, TaskItem,
         background::BackgroundNotification,
         error::RuntimeError,
         handle::{AgentExecutionConfig, AgentObserver, RuntimeHandle},
@@ -285,7 +285,7 @@ impl Agent {
             return false;
         }
 
-        if name == crate::runtime::intrinsic::IDLE_TOOL_NAME {
+        if name == RuntimeIntrinsicTool::Idle.to_string() {
             return self.teammate_identity.is_some();
         }
 

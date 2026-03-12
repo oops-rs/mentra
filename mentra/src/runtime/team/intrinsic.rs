@@ -2,15 +2,16 @@ mod execute;
 mod schema;
 
 use async_trait::async_trait;
+use strum::Display;
 
 use crate::{
     ContentBlock,
     tool::{ExecutableTool, ToolCall, ToolContext, ToolResult, ToolSpec},
 };
 
-pub(crate) use schema::intrinsic_specs;
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Display)]
+#[strum(prefix = "team_")]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum TeamIntrinsicTool {
     Spawn,
     Send,
@@ -22,33 +23,27 @@ pub(crate) enum TeamIntrinsicTool {
 }
 
 impl TeamIntrinsicTool {
-    fn all() -> [Self; 7] {
-        [
-            Self::Spawn,
-            Self::Send,
-            Self::ReadInbox,
-            Self::Broadcast,
-            Self::Request,
-            Self::Respond,
-            Self::ListRequests,
-        ]
-    }
-
-    fn spec(self) -> ToolSpec {
-        schema::tool_spec(self)
-    }
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Spawn,
+        Self::Send,
+        Self::ReadInbox,
+        Self::Broadcast,
+        Self::Request,
+        Self::Respond,
+        Self::ListRequests,
+    ];
 }
 
 #[async_trait]
 impl ExecutableTool for TeamIntrinsicTool {
     fn spec(&self) -> ToolSpec {
-        (*self).spec()
+        self.tool_spec()
     }
 
     async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
         let call = ToolCall {
             id: ctx.tool_call_id.clone(),
-            name: self.spec().name,
+            name: self.to_string(),
             input,
         };
         let block = match self {
@@ -61,12 +56,6 @@ impl ExecutableTool for TeamIntrinsicTool {
             Self::ListRequests => execute::execute_team_list_requests(ctx.agent, call),
         };
         content_block_to_result(block)
-    }
-}
-
-pub(crate) fn register_tools(registry: &mut crate::tool::ToolRegistry) {
-    for tool in TeamIntrinsicTool::all() {
-        registry.register_tool(tool);
     }
 }
 

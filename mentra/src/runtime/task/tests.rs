@@ -7,7 +7,7 @@ use std::{
 
 use serde_json::json;
 
-use crate::runtime::{RuntimeStore, SqliteRuntimeStore};
+use crate::runtime::{RuntimeStore, SqliteRuntimeStore, TaskIntrinsicTool};
 
 use super::{
     TaskAccess, TaskItem,
@@ -400,7 +400,7 @@ impl TaskHarness {
     fn try_create(&self, input: TaskCreateInput) -> Result<String, String> {
         super::execute_with_store(
             &self.store,
-            super::TASK_CREATE_TOOL_NAME,
+            &super::TaskIntrinsicTool::Create,
             serde_json::to_value(input).expect("serialize task create input"),
             self.namespace.as_path(),
             TaskAccess::Lead,
@@ -414,7 +414,7 @@ impl TaskHarness {
     fn try_update(&self, input: TaskUpdateInput, access: TaskAccess<'_>) -> Result<String, String> {
         super::execute_with_store(
             &self.store,
-            super::TASK_UPDATE_TOOL_NAME,
+            &super::TaskIntrinsicTool::Update,
             serde_json::to_value(input).expect("serialize task update input"),
             self.namespace.as_path(),
             access,
@@ -428,7 +428,7 @@ impl TaskHarness {
     fn try_claim(&self, task_id: Option<u64>, owner: &str) -> Result<String, String> {
         super::execute_with_store(
             &self.store,
-            super::TASK_CLAIM_TOOL_NAME,
+            &TaskIntrinsicTool::Claim,
             json!({ "taskId": task_id }),
             self.namespace.as_path(),
             TaskAccess::Teammate(owner),
@@ -438,7 +438,7 @@ impl TaskHarness {
     fn list(&self) -> String {
         super::execute_with_store(
             &self.store,
-            super::TASK_LIST_TOOL_NAME,
+            &TaskIntrinsicTool::List,
             json!({}),
             self.namespace.as_path(),
             TaskAccess::Lead,

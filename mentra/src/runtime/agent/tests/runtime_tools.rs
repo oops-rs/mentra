@@ -15,7 +15,8 @@ use crate::{
     runtime::{
         Agent, AgentConfig, AgentEvent, BackgroundTaskStatus, CancellationToken, RunOptions,
         Runtime, RuntimeError, RuntimePolicy, SpawnedAgentStatus, SqliteRuntimeStore, TaskConfig,
-        TeamAutonomyConfig, TeamConfig, TeamMemberStatus, TeamProtocolStatus, WorkspaceConfig,
+        TaskIntrinsicTool, TeamAutonomyConfig, TeamConfig, TeamMemberStatus, TeamMessageKind,
+        TeamProtocolStatus, WorkspaceConfig,
         task::{self, TaskAccess},
     },
 };
@@ -1476,7 +1477,7 @@ async fn team_spawn_tool_registers_persistent_teammate() {
     let requests = provider_handle.recorded_requests().await;
     assert!(tool_names(&requests[0]).contains("team_spawn"));
     assert!(tool_names(&requests[0]).contains("team_send"));
-    assert!(tool_names(&requests[0]).contains("broadcast"));
+    assert!(tool_names(&requests[0]).contains("team_broadcast"));
     assert!(tool_names(&requests[0]).contains("team_read_inbox"));
     assert!(tool_names(&requests[0]).contains("team_request"));
     assert!(tool_names(&requests[0]).contains("team_respond"));
@@ -1549,7 +1550,7 @@ async fn persistent_teammate_processes_mail_and_reports_back_to_lead() {
     assert!(child_tools.contains("team_list_requests"));
     assert!(child_tools.contains("idle"));
     assert!(!child_tools.contains("team_spawn"));
-    assert!(!child_tools.contains("broadcast"));
+    assert!(!child_tools.contains("team_broadcast"));
     assert!(!child_tools.contains("task_create"));
     assert!(child_tools.contains("task_claim"));
     assert!(child_tools.contains("task_update"));
@@ -1575,7 +1576,7 @@ async fn broadcast_tool_sends_to_every_other_known_agent() {
             tool_use_stream(
                 &model.id,
                 "broadcast-tool",
-                "broadcast",
+                "team_broadcast",
                 r#"{"content":"team sync at noon"}"#,
             ),
             text_stream(&model.id, "broadcasted"),
@@ -1631,12 +1632,12 @@ async fn broadcast_tool_sends_to_every_other_known_agent() {
     assert_eq!(alice_inbox.len(), 1);
     assert_eq!(alice_inbox[0].sender, "lead");
     assert_eq!(alice_inbox[0].content, "team sync at noon");
-    assert_eq!(alice_inbox[0].kind, "broadcast");
+    assert_eq!(alice_inbox[0].kind, TeamMessageKind::Broadcast);
 
     assert_eq!(bob_inbox.len(), 1);
     assert_eq!(bob_inbox[0].sender, "lead");
     assert_eq!(bob_inbox[0].content, "team sync at noon");
-    assert_eq!(bob_inbox[0].kind, "broadcast");
+    assert_eq!(bob_inbox[0].kind, TeamMessageKind::Broadcast);
 
     assert!(lead_inbox.is_empty());
 
@@ -1938,7 +1939,7 @@ async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
 
     let inbox = requester.read_team_inbox().expect("reviewer inbox");
     assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0].kind, "response");
+    assert_eq!(inbox[0].kind, TeamMessageKind::Response);
     assert_eq!(inbox[0].request_id.as_deref(), Some(request_id.as_str()));
     assert_eq!(inbox[0].approve, Some(true));
 
@@ -2245,7 +2246,7 @@ async fn failed_run_requeues_protocol_messages_and_preserves_request_state() {
 
     let inbox = lead.read_team_inbox().expect("requeued inbox");
     assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0].kind, "request");
+    assert_eq!(inbox[0].kind, TeamMessageKind::Request);
     assert_eq!(
         inbox[0].request_id.as_deref(),
         Some(request.request_id.as_str())
@@ -2700,7 +2701,7 @@ async fn autonomous_teammate_claims_task_after_dependency_unblocks() {
 
     task::execute_with_store(
         &store,
-        task::TASK_UPDATE_TOOL_NAME,
+        &TaskIntrinsicTool::Update,
         json!({"taskId": 1, "status": "completed"}),
         tasks_dir.as_path(),
         TaskAccess::Lead,
@@ -3231,7 +3232,7 @@ fn create_task_with_directory(
 ) {
     task::execute_with_store(
         store,
-        task::TASK_CREATE_TOOL_NAME,
+        &TaskIntrinsicTool::Create,
         json!({
             "subject": subject,
             "owner": owner,
@@ -3255,7 +3256,7 @@ fn load_task(store: &SqliteRuntimeStore, tasks_dir: &Path, task_id: u64) -> serd
     serde_json::from_str(
         &task::execute_with_store(
             store,
-            task::TASK_GET_TOOL_NAME,
+            &TaskIntrinsicTool::Get,
             json!({ "taskId": task_id }),
             tasks_dir,
             TaskAccess::Lead,

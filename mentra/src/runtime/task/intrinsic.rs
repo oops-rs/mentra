@@ -1,157 +1,20 @@
 use async_trait::async_trait;
 use serde_json::json;
+use strum::Display;
 
 use crate::{
     ContentBlock,
-    runtime::{
-        Agent, TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME,
-        TASK_UPDATE_TOOL_NAME, task,
-    },
+    runtime::Agent,
     tool::{
         ExecutableTool, ToolCall, ToolCapability, ToolContext, ToolDurability, ToolResult,
         ToolSideEffectLevel, ToolSpec,
     },
 };
 
-fn task_spec(name: &str, description: &str, input_schema: serde_json::Value) -> ToolSpec {
-    ToolSpec {
-        name: name.to_string(),
-        description: Some(description.to_string()),
-        input_schema,
-        capabilities: vec![ToolCapability::TaskMutation],
-        side_effect_level: ToolSideEffectLevel::LocalState,
-        durability: ToolDurability::Persistent,
-    }
-}
-
-pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
-    vec![
-        task_spec(
-            TASK_CREATE_TOOL_NAME,
-            "Lead-oriented project planning tool. Create a persisted task.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "subject": {
-                        "type": "string",
-                        "description": "Short title for the task"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Optional extra detail for the task"
-                    },
-                    "owner": {
-                        "type": "string",
-                        "description": "Optional owner label for the task"
-                    },
-                    "workingDirectory": {
-                        "type": ["string", "null"],
-                        "description": "Optional working directory hint for shell-based work"
-                    },
-                    "blockedBy": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Task IDs that must finish before this task is ready"
-                    }
-                },
-                "required": ["subject"]
-            }),
-        ),
-        task_spec(
-            task::TASK_CLAIM_TOOL_NAME,
-            "Claim a ready unowned persisted task for the current teammate.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "taskId": {
-                        "type": "integer",
-                        "description": "Optional explicit task identifier to claim"
-                    }
-                }
-            }),
-        ),
-        task_spec(
-            TASK_UPDATE_TOOL_NAME,
-            "Lead-oriented project planning tool. Update a persisted task and its dependency edges.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "taskId": {
-                        "type": "integer",
-                        "description": "Stable identifier for the task"
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Updated task subject"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Updated task description"
-                    },
-                    "owner": {
-                        "type": "string",
-                        "description": "Updated task owner"
-                    },
-                    "workingDirectory": {
-                        "type": ["string", "null"],
-                        "description": "Updated working directory hint for shell-based work; pass null to clear it"
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "completed"],
-                        "description": "Updated task status"
-                    },
-                    "addBlockedBy": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Add dependency edges from blocker tasks into this task"
-                    },
-                    "removeBlockedBy": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Remove dependency edges from blocker tasks into this task"
-                    },
-                    "addBlocks": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Add dependency edges from this task into dependent tasks"
-                    },
-                    "removeBlocks": {
-                        "type": "array",
-                        "items": { "type": "integer" },
-                        "description": "Remove dependency edges from this task into dependent tasks"
-                    }
-                },
-                "required": ["taskId"]
-            }),
-        ),
-        task_spec(
-            TASK_LIST_TOOL_NAME,
-            "List persisted tasks grouped by readiness.",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        task_spec(
-            TASK_GET_TOOL_NAME,
-            "Get one persisted task by ID.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "taskId": {
-                        "type": "integer",
-                        "description": "Stable identifier for the task"
-                    }
-                },
-                "required": ["taskId"]
-            }),
-        ),
-    ]
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum TaskIntrinsicTool {
+#[derive(Clone, Copy, Display)]
+#[strum(prefix = "task_")]
+#[strum(serialize_all = "snake_case")]
+pub enum TaskIntrinsicTool {
     Create,
     Claim,
     Update,
@@ -160,23 +23,22 @@ pub(crate) enum TaskIntrinsicTool {
 }
 
 impl TaskIntrinsicTool {
-    fn all() -> [Self; 5] {
-        [
-            Self::Create,
-            Self::Claim,
-            Self::Update,
-            Self::List,
-            Self::Get,
-        ]
-    }
+    pub const ALL: [Self; 5] = [
+        Self::Create,
+        Self::Claim,
+        Self::Update,
+        Self::List,
+        Self::Get,
+    ];
 
-    fn spec(self) -> ToolSpec {
-        match self {
-            Self::Create => intrinsic_specs()[0].clone(),
-            Self::Claim => intrinsic_specs()[1].clone(),
-            Self::Update => intrinsic_specs()[2].clone(),
-            Self::List => intrinsic_specs()[3].clone(),
-            Self::Get => intrinsic_specs()[4].clone(),
+    fn task_spec(&self, description: &str, input_schema: serde_json::Value) -> ToolSpec {
+        ToolSpec {
+            name: self.to_string(),
+            description: Some(description.to_string()),
+            input_schema,
+            capabilities: vec![ToolCapability::TaskMutation],
+            side_effect_level: ToolSideEffectLevel::LocalState,
+            durability: ToolDurability::Persistent,
         }
     }
 }
@@ -184,7 +46,124 @@ impl TaskIntrinsicTool {
 #[async_trait]
 impl ExecutableTool for TaskIntrinsicTool {
     fn spec(&self) -> ToolSpec {
-        (*self).spec()
+        match self {
+            Self::Create => self.task_spec(
+                "Lead-oriented project planning tool. Create a persisted task.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "subject": {
+                            "type": "string",
+                            "description": "Short title for the task"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional extra detail for the task"
+                        },
+                        "owner": {
+                            "type": "string",
+                            "description": "Optional owner label for the task"
+                        },
+                        "workingDirectory": {
+                            "type": ["string", "null"],
+                            "description": "Optional working directory hint for shell-based work"
+                        },
+                        "blockedBy": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "Task IDs that must finish before this task is ready"
+                        }
+                    },
+                    "required": ["subject"]
+                }),
+            ),
+            Self::Claim => self.task_spec(
+                "Claim a ready unowned persisted task for the current teammate.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "taskId": {
+                            "type": "integer",
+                            "description": "Optional explicit task identifier to claim"
+                        }
+                    }
+                }),
+            ),
+            Self::Update => self.task_spec(
+                "Lead-oriented project planning tool. Update a persisted task and its dependency edges.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "taskId": {
+                            "type": "integer",
+                            "description": "Stable identifier for the task"
+                        },
+                        "subject": {
+                            "type": "string",
+                            "description": "Updated task subject"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Updated task description"
+                        },
+                        "owner": {
+                            "type": "string",
+                            "description": "Updated task owner"
+                        },
+                        "workingDirectory": {
+                            "type": ["string", "null"],
+                            "description": "Updated working directory hint for shell-based work; pass null to clear it"
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed"],
+                            "description": "Updated task status"
+                        },
+                        "addBlockedBy": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "Add dependency edges from blocker tasks into this task"
+                        },
+                        "removeBlockedBy": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "Remove dependency edges from blocker tasks into this task"
+                        },
+                        "addBlocks": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "Add dependency edges from this task into dependent tasks"
+                        },
+                        "removeBlocks": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "Remove dependency edges from this task into dependent tasks"
+                        }
+                    },
+                    "required": ["taskId"]
+                }),
+            ),
+            Self::List => self.task_spec(
+                "List persisted tasks grouped by readiness.",
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            ),
+            Self::Get => self.task_spec(
+                "Get one persisted task by ID.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "taskId": {
+                            "type": "integer",
+                            "description": "Stable identifier for the task"
+                        }
+                    },
+                    "required": ["taskId"]
+                }),
+            ),
+        }
     }
 
     async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
@@ -200,17 +179,12 @@ impl ExecutableTool for TaskIntrinsicTool {
     }
 }
 
-pub(crate) fn register_tools(registry: &mut crate::tool::ToolRegistry) {
-    for tool in TaskIntrinsicTool::all() {
-        registry.register_tool(tool);
-    }
-}
-
 pub(crate) fn execute_intrinsic(agent: &mut Agent, call: ToolCall) -> Option<ContentBlock> {
-    if !task::is_task_tool(&call.name) {
-        return None;
-    }
-    let output = agent.execute_task_mutation(&call.name, call.input);
+    let tool = TaskIntrinsicTool::ALL
+        .iter()
+        .find(|tool| tool.spec().name == call.name)?;
+
+    let output = agent.execute_task_mutation(tool, call.input);
 
     Some(match output {
         Ok(content) => match agent.refresh_tasks_from_disk() {

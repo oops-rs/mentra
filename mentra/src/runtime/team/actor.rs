@@ -107,10 +107,7 @@ async fn work_cycle(
         };
 
         match result {
-            Ok(true) => {
-                next_prompt = None;
-            }
-            Ok(false) => {
+            Ok(..) => {
                 next_prompt = None;
             }
             Err(error) => {

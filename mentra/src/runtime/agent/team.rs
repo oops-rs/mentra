@@ -5,12 +5,13 @@ use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::runtime::{
-    TASK_CREATE_TOOL_NAME, TeamDispatch, TeamMemberStatus, TeamMemberSummary,
+    RuntimeIntrinsicTool, TeamDispatch, TeamMemberStatus, TeamMemberSummary,
     TeamProtocolRequestSummary, TeamProtocolStatus,
     error::RuntimeError,
+    task::TaskIntrinsicTool,
     team::{
-        TEAM_BROADCAST_TOOL_NAME, TEAM_SPAWN_TOOL_NAME, TEAMMATE_MAX_ROUNDS, TeamMessage,
-        TeamRequestDirection, TeamRequestFilter, build_teammate_system_prompt, teammate_actor_loop,
+        TEAMMATE_MAX_ROUNDS, TeamIntrinsicTool, TeamMessage, TeamRequestDirection,
+        TeamRequestFilter, build_teammate_system_prompt, teammate_actor_loop,
     },
 };
 
@@ -194,7 +195,7 @@ impl Agent {
 
     pub(crate) fn spawn_disposable_subagent(&self) -> Result<Self, RuntimeError> {
         let mut hidden_tools = self.hidden_tools.clone();
-        hidden_tools.insert(crate::runtime::TASK_TOOL_NAME.to_string());
+        hidden_tools.insert(RuntimeIntrinsicTool::Task.to_string());
 
         let mut config = self.config.clone();
         config.system = Some(build_subagent_system_prompt(
@@ -223,9 +224,9 @@ struct TaskInput {
 
 fn teammate_hidden_tools() -> [String; 3] {
     [
-        TEAM_SPAWN_TOOL_NAME.to_string(),
-        TEAM_BROADCAST_TOOL_NAME.to_string(),
-        TASK_CREATE_TOOL_NAME.to_string(),
+        TeamIntrinsicTool::Spawn.to_string(),
+        TeamIntrinsicTool::Broadcast.to_string(),
+        TaskIntrinsicTool::Create.to_string(),
     ]
 }
 

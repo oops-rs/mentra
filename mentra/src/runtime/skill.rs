@@ -275,7 +275,7 @@ mod tests {
         let error = SkillLoader::from_dir(&root).expect_err("frontmatter error");
 
         assert!(matches!(error, SkillLoadError::InvalidFrontmatter { .. }));
-        assert!(error.to_string().contains("Invalid skill frontmatter"));
+        assert!(error.to_string().contains("invalid skill frontmatter"));
     }
 
     fn temp_skills_dir(label: &str) -> PathBuf {

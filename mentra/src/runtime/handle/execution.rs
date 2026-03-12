@@ -1,3 +1,5 @@
+use crate::runtime::TaskIntrinsicTool;
+
 use super::*;
 
 impl RuntimeHandle {
@@ -161,12 +163,12 @@ impl RuntimeHandle {
 
     pub fn execute_task_mutation(
         &self,
-        tool_name: &str,
+        tool: &TaskIntrinsicTool,
         input: serde_json::Value,
         dir: &Path,
         access: TaskAccess<'_>,
     ) -> Result<String, String> {
-        task::execute_with_store(self.store.as_ref(), tool_name, input, dir, access)
+        task::execute_with_store(self.store.as_ref(), tool, input, dir, access)
     }
 
     pub async fn execute_shell_command(

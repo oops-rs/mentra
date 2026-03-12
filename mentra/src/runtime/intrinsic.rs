@@ -1,86 +1,30 @@
 use async_trait::async_trait;
 use serde_json::json;
+use strum::Display;
 
 use crate::{
     ContentBlock,
-    runtime::{Agent, AgentEvent, ContextCompactionTrigger, SpawnedAgentStatus, task, team},
+    runtime::{Agent, AgentEvent, ContextCompactionTrigger, SpawnedAgentStatus},
     tool::{
         ExecutableTool, ToolCall, ToolCapability, ToolContext, ToolDurability, ToolResult,
         ToolSideEffectLevel, ToolSpec,
     },
 };
 
-pub(crate) const COMPACT_TOOL_NAME: &str = "compact";
-pub(crate) const IDLE_TOOL_NAME: &str = "idle";
-pub(crate) const TASK_TOOL_NAME: &str = "task";
-
-fn intrinsic_spec(
-    name: &str,
-    description: &str,
-    input_schema: serde_json::Value,
-    capabilities: Vec<ToolCapability>,
-    side_effect_level: ToolSideEffectLevel,
-    durability: ToolDurability,
-) -> ToolSpec {
-    ToolSpec {
-        name: name.to_string(),
-        description: Some(description.to_string()),
-        input_schema,
-        capabilities,
-        side_effect_level,
-        durability,
-    }
+pub(crate) fn register_tools(registry: &mut crate::tool::ToolRegistry) {
+    RuntimeIntrinsicTool::ALL
+        .iter()
+        .for_each(|tool| registry.register_tool(*tool));
+    crate::runtime::task::TaskIntrinsicTool::ALL
+        .iter()
+        .for_each(|tool| registry.register_tool(*tool));
+    crate::runtime::team::TeamIntrinsicTool::ALL
+        .iter()
+        .for_each(|tool| registry.register_tool(*tool));
 }
 
-pub(crate) fn specs() -> Vec<ToolSpec> {
-    vec![
-        intrinsic_spec(
-            COMPACT_TOOL_NAME,
-            "Compress older conversation context into a summary.",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-            vec![ToolCapability::ContextCompaction],
-            ToolSideEffectLevel::LocalState,
-            ToolDurability::Persistent,
-        ),
-        intrinsic_spec(
-            IDLE_TOOL_NAME,
-            "Yield the current turn and return to the teammate idle loop.",
-            json!({
-                "type": "object",
-                "properties": {}
-            }),
-            vec![ToolCapability::Delegation],
-            ToolSideEffectLevel::LocalState,
-            ToolDurability::Persistent,
-        ),
-        intrinsic_spec(
-            TASK_TOOL_NAME,
-            "Spawn a fresh subagent to work a subtask and return a concise summary.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Delegated task prompt for the subagent"
-                    }
-                },
-                "required": ["prompt"]
-            }),
-            vec![ToolCapability::Delegation],
-            ToolSideEffectLevel::LocalState,
-            ToolDurability::Ephemeral,
-        ),
-    ]
-    .into_iter()
-    .chain(task::intrinsic_specs())
-    .chain(team::intrinsic_specs())
-    .collect()
-}
-
-#[derive(Clone, Copy)]
+#[derive(Display, Copy, Clone)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum RuntimeIntrinsicTool {
     Compact,
     Idle,
@@ -88,15 +32,23 @@ pub(crate) enum RuntimeIntrinsicTool {
 }
 
 impl RuntimeIntrinsicTool {
-    fn all() -> [Self; 3] {
-        [Self::Compact, Self::Idle, Self::Task]
-    }
+    const ALL: [Self; 3] = [Self::Compact, Self::Idle, Self::Task];
 
-    fn spec(self) -> ToolSpec {
-        match self {
-            Self::Compact => specs()[0].clone(),
-            Self::Idle => specs()[1].clone(),
-            Self::Task => specs()[2].clone(),
+    fn intrinsic_spec(
+        &self,
+        description: &str,
+        input_schema: serde_json::Value,
+        capabilities: Vec<ToolCapability>,
+        side_effect_level: ToolSideEffectLevel,
+        durability: ToolDurability,
+    ) -> ToolSpec {
+        ToolSpec {
+            name: self.to_string(),
+            description: Some(description.to_string()),
+            input_schema,
+            capabilities,
+            side_effect_level,
+            durability,
         }
     }
 }
@@ -104,7 +56,44 @@ impl RuntimeIntrinsicTool {
 #[async_trait]
 impl ExecutableTool for RuntimeIntrinsicTool {
     fn spec(&self) -> ToolSpec {
-        (*self).spec()
+        match self {
+            Self::Compact => self.intrinsic_spec(
+                "Compress older conversation context into a summary.",
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                vec![ToolCapability::ContextCompaction],
+                ToolSideEffectLevel::LocalState,
+                ToolDurability::Persistent,
+            ),
+            Self::Idle => self.intrinsic_spec(
+                "Yield the current turn and return to the teammate idle loop.",
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                vec![ToolCapability::Delegation],
+                ToolSideEffectLevel::LocalState,
+                ToolDurability::Persistent,
+            ),
+            Self::Task => self.intrinsic_spec(
+                "Spawn a fresh subagent to work a subtask and return a concise summary.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "Delegated task prompt for the subagent"
+                        }
+                    },
+                    "required": ["prompt"]
+                }),
+                vec![ToolCapability::Delegation],
+                ToolSideEffectLevel::LocalState,
+                ToolDurability::Ephemeral,
+            ),
+        }
     }
 
     async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
@@ -120,14 +109,6 @@ impl ExecutableTool for RuntimeIntrinsicTool {
         };
         content_block_to_result(block)
     }
-}
-
-pub(crate) fn register_tools(registry: &mut crate::tool::ToolRegistry) {
-    for tool in RuntimeIntrinsicTool::all() {
-        registry.register_tool(tool);
-    }
-    task::register_tools(registry);
-    team::register_tools(registry);
 }
 
 fn content_block_to_result(block: ContentBlock) -> ToolResult {

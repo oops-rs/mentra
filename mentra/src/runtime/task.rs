@@ -13,15 +13,10 @@ use serde_json::Value;
 
 use crate::runtime::store::RuntimeStore;
 
-pub(crate) const TASK_CREATE_TOOL_NAME: &str = "task_create";
-pub(crate) const TASK_CLAIM_TOOL_NAME: &str = "task_claim";
-pub(crate) const TASK_UPDATE_TOOL_NAME: &str = "task_update";
-pub(crate) const TASK_LIST_TOOL_NAME: &str = "task_list";
-pub(crate) const TASK_GET_TOOL_NAME: &str = "task_get";
+pub(crate) use intrinsic::TaskIntrinsicTool;
 pub(crate) const TASK_REMINDER_TEXT: &str = "Reminder: use task_create, task_claim, task_update, task_list, or task_get only for persisted project-task tracking. Do not use task tools to manage persistent teammates or team protocol flows.";
 
 pub(crate) use graph::has_unfinished_tasks;
-pub(crate) use intrinsic::{intrinsic_specs, register_tools};
 pub use types::{TaskItem, TaskStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,26 +54,15 @@ impl From<serde_json::Error> for TaskError {
     }
 }
 
-pub(crate) fn is_task_tool(name: &str) -> bool {
-    matches!(
-        name,
-        TASK_CREATE_TOOL_NAME
-            | TASK_CLAIM_TOOL_NAME
-            | TASK_UPDATE_TOOL_NAME
-            | TASK_LIST_TOOL_NAME
-            | TASK_GET_TOOL_NAME
-    )
-}
-
 pub(crate) fn execute_with_store(
     store: &dyn RuntimeStore,
-    tool_name: &str,
+    tool: &TaskIntrinsicTool,
     input: Value,
     namespace: &Path,
     access: TaskAccess<'_>,
 ) -> Result<String, String> {
-    match tool_name {
-        TASK_CREATE_TOOL_NAME => {
+    match tool {
+        TaskIntrinsicTool::Create => {
             let parsed = input::parse_task_create_input(input)?;
             let mut tasks = load_store_tasks(store, namespace)?;
             let task_id = tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
@@ -106,7 +90,7 @@ pub(crate) fn execute_with_store(
             )
             .map_err(|error| error.to_string())
         }
-        TASK_CLAIM_TOOL_NAME => {
+        TaskIntrinsicTool::Claim => {
             let parsed = input::parse_task_claim_input(input)?;
             let owner = access
                 .actor_name()
@@ -140,7 +124,7 @@ pub(crate) fn execute_with_store(
                 .map_err(store_error)?;
             render::serialize_pretty(&claimed).map_err(|error| error.to_string())
         }
-        TASK_UPDATE_TOOL_NAME => {
+        TaskIntrinsicTool::Update => {
             let parsed = input::parse_task_update_input(input)?;
             let mut tasks = load_store_tasks(store, namespace)?;
             let task_id = parsed.task_id;
@@ -222,7 +206,7 @@ pub(crate) fn execute_with_store(
             })
             .map_err(|error| error.to_string())
         }
-        TASK_GET_TOOL_NAME => {
+        TaskIntrinsicTool::Get => {
             let parsed = input::parse_task_get_input(input)?;
             let tasks = load_store_tasks(store, namespace)?;
             render::serialize_pretty(
@@ -230,7 +214,7 @@ pub(crate) fn execute_with_store(
             )
             .map_err(|error| error.to_string())
         }
-        TASK_LIST_TOOL_NAME => {
+        TaskIntrinsicTool::List => {
             input::parse_task_list_input(input)?;
             let tasks = load_store_tasks(store, namespace)?;
             let mut ready = Vec::new();
@@ -256,7 +240,6 @@ pub(crate) fn execute_with_store(
             })
             .map_err(|error| error.to_string())
         }
-        _ => Err(format!("Tool '{tool_name}' is not a task tool")),
     }
 }
 

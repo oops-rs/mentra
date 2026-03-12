@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::runtime::{
     TaskStateSnapshot,
     error::RuntimeError,
-    task::{TASK_CLAIM_TOOL_NAME, TASK_REMINDER_TEXT, TaskAccess, has_unfinished_tasks},
+    task::{TASK_REMINDER_TEXT, TaskAccess, TaskIntrinsicTool, has_unfinished_tasks},
 };
 
 use super::Agent;
@@ -71,7 +71,7 @@ impl Agent {
             return Ok(None);
         }
 
-        match self.execute_task_mutation(TASK_CLAIM_TOOL_NAME, serde_json::json!({})) {
+        match self.execute_task_mutation(&TaskIntrinsicTool::Claim, serde_json::json!({})) {
             Ok(content) => {
                 self.refresh_tasks_from_disk()?;
                 serde_json::from_str::<crate::runtime::TaskItem>(&content)
@@ -85,11 +85,11 @@ impl Agent {
 
     pub(crate) fn execute_task_mutation(
         &self,
-        tool_name: &str,
+        tool: &TaskIntrinsicTool,
         input: serde_json::Value,
     ) -> Result<String, String> {
         self.runtime.execute_task_mutation(
-            tool_name,
+            tool,
             input,
             self.config.task.tasks_dir.as_path(),
             self.task_access(),

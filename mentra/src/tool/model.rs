@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::runtime::RuntimeError;
 use crate::runtime::{
     BackgroundTaskSummary, ContextCompactionDetails, ContextCompactionTrigger, SpawnedAgentStatus,
     SpawnedAgentSummary, TaskItem, TeamDispatch, TeamMemberSummary, TeamMessage,
     TeamProtocolRequestSummary,
 };
+use crate::runtime::{RuntimeError, TaskIntrinsicTool};
 
 /// High-level capability labels used for tool metadata and policy decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,8 +164,12 @@ impl ToolContext<'_> {
     }
 
     /// Executes one of the persisted task tools directly.
-    pub fn execute_task_tool(&self, tool_name: &str, input: Value) -> Result<String, String> {
-        self.agent.execute_task_mutation(tool_name, input)
+    pub fn execute_task_tool(
+        &self,
+        tool: &TaskIntrinsicTool,
+        input: Value,
+    ) -> Result<String, String> {
+        self.agent.execute_task_mutation(tool, input)
     }
 
     /// Reloads persisted task state into the current agent snapshot.
