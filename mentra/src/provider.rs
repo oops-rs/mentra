@@ -10,9 +10,9 @@ pub mod openai;
 use self::{anthropic::AnthropicProvider, gemini::GeminiProvider, openai::OpenAIProvider};
 
 pub use model::{
-    ContentBlock, ContentBlockDelta, ContentBlockStart, ImageSource, Message, ModelInfo,
-    ModelProviderKind, ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream,
-    ProviderId, Request, Response, Role, ToolChoice, collect_response_from_stream,
+    BuiltinProvider, ContentBlock, ContentBlockDelta, ContentBlockStart, ImageSource, Message,
+    ModelInfo, ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderId,
+    Request, Response, Role, ToolChoice, collect_response_from_stream,
     provider_event_stream_from_response,
 };
 
@@ -38,21 +38,16 @@ pub struct ProviderRegistry {
 impl ProviderRegistry {
     pub(crate) fn register_builtin_provider(
         &mut self,
-        id: impl Into<ProviderId>,
+        id: BuiltinProvider,
         api_key: impl Into<String>,
     ) -> Result<(), String> {
-        let id = id.into();
-        let api_key = api_key.into();
-        let provider: Arc<dyn Provider> = match id.as_str() {
-            "anthropic" => Arc::new(AnthropicProvider::new(api_key)),
-            "gemini" => Arc::new(GeminiProvider::new(api_key)),
-            "openai" => Arc::new(OpenAIProvider::new(api_key)),
-            other => {
-                return Err(format!(
-                    "Unknown builtin provider '{other}'. Register a provider instance instead."
-                ));
-            }
+        let provider: Arc<dyn Provider> = match id {
+            BuiltinProvider::Anthropic => Arc::new(AnthropicProvider::new(api_key)),
+            BuiltinProvider::Gemini => Arc::new(GeminiProvider::new(api_key)),
+            BuiltinProvider::OpenAI => Arc::new(OpenAIProvider::new(api_key)),
         };
+
+        let id: ProviderId = id.into();
 
         if self.default_provider.is_none() {
             self.default_provider = Some(id.clone());

@@ -1,18 +1,21 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    ContentBlock, Message, ModelProviderKind, Role,
+    ContentBlock, Message, ProviderId, Role,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
-    runtime::{AgentConfig, AgentEvent, AgentStatus, RunOptions, Runtime, RuntimeHook, RuntimeHookEvent, RuntimePolicy},
+    runtime::{
+        AgentConfig, AgentEvent, AgentStatus, RunOptions, Runtime, RuntimeHook, RuntimeHookEvent,
+        RuntimePolicy,
+    },
 };
 
 use super::support::{ScriptedProvider, StaticTool, erroring_stream, model_info, ok_stream};
 
 #[tokio::test]
 async fn send_streamed_text_turn_emits_events_and_commits_history() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![ok_stream(vec![
             ProviderEvent::MessageStarted {
@@ -87,9 +90,9 @@ async fn send_streamed_text_turn_emits_events_and_commits_history() {
 
 #[tokio::test]
 async fn send_failure_rolls_history_back_and_emits_run_failed() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
             ok_stream(vec![
@@ -156,11 +159,16 @@ fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -
 
 #[tokio::test]
 async fn run_respects_tool_budget() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
-        vec![tool_use_stream(&model.id, "tool-1", "test_tool", r#"{"value":"hi"}"#)],
+        vec![tool_use_stream(
+            &model.id,
+            "tool-1",
+            "test_tool",
+            r#"{"value":"hi"}"#,
+        )],
     );
 
     let runtime = Runtime::empty_builder()
@@ -183,14 +191,17 @@ async fn run_respects_tool_budget() {
         .await
         .expect_err("tool budget should abort run");
 
-    assert!(matches!(error, crate::runtime::RuntimeError::ToolBudgetExceeded(0)));
+    assert!(matches!(
+        error,
+        crate::runtime::RuntimeError::ToolBudgetExceeded(0)
+    ));
 }
 
 #[tokio::test]
 async fn policy_can_deny_bash_tool_execution() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "pwd", "bash", r#"{"command":"pwd"}"#),
@@ -225,9 +236,9 @@ async fn policy_can_deny_bash_tool_execution() {
 
 #[tokio::test]
 async fn custom_hooks_observe_model_and_tool_execution() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "tool-1", "test_tool", r#"{"value":"hi"}"#),
@@ -254,10 +265,11 @@ async fn custom_hooks_observe_model_and_tool_execution() {
         .expect("send");
 
     let events = recorded.lock().expect("hook events poisoned").clone();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        RuntimeHookEvent::ModelRequestStarted { .. }
-    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RuntimeHookEvent::ModelRequestStarted { .. }))
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         RuntimeHookEvent::ToolExecutionStarted { tool_name, .. } if tool_name == "test_tool"

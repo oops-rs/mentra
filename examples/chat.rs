@@ -2,7 +2,7 @@ use std::{io::Write, path::PathBuf};
 
 use dotenvy::dotenv;
 use mentra::{
-    ContentBlock, ModelInfo, ModelProviderKind, ProviderDescriptor,
+    BuiltinProvider, ContentBlock, ModelInfo, ProviderDescriptor,
     runtime::{
         Agent, AgentConfig, AgentEvent, ContextCompactionConfig, Runtime, TaskItem, TaskStatus,
         TeamAutonomyConfig,
@@ -17,15 +17,15 @@ async fn main() {
 
     let runtime = Runtime::builder()
         .with_optional_provider(
-            ModelProviderKind::OpenAI,
+            BuiltinProvider::OpenAI,
             std::env::var("OPENAI_API_KEY").ok(),
         )
         .with_optional_provider(
-            ModelProviderKind::Anthropic,
+            BuiltinProvider::Anthropic,
             std::env::var("ANTHROPIC_API_KEY").ok(),
         )
         .with_optional_provider(
-            ModelProviderKind::Gemini,
+            BuiltinProvider::Gemini,
             std::env::var("GEMINI_API_KEY").ok(),
         )
         .with_skills_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills"))

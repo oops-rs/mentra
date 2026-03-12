@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    ContentBlock, Message, ModelProviderKind, Role,
+    ContentBlock, Message, ProviderId, Role,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{
         AgentConfig, ContextCompactionConfig, Runtime, RuntimeStore, SqliteRuntimeStore,
@@ -19,11 +19,11 @@ use super::support::{ScriptedProvider, erroring_stream, model_info, ok_stream};
 
 #[tokio::test]
 async fn task_updates_snapshot_and_persists_for_new_agents() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let tasks_dir = temp_tasks_dir("persist");
     let store = temp_store("persist");
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
             task_tool_stream(
@@ -74,7 +74,7 @@ async fn task_updates_snapshot_and_persists_for_new_agents() {
     );
 
     let other_provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![text_stream("ok")],
     );
@@ -91,10 +91,10 @@ async fn task_updates_snapshot_and_persists_for_new_agents() {
 
 #[tokio::test]
 async fn task_reminder_is_injected_after_three_rounds_without_task_tools() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let tasks_dir = temp_tasks_dir("reminder");
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
             task_tool_stream("tool-1", "task_create", r#"{"subject":"Plan work"}"#),
@@ -160,11 +160,11 @@ async fn task_reminder_is_injected_after_three_rounds_without_task_tools() {
 
 #[tokio::test]
 async fn task_state_rolls_back_when_run_fails() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let tasks_dir = temp_tasks_dir("rollback");
     let store = temp_store("rollback");
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
             task_tool_stream("tool-1", "task_create", r#"{"subject":"Plan work"}"#),
@@ -207,10 +207,10 @@ async fn task_state_rolls_back_when_run_fails() {
 
 #[tokio::test]
 async fn task_survives_auto_compaction() {
-    let model = model_info("model", ModelProviderKind::Anthropic);
+    let model = model_info("model", ProviderId::ANTHROPIC);
     let tasks_dir = temp_tasks_dir("compact");
     let provider = ScriptedProvider::new(
-        ModelProviderKind::Anthropic,
+        ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
             task_tool_stream("tool-1", "task_create", r#"{"subject":"Plan work"}"#),

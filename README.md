@@ -44,11 +44,11 @@ Gemini currently supports inline `image_bytes(...)` inputs only and rejects `ima
 Use `Runtime::builder()` for the standard builtin tools, or `Runtime::empty_builder()` when you want to opt into tools explicitly:
 
 ```rust
-use mentra::{ModelProviderKind, runtime::Runtime};
+use mentra::{ProviderId, runtime::Runtime};
 
 let runtime = Runtime::builder()
-    .with_provider(ModelProviderKind::OpenAI, std::env::var("OPENAI_API_KEY")?)
-    .with_optional_provider(ModelProviderKind::Gemini, std::env::var("GEMINI_API_KEY").ok())
+    .with_provider(ProviderId::OPENAI, std::env::var("OPENAI_API_KEY")?)
+    .with_optional_provider(ProviderId::GEMINI, std::env::var("GEMINI_API_KEY").ok())
     .build()?;
 ```
 

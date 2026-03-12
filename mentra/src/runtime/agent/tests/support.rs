@@ -27,12 +27,12 @@ pub(super) struct ScriptedProvider {
 
 impl ScriptedProvider {
     pub(super) fn new(
-        kind: ProviderId,
+        kind: impl Into<ProviderId>,
         models: Vec<ModelInfo>,
         scripts: Vec<StreamScript>,
     ) -> Self {
         Self {
-            kind,
+            kind: kind.into(),
             models,
             scripts: Arc::new(Mutex::new(VecDeque::from(scripts))),
             requests: Arc::new(Mutex::new(Vec::<Request<'static>>::new())),
@@ -71,10 +71,10 @@ impl Provider for ScriptedProvider {
     }
 }
 
-pub(super) fn model_info(id: &str, provider: ProviderId) -> ModelInfo {
+pub(super) fn model_info(id: &str, provider: impl Into<ProviderId>) -> ModelInfo {
     ModelInfo {
         id: id.to_string(),
-        provider,
+        provider: provider.into(),
         display_name: None,
         description: None,
         created_at: None,

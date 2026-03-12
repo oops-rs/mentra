@@ -15,16 +15,34 @@ pub use stream::{
     provider_event_stream_from_response,
 };
 
+pub enum BuiltinProvider {
+    Anthropic,
+    OpenAI,
+    Gemini,
+}
+
+impl From<BuiltinProvider> for ProviderId {
+    fn from(value: BuiltinProvider) -> Self {
+        match value {
+            BuiltinProvider::Anthropic => ProviderId::ANTHROPIC,
+            BuiltinProvider::OpenAI => ProviderId::OPENAI,
+            BuiltinProvider::Gemini => ProviderId::GEMINI,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct ProviderId(Cow<'static, str>);
 
 impl ProviderId {
+    pub const ANTHROPIC: Self = ProviderId(Cow::Borrowed("anthropic"));
+    pub const OPENAI: Self = ProviderId(Cow::Borrowed("openai"));
+    pub const GEMINI: Self = ProviderId(Cow::Borrowed("gemini"));
+}
+
+impl ProviderId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(Cow::Owned(id.into()))
-    }
-
-    pub const fn from_static(id: &'static str) -> Self {
-        Self(Cow::Borrowed(id))
     }
 
     pub fn as_str(&self) -> &str {
@@ -40,7 +58,7 @@ impl Display for ProviderId {
 
 impl From<&str> for ProviderId {
     fn from(value: &str) -> Self {
-        Self(Cow::Owned(value.to_string()))
+        Self::new(value)
     }
 }
 
@@ -52,21 +70,20 @@ impl From<String> for ProviderId {
 
 impl From<&String> for ProviderId {
     fn from(value: &String) -> Self {
-        Self(Cow::Owned(value.clone()))
+        Self::new(value.as_str())
     }
 }
 
-#[allow(non_snake_case)]
-#[allow(non_upper_case_globals)]
-pub struct ModelProviderKind;
+#[cfg(test)]
+mod tests {
+    use super::ProviderId;
 
-impl ModelProviderKind {
-    #[allow(non_upper_case_globals)]
-    pub const Anthropic: ProviderId = ProviderId::from_static("anthropic");
-    #[allow(non_upper_case_globals)]
-    pub const OpenAI: ProviderId = ProviderId::from_static("openai");
-    #[allow(non_upper_case_globals)]
-    pub const Gemini: ProviderId = ProviderId::from_static("gemini");
+    #[test]
+    fn provider_id_new_accepts_runtime_strings() {
+        let id = ProviderId::new(format!("custom-{}", "provider"));
+
+        assert_eq!(id.as_str(), "custom-provider");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

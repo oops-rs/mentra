@@ -43,7 +43,7 @@ impl OpenAIProvider {
 impl Provider for OpenAIProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
-            id: ProviderId::from("openai"),
+            id: ProviderId::OPENAI,
             display_name: Some("OpenAI".to_string()),
             description: Some("OpenAI Responses API provider".to_string()),
         }

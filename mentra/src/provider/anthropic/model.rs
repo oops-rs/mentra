@@ -33,7 +33,7 @@ impl From<AnthropicModel> for ModelInfo {
     fn from(model: AnthropicModel) -> Self {
         ModelInfo {
             id: model.id,
-            provider: ProviderId::from("anthropic"),
+            provider: ProviderId::ANTHROPIC,
             display_name: model.display_name,
             description: None,
             created_at: model

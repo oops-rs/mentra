@@ -42,7 +42,7 @@ impl GeminiProvider {
 impl Provider for GeminiProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
-            id: ProviderId::from("gemini"),
+            id: ProviderId::GEMINI,
             display_name: Some("Gemini".to_string()),
             description: Some("Google Gemini Developer API provider".to_string()),
         }

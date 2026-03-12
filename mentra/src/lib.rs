@@ -3,6 +3,6 @@ pub mod runtime;
 pub mod tool;
 
 pub use provider::{
-    ContentBlock, ImageSource, Message, ModelInfo, ModelProviderKind, ProviderDescriptor,
-    ProviderId, Role,
+    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderDescriptor, ProviderId,
+    Role,
 };

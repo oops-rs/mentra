@@ -30,7 +30,7 @@ impl From<OpenAIModel> for ModelInfo {
     fn from(model: OpenAIModel) -> Self {
         ModelInfo {
             id: model.id,
-            provider: ProviderId::from("openai"),
+            provider: ProviderId::OPENAI,
             display_name: None,
             description: model.owned_by.map(|owner| format!("Owned by {owner}")),
             created_at: model

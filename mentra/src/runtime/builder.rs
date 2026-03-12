@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
-    provider::{Provider, ProviderId, ProviderRegistry},
+    provider::{BuiltinProvider, Provider, ProviderRegistry},
     runtime::{
         RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks, RuntimePolicy, RuntimeStore,
         error::RuntimeError, skill::SkillLoadError,
@@ -85,9 +85,7 @@ impl RuntimeBuilder {
         I: IntoIterator<Item = Arc<dyn RuntimeHook>>,
     {
         Self {
-            handle: self
-                .handle
-                .with_hooks(RuntimeHooks::new().extend(hooks)),
+            handle: self.handle.with_hooks(RuntimeHooks::new().extend(hooks)),
             provider_registry: self.provider_registry,
         }
     }
@@ -100,7 +98,7 @@ impl RuntimeBuilder {
 
     pub fn with_optional_provider(
         mut self,
-        id: impl Into<ProviderId>,
+        id: BuiltinProvider,
         api_key: Option<impl Into<String>>,
     ) -> Self {
         if let Some(api_key) = api_key {
@@ -111,12 +109,10 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_provider(
-        mut self,
-        id: impl Into<ProviderId>,
-        api_key: impl Into<String>,
-    ) -> Self {
-        let _ = self.provider_registry.register_builtin_provider(id, api_key);
+    pub fn with_provider(mut self, id: BuiltinProvider, api_key: impl Into<String>) -> Self {
+        let _ = self
+            .provider_registry
+            .register_builtin_provider(id, api_key);
         self
     }
 

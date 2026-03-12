@@ -49,7 +49,7 @@ impl AnthropicProvider {
 impl Provider for AnthropicProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
-            id: ProviderId::from("anthropic"),
+            id: ProviderId::ANTHROPIC,
             display_name: Some("Anthropic".to_string()),
             description: Some("Anthropic Messages API provider".to_string()),
         }

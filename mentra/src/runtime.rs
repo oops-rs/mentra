@@ -13,7 +13,9 @@ mod team;
 use std::{collections::HashSet, path::Path};
 
 use crate::{
-    provider::{ModelInfo, Provider, ProviderDescriptor, ProviderId, ProviderRegistry},
+    provider::{
+        BuiltinProvider, ModelInfo, Provider, ProviderDescriptor, ProviderId, ProviderRegistry,
+    },
     runtime::{builder::RuntimeBuilder, skill::SkillLoadError},
     tool::ExecutableTool,
 };
@@ -33,11 +35,11 @@ pub use control::{
 };
 pub use error::RuntimeError;
 pub(crate) use handle::RuntimeHandle;
-pub use store::{RuntimeStore, SqliteRuntimeStore};
+pub(crate) use intrinsic::TASK_TOOL_NAME;
 pub(crate) use store::{
     LoadedAgentState, PersistedAgentRecord, PersistedPendingTurn, TaskStateSnapshot,
 };
-pub(crate) use intrinsic::TASK_TOOL_NAME;
+pub use store::{RuntimeStore, SqliteRuntimeStore};
 pub(crate) use task::{
     TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME, TASK_UPDATE_TOOL_NAME,
 };
@@ -108,7 +110,9 @@ impl Runtime {
         let provider = self
             .provider_registry
             .get_provider(Some(&state.record.provider_id))
-            .ok_or_else(|| RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone())))?;
+            .ok_or_else(|| {
+                RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))
+            })?;
         Agent::from_loaded(self.handle.clone(), state, provider)
     }
 
@@ -135,10 +139,11 @@ impl Runtime {
 
     pub fn register_provider(
         &mut self,
-        id: impl Into<ProviderId>,
+        id: BuiltinProvider,
         api_key: impl Into<String>,
     ) -> Result<(), String> {
-        self.provider_registry.register_builtin_provider(id, api_key)
+        self.provider_registry
+            .register_builtin_provider(id, api_key)
     }
 
     pub fn register_provider_instance<P>(&mut self, provider: P)

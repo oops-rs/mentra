@@ -57,7 +57,7 @@ impl From<GeminiModel> for ModelInfo {
 
         ModelInfo {
             id,
-            provider: ProviderId::from("gemini"),
+            provider: ProviderId::GEMINI,
             display_name: model.display_name,
             description: model.description,
             created_at: None,
@@ -370,6 +370,7 @@ mod tests {
     use serde_json::json;
 
     use crate::{
+        ProviderId,
         provider::model::{ContentBlock, Message, ProviderError, Request, Role, ToolChoice},
         tool::ToolSpec,
     };
@@ -634,7 +635,7 @@ mod tests {
 
         let info = crate::provider::model::ModelInfo::from(model);
         assert_eq!(info.id, "gemini-2.0-flash");
-        assert_eq!(info.provider, crate::provider::ModelProviderKind::Gemini);
+        assert_eq!(info.provider, ProviderId::GEMINI);
         assert_eq!(info.display_name.as_deref(), Some("Gemini 2.0 Flash"));
         assert_eq!(info.description.as_deref(), Some("Fast Gemini model"));
         assert_eq!(info.created_at, None);
