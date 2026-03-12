@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
 use crate::runtime::{
-    TaskDiskState,
     error::RuntimeError,
-    task::{TASK_CLAIM_TOOL_NAME, TASK_REMINDER_TEXT, TaskAccess, TaskStore, has_unfinished_tasks},
+    TaskStateSnapshot,
+    task::{TASK_CLAIM_TOOL_NAME, TASK_REMINDER_TEXT, TaskAccess, has_unfinished_tasks},
 };
 
 use super::Agent;
@@ -44,9 +44,10 @@ impl Agent {
     }
 
     pub(crate) fn refresh_tasks_from_disk(&mut self) -> Result<(), RuntimeError> {
-        let tasks = TaskStore::new(self.config.task.tasks_dir.clone())
-            .load_all()
-            .map_err(map_task_error_for_load)?;
+        let tasks = self
+            .runtime
+            .store()
+            .load_tasks(self.config.task.tasks_dir.as_path())?;
         self.tasks = tasks;
         let tasks = self.tasks.clone();
         self.mutate_snapshot(|snapshot| {
@@ -95,10 +96,10 @@ impl Agent {
         )
     }
 
-    pub(super) fn capture_task_disk_state(&self) -> Result<TaskDiskState, RuntimeError> {
-        TaskStore::new(self.config.task.tasks_dir.clone())
-            .capture_disk_state()
-            .map_err(map_task_error_for_load)
+    pub(super) fn capture_task_disk_state(&self) -> Result<TaskStateSnapshot, RuntimeError> {
+        self.runtime
+            .store()
+            .capture_tasks(self.config.task.tasks_dir.as_path())
     }
 
     fn owns_unfinished_tasks(&self) -> bool {
@@ -111,11 +112,11 @@ impl Agent {
         &mut self,
         tasks: Vec<crate::runtime::TaskItem>,
         rounds_since_task: usize,
-        disk_state: &TaskDiskState,
+        disk_state: &TaskStateSnapshot,
     ) -> Result<(), RuntimeError> {
-        TaskStore::new(self.config.task.tasks_dir.clone())
-            .restore_disk_state(disk_state)
-            .map_err(map_task_error_for_restore)?;
+        self.runtime
+            .store()
+            .restore_tasks(self.config.task.tasks_dir.as_path(), disk_state)?;
         self.tasks = tasks;
         self.rounds_since_task = rounds_since_task;
         let tasks = self.tasks.clone();
@@ -123,21 +124,5 @@ impl Agent {
             snapshot.tasks = tasks;
         });
         Ok(())
-    }
-}
-
-fn map_task_error_for_load(error: crate::runtime::TaskError) -> RuntimeError {
-    match error {
-        crate::runtime::TaskError::Io(error) => RuntimeError::FailedToLoadTasks(error),
-        crate::runtime::TaskError::Serde(error) => RuntimeError::FailedToSerializeTasks(error),
-        crate::runtime::TaskError::Validation(message) => RuntimeError::InvalidTask(message),
-    }
-}
-
-fn map_task_error_for_restore(error: crate::runtime::TaskError) -> RuntimeError {
-    match error {
-        crate::runtime::TaskError::Io(error) => RuntimeError::FailedToRestoreTasks(error),
-        crate::runtime::TaskError::Serde(error) => RuntimeError::FailedToSerializeTasks(error),
-        crate::runtime::TaskError::Validation(message) => RuntimeError::InvalidTask(message),
     }
 }

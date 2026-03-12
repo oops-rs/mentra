@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde_json::json;
 
 use crate::{
@@ -6,17 +7,29 @@ use crate::{
         Agent, TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME,
         TASK_UPDATE_TOOL_NAME, task,
     },
-    tool::{ToolCall, ToolSpec},
+    tool::{
+        ExecutableTool, ToolCall, ToolCapability, ToolContext, ToolDurability, ToolResult,
+        ToolSideEffectLevel, ToolSpec,
+    },
 };
+
+fn task_spec(name: &str, description: &str, input_schema: serde_json::Value) -> ToolSpec {
+    ToolSpec {
+        name: name.to_string(),
+        description: Some(description.to_string()),
+        input_schema,
+        capabilities: vec![ToolCapability::TaskMutation],
+        side_effect_level: ToolSideEffectLevel::LocalState,
+        durability: ToolDurability::Persistent,
+    }
+}
 
 pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
     vec![
-        ToolSpec {
-            name: TASK_CREATE_TOOL_NAME.to_string(),
-            description: Some(
-                "Lead-oriented project planning tool. Create a persisted task.".into(),
-            ),
-            input_schema: json!({
+        task_spec(
+            TASK_CREATE_TOOL_NAME,
+            "Lead-oriented project planning tool. Create a persisted task.",
+            json!({
                 "type": "object",
                 "properties": {
                     "subject": {
@@ -43,13 +56,11 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["subject"]
             }),
-        },
-        ToolSpec {
-            name: task::TASK_CLAIM_TOOL_NAME.to_string(),
-            description: Some(
-                "Claim a ready unowned persisted task for the current teammate.".into(),
-            ),
-            input_schema: json!({
+        ),
+        task_spec(
+            task::TASK_CLAIM_TOOL_NAME,
+            "Claim a ready unowned persisted task for the current teammate.",
+            json!({
                 "type": "object",
                 "properties": {
                     "taskId": {
@@ -58,14 +69,11 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                     }
                 }
             }),
-        },
-        ToolSpec {
-            name: TASK_UPDATE_TOOL_NAME.to_string(),
-            description: Some(
-                "Lead-oriented project planning tool. Update a persisted task and its dependency edges."
-                    .into(),
-            ),
-            input_schema: json!({
+        ),
+        task_spec(
+            TASK_UPDATE_TOOL_NAME,
+            "Lead-oriented project planning tool. Update a persisted task and its dependency edges.",
+            json!({
                 "type": "object",
                 "properties": {
                     "taskId": {
@@ -116,19 +124,19 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["taskId"]
             }),
-        },
-        ToolSpec {
-            name: TASK_LIST_TOOL_NAME.to_string(),
-            description: Some("List persisted tasks grouped by readiness.".into()),
-            input_schema: json!({
+        ),
+        task_spec(
+            TASK_LIST_TOOL_NAME,
+            "List persisted tasks grouped by readiness.",
+            json!({
                 "type": "object",
                 "properties": {}
             }),
-        },
-        ToolSpec {
-            name: TASK_GET_TOOL_NAME.to_string(),
-            description: Some("Get one persisted task by ID.".into()),
-            input_schema: json!({
+        ),
+        task_spec(
+            TASK_GET_TOOL_NAME,
+            "Get one persisted task by ID.",
+            json!({
                 "type": "object",
                 "properties": {
                     "taskId": {
@@ -138,58 +146,98 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["taskId"]
             }),
-        },
+        ),
     ]
 }
 
-pub(crate) struct TaskIntrinsicResult {
-    pub(crate) result: ContentBlock,
-    pub(crate) touched_task: bool,
+#[derive(Clone, Copy)]
+pub(crate) enum TaskIntrinsicTool {
+    Create,
+    Claim,
+    Update,
+    List,
+    Get,
 }
 
-pub(crate) fn execute_intrinsic(agent: &mut Agent, call: ToolCall) -> Option<TaskIntrinsicResult> {
-    let output = if matches!(
-        call.name.as_str(),
-        task::TASK_CREATE_TOOL_NAME | task::TASK_CLAIM_TOOL_NAME | task::TASK_UPDATE_TOOL_NAME
-    ) {
-        agent.execute_task_mutation(&call.name, call.input)
-    } else if task::is_task_tool(&call.name) {
-        task::execute(
-            &call.name,
-            call.input,
-            agent.config().task.tasks_dir.as_path(),
-            agent.task_access(),
-        )
-    } else {
+impl TaskIntrinsicTool {
+    fn all() -> [Self; 5] {
+        [Self::Create, Self::Claim, Self::Update, Self::List, Self::Get]
+    }
+
+    fn spec(self) -> ToolSpec {
+        match self {
+            Self::Create => intrinsic_specs()[0].clone(),
+            Self::Claim => intrinsic_specs()[1].clone(),
+            Self::Update => intrinsic_specs()[2].clone(),
+            Self::List => intrinsic_specs()[3].clone(),
+            Self::Get => intrinsic_specs()[4].clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutableTool for TaskIntrinsicTool {
+    fn spec(&self) -> ToolSpec {
+        (*self).spec()
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
+        let call = ToolCall {
+            id: ctx.tool_call_id.clone(),
+            name: self.spec().name,
+            input,
+        };
+        let Some(result) = execute_intrinsic(ctx.agent, call) else {
+            return Err("Task intrinsic is not available".to_string());
+        };
+        content_block_to_result(result)
+    }
+}
+
+pub(crate) fn register_tools(registry: &mut crate::tool::ToolRegistry) {
+    for tool in TaskIntrinsicTool::all() {
+        registry.register_tool(tool);
+    }
+}
+
+pub(crate) fn execute_intrinsic(agent: &mut Agent, call: ToolCall) -> Option<ContentBlock> {
+    if !task::is_task_tool(&call.name) {
         return None;
-    };
+    }
+    let output = agent.execute_task_mutation(&call.name, call.input);
 
     Some(match output {
         Ok(content) => match agent.refresh_tasks_from_disk() {
-            Ok(()) => TaskIntrinsicResult {
-                result: ContentBlock::ToolResult {
-                    tool_use_id: call.id,
-                    content,
-                    is_error: false,
-                },
-                touched_task: true,
-            },
-            Err(error) => TaskIntrinsicResult {
-                result: ContentBlock::ToolResult {
-                    tool_use_id: call.id,
-                    content: format!("Task refresh failed: {error:?}"),
-                    is_error: true,
-                },
-                touched_task: false,
-            },
-        },
-        Err(content) => TaskIntrinsicResult {
-            result: ContentBlock::ToolResult {
+            Ok(()) => ContentBlock::ToolResult {
                 tool_use_id: call.id,
                 content,
+                is_error: false,
+            },
+            Err(error) => ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: format!("Task refresh failed: {error:?}"),
                 is_error: true,
             },
-            touched_task: false,
+        },
+        Err(content) => ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content,
+            is_error: true,
         },
     })
+}
+
+fn content_block_to_result(block: ContentBlock) -> ToolResult {
+    match block {
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => {
+            if is_error {
+                Err(content)
+            } else {
+                Ok(content)
+            }
+        }
+        _ => Err("Task intrinsic returned an unexpected content block".to_string()),
+    }
 }

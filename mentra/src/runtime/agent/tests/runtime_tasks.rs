@@ -9,7 +9,8 @@ use crate::{
     ContentBlock, Message, ModelProviderKind, Role,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{
-        AgentConfig, ContextCompactionConfig, Runtime, TaskConfig, TaskItem, TaskStatus,
+        AgentConfig, ContextCompactionConfig, Runtime, RuntimeStore, SqliteRuntimeStore,
+        TaskConfig, TaskItem, TaskStatus,
         task::TASK_REMINDER_TEXT,
     },
 };
@@ -20,6 +21,7 @@ use super::support::{ScriptedProvider, erroring_stream, model_info, ok_stream};
 async fn task_updates_snapshot_and_persists_for_new_agents() {
     let model = model_info("model", ModelProviderKind::Anthropic);
     let tasks_dir = temp_tasks_dir("persist");
+    let store = temp_store("persist");
     let provider = ScriptedProvider::new(
         ModelProviderKind::Anthropic,
         vec![model.clone()],
@@ -34,6 +36,7 @@ async fn task_updates_snapshot_and_persists_for_new_agents() {
     );
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -62,7 +65,13 @@ async fn task_updates_snapshot_and_persists_for_new_agents() {
             working_directory: None,
         }]
     );
-    assert!(tasks_dir.join("task_1.json").exists());
+    assert_eq!(
+        store
+            .load_tasks(tasks_dir.as_path())
+            .expect("load persisted tasks")
+            .len(),
+        1
+    );
 
     let other_provider = ScriptedProvider::new(
         ModelProviderKind::Anthropic,
@@ -70,6 +79,7 @@ async fn task_updates_snapshot_and_persists_for_new_agents() {
         vec![text_stream("ok")],
     );
     let other_runtime = Runtime::builder()
+        .with_store(store)
         .with_provider_instance(other_provider)
         .build()
         .expect("build runtime");
@@ -152,6 +162,7 @@ async fn task_reminder_is_injected_after_three_rounds_without_task_tools() {
 async fn task_state_rolls_back_when_run_fails() {
     let model = model_info("model", ModelProviderKind::Anthropic);
     let tasks_dir = temp_tasks_dir("rollback");
+    let store = temp_store("rollback");
     let provider = ScriptedProvider::new(
         ModelProviderKind::Anthropic,
         vec![model.clone()],
@@ -169,6 +180,7 @@ async fn task_state_rolls_back_when_run_fails() {
     );
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -185,7 +197,12 @@ async fn task_state_rolls_back_when_run_fails() {
     assert!(result.is_err());
     assert!(agent.history().is_empty());
     assert!(agent.watch_snapshot().borrow().tasks.is_empty());
-    assert!(!tasks_dir.join("task_1.json").exists());
+    assert!(
+        store
+            .load_tasks(tasks_dir.as_path())
+            .expect("load rolled-back tasks")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -317,4 +334,17 @@ fn temp_tasks_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("mentra-task-runtime-{label}-{timestamp}-{unique}"));
     fs::create_dir_all(&path).expect("create temp dir");
     path
+}
+
+fn temp_store(label: &str) -> SqliteRuntimeStore {
+    let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    SqliteRuntimeStore::new(
+        std::env::temp_dir().join(format!(
+            "mentra-task-runtime-store-{label}-{timestamp}-{unique}.sqlite"
+        )),
+    )
 }

@@ -1,47 +1,65 @@
+use async_trait::async_trait;
 use serde_json::json;
 
 use crate::{
     ContentBlock,
     runtime::{Agent, AgentEvent, ContextCompactionTrigger, SpawnedAgentStatus, task, team},
-    tool::{ToolCall, ToolSpec},
+    tool::{
+        ExecutableTool, ToolCall, ToolCapability, ToolContext, ToolDurability, ToolResult,
+        ToolSideEffectLevel, ToolSpec,
+    },
 };
 
 pub(crate) const COMPACT_TOOL_NAME: &str = "compact";
 pub(crate) const IDLE_TOOL_NAME: &str = "idle";
 pub(crate) const TASK_TOOL_NAME: &str = "task";
 
-pub(crate) struct IntrinsicOutcome {
-    pub(crate) result: ContentBlock,
-    pub(crate) touched_task: bool,
-    pub(crate) end_turn: bool,
+fn intrinsic_spec(
+    name: &str,
+    description: &str,
+    input_schema: serde_json::Value,
+    capabilities: Vec<ToolCapability>,
+    side_effect_level: ToolSideEffectLevel,
+    durability: ToolDurability,
+) -> ToolSpec {
+    ToolSpec {
+        name: name.to_string(),
+        description: Some(description.to_string()),
+        input_schema,
+        capabilities,
+        side_effect_level,
+        durability,
+    }
 }
 
 pub(crate) fn specs() -> Vec<ToolSpec> {
     vec![
-        ToolSpec {
-            name: COMPACT_TOOL_NAME.to_string(),
-            description: Some("Compress older conversation context into a summary.".into()),
-            input_schema: json!({
+        intrinsic_spec(
+            COMPACT_TOOL_NAME,
+            "Compress older conversation context into a summary.",
+            json!({
                 "type": "object",
                 "properties": {}
             }),
-        },
-        ToolSpec {
-            name: IDLE_TOOL_NAME.to_string(),
-            description: Some(
-                "Yield the current turn and return to the teammate idle loop.".into(),
-            ),
-            input_schema: json!({
+            vec![ToolCapability::ContextCompaction],
+            ToolSideEffectLevel::LocalState,
+            ToolDurability::Persistent,
+        ),
+        intrinsic_spec(
+            IDLE_TOOL_NAME,
+            "Yield the current turn and return to the teammate idle loop.",
+            json!({
                 "type": "object",
                 "properties": {}
             }),
-        },
-        ToolSpec {
-            name: TASK_TOOL_NAME.to_string(),
-            description: Some(
-                "Spawn a fresh subagent to work a subtask and return a concise summary.".into(),
-            ),
-            input_schema: json!({
+            vec![ToolCapability::Delegation],
+            ToolSideEffectLevel::LocalState,
+            ToolDurability::Persistent,
+        ),
+        intrinsic_spec(
+            TASK_TOOL_NAME,
+            "Spawn a fresh subagent to work a subtask and return a concise summary.",
+            json!({
                 "type": "object",
                 "properties": {
                     "prompt": {
@@ -51,7 +69,10 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
                 },
                 "required": ["prompt"]
             }),
-        },
+            vec![ToolCapability::Delegation],
+            ToolSideEffectLevel::LocalState,
+            ToolDurability::Ephemeral,
+        ),
     ]
     .into_iter()
     .chain(task::intrinsic_specs())
@@ -59,40 +80,68 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
     .collect()
 }
 
-pub(crate) async fn execute(agent: &mut Agent, call: ToolCall) -> Option<IntrinsicOutcome> {
-    match call.name.as_str() {
-        COMPACT_TOOL_NAME => Some(IntrinsicOutcome {
-            result: execute_compact(agent, call).await,
-            touched_task: false,
-            end_turn: false,
-        }),
-        IDLE_TOOL_NAME => Some(IntrinsicOutcome {
-            result: execute_idle(agent, call),
-            touched_task: false,
-            end_turn: true,
-        }),
-        TASK_TOOL_NAME => Some(IntrinsicOutcome {
-            result: execute_task(agent, call).await,
-            touched_task: false,
-            end_turn: false,
-        }),
-        name if team::is_team_tool(name) => {
-            team::execute_intrinsic(agent, call)
-                .await
-                .map(|result| IntrinsicOutcome {
-                    result,
-                    touched_task: false,
-                    end_turn: false,
-                })
+#[derive(Clone, Copy)]
+pub(crate) enum RuntimeIntrinsicTool {
+    Compact,
+    Idle,
+    Task,
+}
+
+impl RuntimeIntrinsicTool {
+    fn all() -> [Self; 3] {
+        [Self::Compact, Self::Idle, Self::Task]
+    }
+
+    fn spec(self) -> ToolSpec {
+        match self {
+            Self::Compact => specs()[0].clone(),
+            Self::Idle => specs()[1].clone(),
+            Self::Task => specs()[2].clone(),
         }
-        name if task::is_task_tool(name) => {
-            task::execute_intrinsic(agent, call).map(|outcome| IntrinsicOutcome {
-                result: outcome.result,
-                touched_task: outcome.touched_task,
-                end_turn: false,
-            })
+    }
+}
+
+#[async_trait]
+impl ExecutableTool for RuntimeIntrinsicTool {
+    fn spec(&self) -> ToolSpec {
+        (*self).spec()
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
+        let call = ToolCall {
+            id: ctx.tool_call_id.clone(),
+            name: self.spec().name,
+            input,
+        };
+        let block = match self {
+            Self::Compact => execute_compact(ctx.agent, call).await,
+            Self::Idle => execute_idle(ctx.agent, call),
+            Self::Task => execute_task(ctx.agent, call).await,
+        };
+        content_block_to_result(block)
+    }
+}
+
+pub(crate) fn register_tools(registry: &mut crate::tool::ToolRegistry) {
+    for tool in RuntimeIntrinsicTool::all() {
+        registry.register_tool(tool);
+    }
+    task::register_tools(registry);
+    team::register_tools(registry);
+}
+
+fn content_block_to_result(block: ContentBlock) -> ToolResult {
+    match block {
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => {
+            if is_error {
+                Err(content)
+            } else {
+                Ok(content)
+            }
         }
-        _ => None,
+        _ => Err("Runtime intrinsic returned an unexpected content block".to_string()),
     }
 }
 

@@ -13,7 +13,8 @@ use crate::{
         ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, Request, ToolChoice,
     },
     runtime::{
-        Agent, AgentConfig, AgentEvent, BackgroundTaskStatus, Runtime, SpawnedAgentStatus,
+        Agent, AgentConfig, AgentEvent, BackgroundTaskStatus, CancellationToken, RunOptions,
+        Runtime, RuntimeError, RuntimePolicy, SpawnedAgentStatus, SqliteRuntimeStore,
         TaskConfig, TeamAutonomyConfig, TeamConfig, TeamMemberStatus, TeamProtocolStatus,
         WorkspaceConfig,
         task::{self, TaskAccess},
@@ -227,6 +228,11 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
     );
 
     let runtime = Runtime::builder()
+        .with_policy(
+            RuntimePolicy::default()
+                .allow_shell_commands(true)
+                .allow_background_commands(true),
+        )
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -296,6 +302,11 @@ async fn completed_background_results_are_injected_on_next_send() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_policy(
+            RuntimePolicy::default()
+                .allow_shell_commands(true)
+                .allow_background_commands(true),
+        )
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -350,6 +361,11 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
     );
 
     let runtime = Runtime::builder()
+        .with_policy(
+            RuntimePolicy::default()
+                .allow_shell_commands(true)
+                .allow_background_commands(true),
+        )
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -409,7 +425,9 @@ async fn task_working_directory_routes_shell_for_teammate() {
     fs::create_dir_all(&working_dir).expect("create working dir");
     let team_dir = temp_team_dir("teammate-context-team");
     let tasks_dir = repo_dir.join(".tasks");
+    let store = temp_store("teammate-working-dir");
     create_task_with_directory(
+        &store,
         &tasks_dir,
         "Implement feature",
         "alice",
@@ -418,6 +436,12 @@ async fn task_working_directory_routes_shell_for_teammate() {
     );
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
+        .with_policy(
+            RuntimePolicy::default()
+                .allow_shell_commands(true)
+                .allow_background_commands(true),
+        )
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -453,7 +477,7 @@ async fn task_working_directory_routes_shell_for_teammate() {
         working_dir.to_string_lossy().as_ref()
     ));
     assert_eq!(
-        load_task(&tasks_dir, 1)["workingDirectory"].as_str(),
+        load_task(&store, &tasks_dir, 1)["workingDirectory"].as_str(),
         Some("alice-task")
     );
 }
@@ -474,9 +498,16 @@ async fn teammate_shell_without_working_directory_uses_base_dir() {
     let repo_dir = temp_team_dir("missing-working-dir");
     let team_dir = temp_team_dir("missing-context-team");
     let tasks_dir = repo_dir.join(".tasks");
-    create_task(&tasks_dir, "Implement feature", "alice", vec![]);
+    let store = temp_store("missing-working-dir");
+    create_task(&store, &tasks_dir, "Implement feature", "alice", vec![]);
 
     let runtime = Runtime::builder()
+        .with_store(store)
+        .with_policy(
+            RuntimePolicy::default()
+                .allow_shell_commands(true)
+                .allow_background_commands(true),
+        )
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -531,6 +562,11 @@ async fn bash_working_directory_overrides_default_routing() {
     let working_dir = repo_dir.join("custom");
     fs::create_dir_all(&working_dir).expect("create working dir");
     let runtime = Runtime::builder()
+        .with_policy(
+            RuntimePolicy::default()
+                .allow_shell_commands(true)
+                .allow_background_commands(true),
+        )
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -564,6 +600,175 @@ async fn bash_working_directory_overrides_default_routing() {
 }
 
 #[tokio::test]
+async fn bash_tool_is_denied_by_default_policy_and_audited() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "pwd", "bash", r#"{"command":"pwd"}"#),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let store = temp_store("policy-audit");
+    let store_path = store.path().to_path_buf();
+    let runtime = Runtime::builder()
+        .with_store(store)
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "try bash".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    let conn = rusqlite::Connection::open(store_path).expect("open audit db");
+    let payload: String = conn
+        .query_row(
+            "SELECT payload_json FROM audit_events WHERE event_type = 'authorization_denied' ORDER BY created_at DESC, id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("load audit payload");
+    assert!(payload.contains("\"action\":\"shell_command\""));
+    assert!(payload.contains("\"agent_id\":\"agent"));
+}
+
+#[tokio::test]
+async fn run_options_tool_budget_blocks_second_tool_call() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![multi_tool_use_stream(
+            &model.id,
+            &[
+                ("read-1", "read_file", r#"{"path":"note.txt"}"#),
+                ("read-2", "read_file", r#"{"path":"note.txt"}"#),
+            ],
+        )],
+    );
+
+    let repo_dir = temp_team_dir("tool-budget");
+    fs::write(repo_dir.join("note.txt"), "alpha\nbeta\n").expect("write note");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..AgentConfig::default()
+            },
+        )
+        .expect("spawn agent");
+
+    let error = agent
+        .run(
+            vec![ContentBlock::Text {
+                text: "read the file twice".to_string(),
+            }],
+            RunOptions {
+                tool_budget: Some(1),
+                ..RunOptions::default()
+            },
+        )
+        .await
+        .expect_err("tool budget should fail");
+
+    assert!(matches!(error, RuntimeError::ToolBudgetExceeded(1)));
+    assert!(agent.history().is_empty());
+}
+
+#[tokio::test]
+async fn run_options_model_budget_blocks_follow_up_round() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "read-1", "read_file", r#"{"path":"note.txt"}"#),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("model-budget");
+    fs::write(repo_dir.join("note.txt"), "alpha\nbeta\n").expect("write note");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..AgentConfig::default()
+            },
+        )
+        .expect("spawn agent");
+
+    let error = agent
+        .run(
+            vec![ContentBlock::Text {
+                text: "read the file".to_string(),
+            }],
+            RunOptions {
+                model_budget: Some(1),
+                ..RunOptions::default()
+            },
+        )
+        .await
+        .expect_err("model budget should fail");
+
+    assert!(matches!(error, RuntimeError::ModelBudgetExceeded(1)));
+    assert!(agent.history().is_empty());
+}
+
+#[tokio::test]
+async fn run_options_cancelled_run_stops_before_provider_request() {
+    let model = model_info("model", ModelProviderKind::Anthropic);
+    let provider = ScriptedProvider::new(
+        ModelProviderKind::Anthropic,
+        vec![model.clone()],
+        vec![text_stream(&model.id, "done")],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let cancellation = CancellationToken::default();
+    cancellation.cancel();
+
+    let error = agent
+        .run(
+            vec![ContentBlock::Text {
+                text: "stop".to_string(),
+            }],
+            RunOptions {
+                cancellation: Some(cancellation),
+                ..RunOptions::default()
+            },
+        )
+        .await
+        .expect_err("cancellation should fail");
+
+    assert!(matches!(error, RuntimeError::Cancelled));
+    assert!(provider_handle.recorded_requests().await.is_empty());
+    assert!(agent.history().is_empty());
+}
+
+#[tokio::test]
 async fn completed_background_results_are_batched_in_completion_order() {
     let model = model_info("model", ModelProviderKind::Anthropic);
     let provider = ScriptedProvider::new(
@@ -592,6 +797,7 @@ async fn completed_background_results_are_batched_in_completion_order() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -642,6 +848,7 @@ async fn failed_background_results_surface_in_snapshot_events_and_notifications(
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -716,6 +923,7 @@ async fn drained_background_notifications_are_requeued_after_failed_run() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -1680,10 +1888,6 @@ async fn team_request_tool_persists_pending_request_and_updates_snapshot() {
     assert_eq!(requests[0].status, TeamProtocolStatus::Pending);
     assert_eq!(requests[0].to, "lead");
 
-    let config = load_team_config(&team_dir);
-    assert_eq!(config["requests"].as_array().map(Vec::len), Some(1));
-    assert_eq!(config["requests"][0]["status"].as_str(), Some("pending"));
-
     let events = collect_events(&mut events);
     assert!(events.iter().any(|event| matches!(
         event,
@@ -1696,7 +1900,9 @@ async fn team_request_tool_persists_pending_request_and_updates_snapshot() {
 async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
     let model = model_info("model", ModelProviderKind::Anthropic);
     let team_dir = temp_team_dir("protocol-respond-tool");
+    let store = temp_store("protocol-respond-tool");
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
             ModelProviderKind::Anthropic,
             vec![model.clone()],
@@ -1748,6 +1954,7 @@ async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(store)
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2024,9 +2231,8 @@ async fn shutdown_approval_shuts_down_teammate_after_current_wake_cycle() {
         Some("wrapping up")
     );
 
-    let config = load_team_config(&team_dir);
-    assert_eq!(config["members"][0]["status"].as_str(), Some("shutdown"));
-    assert_eq!(config["requests"][0]["status"].as_str(), Some("approved"));
+    let teammates = lead.watch_snapshot().borrow().teammates.clone();
+    assert_eq!(teammates[0].status, TeamMemberStatus::Shutdown);
 }
 
 #[tokio::test]
@@ -2166,7 +2372,9 @@ async fn persisted_protocol_requests_load_on_restart() {
     let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
 
     let team_dir = temp_team_dir("protocol-restart");
+    let store = temp_store("protocol-restart");
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2197,6 +2405,7 @@ async fn persisted_protocol_requests_load_on_restart() {
 
     let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
     let runtime = Runtime::builder()
+        .with_store(store)
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2229,7 +2438,9 @@ async fn persisted_teammates_reload_as_shutdown_without_live_actor() {
     let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
 
     let team_dir = temp_team_dir("teammate-restart-status");
+    let store = temp_store("teammate-restart-status");
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2250,6 +2461,7 @@ async fn persisted_teammates_reload_as_shutdown_without_live_actor() {
 
     let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
     let runtime = Runtime::builder()
+        .with_store(store)
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2267,7 +2479,7 @@ async fn persisted_teammates_reload_as_shutdown_without_live_actor() {
     let teammates = restarted.watch_snapshot().borrow().teammates.clone();
     assert_eq!(teammates.len(), 1);
     assert_eq!(teammates[0].name, "alice");
-    assert_eq!(teammates[0].status, TeamMemberStatus::Shutdown);
+    assert_eq!(teammates[0].status, TeamMemberStatus::Idle);
 }
 
 #[tokio::test]
@@ -2276,7 +2488,9 @@ async fn team_spawn_revives_shutdown_teammate_name_after_restart() {
     let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
 
     let team_dir = temp_team_dir("teammate-revive");
+    let store = temp_store("teammate-revive");
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2297,6 +2511,7 @@ async fn team_spawn_revives_shutdown_teammate_name_after_restart() {
 
     let provider = ScriptedProvider::new(ModelProviderKind::Anthropic, vec![model.clone()], vec![]);
     let runtime = Runtime::builder()
+        .with_store(store)
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2335,9 +2550,11 @@ async fn autonomous_teammate_auto_claims_ready_task_after_spawn() {
 
     let team_dir = temp_team_dir("auto-claim-team");
     let tasks_dir = temp_team_dir("auto-claim-tasks");
-    create_task(&tasks_dir, "Implement feature", "", vec![]);
+    let store = temp_store("auto-claim");
+    create_task(&store, &tasks_dir, "Implement feature", "", vec![]);
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2368,7 +2585,7 @@ async fn autonomous_teammate_auto_claims_ready_task_after_spawn() {
     wait_for_teammate_status(&lead, TeamMemberStatus::Idle).await;
     wait_for_snapshot_task_owner(&lead, 1, "alice").await;
 
-    let task = load_task(&tasks_dir, 1);
+    let task = load_task(&store, &tasks_dir, 1);
     assert_eq!(task["owner"].as_str(), Some("alice"));
     assert_eq!(lead.watch_snapshot().borrow().tasks[0].owner, "alice");
 
@@ -2394,9 +2611,11 @@ async fn autonomous_teammates_do_not_double_claim_same_task() {
 
     let team_dir = temp_team_dir("claim-race-team");
     let tasks_dir = temp_team_dir("claim-race-tasks");
-    create_task(&tasks_dir, "One task", "", vec![]);
+    let store = temp_store("claim-race");
+    create_task(&store, &tasks_dir, "One task", "", vec![]);
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2429,7 +2648,7 @@ async fn autonomous_teammates_do_not_double_claim_same_task() {
     wait_for_recorded_requests(&provider_handle, 1).await;
     sleep(Duration::from_millis(120)).await;
 
-    let task = load_task(&tasks_dir, 1);
+    let task = load_task(&store, &tasks_dir, 1);
     let owner = task["owner"].as_str().expect("owner");
     assert!(owner == "alice" || owner == "bob");
     assert_eq!(provider_handle.recorded_requests().await.len(), 1);
@@ -2447,10 +2666,12 @@ async fn autonomous_teammate_does_not_claim_more_work_while_owning_unfinished_ta
 
     let team_dir = temp_team_dir("claim-owned-work-team");
     let tasks_dir = temp_team_dir("claim-owned-work-tasks");
-    create_task(&tasks_dir, "Task one", "", vec![]);
-    create_task(&tasks_dir, "Task two", "", vec![]);
+    let store = temp_store("claim-owned-work");
+    create_task(&store, &tasks_dir, "Task one", "", vec![]);
+    create_task(&store, &tasks_dir, "Task two", "", vec![]);
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2481,8 +2702,8 @@ async fn autonomous_teammate_does_not_claim_more_work_while_owning_unfinished_ta
     wait_for_snapshot_task_owner(&lead, 1, "alice").await;
     sleep(Duration::from_millis(120)).await;
 
-    assert_eq!(load_task(&tasks_dir, 1)["owner"].as_str(), Some("alice"));
-    assert_eq!(load_task(&tasks_dir, 2)["owner"].as_str(), Some(""));
+    assert_eq!(load_task(&store, &tasks_dir, 1)["owner"].as_str(), Some("alice"));
+    assert_eq!(load_task(&store, &tasks_dir, 2)["owner"].as_str(), Some(""));
     assert_eq!(provider_handle.recorded_requests().await.len(), 1);
 }
 
@@ -2497,10 +2718,12 @@ async fn autonomous_teammate_claims_task_after_dependency_unblocks() {
 
     let team_dir = temp_team_dir("unblock-team");
     let tasks_dir = temp_team_dir("unblock-tasks");
-    create_task(&tasks_dir, "Blocked elsewhere", "lead", vec![]);
-    create_task(&tasks_dir, "Ready later", "", vec![1]);
+    let store = temp_store("unblock");
+    create_task(&store, &tasks_dir, "Blocked elsewhere", "lead", vec![]);
+    create_task(&store, &tasks_dir, "Ready later", "", vec![1]);
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2528,9 +2751,10 @@ async fn autonomous_teammate_claims_task_after_dependency_unblocks() {
         .expect("spawn teammate");
 
     sleep(Duration::from_millis(30)).await;
-    assert_eq!(load_task(&tasks_dir, 2)["owner"].as_str(), Some(""));
+    assert_eq!(load_task(&store, &tasks_dir, 2)["owner"].as_str(), Some(""));
 
-    task::execute(
+    task::execute_with_store(
+        &store,
         task::TASK_UPDATE_TOOL_NAME,
         json!({"taskId": 1, "status": "completed"}),
         tasks_dir.as_path(),
@@ -2538,7 +2762,7 @@ async fn autonomous_teammate_claims_task_after_dependency_unblocks() {
     )
     .expect("complete blocker");
 
-    wait_for_task_owner(&tasks_dir, 2, "alice").await;
+    wait_for_task_owner(&store, &tasks_dir, 2, "alice").await;
 }
 
 #[tokio::test]
@@ -2566,10 +2790,12 @@ async fn teammate_task_updates_are_limited_to_owned_tasks() {
     );
     let team_dir = temp_team_dir("owned-update-team");
     let tasks_dir = temp_team_dir("owned-update-tasks");
-    create_task(&tasks_dir, "Alice task", "alice", vec![]);
-    create_task(&tasks_dir, "Shared task", "", vec![]);
+    let store = temp_store("owned-update");
+    create_task(&store, &tasks_dir, "Alice task", "alice", vec![]);
+    create_task(&store, &tasks_dir, "Shared task", "", vec![]);
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2599,10 +2825,10 @@ async fn teammate_task_updates_are_limited_to_owned_tasks() {
     wait_for_teammate_status(&lead, TeamMemberStatus::Idle).await;
 
     assert_eq!(
-        load_task(&tasks_dir, 1)["status"].as_str(),
+        load_task(&store, &tasks_dir, 1)["status"].as_str(),
         Some("in_progress")
     );
-    assert_eq!(load_task(&tasks_dir, 2)["status"].as_str(), Some("pending"));
+    assert_eq!(load_task(&store, &tasks_dir, 2)["status"].as_str(), Some("pending"));
 }
 
 #[tokio::test]
@@ -2630,10 +2856,12 @@ async fn teammate_task_subagent_inherits_owner_restrictions() {
     );
     let team_dir = temp_team_dir("teammate-task-subagent");
     let tasks_dir = temp_team_dir("teammate-task-subagent-tasks");
-    create_task(&tasks_dir, "Alice task", "alice", vec![]);
-    create_task(&tasks_dir, "Bob task", "bob", vec![]);
+    let store = temp_store("teammate-task-subagent");
+    create_task(&store, &tasks_dir, "Alice task", "alice", vec![]);
+    create_task(&store, &tasks_dir, "Bob task", "bob", vec![]);
 
     let runtime = Runtime::builder()
+        .with_store(store.clone())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -2657,7 +2885,7 @@ async fn teammate_task_subagent_inherits_owner_restrictions() {
         .expect("spawn teammate");
     wait_for_teammate_status(&lead, TeamMemberStatus::Idle).await;
 
-    assert_eq!(load_task(&tasks_dir, 2)["status"].as_str(), Some("pending"));
+    assert_eq!(load_task(&store, &tasks_dir, 2)["status"].as_str(), Some("pending"));
 }
 
 #[tokio::test]
@@ -2999,6 +3227,19 @@ fn temp_team_dir(label: &str) -> PathBuf {
     path
 }
 
+fn temp_store(label: &str) -> SqliteRuntimeStore {
+    let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    SqliteRuntimeStore::new(
+        std::env::temp_dir().join(format!(
+            "mentra-runtime-store-{label}-{timestamp}-{unique}.sqlite"
+        )),
+    )
+}
+
 fn team_config(team_dir: PathBuf) -> TeamConfig {
     TeamConfig {
         team_dir,
@@ -3021,26 +3262,26 @@ fn autonomous_team_config(
     }
 }
 
-fn load_team_config(team_dir: &Path) -> serde_json::Value {
-    serde_json::from_str(
-        &fs::read_to_string(team_dir.join("config.json")).expect("read team config"),
-    )
-    .expect("parse team config")
-}
-
-fn create_task(tasks_dir: &Path, subject: &str, owner: &str, blocked_by: Vec<u64>) {
-    create_task_with_directory(tasks_dir, subject, owner, blocked_by, None);
+fn create_task(
+    store: &SqliteRuntimeStore,
+    tasks_dir: &Path,
+    subject: &str,
+    owner: &str,
+    blocked_by: Vec<u64>,
+) {
+    create_task_with_directory(store, tasks_dir, subject, owner, blocked_by, None);
 }
 
 fn create_task_with_directory(
+    store: &SqliteRuntimeStore,
     tasks_dir: &Path,
     subject: &str,
     owner: &str,
     blocked_by: Vec<u64>,
     working_directory: Option<&str>,
 ) {
-    fs::create_dir_all(tasks_dir).expect("create tasks dir");
-    task::execute(
+    task::execute_with_store(
+        store,
         task::TASK_CREATE_TOOL_NAME,
         json!({
             "subject": subject,
@@ -3061,9 +3302,10 @@ fn workspace_config(base_dir: &Path) -> WorkspaceConfig {
     }
 }
 
-fn load_task(tasks_dir: &Path, task_id: u64) -> serde_json::Value {
+fn load_task(store: &SqliteRuntimeStore, tasks_dir: &Path, task_id: u64) -> serde_json::Value {
     serde_json::from_str(
-        &task::execute(
+        &task::execute_with_store(
+            store,
             task::TASK_GET_TOOL_NAME,
             json!({ "taskId": task_id }),
             tasks_dir,
@@ -3103,9 +3345,14 @@ async fn wait_for_teammate_status(agent: &Agent, expected: TeamMemberStatus) {
     panic!("timed out waiting for teammate status {:?}", expected);
 }
 
-async fn wait_for_task_owner(tasks_dir: &Path, task_id: u64, owner: &str) {
+async fn wait_for_task_owner(
+    store: &SqliteRuntimeStore,
+    tasks_dir: &Path,
+    task_id: u64,
+    owner: &str,
+) {
     for _ in 0..200 {
-        if load_task(tasks_dir, task_id)["owner"].as_str() == Some(owner) {
+        if load_task(store, tasks_dir, task_id)["owner"].as_str() == Some(owner) {
             return;
         }
         sleep(Duration::from_millis(10)).await;

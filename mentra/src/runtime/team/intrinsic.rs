@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -12,7 +13,10 @@ use crate::{
             TEAM_SPAWN_TOOL_NAME, TeamRequestDirection,
         },
     },
-    tool::{ToolCall, ToolSpec},
+    tool::{
+        ExecutableTool, ToolCall, ToolCapability, ToolContext, ToolDurability, ToolResult,
+        ToolSideEffectLevel, ToolSpec,
+    },
 };
 
 #[derive(Debug, Deserialize)]
@@ -55,15 +59,23 @@ struct TeamListRequestsInput {
     direction: Option<String>,
 }
 
+fn team_spec(name: &str, description: &str, input_schema: serde_json::Value) -> ToolSpec {
+    ToolSpec {
+        name: name.to_string(),
+        description: Some(description.to_string()),
+        input_schema,
+        capabilities: vec![ToolCapability::TeamCoordination],
+        side_effect_level: ToolSideEffectLevel::LocalState,
+        durability: ToolDurability::Persistent,
+    }
+}
+
 pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
     vec![
-        ToolSpec {
-            name: TEAM_SPAWN_TOOL_NAME.to_string(),
-            description: Some(
-                "Create a persistent teammate that can receive mailbox messages across turns."
-                    .into(),
-            ),
-            input_schema: json!({
+        team_spec(
+            TEAM_SPAWN_TOOL_NAME,
+            "Create a persistent teammate that can receive mailbox messages across turns.",
+            json!({
                 "type": "object",
                 "properties": {
                     "name": {
@@ -81,14 +93,11 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["name", "role"]
             }),
-        },
-        ToolSpec {
-            name: TEAM_SEND_TOOL_NAME.to_string(),
-            description: Some(
-                "Send a normal mailbox message to the lead or a persistent teammate. Use this to ask a teammate for work or a proposal; do not use team_request when you are simply asking them to submit a plan back to you."
-                    .into(),
-            ),
-            input_schema: json!({
+        ),
+        team_spec(
+            TEAM_SEND_TOOL_NAME,
+            "Send a normal mailbox message to the lead or a persistent teammate. Use this to ask a teammate for work or a proposal; do not use team_request when you are simply asking them to submit a plan back to you.",
+            json!({
                 "type": "object",
                 "properties": {
                     "to": {
@@ -102,23 +111,19 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["to", "content"]
             }),
-        },
-        ToolSpec {
-            name: TEAM_READ_INBOX_TOOL_NAME.to_string(),
-            description: Some(
-                "Read and drain any currently pending mailbox messages for this agent.".into(),
-            ),
-            input_schema: json!({
+        ),
+        team_spec(
+            TEAM_READ_INBOX_TOOL_NAME,
+            "Read and drain any currently pending mailbox messages for this agent.",
+            json!({
                 "type": "object",
                 "properties": {}
             }),
-        },
-        ToolSpec {
-            name: TEAM_BROADCAST_TOOL_NAME.to_string(),
-            description: Some(
-                "Lead-only team announcement tool. Send the same mailbox message to every other known agent on the team.".into(),
-            ),
-            input_schema: json!({
+        ),
+        team_spec(
+            TEAM_BROADCAST_TOOL_NAME,
+            "Lead-only team announcement tool. Send the same mailbox message to every other known agent on the team.",
+            json!({
                 "type": "object",
                 "properties": {
                     "content": {
@@ -128,14 +133,11 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["content"]
             }),
-        },
-        ToolSpec {
-            name: TEAM_REQUEST_TOOL_NAME.to_string(),
-            description: Some(
-                "Create a structured team request with a generated request_id and durable status. Use this when you are the requester and expect the other side to answer with team_respond. For built-in plan review, the teammate doing risky work should send protocol `plan_approval` to the lead; the lead should usually ask for the plan with team_send, then answer the inbound request with team_respond."
-                    .into(),
-            ),
-            input_schema: json!({
+        ),
+        team_spec(
+            TEAM_REQUEST_TOOL_NAME,
+            "Create a structured team request with a generated request_id and durable status. Use this when you are the requester and expect the other side to answer with team_respond. For built-in plan review, the teammate doing risky work should send protocol `plan_approval` to the lead; the lead should usually ask for the plan with team_send, then answer the inbound request with team_respond.",
+            json!({
                 "type": "object",
                 "properties": {
                     "to": {
@@ -153,13 +155,11 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["to", "protocol", "content"]
             }),
-        },
-        ToolSpec {
-            name: TEAM_RESPOND_TOOL_NAME.to_string(),
-            description: Some(
-                "Approve or reject a pending team request by request_id.".into(),
-            ),
-            input_schema: json!({
+        ),
+        team_spec(
+            TEAM_RESPOND_TOOL_NAME,
+            "Approve or reject a pending team request by request_id.",
+            json!({
                 "type": "object",
                 "properties": {
                     "request_id": {
@@ -177,13 +177,11 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["request_id", "approve"]
             }),
-        },
-        ToolSpec {
-            name: TEAM_LIST_REQUESTS_TOOL_NAME.to_string(),
-            description: Some(
-                "List visible team protocol requests with optional filters.".into(),
-            ),
-            input_schema: json!({
+        ),
+        team_spec(
+            TEAM_LIST_REQUESTS_TOOL_NAME,
+            "List visible team protocol requests with optional filters.",
+            json!({
                 "type": "object",
                 "properties": {
                     "status": {
@@ -206,8 +204,76 @@ pub(crate) fn intrinsic_specs() -> Vec<ToolSpec> {
                     }
                 }
             }),
-        },
+        ),
     ]
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TeamIntrinsicTool {
+    Spawn,
+    Send,
+    ReadInbox,
+    Broadcast,
+    Request,
+    Respond,
+    ListRequests,
+}
+
+impl TeamIntrinsicTool {
+    fn all() -> [Self; 7] {
+        [
+            Self::Spawn,
+            Self::Send,
+            Self::ReadInbox,
+            Self::Broadcast,
+            Self::Request,
+            Self::Respond,
+            Self::ListRequests,
+        ]
+    }
+
+    fn spec(self) -> ToolSpec {
+        match self {
+            Self::Spawn => intrinsic_specs()[0].clone(),
+            Self::Send => intrinsic_specs()[1].clone(),
+            Self::ReadInbox => intrinsic_specs()[2].clone(),
+            Self::Broadcast => intrinsic_specs()[3].clone(),
+            Self::Request => intrinsic_specs()[4].clone(),
+            Self::Respond => intrinsic_specs()[5].clone(),
+            Self::ListRequests => intrinsic_specs()[6].clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutableTool for TeamIntrinsicTool {
+    fn spec(&self) -> ToolSpec {
+        (*self).spec()
+    }
+
+    async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
+        let call = ToolCall {
+            id: ctx.tool_call_id.clone(),
+            name: self.spec().name,
+            input,
+        };
+        let block = match self {
+            Self::Spawn => execute_team_spawn(ctx.agent, call).await,
+            Self::Send => execute_team_send(ctx.agent, call),
+            Self::ReadInbox => execute_team_read_inbox(ctx.agent, call),
+            Self::Broadcast => execute_team_broadcast(ctx.agent, call),
+            Self::Request => execute_team_request(ctx.agent, call),
+            Self::Respond => execute_team_respond(ctx.agent, call),
+            Self::ListRequests => execute_team_list_requests(ctx.agent, call),
+        };
+        content_block_to_result(block)
+    }
+}
+
+pub(crate) fn register_tools(registry: &mut crate::tool::ToolRegistry) {
+    for tool in TeamIntrinsicTool::all() {
+        registry.register_tool(tool);
+    }
 }
 
 pub(crate) async fn execute_team_spawn(agent: &mut Agent, call: ToolCall) -> ContentBlock {
@@ -440,5 +506,20 @@ pub(crate) fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> C
             content: format!("Failed to list team requests: {error:?}"),
             is_error: true,
         },
+    }
+}
+
+fn content_block_to_result(block: ContentBlock) -> ToolResult {
+    match block {
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => {
+            if is_error {
+                Err(content)
+            } else {
+                Ok(content)
+            }
+        }
+        _ => Err("Team intrinsic returned an unexpected content block".to_string()),
     }
 }

@@ -13,28 +13,24 @@ use crate::runtime::{
     AgentEvent, AgentSnapshot,
     error::RuntimeError,
     handle::{AgentExecutionConfig, AgentObserver},
-    task::{TaskItem, TaskStore},
+    store::RuntimeStore,
+    task::TaskItem,
 };
 
 use super::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
     TeamProtocolStatus, TeamRequestFilter,
-    store::{
-        append_message, ensure_team_dirs, has_pending_messages as store_has_pending_messages,
-        inbox_path, load_team_state, persist_team_state, read_and_drain_messages,
-        requeue_messages as store_requeue_messages, unread_message_count,
-    },
 };
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TeamManager {
     inner: Arc<TeamManagerInner>,
 }
 
-#[derive(Default)]
 struct TeamManagerInner {
+    store: Arc<dyn RuntimeStore>,
     state: Mutex<TeamManagerState>,
 }
 
@@ -69,6 +65,15 @@ struct TeammateActorHandle {
 }
 
 impl TeamManager {
+    pub(crate) fn new(store: Arc<dyn RuntimeStore>) -> Self {
+        Self {
+            inner: Arc::new(TeamManagerInner {
+                store,
+                state: Mutex::new(TeamManagerState::default()),
+            }),
+        }
+    }
+
     pub(crate) fn register_agent(
         &self,
         agent_name: &str,
@@ -77,11 +82,13 @@ impl TeamManager {
     ) -> Result<(), RuntimeError> {
         let (members, requests, unread_count) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, config.team_dir.as_path())?;
+            let team = ensure_team_state(&self.inner.store, &mut state, config.team_dir.as_path())?;
             team.known_agents.insert(agent_name.to_string());
             team.unread_counts.insert(
                 agent_name.to_string(),
-                unread_message_count(config.team_dir.as_path(), agent_name)?,
+                self.inner
+                    .store
+                    .unread_team_count(config.team_dir.as_path(), agent_name)?,
             );
             team.observers
                 .retain(|observer| observer.agent_name != agent_name);
@@ -104,6 +111,7 @@ impl TeamManager {
 
         Self::publish_snapshot(
             Arc::clone(&observer.snapshot),
+            self.inner.store.as_ref(),
             config.tasks_dir.as_path(),
             &members,
             &requests,
@@ -127,7 +135,7 @@ impl TeamManager {
     ) -> Result<TeamMemberSummary, RuntimeError> {
         let (observers, members, requests) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
             if let Some(index) = team
                 .members
                 .iter()
@@ -152,7 +160,9 @@ impl TeamManager {
                     _task: task,
                 },
             );
-            persist_team_state(&team.team_dir, &team.members, &team.requests)?;
+            self.inner
+                .store
+                .upsert_team_member(&team.team_dir, &summary)?;
             (
                 team.observers.clone(),
                 team.members.clone(),
@@ -178,7 +188,7 @@ impl TeamManager {
     ) -> Result<(), RuntimeError> {
         let wake_tx = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
             team.actors
                 .get(teammate_name)
                 .map(|actor| actor.wake_tx.clone())
@@ -201,7 +211,7 @@ impl TeamManager {
     ) -> Result<(), RuntimeError> {
         let (observers, members, requests, teammate) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
             let teammate = team
                 .members
                 .iter_mut()
@@ -210,8 +220,10 @@ impl TeamManager {
                     RuntimeError::InvalidTeam(format!("Unknown team member '{name}'"))
                 })?;
             teammate.status = status;
+            self.inner
+                .store
+                .upsert_team_member(&team.team_dir, teammate)?;
             let teammate = teammate.clone();
-            persist_team_state(&team.team_dir, &team.members, &team.requests)?;
             (
                 team.observers.clone(),
                 team.members.clone(),
@@ -238,7 +250,7 @@ impl TeamManager {
     ) -> Result<TeamDispatch, RuntimeError> {
         let (wake_tx, notification) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
             if !team.known_agents.contains(to)
                 && !team.members.iter().any(|member| member.name == to)
             {
@@ -247,8 +259,9 @@ impl TeamManager {
                 )));
             }
 
-            append_message(
-                inbox_path(team_dir, to).as_path(),
+            self.inner.store.append_team_message(
+                team_dir,
+                to,
                 &TeamMessage::message(sender.to_string(), content),
             )?;
             increment_unread_count(team, to);
@@ -277,7 +290,7 @@ impl TeamManager {
     ) -> Result<Vec<TeamDispatch>, RuntimeError> {
         let (recipients, wake_txs, notifications) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
 
             let mut recipients = team.known_agents.iter().cloned().collect::<Vec<_>>();
             recipients.sort();
@@ -285,8 +298,9 @@ impl TeamManager {
 
             let mut wake_txs = Vec::new();
             for recipient in &recipients {
-                append_message(
-                    inbox_path(team_dir, recipient).as_path(),
+                self.inner.store.append_team_message(
+                    team_dir,
+                    recipient,
                     &TeamMessage::broadcast(sender.to_string(), content.clone()),
                 )?;
                 increment_unread_count(team, recipient);
@@ -328,8 +342,8 @@ impl TeamManager {
     ) -> Result<Vec<TeamMessage>, RuntimeError> {
         let (messages, notification) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
-            let messages = read_and_drain_messages(inbox_path(team_dir, agent_name).as_path())?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
+            let messages = self.inner.store.read_team_inbox(team_dir, agent_name)?;
             team.unread_counts.insert(agent_name.to_string(), 0);
             (messages, inbox_notification(team, agent_name))
         };
@@ -342,23 +356,41 @@ impl TeamManager {
         team_dir: &Path,
         agent_name: &str,
     ) -> Result<bool, RuntimeError> {
-        let _guard = self.inner.state.lock().expect("team manager poisoned");
-        store_has_pending_messages(team_dir, agent_name)
+        Ok(self.inner.store.unread_team_count(team_dir, agent_name)? > 0)
     }
 
     pub(crate) fn requeue_messages(
         &self,
         team_dir: &Path,
         agent_name: &str,
-        messages: Vec<TeamMessage>,
+        _messages: Vec<TeamMessage>,
     ) -> Result<(), RuntimeError> {
         let notification = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
-            store_requeue_messages(team_dir, agent_name, messages)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
+            self.inner.store.requeue_team_inbox(team_dir, agent_name)?;
             team.unread_counts.insert(
                 agent_name.to_string(),
-                unread_message_count(team_dir, agent_name)?,
+                self.inner.store.unread_team_count(team_dir, agent_name)?,
+            );
+            inbox_notification(team, agent_name)
+        };
+        self.publish_inbox_notification(notification);
+        Ok(())
+    }
+
+    pub(crate) fn acknowledge_messages(
+        &self,
+        team_dir: &Path,
+        agent_name: &str,
+    ) -> Result<(), RuntimeError> {
+        let notification = {
+            let mut state = self.inner.state.lock().expect("team manager poisoned");
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
+            self.inner.store.ack_team_inbox(team_dir, agent_name)?;
+            team.unread_counts.insert(
+                agent_name.to_string(),
+                self.inner.store.unread_team_count(team_dir, agent_name)?,
             );
             inbox_notification(team, agent_name)
         };
@@ -376,7 +408,7 @@ impl TeamManager {
     ) -> Result<TeamProtocolRequestSummary, RuntimeError> {
         let (observers, members, requests, request, wake_tx, notification) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
             if !team.known_agents.contains(to)
                 && !team.members.iter().any(|member| member.name == to)
             {
@@ -397,14 +429,17 @@ impl TeamManager {
                 resolution_reason: None,
             };
 
-            append_message(
-                inbox_path(team_dir, to).as_path(),
+            self.inner.store.append_team_message(
+                team_dir,
+                to,
                 &TeamMessage::request(sender.to_string(), &request),
             )?;
             increment_unread_count(team, to);
 
             team.requests.push(request.clone());
-            persist_team_state(&team.team_dir, &team.members, &team.requests)?;
+            self.inner
+                .store
+                .upsert_team_request(&team.team_dir, &request)?;
             (
                 team.observers.clone(),
                 team.members.clone(),
@@ -441,7 +476,7 @@ impl TeamManager {
     ) -> Result<TeamProtocolRequestSummary, RuntimeError> {
         let (observers, members, requests, request, wake_tx, notification) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
             let request = team
                 .requests
                 .iter_mut()
@@ -472,8 +507,9 @@ impl TeamManager {
             let request = request.clone();
             let response_body = request.resolution_reason.clone().unwrap_or_default();
 
-            append_message(
-                inbox_path(team_dir, &request.from).as_path(),
+            self.inner.store.append_team_message(
+                team_dir,
+                &request.from,
                 &TeamMessage::response(responder.to_string(), &request, approve, response_body),
             )?;
             increment_unread_count(team, &request.from);
@@ -482,7 +518,9 @@ impl TeamManager {
                 team.pending_shutdowns.insert(responder.to_string());
             }
 
-            persist_team_state(&team.team_dir, &team.members, &team.requests)?;
+            self.inner
+                .store
+                .upsert_team_request(&team.team_dir, &request)?;
             let wake_tx = team
                 .actors
                 .get(&request.from)
@@ -522,7 +560,7 @@ impl TeamManager {
     ) -> Result<Vec<TeamProtocolRequestSummary>, RuntimeError> {
         let mut requests = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
-            let team = ensure_team_state(&mut state, team_dir)?;
+            let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
             team.requests
                 .iter()
                 .filter(|request| filter.matches(agent_name, request))
@@ -543,7 +581,7 @@ impl TeamManager {
         teammate_name: &str,
     ) -> Result<bool, RuntimeError> {
         let mut state = self.inner.state.lock().expect("team manager poisoned");
-        let team = ensure_team_state(&mut state, team_dir)?;
+        let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
         Ok(team.pending_shutdowns.remove(teammate_name))
     }
 
@@ -553,7 +591,7 @@ impl TeamManager {
         teammate_name: &str,
     ) -> Result<(), RuntimeError> {
         let mut state = self.inner.state.lock().expect("team manager poisoned");
-        let team = ensure_team_state(&mut state, team_dir)?;
+        let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
         team.actors.remove(teammate_name);
         Ok(())
     }
@@ -573,6 +611,7 @@ impl TeamManager {
                 .pending_team_messages;
             Self::publish_snapshot(
                 Arc::clone(&observer.snapshot),
+                self.inner.store.as_ref(),
                 observer.tasks_dir.as_path(),
                 &members,
                 &requests,
@@ -590,12 +629,13 @@ impl TeamManager {
 
     fn publish_snapshot(
         snapshot: Arc<Mutex<AgentSnapshot>>,
+        store: &dyn RuntimeStore,
         tasks_dir: &Path,
         members: &[TeamMemberSummary],
         requests: &[TeamProtocolRequestSummary],
         unread_count: usize,
     ) {
-        let tasks = load_tasks(tasks_dir, &snapshot);
+        let tasks = load_tasks(store, tasks_dir, &snapshot);
         let mut guard = snapshot.lock().expect("agent snapshot poisoned");
         guard.tasks = tasks;
         guard.teammates = members.to_vec();
@@ -611,6 +651,7 @@ impl TeamManager {
         for observer in notification.observers {
             Self::publish_snapshot(
                 Arc::clone(&observer.snapshot),
+                self.inner.store.as_ref(),
                 observer.tasks_dir.as_path(),
                 &notification.members,
                 &notification.requests,
@@ -629,8 +670,12 @@ impl TeamManager {
     }
 }
 
-fn load_tasks(tasks_dir: &Path, snapshot: &Arc<Mutex<AgentSnapshot>>) -> Vec<TaskItem> {
-    match TaskStore::new(tasks_dir.to_path_buf()).load_all() {
+fn load_tasks(
+    store: &dyn RuntimeStore,
+    tasks_dir: &Path,
+    snapshot: &Arc<Mutex<AgentSnapshot>>,
+) -> Vec<TaskItem> {
+    match store.load_tasks(tasks_dir) {
         Ok(tasks) => tasks,
         Err(_) => snapshot
             .lock()
@@ -656,31 +701,22 @@ impl Default for TeamState {
 }
 
 fn ensure_team_state<'a>(
+    store: &Arc<dyn RuntimeStore>,
     state: &'a mut TeamManagerState,
     team_dir: &Path,
 ) -> Result<&'a mut TeamState, RuntimeError> {
     let key = team_key(team_dir);
     if !state.teams.contains_key(&key) {
-        ensure_team_dirs(team_dir)?;
-        let disk_state = load_team_state(team_dir)?;
         state.teams.insert(
             key.clone(),
             TeamState {
                 team_dir: team_dir.to_path_buf(),
-                members: disk_state
-                    .members
+                members: store.load_team_members(team_dir)?,
+                requests: store.load_team_requests(team_dir)?,
+                known_agents: store
+                    .list_team_agent_names(team_dir)?
                     .into_iter()
-                    .map(|mut member| {
-                        if matches!(
-                            member.status,
-                            TeamMemberStatus::Idle | TeamMemberStatus::Working
-                        ) {
-                            member.status = TeamMemberStatus::Shutdown;
-                        }
-                        member
-                    })
                     .collect(),
-                requests: disk_state.requests,
                 ..Default::default()
             },
         );
