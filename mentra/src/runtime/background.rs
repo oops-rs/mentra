@@ -8,6 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use strum::Display;
 use tokio::sync::{broadcast, watch};
 
 use crate::runtime::{
@@ -20,23 +21,14 @@ const OUTPUT_PREVIEW_MAX_CHARS: usize = 500;
 const NOTIFICATION_PENDING: i64 = 0;
 const NOTIFICATION_ACKED: i64 = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Display)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum BackgroundTaskStatus {
     Running,
     Finished,
     Failed,
     Interrupted,
-}
-
-impl BackgroundTaskStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Finished => "finished",
-            Self::Failed => "failed",
-            Self::Interrupted => "interrupted",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +288,7 @@ impl BackgroundTaskManager {
         let _ = self.emit_hook(RuntimeHookEvent::BackgroundTaskFinished {
             agent_id: agent_id.to_string(),
             task_id: summary.id.clone(),
-            status: summary.status.as_str().to_string(),
+            status: summary.status.to_string(),
         });
 
         self.publish_observer(
@@ -413,7 +405,7 @@ fn render_task_summary(task: &BackgroundTaskSummary) -> String {
     format!(
         "{}: [{}] cwd={} {}",
         task.id,
-        task.status.as_str(),
+        task.status,
         task.cwd.display(),
         task.command
     )
@@ -423,7 +415,7 @@ fn render_task_detail(task: &BackgroundTaskSummary) -> String {
     let output = task.output_preview.as_deref().unwrap_or("(running)");
     format!(
         "[{}] cwd={}\n{}\n{}",
-        task.status.as_str(),
+        task.status,
         task.cwd.display(),
         task.command,
         output

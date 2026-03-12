@@ -152,8 +152,7 @@ impl GeminiContent {
         tool_name_by_id: &BTreeMap<String, String>,
     ) -> Result<Self, ProviderError> {
         let role = match &message.role {
-            Role::User => "user".to_string(),
-            Role::Assistant => "model".to_string(),
+            Role::User | Role::Assistant => message.role.to_string(),
             Role::Unknown(role) => {
                 return Err(ProviderError::InvalidRequest(format!(
                     "Gemini message role '{role}' is not supported"

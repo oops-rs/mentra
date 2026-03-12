@@ -160,7 +160,7 @@ impl OpenAIInputItem {
         }
 
         items.push(OpenAIInputItem::Message(OpenAIMessageInput {
-            role: role_name(&message.role).to_string(),
+            role: message.role.to_string(),
             content: std::mem::take(content),
         }));
         Ok(())
@@ -298,14 +298,6 @@ impl From<ToolChoice> for OpenAIToolChoice {
                 name,
             }),
         }
-    }
-}
-
-fn role_name(role: &Role) -> &str {
-    match role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Unknown(role) => role.as_str(),
     }
 }
 

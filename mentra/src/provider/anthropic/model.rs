@@ -136,11 +136,7 @@ impl TryFrom<&Message> for AnthropicMessage {
         }
 
         Ok(AnthropicMessage {
-            role: match &message.role {
-                Role::User => "user".to_string(),
-                Role::Assistant => "assistant".to_string(),
-                Role::Unknown(role) => role.clone(),
-            },
+            role: message.role.to_string(),
             content: message.content.iter().map(|block| block.into()).collect(),
         })
     }

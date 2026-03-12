@@ -394,7 +394,7 @@ fn format_background_results(notifications: &[BackgroundNotification]) -> String
             format!(
                 "[bg:{}] status={} command=\"{}\" output=\"{}\"",
                 notification.task_id,
-                notification.status.as_str(),
+                notification.status,
                 escape_background_field(&notification.command),
                 escape_background_field(&notification.output_preview),
             )

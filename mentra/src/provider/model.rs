@@ -5,6 +5,7 @@ use std::{borrow::Cow, collections::BTreeMap, fmt::Display};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use strum::Display;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -17,7 +18,8 @@ pub use stream::{
 };
 
 /// Builtin model providers that Mentra can construct from API keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
+#[strum(serialize_all = "snake_case")]
 pub enum BuiltinProvider {
     Anthropic,
     OpenAI,
@@ -181,7 +183,9 @@ pub struct Response {
 }
 
 /// Provider-neutral chat role labels.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Display)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
     Assistant,

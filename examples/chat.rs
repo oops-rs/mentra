@@ -296,7 +296,7 @@ fn subscribe_events(agent: &Agent) -> tokio::task::JoinHandle<()> {
                         println!(
                             "\x1b[34mfinished background task\x1b[0m {} ({}) {}",
                             task.id,
-                            task.status.as_str(),
+                            task.status,
                             task.output_preview.as_deref().unwrap_or("(no output)")
                         );
                     }
