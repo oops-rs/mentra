@@ -10,8 +10,7 @@ use crate::{
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{
         AgentConfig, ContextCompactionConfig, Runtime, RuntimeStore, SqliteRuntimeStore,
-        TaskConfig, TaskItem, TaskStatus,
-        task::TASK_REMINDER_TEXT,
+        TaskConfig, TaskItem, TaskStatus, task::TASK_REMINDER_TEXT,
     },
 };
 
@@ -342,9 +341,7 @@ fn temp_store(label: &str) -> SqliteRuntimeStore {
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    SqliteRuntimeStore::new(
-        std::env::temp_dir().join(format!(
-            "mentra-task-runtime-store-{label}-{timestamp}-{unique}.sqlite"
-        )),
-    )
+    SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
+        "mentra-task-runtime-store-{label}-{timestamp}-{unique}.sqlite"
+    )))
 }

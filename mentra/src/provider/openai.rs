@@ -7,7 +7,9 @@ mod sse;
 
 use crate::provider::{
     Provider,
-    model::{ModelInfo, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request},
+    model::{
+        ModelInfo, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
+    },
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/";

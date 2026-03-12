@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+/// Authorization policy for builtin shell, background, and file tools.
 #[derive(Debug, Clone)]
 pub struct RuntimePolicy {
     allow_shell_commands: bool,
@@ -29,6 +30,7 @@ impl Default for RuntimePolicy {
 }
 
 impl RuntimePolicy {
+    /// Returns a permissive policy that enables shell and background execution.
     pub fn permissive() -> Self {
         Self {
             allow_shell_commands: true,
@@ -37,36 +39,43 @@ impl RuntimePolicy {
         }
     }
 
+    /// Enables or disables foreground shell command execution.
     pub fn allow_shell_commands(mut self, allow: bool) -> Self {
         self.allow_shell_commands = allow;
         self
     }
 
+    /// Enables or disables background shell command execution.
     pub fn allow_background_commands(mut self, allow: bool) -> Self {
         self.allow_background_commands = allow;
         self
     }
 
+    /// Adds an extra working-directory root allowed for shell commands.
     pub fn with_allowed_working_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.allowed_working_roots.push(path.into());
         self
     }
 
+    /// Adds an extra root allowed for builtin file reads.
     pub fn with_allowed_read_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.allowed_read_roots.push(path.into());
         self
     }
 
+    /// Records an environment variable name that callers may expose to tools.
     pub fn with_allowed_env_var(mut self, name: impl Into<String>) -> Self {
         self.allowed_env_vars.push(name.into());
         self
     }
 
+    /// Sets the maximum number of concurrently tracked background tasks per agent.
     pub fn with_max_background_tasks(mut self, limit: usize) -> Self {
         self.background_task_limit = Some(limit);
         self
     }
 
+    /// Sets the builtin command timeout.
     pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
         self.command_timeout = Some(timeout);
         self
@@ -85,14 +94,12 @@ impl RuntimePolicy {
             );
         }
         if background && !self.allow_background_commands {
-            return Err("Background command execution is disabled by the runtime policy.".to_string());
+            return Err(
+                "Background command execution is disabled by the runtime policy.".to_string(),
+            );
         }
 
-        if !path_is_allowed(
-            cwd,
-            base_dir,
-            self.allowed_working_roots.as_slice(),
-        ) {
+        if !path_is_allowed(cwd, base_dir, self.allowed_working_roots.as_slice()) {
             return Err(format!(
                 "Working directory '{}' is outside the runtime policy roots",
                 cwd.display()
@@ -113,7 +120,11 @@ impl RuntimePolicy {
             base_dir.join(path)
         };
 
-        if path_is_allowed(resolved.as_path(), base_dir, self.allowed_read_roots.as_slice()) {
+        if path_is_allowed(
+            resolved.as_path(),
+            base_dir,
+            self.allowed_read_roots.as_slice(),
+        ) {
             Ok(resolved)
         } else {
             Err(format!(

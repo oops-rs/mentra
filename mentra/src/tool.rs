@@ -15,12 +15,14 @@ struct RegisteredTool {
 }
 
 #[derive(Clone)]
+/// Registry of tools available to a runtime instance.
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
     tool_specs: Arc<[ToolSpec]>,
 }
 
 impl ToolRegistry {
+    /// Creates an empty tool registry.
     pub fn new_empty() -> Self {
         Self {
             tools: HashMap::new(),
@@ -28,6 +30,7 @@ impl ToolRegistry {
         }
     }
 
+    /// Registers a tool implementation and refreshes the cached tool specs.
     pub fn register_tool<T>(&mut self, tool: T)
     where
         T: ExecutableTool + 'static,
@@ -39,10 +42,12 @@ impl ToolRegistry {
         self.refresh_tool_specs();
     }
 
+    /// Returns the provider-facing tool specifications.
     pub fn tools(&self) -> Arc<[ToolSpec]> {
         Arc::clone(&self.tool_specs)
     }
 
+    /// Returns a tool handler by name.
     pub fn get_tool(&self, name: &str) -> Option<Arc<dyn ExecutableTool>> {
         self.tools.get(name).map(|tool| Arc::clone(&tool.handler))
     }

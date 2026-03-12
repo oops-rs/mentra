@@ -13,6 +13,7 @@ use crate::{
 use super::Runtime;
 use super::skill::SkillLoader;
 
+/// Builder for constructing a [`Runtime`] with providers, tools, and policies.
 #[derive(Default)]
 pub struct RuntimeBuilder {
     handle: RuntimeHandle,
@@ -20,10 +21,12 @@ pub struct RuntimeBuilder {
 }
 
 impl RuntimeBuilder {
+    /// Creates a builder with Mentra's builtin tools enabled.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates a builder without builtin tools.
     pub fn new_empty() -> Self {
         Self {
             handle: RuntimeHandle::new_empty(),
@@ -31,6 +34,7 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Registers a custom tool.
     pub fn with_tool<T>(self, tool: T) -> Self
     where
         T: ExecutableTool + 'static,
@@ -39,6 +43,7 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a runtime intrinsic tool.
     pub fn with_intrinsic<T>(self, tool: T) -> Self
     where
         T: ExecutableTool + 'static,
@@ -46,6 +51,7 @@ impl RuntimeBuilder {
         self.with_tool(tool)
     }
 
+    /// Replaces the runtime store implementation.
     pub fn with_store(self, store: impl RuntimeStore + 'static) -> Self {
         Self {
             handle: self.handle.rebind_store(std::sync::Arc::new(store)),
@@ -53,6 +59,7 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Replaces the command executor used by builtin tools.
     pub fn with_executor<E>(self, executor: E) -> Self
     where
         E: RuntimeExecutor + 'static,
@@ -63,6 +70,7 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Sets the runtime policy used to authorize file and process access.
     pub fn with_policy(self, policy: RuntimePolicy) -> Self {
         Self {
             handle: self.handle.with_policy(policy),
@@ -70,6 +78,7 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Appends a single runtime hook.
     pub fn with_hook<H>(self, hook: H) -> Self
     where
         H: RuntimeHook + 'static,
@@ -80,6 +89,7 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Replaces hooks with the provided collection.
     pub fn with_hooks<I>(self, hooks: I) -> Self
     where
         I: IntoIterator<Item = Arc<dyn RuntimeHook>>,
@@ -90,12 +100,14 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Registers a skills directory and enables the builtin `load_skill` tool.
     pub fn with_skills_dir(self, path: impl AsRef<Path>) -> Result<Self, SkillLoadError> {
         self.handle
             .register_skill_loader(SkillLoader::from_dir(path)?);
         Ok(self)
     }
 
+    /// Registers a builtin provider when an API key is present.
     pub fn with_optional_provider(
         mut self,
         id: BuiltinProvider,
@@ -109,6 +121,7 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a builtin provider from an API key.
     pub fn with_provider(mut self, id: BuiltinProvider, api_key: impl Into<String>) -> Self {
         let _ = self
             .provider_registry
@@ -116,6 +129,7 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a custom provider implementation.
     pub fn with_provider_instance<P>(mut self, provider: P) -> Self
     where
         P: Provider + 'static,
@@ -124,6 +138,7 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Builds the runtime and validates that at least one provider is registered.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         if self.provider_registry.is_empty() {
             Err(RuntimeError::ProviderNotFound(None))

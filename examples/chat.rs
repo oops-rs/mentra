@@ -4,8 +4,8 @@ use dotenvy::dotenv;
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, ProviderDescriptor,
     runtime::{
-        Agent, AgentConfig, AgentEvent, ContextCompactionConfig, Runtime, TaskItem, TaskStatus,
-        TeamAutonomyConfig,
+        Agent, AgentConfig, AgentEvent, ContextCompactionConfig, Runtime, RuntimePolicy, TaskItem,
+        TaskStatus, TeamAutonomyConfig,
     },
     tool::ToolCall,
 };
@@ -27,6 +27,11 @@ async fn main() {
         .with_optional_provider(
             BuiltinProvider::Gemini,
             std::env::var("GEMINI_API_KEY").ok(),
+        )
+        .with_policy(
+            RuntimePolicy::default()
+                .allow_shell_commands(true)
+                .allow_background_commands(true),
         )
         .with_skills_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills"))
         .expect("Failed to register example skills")
@@ -95,7 +100,7 @@ async fn pick_model(runtime: &Runtime) -> ModelInfo {
     let mut discovered_models = match runtime.list_models(Some(&provider.id)).await {
         Ok(models) => models,
         Err(error) => {
-            println!("Failed to list models for provider {provider_name}: {error:?}");
+            println!("Failed to list models for provider {provider_name}: {error}");
             return prompt_manual_model(&provider);
         }
     };

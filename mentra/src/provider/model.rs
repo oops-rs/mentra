@@ -1,7 +1,12 @@
 mod response_builder;
 mod stream;
 
-use std::{borrow::Cow, collections::BTreeMap, fmt::Display};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    error::Error,
+    fmt::{self, Display, Formatter},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +20,8 @@ pub use stream::{
     provider_event_stream_from_response,
 };
 
+/// Builtin model providers that Mentra can construct from API keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinProvider {
     Anthropic,
     OpenAI,
@@ -31,6 +38,7 @@ impl From<BuiltinProvider> for ProviderId {
     }
 }
 
+/// Stable identifier for a registered provider implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct ProviderId(Cow<'static, str>);
 
@@ -41,10 +49,12 @@ impl ProviderId {
 }
 
 impl ProviderId {
+    /// Creates a provider identifier from a runtime string.
     pub fn new(id: impl Into<String>) -> Self {
         Self(Cow::Owned(id.into()))
     }
 
+    /// Returns the provider identifier as a string slice.
     pub fn as_str(&self) -> &str {
         self.0.as_ref()
     }
@@ -74,18 +84,7 @@ impl From<&String> for ProviderId {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ProviderId;
-
-    #[test]
-    fn provider_id_new_accepts_runtime_strings() {
-        let id = ProviderId::new(format!("custom-{}", "provider"));
-
-        assert_eq!(id.as_str(), "custom-provider");
-    }
-}
-
+/// Human-facing metadata about a provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDescriptor {
     pub id: ProviderId,
@@ -94,6 +93,7 @@ pub struct ProviderDescriptor {
 }
 
 impl ProviderDescriptor {
+    /// Creates a provider descriptor with only an identifier.
     pub fn new(id: impl Into<ProviderId>) -> Self {
         Self {
             id: id.into(),
@@ -103,6 +103,7 @@ impl ProviderDescriptor {
     }
 }
 
+/// Metadata describing a model available from a provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
@@ -112,6 +113,7 @@ pub struct ModelInfo {
     pub created_at: Option<OffsetDateTime>,
 }
 
+/// Errors returned by provider implementations and stream adapters.
 #[derive(Debug)]
 pub enum ProviderError {
     Transport(reqwest::Error),
@@ -127,6 +129,37 @@ pub enum ProviderError {
     MalformedStream(String),
 }
 
+impl Display for ProviderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => write!(f, "provider transport error: {error}"),
+            Self::Http { status, body } if body.trim().is_empty() => {
+                write!(f, "provider returned HTTP {status}")
+            }
+            Self::Http { status, body } => write!(f, "provider returned HTTP {status}: {body}"),
+            Self::Decode(error) => write!(f, "failed to decode provider response: {error}"),
+            Self::Serialize(error) => write!(f, "failed to serialize provider request: {error}"),
+            Self::Deserialize(error) => {
+                write!(f, "failed to deserialize provider payload: {error}")
+            }
+            Self::InvalidRequest(message) => write!(f, "invalid provider request: {message}"),
+            Self::InvalidResponse(message) => write!(f, "invalid provider response: {message}"),
+            Self::MalformedStream(message) => write!(f, "malformed provider stream: {message}"),
+        }
+    }
+}
+
+impl Error for ProviderError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Transport(error) | Self::Decode(error) => Some(error),
+            Self::Serialize(error) | Self::Deserialize(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Provider request assembled by the runtime before dispatch.
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
     pub model: Cow<'a, str>,
@@ -140,6 +173,7 @@ pub struct Request<'a> {
 }
 
 impl Request<'_> {
+    /// Converts borrowed request fields into owned values.
     pub fn into_owned(self) -> Request<'static> {
         Request {
             model: Cow::Owned(self.model.into_owned()),
@@ -154,6 +188,7 @@ impl Request<'_> {
     }
 }
 
+/// A complete response collected from a provider stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     pub id: String,
@@ -163,6 +198,7 @@ pub struct Response {
     pub stop_reason: Option<String>,
 }
 
+/// Provider-neutral chat role labels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
@@ -170,6 +206,7 @@ pub enum Role {
     Unknown(String),
 }
 
+/// Provider-neutral chat message content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -177,6 +214,7 @@ pub struct Message {
 }
 
 impl Message {
+    /// Creates a single-block user message.
     pub fn user(content: ContentBlock) -> Self {
         Self {
             role: Role::User,
@@ -184,6 +222,7 @@ impl Message {
         }
     }
 
+    /// Creates a single-block assistant message.
     pub fn assistant(content: ContentBlock) -> Self {
         Self {
             role: Role::Assistant,
@@ -191,6 +230,7 @@ impl Message {
         }
     }
 
+    /// Creates a message with a provider-specific role label.
     pub fn unknown(role: impl Into<String>, content: ContentBlock) -> Self {
         Self {
             role: Role::Unknown(role.into()),
@@ -199,6 +239,7 @@ impl Message {
     }
 }
 
+/// A provider-neutral content block exchanged with models.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentBlock {
     Text {
@@ -220,16 +261,19 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
+    /// Creates a text content block.
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
 
+    /// Creates an inline image content block from raw bytes.
     pub fn image_bytes(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
         Self::Image {
             source: ImageSource::bytes(media_type, data),
         }
     }
 
+    /// Creates an image content block referencing a remote URL.
     pub fn image_url(url: impl Into<String>) -> Self {
         Self::Image {
             source: ImageSource::url(url),
@@ -237,6 +281,7 @@ impl ContentBlock {
     }
 }
 
+/// Image payload supported by model providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageSource {
     Bytes { media_type: String, data: Vec<u8> },
@@ -244,6 +289,7 @@ pub enum ImageSource {
 }
 
 impl ImageSource {
+    /// Creates an inline image source from bytes.
     pub fn bytes(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
         Self::Bytes {
             media_type: media_type.into(),
@@ -251,11 +297,13 @@ impl ImageSource {
         }
     }
 
+    /// Creates a URL-backed image source.
     pub fn url(url: impl Into<String>) -> Self {
         Self::Url { url: url.into() }
     }
 }
 
+/// Provider-neutral tool choice hint passed to model APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ToolChoice {
     #[default]
@@ -264,4 +312,40 @@ pub enum ToolChoice {
     Tool {
         name: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::{ProviderError, ProviderId};
+
+    #[test]
+    fn provider_id_new_accepts_runtime_strings() {
+        let id = ProviderId::new(format!("custom-{}", "provider"));
+
+        assert_eq!(id.as_str(), "custom-provider");
+    }
+
+    #[test]
+    fn provider_error_display_includes_http_status() {
+        let error = ProviderError::Http {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "bad payload".to_string(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "provider returned HTTP 400 Bad Request: bad payload"
+        );
+    }
+
+    #[test]
+    fn provider_error_exposes_source_for_serde_failures() {
+        let error = ProviderError::Serialize(
+            serde_json::from_str::<serde_json::Value>("{").expect_err("invalid json"),
+        );
+
+        assert!(error.source().is_some());
+    }
 }

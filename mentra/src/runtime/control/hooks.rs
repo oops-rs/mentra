@@ -69,7 +69,9 @@ impl RuntimeHookEvent {
     fn scope(&self) -> String {
         match self {
             Self::AuthorizationDenied { agent_id, .. } => agent_id.clone(),
-            Self::RecoveryPrepared { runtime_instance_id } => runtime_instance_id.clone(),
+            Self::RecoveryPrepared {
+                runtime_instance_id,
+            } => runtime_instance_id.clone(),
             Self::ModelRequestStarted { agent_id, .. }
             | Self::ModelRequestFinished { agent_id, .. }
             | Self::ToolExecutionStarted { agent_id, .. }

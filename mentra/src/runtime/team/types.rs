@@ -1,3 +1,4 @@
+use std::fmt::{self, Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,17 @@ pub enum TeamMemberStatus {
     Working,
     Failed(String),
     Shutdown,
+}
+
+impl Display for TeamMemberStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Idle => f.write_str("idle"),
+            Self::Working => f.write_str("working"),
+            Self::Failed(reason) => write!(f, "failed: {reason}"),
+            Self::Shutdown => f.write_str("shutdown"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +40,16 @@ pub enum TeamProtocolStatus {
     Pending,
     Approved,
     Rejected,
+}
+
+impl Display for TeamProtocolStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending => f.write_str("pending"),
+            Self::Approved => f.write_str("approved"),
+            Self::Rejected => f.write_str("rejected"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

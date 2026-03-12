@@ -1,7 +1,15 @@
 [package]
 name = "mentra"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+description = "An agent runtime for tool-using LLM applications"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/mentra"
+readme = "README.md"
+keywords = ["agents", "llm", "runtime", "tools", "ai"]
+categories = ["asynchronous", "development-tools"]
 
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }

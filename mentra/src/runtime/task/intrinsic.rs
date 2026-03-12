@@ -161,7 +161,13 @@ pub(crate) enum TaskIntrinsicTool {
 
 impl TaskIntrinsicTool {
     fn all() -> [Self; 5] {
-        [Self::Create, Self::Claim, Self::Update, Self::List, Self::Get]
+        [
+            Self::Create,
+            Self::Claim,
+            Self::Update,
+            Self::List,
+            Self::Get,
+        ]
     }
 
     fn spec(self) -> ToolSpec {
@@ -215,7 +221,7 @@ pub(crate) fn execute_intrinsic(agent: &mut Agent, call: ToolCall) -> Option<Con
             },
             Err(error) => ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Task refresh failed: {error:?}"),
+                content: format!("Task refresh failed: {error}"),
                 is_error: true,
             },
         },

@@ -9,7 +9,7 @@ pub(super) fn validate_unblocked_status(task: &TaskItem) -> Result<(), TaskError
         && !task.blocked_by.is_empty()
     {
         return Err(TaskError::Validation(format!(
-            "Task {} cannot be {:?} while blocked by {:?}",
+            "Task {} cannot be {} while blocked by {:?}",
             task.id, task.status, task.blocked_by
         )));
     }
@@ -32,7 +32,7 @@ pub(super) fn validate_claimable(task: &TaskItem, owner: &str) -> Result<(), Tas
     }
     if task.status != TaskStatus::Pending {
         return Err(TaskError::Validation(format!(
-            "Task {} is {:?} and cannot be claimed by '{}'",
+            "Task {} is {} and cannot be claimed by '{}'",
             task.id, task.status, owner
         )));
     }
@@ -75,7 +75,10 @@ pub(super) fn is_claimable(task: &TaskItem) -> bool {
     task.status == TaskStatus::Pending && task.blocked_by.is_empty() && task.owner.is_empty()
 }
 
-pub(super) fn find_task_mut(tasks: &mut [TaskItem], task_id: u64) -> Result<&mut TaskItem, TaskError> {
+pub(super) fn find_task_mut(
+    tasks: &mut [TaskItem],
+    task_id: u64,
+) -> Result<&mut TaskItem, TaskError> {
     tasks
         .iter_mut()
         .find(|task| task.id == task_id)

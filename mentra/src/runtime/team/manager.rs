@@ -713,10 +713,7 @@ fn ensure_team_state<'a>(
                 team_dir: team_dir.to_path_buf(),
                 members: store.load_team_members(team_dir)?,
                 requests: store.load_team_requests(team_dir)?,
-                known_agents: store
-                    .list_team_agent_names(team_dir)?
-                    .into_iter()
-                    .collect(),
+                known_agents: store.list_team_agent_names(team_dir)?.into_iter().collect(),
                 ..Default::default()
             },
         );

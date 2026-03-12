@@ -173,6 +173,6 @@ fn mark_failed(
     manager.update_member_status(
         team_dir,
         teammate_name,
-        TeamMemberStatus::Failed(format!("{error:?}")),
+        TeamMemberStatus::Failed(error.to_string()),
     )
 }

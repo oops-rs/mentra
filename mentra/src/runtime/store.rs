@@ -13,8 +13,8 @@ use crate::{
     provider::ProviderId,
     runtime::{
         AgentConfig, AgentStatus, BackgroundTaskStatus, BackgroundTaskSummary,
-        PendingToolUseSummary, SpawnedAgentSummary, TaskItem, TeamMemberStatus,
-        TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
+        PendingToolUseSummary, SpawnedAgentSummary, TaskItem, TeamMemberStatus, TeamMemberSummary,
+        TeamMessage, TeamProtocolRequestSummary,
     },
 };
 
@@ -62,10 +62,14 @@ pub struct TaskStateSnapshot {
     pub(crate) tasks: Vec<TaskItem>,
 }
 
+/// Persistence backend used for agents, team state, tasks, and audit events.
 pub trait RuntimeStore: Send + Sync {
     fn prepare_recovery(&self) -> Result<(), RuntimeError>;
-    fn create_agent(&self, record: &PersistedAgentRecord, history: &[Message])
-    -> Result<(), RuntimeError>;
+    fn create_agent(
+        &self,
+        record: &PersistedAgentRecord,
+        history: &[Message],
+    ) -> Result<(), RuntimeError>;
     fn save_agent_checkpoint(
         &self,
         record: &PersistedAgentRecord,
@@ -158,6 +162,7 @@ pub trait RuntimeStore: Send + Sync {
 }
 
 #[derive(Clone)]
+/// SQLite-backed [`RuntimeStore`] implementation used by default.
 pub struct SqliteRuntimeStore {
     path: PathBuf,
 }
@@ -172,10 +177,12 @@ impl Default for SqliteRuntimeStore {
 }
 
 impl SqliteRuntimeStore {
+    /// Creates a SQLite runtime store at the provided path.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
+    /// Returns the SQLite database path for the store.
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
@@ -420,7 +427,9 @@ impl RuntimeStore for SqliteRuntimeStore {
                 )
                 .map_err(sqlite_error)?;
             let rows = stmt
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
                 .map_err(sqlite_error)?;
             for row in rows {
                 let (run_id, agent_id) = row.map_err(sqlite_error)?;
@@ -439,8 +448,11 @@ impl RuntimeStore for SqliteRuntimeStore {
 
         tx.execute("DELETE FROM pending_turns", [])
             .map_err(sqlite_error)?;
-        tx.execute("DELETE FROM leases WHERE expires_at <= ?1", params![now_secs()])
-            .map_err(sqlite_error)?;
+        tx.execute(
+            "DELETE FROM leases WHERE expires_at <= ?1",
+            params![now_secs()],
+        )
+        .map_err(sqlite_error)?;
         tx.commit().map_err(sqlite_error)
     }
 
@@ -496,8 +508,11 @@ impl RuntimeStore for SqliteRuntimeStore {
 
     fn clear_pending_turn(&self, agent_id: &str) -> Result<(), RuntimeError> {
         let conn = self.open()?;
-        conn.execute("DELETE FROM pending_turns WHERE agent_id = ?1", params![agent_id])
-            .map_err(sqlite_error)?;
+        conn.execute(
+            "DELETE FROM pending_turns WHERE agent_id = ?1",
+            params![agent_id],
+        )
+        .map_err(sqlite_error)?;
         Ok(())
     }
 
@@ -645,8 +660,11 @@ impl RuntimeStore for SqliteRuntimeStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
         let namespace = Self::task_namespace(namespace);
-        tx.execute("DELETE FROM tasks WHERE namespace = ?1", params![namespace.clone()])
-            .map_err(sqlite_error)?;
+        tx.execute(
+            "DELETE FROM tasks WHERE namespace = ?1",
+            params![namespace.clone()],
+        )
+        .map_err(sqlite_error)?;
         tx.execute(
             "DELETE FROM task_edges WHERE namespace = ?1",
             params![namespace.clone()],
@@ -684,12 +702,12 @@ impl RuntimeStore for SqliteRuntimeStore {
     fn load_team_members(&self, team_dir: &Path) -> Result<Vec<TeamMemberSummary>, RuntimeError> {
         let conn = self.open()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT summary_json FROM team_members WHERE team_dir = ?1 ORDER BY name",
-            )
+            .prepare("SELECT summary_json FROM team_members WHERE team_dir = ?1 ORDER BY name")
             .map_err(sqlite_error)?;
         let rows = stmt
-            .query_map(params![Self::team_key(team_dir)], |row| row.get::<_, String>(0))
+            .query_map(params![Self::team_key(team_dir)], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(sqlite_error)?;
         let mut members = Vec::new();
         for row in rows {
@@ -828,7 +846,9 @@ impl RuntimeStore for SqliteRuntimeStore {
             )
             .map_err(sqlite_error)?;
         let rows = stmt
-            .query_map(params![Self::team_key(team_dir)], |row| row.get::<_, String>(0))
+            .query_map(params![Self::team_key(team_dir)], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(sqlite_error)?;
         let mut requests = Vec::new();
         for row in rows {
@@ -867,10 +887,12 @@ impl RuntimeStore for SqliteRuntimeStore {
         let mut stmt = conn
             .prepare("SELECT name FROM agents WHERE team_dir = ?1 ORDER BY name")
             .map_err(sqlite_error)?;
-        stmt.query_map(params![Self::team_key(team_dir)], |row| row.get::<_, String>(0))
-            .map_err(sqlite_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_error)
+        stmt.query_map(params![Self::team_key(team_dir)], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(sqlite_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_error)
     }
 
     fn load_background_tasks(
@@ -954,7 +976,9 @@ impl RuntimeStore for SqliteRuntimeStore {
                     command: task.command,
                     cwd: task.cwd,
                     status: task.status,
-                    output_preview: task.output_preview.unwrap_or_else(|| "(no output)".to_string()),
+                    output_preview: task
+                        .output_preview
+                        .unwrap_or_else(|| "(no output)".to_string()),
                 })
             })
             .collect()
@@ -1015,11 +1039,13 @@ impl RuntimeStore for SqliteRuntimeStore {
 }
 
 impl SqliteRuntimeStore {
-    fn load_history(&self, conn: &Connection, agent_id: &str) -> Result<Vec<Message>, RuntimeError> {
+    fn load_history(
+        &self,
+        conn: &Connection,
+        agent_id: &str,
+    ) -> Result<Vec<Message>, RuntimeError> {
         let mut stmt = conn
-            .prepare(
-                "SELECT payload_json FROM agent_messages WHERE agent_id = ?1 ORDER BY seq",
-            )
+            .prepare("SELECT payload_json FROM agent_messages WHERE agent_id = ?1 ORDER BY seq")
             .map_err(sqlite_error)?;
         let rows = stmt
             .query_map(params![agent_id], |row| row.get::<_, String>(0))
@@ -1040,7 +1066,9 @@ impl SqliteRuntimeStore {
             .prepare("SELECT payload_json FROM tasks WHERE namespace = ?1 ORDER BY id")
             .map_err(sqlite_error)?;
         let rows = stmt
-            .query_map(params![Self::task_namespace(namespace)], |row| row.get::<_, String>(0))
+            .query_map(params![Self::task_namespace(namespace)], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(sqlite_error)?;
         let mut tasks = Vec::new();
         for row in rows {
@@ -1055,10 +1083,7 @@ fn to_json<T: Serialize>(value: &T) -> Result<String, RuntimeError> {
 }
 
 fn maybe_json<T: Serialize>(value: &Option<T>) -> Result<Option<String>, RuntimeError> {
-    value
-        .as_ref()
-        .map(to_json)
-        .transpose()
+    value.as_ref().map(to_json).transpose()
 }
 
 fn from_json<T: DeserializeOwned>(value: &str) -> Result<T, RuntimeError> {
@@ -1073,7 +1098,7 @@ fn to_sql_error(error: RuntimeError) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
         rusqlite::types::Type::Text,
-        Box::new(std::io::Error::other(format!("{error:?}"))),
+        Box::new(std::io::Error::other(error.to_string())),
     )
 }
 

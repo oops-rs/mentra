@@ -178,7 +178,7 @@ async fn execute_compact(agent: &mut Agent, call: ToolCall) -> ContentBlock {
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Context compaction failed: {error:?}"),
+            content: format!("Context compaction failed: {error}"),
             is_error: true,
         },
     }
@@ -192,7 +192,7 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
                 Err(error) => {
                     return ContentBlock::ToolResult {
                         tool_use_id: call.id,
-                        content: format!("Failed to spawn subagent: {error:?}"),
+                        content: format!("Failed to spawn subagent: {error}"),
                         is_error: true,
                     };
                 }
@@ -210,7 +210,7 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
                     if let Err(error) = agent.refresh_tasks_from_disk() {
                         return ContentBlock::ToolResult {
                             tool_use_id: call.id,
-                            content: format!("Task refresh failed: {error:?}"),
+                            content: format!("Task refresh failed: {error}"),
                             is_error: true,
                         };
                     }
@@ -222,17 +222,16 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
                     }
                 }
                 Err(error) => {
-                    if let Some(finished) = agent.finish_subagent(
-                        child.id(),
-                        SpawnedAgentStatus::Failed(format!("{error:?}")),
-                    ) {
+                    if let Some(finished) = agent
+                        .finish_subagent(child.id(), SpawnedAgentStatus::Failed(error.to_string()))
+                    {
                         agent.emit_event(AgentEvent::SubagentFinished { agent: finished });
                     }
                     let _ = agent.refresh_tasks_from_disk();
 
                     ContentBlock::ToolResult {
                         tool_use_id: call.id,
-                        content: format!("Subagent failed: {error:?}"),
+                        content: format!("Subagent failed: {error}"),
                         is_error: true,
                     }
                 }

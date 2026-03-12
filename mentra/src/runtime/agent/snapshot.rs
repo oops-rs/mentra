@@ -115,7 +115,9 @@ impl Agent {
         error: Option<&str>,
     ) -> Result<(), crate::runtime::RuntimeError> {
         if let Some(run_id) = &self.current_run_id {
-            self.runtime.store().update_run_state(run_id, state, error)?;
+            self.runtime
+                .store()
+                .update_run_state(run_id, state, error)?;
         }
         Ok(())
     }

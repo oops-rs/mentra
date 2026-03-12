@@ -4,8 +4,7 @@ use serde_json::json;
 use crate::{
     runtime::team::{
         TEAM_BROADCAST_TOOL_NAME, TEAM_LIST_REQUESTS_TOOL_NAME, TEAM_READ_INBOX_TOOL_NAME,
-        TEAM_REQUEST_TOOL_NAME, TEAM_RESPOND_TOOL_NAME, TEAM_SEND_TOOL_NAME,
-        TEAM_SPAWN_TOOL_NAME,
+        TEAM_REQUEST_TOOL_NAME, TEAM_RESPOND_TOOL_NAME, TEAM_SEND_TOOL_NAME, TEAM_SPAWN_TOOL_NAME,
     },
     tool::{ToolCapability, ToolDurability, ToolSideEffectLevel, ToolSpec},
 };

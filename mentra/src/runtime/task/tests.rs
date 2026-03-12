@@ -185,7 +185,7 @@ fn blocked_task_cannot_start_or_complete() {
             TaskAccess::Lead,
         )
         .expect_err("blocked task should fail");
-    assert!(error.contains("cannot be InProgress while blocked"));
+    assert!(error.contains("cannot be in_progress while blocked"));
 }
 
 #[test]
@@ -294,16 +294,16 @@ fn claim_rejects_unclaimable_tasks() {
         blocked_by: vec![1],
     });
 
-    let blocked = store
-        .try_claim(Some(2), "alice")
-        .expect_err("blocked task");
+    let blocked = store.try_claim(Some(2), "alice").expect_err("blocked task");
     assert!(blocked.contains("cannot be claimed"));
 
     store.claim(Some(1), "alice");
     let owned = store.try_claim(Some(1), "bob").expect_err("owned task");
     assert!(owned.contains("already owned"));
 
-    let missing = store.try_claim(Some(99), "alice").expect_err("missing task");
+    let missing = store
+        .try_claim(Some(99), "alice")
+        .expect_err("missing task");
     assert!(missing.contains("does not exist"));
 
     let store = TaskHarness::new("claim-status");
@@ -460,7 +460,9 @@ fn temp_namespace(label: &str) -> PathBuf {
 }
 
 fn temp_store(label: &str) -> SqliteRuntimeStore {
-    SqliteRuntimeStore::new(temp_path(format!("mentra-task-store-{label}")).with_extension("sqlite"))
+    SqliteRuntimeStore::new(
+        temp_path(format!("mentra-task-store-{label}")).with_extension("sqlite"),
+    )
 }
 
 fn temp_path(label: String) -> PathBuf {

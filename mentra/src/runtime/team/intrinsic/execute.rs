@@ -28,14 +28,14 @@ pub(super) async fn execute_team_spawn(agent: &mut Agent, call: ToolCall) -> Con
         Ok(teammate) => ContentBlock::ToolResult {
             tool_use_id: call.id,
             content: format!(
-                "Spawned persistent teammate '{}' (role: {}, status: {:?})",
+                "Spawned persistent teammate '{}' (role: {}, status: {})",
                 teammate.name, teammate.role, teammate.status
             ),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to spawn teammate: {error:?}"),
+            content: format!("Failed to spawn teammate: {error}"),
             is_error: true,
         },
     }
@@ -61,7 +61,7 @@ pub(super) fn execute_team_send(agent: &mut Agent, call: ToolCall) -> ContentBlo
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to send team message: {error:?}"),
+            content: format!("Failed to send team message: {error}"),
             is_error: true,
         },
     }
@@ -78,7 +78,7 @@ pub(super) fn execute_team_read_inbox(agent: &mut Agent, call: ToolCall) -> Cont
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to read team inbox: {error:?}"),
+            content: format!("Failed to read team inbox: {error}"),
             is_error: true,
         },
     }
@@ -112,7 +112,7 @@ pub(super) fn execute_team_broadcast(agent: &mut Agent, call: ToolCall) -> Conte
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to broadcast team message: {error:?}"),
+            content: format!("Failed to broadcast team message: {error}"),
             is_error: true,
         },
     }
@@ -141,7 +141,7 @@ pub(super) fn execute_team_request(agent: &mut Agent, call: ToolCall) -> Content
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to create team request: {error:?}"),
+            content: format!("Failed to create team request: {error}"),
             is_error: true,
         },
     }
@@ -176,7 +176,7 @@ pub(super) fn execute_team_respond(agent: &mut Agent, call: ToolCall) -> Content
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to respond to team request: {error:?}"),
+            content: format!("Failed to respond to team request: {error}"),
             is_error: true,
         },
     }
@@ -230,13 +230,13 @@ pub(super) fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> C
             },
             Err(error) => ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Failed to serialize team requests: {error:?}"),
+                content: format!("Failed to serialize team requests: {error}"),
                 is_error: true,
             },
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to list team requests: {error:?}"),
+            content: format!("Failed to list team requests: {error}"),
             is_error: true,
         },
     }

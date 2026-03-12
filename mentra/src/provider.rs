@@ -16,14 +16,19 @@ pub use model::{
     provider_event_stream_from_response,
 };
 
+/// Transport-neutral interface implemented by model providers.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Returns identifying metadata for the provider instance.
     fn descriptor(&self) -> ProviderDescriptor;
 
+    /// Lists models available from the provider.
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
 
+    /// Streams a model response for the given request.
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError>;
 
+    /// Sends a request and collects the full response in memory.
     async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
         collect_response_from_stream(self.stream(request).await?).await
     }

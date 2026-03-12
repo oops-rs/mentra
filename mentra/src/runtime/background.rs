@@ -8,9 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::{broadcast, watch},
-};
+use tokio::sync::{broadcast, watch};
 
 use crate::runtime::{
     AgentEvent, AgentSnapshot, RuntimeStore,
@@ -203,7 +201,8 @@ impl BackgroundTaskManager {
             .agents
             .get(agent_id)
             .map(|agent| {
-                agent.tasks
+                agent
+                    .tasks
                     .iter()
                     .filter(|task| task.status == BackgroundTaskStatus::Running)
                     .count()

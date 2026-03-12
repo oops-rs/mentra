@@ -162,7 +162,7 @@ impl<'a> TurnRunner<'a> {
                             model: self.agent.model().to_string(),
                             attempt,
                             success: false,
-                            error: Some(format!("{error:?}")),
+                            error: Some(error.to_string()),
                         })?;
                     if self.model_requests >= self.options.model_budget() {
                         return Err(RuntimeError::ModelBudgetExceeded(
@@ -179,7 +179,7 @@ impl<'a> TurnRunner<'a> {
                             model: self.agent.model().to_string(),
                             attempt,
                             success: false,
-                            error: Some(format!("{error:?}")),
+                            error: Some(error.to_string()),
                         })?;
                     return Err(RuntimeError::FailedToStreamResponse(error));
                 }
@@ -268,7 +268,7 @@ impl<'a> TurnRunner<'a> {
             return (
                 ContentBlock::ToolResult {
                     tool_use_id: call.id,
-                    content: format!("Tool execution blocked: {error:?}"),
+                    content: format!("Tool execution blocked: {error}"),
                     is_error: true,
                 },
                 false,

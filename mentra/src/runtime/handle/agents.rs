@@ -20,9 +20,9 @@ impl RuntimeHandle {
 
     pub fn acquire_agent_lease(&self, agent_id: &str) -> Result<(), RuntimeError> {
         let key = format!("agent:{agent_id}");
-        let acquired = self
-            .store
-            .acquire_lease(&key, &self.runtime_instance_id, Duration::from_secs(3600))?;
+        let acquired =
+            self.store
+                .acquire_lease(&key, &self.runtime_instance_id, Duration::from_secs(3600))?;
         if acquired {
             Ok(())
         } else {

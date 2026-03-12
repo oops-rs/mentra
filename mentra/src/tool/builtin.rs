@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::tool::{
-    ExecutableTool, ToolCapability, ToolContext, ToolDurability, ToolResult,
-    ToolSideEffectLevel, ToolSpec,
+    ExecutableTool, ToolCapability, ToolContext, ToolDurability, ToolResult, ToolSideEffectLevel,
+    ToolSpec,
 };
 
 pub struct BashTool;
@@ -51,8 +51,7 @@ impl ExecutableTool for BashTool {
 
         let output = ctx
             .execute_shell_command(command.to_string(), working_directory)
-            .await
-            ?;
+            .await?;
 
         if output.success() {
             Ok(output.stdout)
@@ -95,7 +94,10 @@ impl ExecutableTool for BackgroundRunTool {
                 },
                 "required": ["command"]
             }),
-            capabilities: vec![ToolCapability::BackgroundExec, ToolCapability::FilesystemWrite],
+            capabilities: vec![
+                ToolCapability::BackgroundExec,
+                ToolCapability::FilesystemWrite,
+            ],
             side_effect_level: ToolSideEffectLevel::Process,
             durability: ToolDurability::Persistent,
         }

@@ -1,8 +1,12 @@
-use crate::{ContentBlock, Message, Role, runtime::{RunOptions, error::RuntimeError}};
+use crate::{
+    ContentBlock, Message, Role,
+    runtime::{RunOptions, error::RuntimeError},
+};
 
 use super::{Agent, AgentEvent, AgentStatus, TurnRunner};
 
 impl Agent {
+    /// Sends a user turn using default run options.
     pub async fn send(
         &mut self,
         content: impl Into<Vec<ContentBlock>>,
@@ -10,6 +14,7 @@ impl Agent {
         self.run(content, RunOptions::default()).await
     }
 
+    /// Runs a user turn with explicit execution limits and cancellation settings.
     pub async fn run(
         &mut self,
         content: impl Into<Vec<ContentBlock>>,
@@ -49,7 +54,7 @@ impl Agent {
                 self.restore_task_state(tasks_before_run, rounds_before_run, &task_disk_state)?;
                 self.clear_pending_turn();
                 self.clear_persisted_pending_turn()?;
-                let message = format!("{error:?}");
+                let message = error.to_string();
                 self.set_status(AgentStatus::Failed(message.clone()));
                 self.persist_state()?;
                 self.fail_run_checkpoint(&message)?;

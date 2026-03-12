@@ -1298,7 +1298,7 @@ async fn task_tool_wraps_child_failure_and_parent_continues() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "tool-parent".to_string(),
-            content: "Subagent failed: FailedToStreamResponse(MalformedStream(\"boom\"))"
+            content: "Subagent failed: failed to stream provider response: malformed provider stream: boom"
                 .to_string(),
             is_error: true,
         })
@@ -1313,7 +1313,7 @@ async fn task_tool_wraps_child_failure_and_parent_continues() {
     assert!(matches!(
         &subagents[0].status,
         SpawnedAgentStatus::Failed(message)
-            if message == "FailedToStreamResponse(MalformedStream(\"boom\"))"
+            if message == "failed to stream provider response: malformed provider stream: boom"
     ));
 }
 
@@ -1408,7 +1408,7 @@ async fn task_tool_returns_error_when_child_hits_round_limit() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "parent-task".to_string(),
-            content: "Subagent failed: MaxRoundsExceeded(30)".to_string(),
+            content: "Subagent failed: max rounds exceeded at 30".to_string(),
             is_error: true,
         })
     );
@@ -2296,7 +2296,9 @@ async fn failed_teammate_can_recover_on_next_wake() {
         .expect("spawn teammate");
     wait_for_teammate_status(
         &lead,
-        TeamMemberStatus::Failed("FailedToStreamResponse(InvalidResponse(\"boom\"))".to_string()),
+        TeamMemberStatus::Failed(
+            "failed to stream provider response: invalid provider response: boom".to_string(),
+        ),
     )
     .await;
 

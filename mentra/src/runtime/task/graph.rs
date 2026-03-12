@@ -149,7 +149,7 @@ fn validate_unblocked_status(task: &TaskItem) -> Result<(), TaskError> {
         && !task.blocked_by.is_empty()
     {
         return Err(TaskError::Validation(format!(
-            "Task {} cannot be {:?} while blocked by {:?}",
+            "Task {} cannot be {} while blocked by {:?}",
             task.id, task.status, task.blocked_by
         )));
     }

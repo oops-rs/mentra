@@ -93,7 +93,9 @@ impl RuntimeExecutor for LocalRuntimeExecutor {
 
         let output = if let Some(timeout) = timeout {
             match tokio::time::timeout(timeout, process.output()).await {
-                Ok(result) => result.map_err(|error| format!("Failed to execute command: {error}"))?,
+                Ok(result) => {
+                    result.map_err(|error| format!("Failed to execute command: {error}"))?
+                }
                 Err(_) => {
                     return Err(format!(
                         "Command timed out after {}s",

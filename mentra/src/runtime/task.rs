@@ -117,8 +117,8 @@ pub(crate) fn execute_with_store(
             let mut tasks = load_store_tasks(store, namespace)?;
             let claimed = match parsed.task_id {
                 Some(task_id) => {
-                    let task =
-                        store::find_task_mut(&mut tasks, task_id).map_err(|error| error.to_string())?;
+                    let task = store::find_task_mut(&mut tasks, task_id)
+                        .map_err(|error| error.to_string())?;
                     store::validate_claimable(task, &owner).map_err(|error| error.to_string())?;
                     task.owner = owner;
                     task.clone()
@@ -272,9 +272,9 @@ impl<'a> TaskAccess<'a> {
 fn load_store_tasks(store: &dyn RuntimeStore, namespace: &Path) -> Result<Vec<TaskItem>, String> {
     store
         .load_tasks(namespace)
-        .map_err(|error| format!("Task storage failed: {error:?}"))
+        .map_err(|error| format!("Task storage failed: {error}"))
 }
 
 fn store_error(error: crate::runtime::RuntimeError) -> String {
-    format!("Task storage failed: {error:?}")
+    format!("Task storage failed: {error}")
 }

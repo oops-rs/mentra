@@ -237,7 +237,7 @@ impl RuntimeHandle {
         let tasks = self
             .store
             .load_tasks(&config.tasks_dir)
-            .map_err(|error| format!("{error:?}"))?;
+            .map_err(|error| error.to_string())?;
         let owned = tasks
             .into_iter()
             .filter(|task| {

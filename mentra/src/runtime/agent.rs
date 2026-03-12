@@ -27,8 +27,7 @@ use crate::{
     Message,
     provider::{Provider, ProviderId, ToolChoice},
     runtime::{
-        LoadedAgentState,
-        TaskItem,
+        LoadedAgentState, TaskItem,
         background::BackgroundNotification,
         error::RuntimeError,
         handle::{AgentExecutionConfig, AgentObserver, RuntimeHandle},
@@ -50,6 +49,7 @@ pub(crate) use team::parse_task_input;
 
 static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Running or persisted agent managed by a [`crate::runtime::Runtime`].
 pub struct Agent {
     id: String,
     runtime: RuntimeHandle,
@@ -226,22 +226,27 @@ impl Agent {
         Ok(agent)
     }
 
+    /// Returns the agent's display name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the stable persisted agent identifier.
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    /// Returns the model identifier used by the agent.
     pub fn model(&self) -> &str {
         &self.model
     }
 
+    /// Returns the effective agent configuration.
     pub fn config(&self) -> &AgentConfig {
         &self.config
     }
 
+    /// Returns the committed transcript history.
     pub fn history(&self) -> &[Message] {
         &self.history
     }
@@ -250,14 +255,17 @@ impl Agent {
         &self.tasks
     }
 
+    /// Returns the most recent committed message, if any.
     pub fn last_message(&self) -> Option<&Message> {
         self.history.last()
     }
 
+    /// Subscribes to the agent's transient event stream.
     pub fn subscribe_events(&self) -> broadcast::Receiver<AgentEvent> {
         self.event_tx.subscribe()
     }
 
+    /// Watches the current agent snapshot for state updates.
     pub fn watch_snapshot(&self) -> watch::Receiver<AgentSnapshot> {
         self.snapshot_tx.subscribe()
     }

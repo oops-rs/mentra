@@ -46,7 +46,10 @@ impl RunOptions {
             return Err(RuntimeError::Cancelled);
         }
 
-        if self.deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+        if self
+            .deadline
+            .is_some_and(|deadline| SystemTime::now() >= deadline)
+        {
             return Err(RuntimeError::DeadlineExceeded);
         }
 

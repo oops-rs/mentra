@@ -4,13 +4,14 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::runtime::{
-    BackgroundTaskSummary, ContextCompactionDetails, ContextCompactionTrigger,
-    SpawnedAgentStatus, SpawnedAgentSummary, TaskItem, TeamDispatch, TeamMemberSummary,
-    TeamMessage, TeamProtocolRequestSummary,
-};
 use crate::runtime::RuntimeError;
+use crate::runtime::{
+    BackgroundTaskSummary, ContextCompactionDetails, ContextCompactionTrigger, SpawnedAgentStatus,
+    SpawnedAgentSummary, TaskItem, TeamDispatch, TeamMemberSummary, TeamMessage,
+    TeamProtocolRequestSummary,
+};
 
+/// High-level capability labels used for tool metadata and policy decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolCapability {
     ReadOnly,
@@ -26,6 +27,7 @@ pub enum ToolCapability {
     Custom(String),
 }
 
+/// Declares how much side effect a tool may have when executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ToolSideEffectLevel {
     #[default]
@@ -35,6 +37,7 @@ pub enum ToolSideEffectLevel {
     External,
 }
 
+/// Declares whether a tool call is safe to replay or persist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ToolDurability {
     #[default]
@@ -43,6 +46,7 @@ pub enum ToolDurability {
     ReplaySafe,
 }
 
+/// Provider-facing description of a tool and its input schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
@@ -53,6 +57,7 @@ pub struct ToolSpec {
     pub durability: ToolDurability,
 }
 
+/// A concrete tool call emitted by a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -60,6 +65,7 @@ pub struct ToolCall {
     pub input: Value,
 }
 
+/// Execution context made available to a running tool.
 pub struct ToolContext<'a> {
     pub agent_id: String,
     pub tool_call_id: String,
@@ -70,26 +76,32 @@ pub struct ToolContext<'a> {
 }
 
 impl ToolContext<'_> {
+    /// Returns the resolved working directory for the current tool execution.
     pub fn working_directory(&self) -> &Path {
         self.working_directory.as_path()
     }
 
+    /// Returns the current agent's display name.
     pub fn agent_name(&self) -> &str {
         self.agent.name()
     }
 
+    /// Returns the current model identifier.
     pub fn model(&self) -> &str {
         self.agent.model()
     }
 
+    /// Returns the number of messages currently stored in history.
     pub fn history_len(&self) -> usize {
         self.agent.history().len()
     }
 
+    /// Returns the current agent's task snapshot.
     pub fn tasks(&self) -> &[TaskItem] {
         self.agent.tasks()
     }
 
+    /// Resolves an optional working-directory override.
     pub fn resolve_working_directory(
         &self,
         working_directory: Option<&str>,
@@ -98,14 +110,17 @@ impl ToolContext<'_> {
             .resolve_working_directory(&self.agent_id, working_directory)
     }
 
+    /// Loads a named skill body from the registered skills directory.
     pub fn load_skill(&self, name: &str) -> Result<String, String> {
         self.runtime.load_skill(name)
     }
 
+    /// Returns skill descriptions exposed to the model, when available.
     pub fn skill_descriptions(&self) -> Option<String> {
         self.runtime.skill_descriptions()
     }
 
+    /// Executes a foreground shell command through the runtime policy and executor.
     pub async fn execute_shell_command(
         &self,
         command: String,
@@ -116,6 +131,7 @@ impl ToolContext<'_> {
             .await
     }
 
+    /// Starts a background shell command through the runtime policy and executor.
     pub fn start_background_task(
         &self,
         command: String,
@@ -125,14 +141,17 @@ impl ToolContext<'_> {
             .start_background_task(&self.agent_id, command, cwd)
     }
 
+    /// Reads the status of one or more background tasks.
     pub fn check_background_task(&self, task_id: Option<&str>) -> Result<String, String> {
         self.runtime.check_background_task(&self.agent_id, task_id)
     }
 
+    /// Requests that the current agent yield back to its idle loop.
     pub fn request_idle(&mut self) {
         self.agent.request_idle();
     }
 
+    /// Runs the builtin context-compaction flow immediately.
     pub async fn compact_history(
         &mut self,
     ) -> Result<Option<ContextCompactionDetails>, RuntimeError> {
@@ -144,30 +163,34 @@ impl ToolContext<'_> {
             .await
     }
 
+    /// Executes one of the persisted task tools directly.
     pub fn execute_task_tool(&self, tool_name: &str, input: Value) -> Result<String, String> {
         self.agent.execute_task_mutation(tool_name, input)
     }
 
+    /// Reloads persisted task state into the current agent snapshot.
     pub fn refresh_tasks(&mut self) -> Result<(), RuntimeError> {
         self.agent.refresh_tasks_from_disk()
     }
 
-    pub async fn read_file(
-        &self,
-        path: &str,
-        max_lines: Option<usize>,
-    ) -> Result<String, String> {
-        self.runtime.read_file(&self.agent_id, path, max_lines).await
+    /// Reads a file through the runtime's read policy.
+    pub async fn read_file(&self, path: &str, max_lines: Option<usize>) -> Result<String, String> {
+        self.runtime
+            .read_file(&self.agent_id, path, max_lines)
+            .await
     }
 
+    /// Spawns a disposable subagent that inherits the current runtime.
     pub fn spawn_subagent(&self) -> Result<crate::runtime::Agent, RuntimeError> {
         self.agent.spawn_subagent()
     }
 
+    /// Records a subagent in the current agent snapshot.
     pub fn register_subagent(&mut self, agent: &crate::runtime::Agent) -> SpawnedAgentSummary {
         self.agent.register_subagent(agent)
     }
 
+    /// Marks a tracked subagent as finished.
     pub fn finish_subagent(
         &mut self,
         id: &str,
@@ -176,6 +199,7 @@ impl ToolContext<'_> {
         self.agent.finish_subagent(id, status)
     }
 
+    /// Spawns a persistent teammate in the current team namespace.
     pub async fn spawn_teammate(
         &mut self,
         name: impl Into<String>,
@@ -185,6 +209,7 @@ impl ToolContext<'_> {
         self.agent.spawn_teammate(name, role, prompt).await
     }
 
+    /// Sends a direct message to a teammate.
     pub fn send_team_message(
         &self,
         to: &str,
@@ -193,6 +218,7 @@ impl ToolContext<'_> {
         self.agent.send_team_message(to, content)
     }
 
+    /// Broadcasts a message to every known teammate except the sender.
     pub fn broadcast_team_message(
         &self,
         content: impl Into<String>,
@@ -200,10 +226,12 @@ impl ToolContext<'_> {
         self.agent.broadcast_team_message(content)
     }
 
+    /// Reads and acknowledges the current team inbox.
     pub fn read_team_inbox(&self) -> Result<Vec<TeamMessage>, RuntimeError> {
         self.agent.read_team_inbox()
     }
 
+    /// Creates a team protocol request addressed to a teammate.
     pub fn request_team_protocol(
         &self,
         to: &str,
@@ -213,22 +241,27 @@ impl ToolContext<'_> {
         self.agent.request_team_protocol(to, protocol, content)
     }
 
+    /// Resolves a team protocol request.
     pub fn respond_team_protocol(
         &self,
         request_id: &str,
         approve: bool,
         reason: Option<String>,
     ) -> Result<TeamProtocolRequestSummary, RuntimeError> {
-        self.agent.respond_team_protocol(request_id, approve, reason)
+        self.agent
+            .respond_team_protocol(request_id, approve, reason)
     }
-
 }
 
+/// String result returned by Mentra tools.
 pub type ToolResult = Result<String, String>;
 
+/// Trait implemented by custom tools exposed to models.
 #[async_trait]
 pub trait ExecutableTool: Send + Sync {
+    /// Returns the static tool metadata used in model requests.
     fn spec(&self) -> ToolSpec;
 
+    /// Executes the tool for one model-emitted input payload.
     async fn execute(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult;
 }
