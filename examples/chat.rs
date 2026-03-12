@@ -2,7 +2,7 @@ use std::{io::Write, path::PathBuf};
 
 use dotenvy::dotenv;
 use mentra::{
-    ContentBlock, ModelInfo, ModelProviderKind,
+    ContentBlock, ModelInfo, ModelProviderKind, ProviderDescriptor,
     runtime::{
         Agent, AgentConfig, AgentEvent, ContextCompactionConfig, Runtime, TaskItem, TaskStatus,
         TeamAutonomyConfig,
@@ -91,11 +91,12 @@ fn example_compaction_config() -> ContextCompactionConfig {
 async fn pick_model(runtime: &Runtime) -> ModelInfo {
     let providers = runtime.providers();
     let provider = pick_provider(&providers);
-    let mut discovered_models = match runtime.list_models(Some(provider)).await {
+    let provider_name = provider_name(&provider);
+    let mut discovered_models = match runtime.list_models(Some(&provider.id)).await {
         Ok(models) => models,
         Err(error) => {
-            println!("Failed to list models for provider {provider}: {error:?}");
-            return prompt_manual_model(provider);
+            println!("Failed to list models for provider {provider_name}: {error:?}");
+            return prompt_manual_model(&provider);
         }
     };
 
@@ -108,11 +109,11 @@ async fn pick_model(runtime: &Runtime) -> ModelInfo {
     discovered_models.truncate(10);
 
     if discovered_models.is_empty() {
-        println!("No models were returned for provider {provider}.");
-        return prompt_manual_model(provider);
+        println!("No models were returned for provider {provider_name}.");
+        return prompt_manual_model(&provider);
     }
 
-    println!("Available models for {provider} (newest to oldest):");
+    println!("Available models for {provider_name} (newest to oldest):");
     for (index, model) in discovered_models.iter().enumerate() {
         let display_name = model.display_name.as_deref().unwrap_or(&model.id);
         println!("  {}. {}", index + 1, display_name);
@@ -142,7 +143,7 @@ async fn pick_model(runtime: &Runtime) -> ModelInfo {
         match selection {
             Ok(index) if (1..=discovered_models.len()).contains(&index) => {
                 let model = discovered_models[index - 1].clone();
-                println!("Picked model: {} ({provider})", model.id);
+                println!("Picked model: {} ({provider_name})", model.id);
                 return model;
             }
             _ => {
@@ -155,8 +156,8 @@ async fn pick_model(runtime: &Runtime) -> ModelInfo {
     }
 }
 
-fn prompt_manual_model(provider: ModelProviderKind) -> ModelInfo {
-    println!("Enter a model ID manually for {provider}.");
+fn prompt_manual_model(provider: &ProviderDescriptor) -> ModelInfo {
+    println!("Enter a model ID manually for {}.", provider_name(provider));
 
     loop {
         print!("Model ID: ");
@@ -175,7 +176,7 @@ fn prompt_manual_model(provider: ModelProviderKind) -> ModelInfo {
 
         return ModelInfo {
             id: model_id.to_string(),
-            provider,
+            provider: provider.id.clone(),
             display_name: None,
             description: Some("Entered manually".to_string()),
             created_at: None,
@@ -183,16 +184,16 @@ fn prompt_manual_model(provider: ModelProviderKind) -> ModelInfo {
     }
 }
 
-fn pick_provider(providers: &[ModelProviderKind]) -> ModelProviderKind {
+fn pick_provider(providers: &[ProviderDescriptor]) -> ProviderDescriptor {
     if providers.len() == 1 {
-        let provider = providers[0];
-        println!("Using provider: {provider}");
+        let provider = providers[0].clone();
+        println!("Using provider: {}", provider_name(&provider));
         return provider;
     }
 
     println!("Available providers:");
     for (index, provider) in providers.iter().enumerate() {
-        println!("  {}. {}", index + 1, provider);
+        println!("  {}. {}", index + 1, provider_name(provider));
     }
 
     loop {
@@ -207,8 +208,8 @@ fn pick_provider(providers: &[ModelProviderKind]) -> ModelProviderKind {
         let selection = input.trim().parse::<usize>();
         match selection {
             Ok(index) if (1..=providers.len()).contains(&index) => {
-                let provider = providers[index - 1];
-                println!("Using provider: {provider}");
+                let provider = providers[index - 1].clone();
+                println!("Using provider: {}", provider_name(&provider));
                 return provider;
             }
             _ => {
@@ -216,6 +217,13 @@ fn pick_provider(providers: &[ModelProviderKind]) -> ModelProviderKind {
             }
         }
     }
+}
+
+fn provider_name(provider: &ProviderDescriptor) -> &str {
+    provider
+        .display_name
+        .as_deref()
+        .unwrap_or(provider.id.as_str())
 }
 
 fn subscribe_events(agent: &Agent) -> tokio::task::JoinHandle<()> {
