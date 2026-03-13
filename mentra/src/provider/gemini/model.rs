@@ -385,8 +385,8 @@ mod tests {
                 Message::user(ContentBlock::text("What files changed?")),
                 Message::assistant(ContentBlock::ToolUse {
                     id: "call_1".to_string(),
-                    name: "read_file".to_string(),
-                    input: json!({ "path": "README.md" }),
+                    name: "files".to_string(),
+                    input: json!({ "operations": [{ "op": "read", "path": "README.md" }] }),
                 }),
                 Message::user(ContentBlock::ToolResult {
                     tool_use_id: "call_1".to_string(),
@@ -395,12 +395,12 @@ mod tests {
                 }),
             ]),
             tools: Cow::Owned(vec![ToolSpec {
-                name: "read_file".to_string(),
-                description: Some("Read a file".to_string()),
+                name: "files".to_string(),
+                description: Some("Read and edit files".to_string()),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" }
+                        "operations": { "type": "array" }
                     }
                 }),
                 capabilities: vec![],
@@ -408,7 +408,7 @@ mod tests {
                 durability: crate::tool::ToolDurability::ReplaySafe,
             }]),
             tool_choice: Some(ToolChoice::Tool {
-                name: "read_file".to_string(),
+                name: "files".to_string(),
             }),
             temperature: Some(0.2),
             max_output_tokens: Some(256),
@@ -433,11 +433,11 @@ mod tests {
         );
         assert_eq!(
             payload["contents"][1]["parts"][0]["functionCall"]["name"],
-            "read_file"
+            "files"
         );
         assert_eq!(
             payload["contents"][2]["parts"][0]["functionResponse"]["name"],
-            "read_file"
+            "files"
         );
         assert_eq!(
             payload["contents"][2]["parts"][0]["functionResponse"]["response"]["content"],
@@ -445,7 +445,7 @@ mod tests {
         );
         assert_eq!(
             payload["tools"][0]["functionDeclarations"][0]["name"],
-            "read_file"
+            "files"
         );
         assert_eq!(
             payload["toolConfig"]["functionCallingConfig"]["mode"],
@@ -453,7 +453,7 @@ mod tests {
         );
         assert_eq!(
             payload["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"][0],
-            "read_file"
+            "files"
         );
         let temperature = payload["generationConfig"]["temperature"]
             .as_f64()

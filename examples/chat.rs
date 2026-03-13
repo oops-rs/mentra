@@ -488,14 +488,29 @@ fn describe_tool_call(call: &ToolCall) -> String {
         return "check_background".to_string();
     }
 
-    if call.name == "read_file"
-        && let Some(path) = call.input.get("path").and_then(|value| value.as_str())
+    if call.name == "files"
+        && let Some(operations) = call
+            .input
+            .get("operations")
+            .and_then(|value| value.as_array())
     {
-        if let Some(lines) = call.input.get("lines").and_then(|value| value.as_u64()) {
-            return format!("read_file {} ({lines} lines)", path);
+        if let Some(operation) = operations.first()
+            && let Some(op) = operation.get("op").and_then(|value| value.as_str())
+        {
+            let path = operation
+                .get("path")
+                .or_else(|| operation.get("from"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let suffix = if operations.len() > 1 {
+                format!(" (+{} more)", operations.len() - 1)
+            } else {
+                String::new()
+            };
+            return format!("files {op} {path}{suffix}");
         }
 
-        return format!("read_file {} (all lines)", path);
+        return "files".to_string();
     }
 
     if call.name == "task"

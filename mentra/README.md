@@ -6,7 +6,7 @@ Mentra is an agent runtime for building tool-using LLM applications.
 
 - streaming model response handling
 - custom tool execution through the async `ExecutableTool` trait
-- builtin `shell`, `background_run`, `check_background`, and `read_file` tools
+- builtin `shell`, `background_run`, `check_background`, and `files` tools
 - builtin `task` subagents with isolated child context and parent-side tracking
 - persistent agent teams with `team_spawn`, `team_send`, `broadcast`, `team_read_inbox`, and generic request-response protocols via `team_request`, `team_respond`, and `team_list_requests`
 - three-layer context compaction with silent tool-result shrinking, auto-summary compaction, and a builtin `compact` tool
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Coding Agent Setup
 
-`Runtime::builder()` registers Mentra's builtin tools, including `shell`, `background_run`, `check_background`, `read_file`, and the runtime/task/team intrinsics. Shell and background execution remain disabled by default, so coding-agent setups must opt in with a runtime policy.
+`Runtime::builder()` registers Mentra's builtin tools, including `shell`, `background_run`, `check_background`, `files`, and the runtime/task/team intrinsics. Shell and background execution remain disabled by default, so coding-agent setups must opt in with a runtime policy.
 
 ```rust,no_run
 use mentra::{BuiltinProvider, Runtime, RuntimePolicy};

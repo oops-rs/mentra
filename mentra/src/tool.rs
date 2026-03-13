@@ -68,7 +68,7 @@ impl Default for ToolRegistry {
         registry.register_tool(builtin::ShellTool);
         registry.register_tool(builtin::BackgroundRunTool);
         registry.register_tool(builtin::CheckBackgroundTool);
-        registry.register_tool(builtin::ReadFileTool);
+        registry.register_tool(builtin::FilesTool);
         registry
     }
 }

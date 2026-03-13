@@ -30,3 +30,4 @@ rusqlite = { version = "0.32.1", features = ["bundled"] }
 thiserror = "2.0.18"
 strum = { version = "0.27", features = ["derive"] }
 libc = "0.2"
+regex = "1.12.2"

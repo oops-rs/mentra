@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, sleep, timeout};
 
 use crate::{
     ContentBlock, Message, ProviderId, Role,
@@ -594,6 +594,430 @@ async fn shell_tool_is_denied_by_default_policy_and_audited() {
 }
 
 #[tokio::test]
+async fn files_tool_reads_numbered_lines() {
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-read",
+                "files",
+                r#"{"operations":[{"op":"read","path":"note.txt","offset":2,"limit":1}]}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-read");
+    fs::write(repo_dir.join("note.txt"), "alpha\nbeta\ngamma\n").expect("write note");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "read the second line".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    assert_eq!(
+        agent.history()[2],
+        Message::user(ContentBlock::ToolResult {
+            tool_use_id: "files-read".to_string(),
+            content: "read note.txt\nL2: beta".to_string(),
+            is_error: false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn files_tool_can_stage_create_then_read_in_one_call() {
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-create-read",
+                "files",
+                r#"{"operations":[{"op":"create","path":"draft.txt","content":"hello"},{"op":"read","path":"draft.txt"}]}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-create-read");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "create a draft and read it back".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    let content = match &agent.history()[2] {
+        Message {
+            role: Role::User,
+            content,
+        } => content.first().expect("tool result"),
+        _ => panic!("expected tool result"),
+    };
+    match content {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            assert_eq!(tool_use_id, "files-create-read");
+            assert!(!is_error);
+            assert!(content.contains("create draft.txt"));
+            assert!(content.contains("read draft.txt"));
+            assert!(content.contains("L1: hello"));
+        }
+        other => panic!("unexpected content block: {other:?}"),
+    }
+    assert_eq!(
+        fs::read_to_string(repo_dir.join("draft.txt")).expect("read draft"),
+        "hello"
+    );
+}
+
+#[tokio::test]
+async fn files_tool_can_update_existing_files() {
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-set-read",
+                "files",
+                r#"{"operations":[{"op":"set","path":"note.txt","content":"updated\n"},{"op":"read","path":"note.txt"}]}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-set-read");
+    fs::write(repo_dir.join("note.txt"), "original\n").expect("write note");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "update the note and read it back".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    let content = match &agent.history()[2] {
+        Message {
+            role: Role::User,
+            content,
+        } => content.first().expect("tool result"),
+        _ => panic!("expected tool result"),
+    };
+    match content {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            assert_eq!(tool_use_id, "files-set-read");
+            assert!(!is_error);
+            assert!(content.contains("set note.txt"));
+            assert!(content.contains("L1: updated"));
+        }
+        other => panic!("unexpected content block: {other:?}"),
+    }
+    assert_eq!(
+        fs::read_to_string(repo_dir.join("note.txt")).expect("read note"),
+        "updated\n"
+    );
+}
+
+#[tokio::test]
+async fn files_tool_lists_and_searches_with_staged_state() {
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-list-search",
+                "files",
+                r#"{"operations":[{"op":"create","path":"src/new.txt","content":"beta\ncreated\n"},{"op":"list","path":".","depth":2,"limit":10},{"op":"search","path":".","pattern":"beta","limit":10}]}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-list-search");
+    fs::create_dir_all(repo_dir.join("src")).expect("create src");
+    fs::write(repo_dir.join("note.txt"), "alpha\nbeta\n").expect("write note");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "create a file, then list and search".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    let tool_output = match &agent.history()[2] {
+        Message {
+            role: Role::User,
+            content,
+        } => match content.first().expect("tool result") {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            other => panic!("unexpected content block: {other:?}"),
+        },
+        _ => panic!("expected tool result"),
+    };
+    assert!(tool_output.contains("create src/new.txt"));
+    assert!(tool_output.contains("[file] note.txt"));
+    assert!(tool_output.contains("[dir] src"));
+    assert!(tool_output.contains("[file] src/new.txt"));
+    assert!(tool_output.contains("note.txt:2: beta"));
+    assert!(tool_output.contains("src/new.txt:1: beta"));
+}
+
+#[tokio::test]
+async fn files_tool_aborts_without_partial_mutation_on_validation_error() {
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-fail",
+                "files",
+                r#"{"operations":[{"op":"create","path":"draft.txt","content":"hello"},{"op":"replace","path":"draft.txt","old":"missing","new":"present"}]}"#,
+            ),
+            text_stream(&model.id, "handled"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-no-partial");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "this edit should fail cleanly".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    match &agent.history()[2] {
+        Message {
+            role: Role::User,
+            content,
+        } => match content.first().expect("tool result") {
+            ContentBlock::ToolResult {
+                is_error: true,
+                content,
+                ..
+            } => assert!(content.contains("Expected 1 replacement(s)")),
+            other => panic!("unexpected content block: {other:?}"),
+        },
+        _ => panic!("expected tool result"),
+    }
+    assert!(!repo_dir.join("draft.txt").exists());
+}
+
+#[tokio::test]
+async fn files_tool_denies_writes_outside_workspace_roots() {
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-denied",
+                "files",
+                r#"{"operations":[{"op":"create","path":"../outside.txt","content":"nope"}]}"#,
+            ),
+            text_stream(&model.id, "handled"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-denied");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "try to write outside the repo".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    match &agent.history()[2] {
+        Message {
+            role: Role::User,
+            content,
+        } => match content.first().expect("tool result") {
+            ContentBlock::ToolResult {
+                is_error: true,
+                content,
+                ..
+            } => assert!(content.contains("outside the runtime policy write roots")),
+            other => panic!("unexpected content block: {other:?}"),
+        },
+        _ => panic!("expected tool result"),
+    }
+    assert!(!repo_dir.join("..").join("outside.txt").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn files_tool_search_handles_symlink_loops() {
+    use std::os::unix::fs::symlink;
+
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-search-loop",
+                "files",
+                r#"{"operations":[{"op":"search","path":".","pattern":"never-match","limit":10}]}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-search-loop");
+    fs::write(repo_dir.join("note.txt"), "alpha\nbeta\n").expect("write note");
+    symlink(".", repo_dir.join("loop")).expect("create loop symlink");
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    timeout(
+        Duration::from_secs(2),
+        agent.send(vec![ContentBlock::Text {
+            text: "search the repo".to_string(),
+        }]),
+    )
+    .await
+    .expect("search should finish")
+    .expect("send");
+
+    match &agent.history()[2] {
+        Message {
+            role: Role::User,
+            content,
+        } => match content.first().expect("tool result") {
+            ContentBlock::ToolResult {
+                is_error: false,
+                content,
+                ..
+            } => assert!(content.contains("(no matches)")),
+            other => panic!("unexpected content block: {other:?}"),
+        },
+        _ => panic!("expected tool result"),
+    }
+}
+
+#[tokio::test]
 async fn background_run_reuses_shell_policy_evaluation() {
     let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
@@ -644,8 +1068,16 @@ async fn run_options_tool_budget_blocks_second_tool_call() {
         vec![multi_tool_use_stream(
             &model.id,
             &[
-                ("read-1", "read_file", r#"{"path":"note.txt"}"#),
-                ("read-2", "read_file", r#"{"path":"note.txt"}"#),
+                (
+                    "read-1",
+                    "files",
+                    r#"{"operations":[{"op":"read","path":"note.txt"}]}"#,
+                ),
+                (
+                    "read-2",
+                    "files",
+                    r#"{"operations":[{"op":"read","path":"note.txt"}]}"#,
+                ),
             ],
         )],
     );
@@ -691,7 +1123,12 @@ async fn run_options_model_budget_blocks_follow_up_round() {
         ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "read-1", "read_file", r#"{"path":"note.txt"}"#),
+            tool_use_stream(
+                &model.id,
+                "read-1",
+                "files",
+                r#"{"operations":[{"op":"read","path":"note.txt"}]}"#,
+            ),
             text_stream(&model.id, "done"),
         ],
     );
@@ -984,7 +1421,8 @@ async fn default_runtime_exposes_task_and_new_empty_does_not() {
     assert!(default_tools.contains("background_run"));
     assert!(default_tools.contains("check_background"));
     assert!(default_tools.contains("compact"));
-    assert!(default_tools.contains("read_file"));
+    assert!(default_tools.contains("files"));
+    assert!(!default_tools.contains("read_file"));
     assert!(default_tools.contains("task"));
     assert!(default_tools.contains("task_create"));
     assert!(default_tools.contains("task_claim"));
@@ -1015,6 +1453,7 @@ async fn default_runtime_exposes_task_and_new_empty_does_not() {
     let empty_tools = tool_names(&empty_requests[0]);
     assert!(!empty_tools.contains("background_run"));
     assert!(!empty_tools.contains("check_background"));
+    assert!(!empty_tools.contains("files"));
     assert!(!empty_tools.contains("compact"));
     assert!(!empty_tools.contains("task"));
     assert!(!empty_tools.contains("task_create"));
@@ -1201,7 +1640,7 @@ async fn task_tool_runs_child_with_isolated_history_and_filtered_tools() {
 
     let child_tools = tool_names(&requests[1]);
     assert!(child_tools.contains("shell"));
-    assert!(child_tools.contains("read_file"));
+    assert!(child_tools.contains("files"));
     assert!(!child_tools.contains("idle"));
     assert!(!child_tools.contains("task"));
 

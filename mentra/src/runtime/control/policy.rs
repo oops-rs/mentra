@@ -1,5 +1,6 @@
 use std::{
-    path::{Path, PathBuf},
+    fs,
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -15,6 +16,7 @@ pub struct RuntimePolicy {
     allow_background_commands: bool,
     allowed_working_roots: Vec<PathBuf>,
     allowed_read_roots: Vec<PathBuf>,
+    allowed_write_roots: Vec<PathBuf>,
     allowed_env_vars: Vec<String>,
     approval_policy: ApprovalPolicy,
     exec_rules: Vec<ExecRule>,
@@ -31,6 +33,7 @@ impl Default for RuntimePolicy {
             allow_background_commands: false,
             allowed_working_roots: Vec::new(),
             allowed_read_roots: Vec::new(),
+            allowed_write_roots: Vec::new(),
             allowed_env_vars: vec!["PATH".to_string()],
             approval_policy: ApprovalPolicy::UnlessAllowed,
             exec_rules: Vec::new(),
@@ -74,6 +77,12 @@ impl RuntimePolicy {
     /// Adds an extra root allowed for builtin file reads.
     pub fn with_allowed_read_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.allowed_read_roots.push(path.into());
+        self
+    }
+
+    /// Adds an extra root allowed for builtin file writes.
+    pub fn with_allowed_write_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.allowed_write_roots.push(path.into());
         self
     }
 
@@ -215,11 +224,7 @@ impl RuntimePolicy {
         base_dir: &Path,
         path: &Path,
     ) -> Result<PathBuf, String> {
-        let resolved = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            base_dir.join(path)
-        };
+        let resolved = resolve_authorized_path(base_dir, path)?;
 
         if path_is_allowed(
             resolved.as_path(),
@@ -230,6 +235,27 @@ impl RuntimePolicy {
         } else {
             Err(format!(
                 "Path '{}' is outside the runtime policy read roots",
+                resolved.display()
+            ))
+        }
+    }
+
+    pub(crate) fn authorize_file_write(
+        &self,
+        base_dir: &Path,
+        path: &Path,
+    ) -> Result<PathBuf, String> {
+        let resolved = resolve_authorized_path(base_dir, path)?;
+
+        if path_is_allowed(
+            resolved.as_path(),
+            base_dir,
+            self.allowed_write_roots.as_slice(),
+        ) {
+            Ok(resolved)
+        } else {
+            Err(format!(
+                "Path '{}' is outside the runtime policy write roots",
                 resolved.display()
             ))
         }
@@ -265,12 +291,113 @@ impl RuntimePolicy {
 }
 
 fn path_is_allowed(path: &Path, default_root: &Path, extra_roots: &[PathBuf]) -> bool {
-    path.starts_with(default_root) || extra_roots.iter().any(|root| path.starts_with(root))
+    let default_root = canonicalize_policy_root(default_root);
+    path.starts_with(&default_root)
+        || extra_roots
+            .iter()
+            .map(|root| canonicalize_policy_root(root))
+            .any(|root| path.starts_with(root))
+}
+
+fn canonicalize_policy_root(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn resolve_authorized_path(base_dir: &Path, path: &Path) -> Result<PathBuf, String> {
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    };
+    let normalized = normalize_absolute_path(&resolved)?;
+    resolve_existing_components(&normalized)
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "Path '{}' must resolve to an absolute path",
+            path.display()
+        ));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() || !normalized.is_absolute() {
+                    return Err(format!(
+                        "Path '{}' escapes the filesystem root",
+                        path.display()
+                    ));
+                }
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+
+    if !normalized.is_absolute() {
+        return Err(format!(
+            "Path '{}' must resolve to an absolute path",
+            path.display()
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn resolve_existing_components(path: &Path) -> Result<PathBuf, String> {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+            Component::RootDir => resolved.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => unreachable!("paths are normalized before resolution"),
+            Component::Normal(segment) => {
+                resolved.push(segment);
+                match fs::symlink_metadata(&resolved) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        resolved = fs::canonicalize(&resolved).map_err(|error| {
+                            format!(
+                                "Failed to resolve symlink '{}': {error}",
+                                resolved.display()
+                            )
+                        })?;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "Failed to inspect '{}': {error}",
+                            resolved.display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !resolved.is_absolute() {
+        return Err(format!(
+            "Path '{}' must resolve to an absolute path",
+            path.display()
+        ));
+    }
+
+    Ok(resolved)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn heuristic_fallback_allows_safe_commands_and_prompts_unknown() {
@@ -347,5 +474,46 @@ mod tests {
             )
             .expect_err("background should be disabled");
         assert!(error.contains("Background command execution is disabled"));
+    }
+
+    #[test]
+    fn normalize_absolute_path_rejects_parent_past_root() {
+        let mut path = std::env::temp_dir();
+        for _ in 0..10 {
+            path.push("..");
+        }
+        path.push("escape");
+        let error = normalize_absolute_path(&path).expect_err("path should be rejected");
+        assert!(error.contains("escapes the filesystem root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorize_file_write_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("policy-write-root");
+        let outside = unique_temp_dir("policy-write-outside");
+        let link = root.join("link");
+        symlink(&outside, &link).expect("create symlink");
+
+        let policy = RuntimePolicy::default().with_allowed_write_root(&root);
+        let error = policy
+            .authorize_file_write(&root, &link.join("escape.txt"))
+            .expect_err("symlink escape should be denied");
+        assert!(error.contains("outside the runtime policy write roots"));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("duration")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mentra-{label}-{unique}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 }

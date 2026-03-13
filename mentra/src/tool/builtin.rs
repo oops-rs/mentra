@@ -1,3 +1,6 @@
+#[path = "files.rs"]
+mod files;
+
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -6,11 +9,12 @@ use crate::tool::{
     ToolSpec,
 };
 
+pub use files::FilesTool;
+
 pub struct ShellTool;
 pub struct BackgroundRunTool;
 pub struct CheckBackgroundTool;
 pub struct LoadSkillTool;
-pub struct ReadFileTool;
 
 #[async_trait]
 impl ExecutableTool for ShellTool {
@@ -188,46 +192,6 @@ impl ExecutableTool for CheckBackgroundTool {
     async fn execute(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         let task_id = input.get("task_id").and_then(|value| value.as_str());
         ctx.check_background_task(task_id)
-    }
-}
-
-#[async_trait]
-impl ExecutableTool for ReadFileTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "read_file".to_string(),
-            description: Some("Read the first N lines of a file.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to read"
-                    },
-                    "lines": {
-                        "type": "integer",
-                        "description": "Maximum number of lines to read. If omitted, read the whole file"
-                    }
-                },
-                "required": ["path"]
-            }),
-            capabilities: vec![ToolCapability::ReadOnly, ToolCapability::FilesystemRead],
-            side_effect_level: ToolSideEffectLevel::None,
-            durability: ToolDurability::ReplaySafe,
-        }
-    }
-
-    async fn execute(&self, _ctx: ToolContext<'_>, input: Value) -> ToolResult {
-        let path = input
-            .get("path")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "Path is required".to_string())?;
-        let max_lines = input
-            .get("lines")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize);
-
-        _ctx.read_file(path, max_lines).await
     }
 }
 

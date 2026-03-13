@@ -325,8 +325,8 @@ mod tests {
                 Message::assistant(ContentBlock::text("I'll inspect that.")),
                 Message::assistant(ContentBlock::ToolUse {
                     id: "call_123".to_string(),
-                    name: "read_file".to_string(),
-                    input: json!({ "path": "README.md" }),
+                    name: "files".to_string(),
+                    input: json!({ "operations": [{ "op": "read", "path": "README.md" }] }),
                 }),
                 Message::assistant(ContentBlock::ToolResult {
                     tool_use_id: "call_123".to_string(),
@@ -335,12 +335,12 @@ mod tests {
                 }),
             ]),
             tools: Cow::Owned(vec![ToolSpec {
-                name: "read_file".to_string(),
-                description: Some("Read a file".to_string()),
+                name: "files".to_string(),
+                description: Some("Read and edit files".to_string()),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" }
+                        "operations": { "type": "array" }
                     }
                 }),
                 capabilities: vec![],
@@ -348,7 +348,7 @@ mod tests {
                 durability: crate::tool::ToolDurability::ReplaySafe,
             }]),
             tool_choice: Some(ToolChoice::Tool {
-                name: "read_file".to_string(),
+                name: "files".to_string(),
             }),
             temperature: Some(0.2),
             max_output_tokens: Some(256),
@@ -377,12 +377,12 @@ mod tests {
         );
         assert_eq!(payload["input"][2]["type"], "function_call");
         assert_eq!(payload["input"][2]["call_id"], "call_123");
-        assert_eq!(payload["input"][2]["name"], "read_file");
+        assert_eq!(payload["input"][2]["name"], "files");
         assert_eq!(payload["input"][3]["type"], "function_call_output");
         assert_eq!(payload["input"][3]["output"], "README contents");
         assert_eq!(payload["tools"][0]["type"], "function");
         assert_eq!(payload["tool_choice"]["type"], "function");
-        assert_eq!(payload["tool_choice"]["name"], "read_file");
+        assert_eq!(payload["tool_choice"]["name"], "files");
         let temperature = payload["temperature"]
             .as_f64()
             .expect("temperature should be numeric");
