@@ -26,11 +26,11 @@ use tokio::sync::{broadcast, watch};
 
 use crate::{
     Message,
+    background::BackgroundNotification,
     error::RuntimeError,
     provider::{Provider, ProviderId, ToolChoice},
     runtime::{
         LoadedAgentState, RuntimeIntrinsicTool, TaskItem,
-        background::BackgroundNotification,
         handle::{AgentExecutionConfig, AgentObserver, RuntimeHandle},
     },
     team::TeamMessage,

@@ -2,10 +2,11 @@ use std::borrow::Cow;
 
 use crate::{
     ContentBlock, Message,
+    background::BackgroundNotification,
     error::RuntimeError,
     provider::Request,
     runtime::{
-        RunOptions, RuntimeHookEvent, background::BackgroundNotification,
+        RunOptions, RuntimeHookEvent,
         control::is_transient_provider_error,
     },
     team::format_inbox,

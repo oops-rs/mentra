@@ -14,8 +14,8 @@ use tokio::sync::{broadcast, watch};
 
 use crate::{
     agent::{AgentEvent, AgentSnapshot},
+    background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
     runtime::{
-        background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
         control::{
             AuditHook, CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor,
             RuntimeExecutor, RuntimeHookEvent, RuntimeHooks, RuntimePolicy, read_limited_file,

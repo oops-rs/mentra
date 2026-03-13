@@ -1,4 +1,54 @@
 use super::*;
+use crate::background::BackgroundHookSink;
+
+#[derive(Clone)]
+struct RuntimeBackgroundHookSink {
+    store: Arc<dyn RuntimeStore>,
+    hooks: RuntimeHooks,
+}
+
+impl BackgroundHookSink for RuntimeBackgroundHookSink {
+    fn task_started(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        command: &str,
+        cwd: &Path,
+    ) -> Result<(), RuntimeError> {
+        self.hooks.emit(
+            self.store.as_ref(),
+            &RuntimeHookEvent::BackgroundTaskStarted {
+                agent_id: agent_id.to_string(),
+                task_id: task_id.to_string(),
+                command: command.to_string(),
+                cwd: cwd.to_path_buf(),
+            },
+        )
+    }
+
+    fn task_finished(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        status: &str,
+    ) -> Result<(), RuntimeError> {
+        self.hooks.emit(
+            self.store.as_ref(),
+            &RuntimeHookEvent::BackgroundTaskFinished {
+                agent_id: agent_id.to_string(),
+                task_id: task_id.to_string(),
+                status: status.to_string(),
+            },
+        )
+    }
+}
+
+fn background_hook_sink(
+    store: Arc<dyn RuntimeStore>,
+    hooks: RuntimeHooks,
+) -> Arc<dyn BackgroundHookSink> {
+    Arc::new(RuntimeBackgroundHookSink { store, hooks })
+}
 
 impl RuntimeHandle {
     pub fn new(runtime_intrinsics_enabled: bool) -> Self {
@@ -36,7 +86,7 @@ impl RuntimeHandle {
             background_tasks: BackgroundTaskManager::new(
                 store.clone(),
                 executor.clone(),
-                hooks.clone(),
+                background_hook_sink(store.clone(), hooks.clone()),
             ),
             team: TeamManager::new(store.clone()),
             store,
@@ -73,7 +123,7 @@ impl RuntimeHandle {
             background_tasks: BackgroundTaskManager::new(
                 store.clone(),
                 self.executor.clone(),
-                self.hooks.clone(),
+                background_hook_sink(store.clone(), self.hooks.clone()),
             ),
             team: TeamManager::new(store.clone()),
             store,
@@ -109,7 +159,7 @@ impl RuntimeHandle {
             background_tasks: BackgroundTaskManager::new(
                 self.store.clone(),
                 executor.clone(),
-                self.hooks.clone(),
+                background_hook_sink(self.store.clone(), self.hooks.clone()),
             ),
             team: self.team.clone(),
             store: self.store.clone(),
@@ -141,7 +191,7 @@ impl RuntimeHandle {
             background_tasks: BackgroundTaskManager::new(
                 self.store.clone(),
                 self.executor.clone(),
-                self.hooks.clone(),
+                background_hook_sink(self.store.clone(), self.hooks.clone()),
             ),
             team: self.team.clone(),
             store: self.store.clone(),
@@ -173,7 +223,7 @@ impl RuntimeHandle {
             background_tasks: BackgroundTaskManager::new(
                 self.store.clone(),
                 self.executor.clone(),
-                hooks.clone(),
+                background_hook_sink(self.store.clone(), hooks.clone()),
             ),
             team: self.team.clone(),
             store: self.store.clone(),
@@ -205,7 +255,7 @@ impl RuntimeHandle {
             background_tasks: BackgroundTaskManager::new(
                 self.store.clone(),
                 self.executor.clone(),
-                self.hooks.clone(),
+                background_hook_sink(self.store.clone(), self.hooks.clone()),
             ),
             team: self.team.clone(),
             store: self.store.clone(),

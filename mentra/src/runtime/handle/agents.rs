@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     agent::{AgentEvent, AgentSnapshot},
+    background::{BackgroundObserverSink, BackgroundRegistration},
     team::{TeamObserverSink, TeamRegistration},
 };
 
@@ -48,6 +49,36 @@ impl TeamObserverSink for AgentTeamObserver {
     }
 }
 
+struct AgentBackgroundObserver {
+    snapshot_tx: watch::Sender<AgentSnapshot>,
+    snapshot: Arc<Mutex<AgentSnapshot>>,
+    events: broadcast::Sender<AgentEvent>,
+}
+
+impl AgentBackgroundObserver {
+    fn new(observer: &AgentObserver) -> Self {
+        Self {
+            snapshot_tx: observer.snapshot_tx.clone(),
+            snapshot: Arc::clone(&observer.snapshot),
+            events: observer.events.clone(),
+        }
+    }
+}
+
+impl BackgroundObserverSink for AgentBackgroundObserver {
+    fn publish_snapshot(&self, tasks: &[crate::background::BackgroundTaskSummary]) {
+        let mut snapshot = self.snapshot.lock().expect("agent snapshot poisoned");
+        snapshot.background_tasks = tasks.to_vec();
+        let next_snapshot = snapshot.clone();
+        drop(snapshot);
+        self.snapshot_tx.send_replace(next_snapshot);
+    }
+
+    fn publish_event(&self, event: AgentEvent) {
+        let _ = self.events.send(event);
+    }
+}
+
 impl RuntimeHandle {
     pub fn register_agent(
         &self,
@@ -57,7 +88,10 @@ impl RuntimeHandle {
         observer: &AgentObserver,
     ) -> Result<(), RuntimeError> {
         self.acquire_agent_lease(agent_id)?;
-        self.background_tasks.register_agent(agent_id, observer);
+        self.background_tasks.register_agent(BackgroundRegistration {
+            agent_id: agent_id.to_string(),
+            observer: Arc::new(AgentBackgroundObserver::new(observer)),
+        });
         self.team.register_agent(TeamRegistration {
             agent_name: agent_name.to_string(),
             team_dir: config.team_dir.clone(),

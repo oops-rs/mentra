@@ -1,3 +1,7 @@
+mod hook;
+mod observer;
+mod store;
+
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -9,14 +13,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use strum::Display;
-use tokio::sync::{broadcast, watch};
 
-use crate::agent::{AgentEvent, AgentSnapshot};
-use crate::runtime::{
-    RuntimeStore,
-    control::{CommandOutput, CommandRequest, RuntimeExecutor, RuntimeHookEvent, RuntimeHooks},
-    handle::AgentObserver,
-};
+use crate::agent::AgentEvent;
+use crate::runtime::control::{CommandOutput, CommandRequest, RuntimeExecutor};
+
+pub(crate) use hook::BackgroundHookSink;
+pub(crate) use observer::{BackgroundObserverSink, BackgroundRegistration};
+pub use store::BackgroundStore;
 
 const OUTPUT_PREVIEW_MAX_CHARS: usize = 500;
 const NOTIFICATION_PENDING: i64 = 0;
@@ -56,9 +59,9 @@ pub(crate) struct BackgroundTaskManager {
 }
 
 struct BackgroundTaskManagerInner {
-    store: Arc<dyn RuntimeStore>,
+    store: Arc<dyn BackgroundStore>,
     executor: Arc<dyn RuntimeExecutor>,
-    hooks: RuntimeHooks,
+    hooks: Arc<dyn BackgroundHookSink>,
     next_task_id: AtomicU64,
     state: Mutex<BackgroundTaskManagerState>,
 }
@@ -76,16 +79,14 @@ struct AgentBackgroundState {
 
 #[derive(Clone)]
 struct BackgroundObserver {
-    events: broadcast::Sender<AgentEvent>,
-    snapshot_tx: watch::Sender<AgentSnapshot>,
-    snapshot: Arc<Mutex<AgentSnapshot>>,
+    sink: Arc<dyn BackgroundObserverSink>,
 }
 
 impl BackgroundTaskManager {
     pub(crate) fn new(
-        store: Arc<dyn RuntimeStore>,
+        store: Arc<dyn BackgroundStore>,
         executor: Arc<dyn RuntimeExecutor>,
-        hooks: RuntimeHooks,
+        hooks: Arc<dyn BackgroundHookSink>,
     ) -> Self {
         Self {
             inner: Arc::new(BackgroundTaskManagerInner {
@@ -98,34 +99,27 @@ impl BackgroundTaskManager {
         }
     }
 
-    pub(crate) fn register_agent(&self, agent_id: &str, observer: &AgentObserver) {
+    pub(crate) fn register_agent(&self, registration: BackgroundRegistration) {
+        let BackgroundRegistration { agent_id, observer } = registration;
         let tasks = {
             let mut state = self
                 .inner
                 .state
                 .lock()
                 .expect("background manager poisoned");
-            let agent = state.agents.entry(agent_id.to_string()).or_default();
+            let agent = state.agents.entry(agent_id.clone()).or_default();
             agent.tasks = self
                 .inner
                 .store
-                .load_background_tasks(agent_id)
+                .load_background_tasks(&agent_id)
                 .unwrap_or_default();
             agent.observer = Some(BackgroundObserver {
-                events: observer.events.clone(),
-                snapshot_tx: observer.snapshot_tx.clone(),
-                snapshot: Arc::clone(&observer.snapshot),
+                sink: observer.clone(),
             });
             agent.tasks.clone()
         };
 
-        Self::publish_snapshot(Arc::clone(&observer.snapshot), &tasks);
-        let snapshot = observer
-            .snapshot
-            .lock()
-            .expect("agent snapshot poisoned")
-            .clone();
-        observer.snapshot_tx.send_replace(snapshot);
+        observer.publish_snapshot(&tasks);
     }
 
     pub(crate) fn start_task(
@@ -166,12 +160,10 @@ impl BackgroundTaskManager {
                 task: summary.clone(),
             },
         );
-        let _ = self.emit_hook(RuntimeHookEvent::BackgroundTaskStarted {
-            agent_id: agent_id.to_string(),
-            task_id: summary.id.clone(),
-            command: summary.command.clone(),
-            cwd: summary.cwd.clone(),
-        });
+        let _ = self
+            .inner
+            .hooks
+            .task_started(agent_id, &summary.id, &summary.command, &summary.cwd);
 
         let manager = self.clone();
         let agent_id = agent_id.to_string();
@@ -286,11 +278,11 @@ impl BackgroundTaskManager {
             .inner
             .store
             .upsert_background_task(agent_id, &summary, NOTIFICATION_PENDING);
-        let _ = self.emit_hook(RuntimeHookEvent::BackgroundTaskFinished {
-            agent_id: agent_id.to_string(),
-            task_id: summary.id.clone(),
-            status: summary.status.to_string(),
-        });
+        let status = summary.status.to_string();
+        let _ = self
+            .inner
+            .hooks
+            .task_finished(agent_id, &summary.id, &status);
 
         self.publish_observer(
             observer,
@@ -298,11 +290,6 @@ impl BackgroundTaskManager {
             AgentEvent::BackgroundTaskFinished { task: summary },
         );
     }
-
-    fn emit_hook(&self, event: RuntimeHookEvent) -> Result<(), crate::runtime::RuntimeError> {
-        self.inner.hooks.emit(self.inner.store.as_ref(), &event)
-    }
-
     fn publish_observer(
         &self,
         observer: Option<BackgroundObserver>,
@@ -313,19 +300,8 @@ impl BackgroundTaskManager {
             return;
         };
 
-        Self::publish_snapshot(Arc::clone(&observer.snapshot), &tasks);
-        let snapshot = observer
-            .snapshot
-            .lock()
-            .expect("agent snapshot poisoned")
-            .clone();
-        observer.snapshot_tx.send_replace(snapshot);
-        let _ = observer.events.send(event);
-    }
-
-    fn publish_snapshot(snapshot: Arc<Mutex<AgentSnapshot>>, tasks: &[BackgroundTaskSummary]) {
-        let mut guard = snapshot.lock().expect("agent snapshot poisoned");
-        guard.background_tasks = tasks.to_vec();
+        observer.sink.publish_snapshot(&tasks);
+        observer.sink.publish_event(event);
     }
 }
 

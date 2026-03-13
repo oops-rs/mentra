@@ -1,4 +1,3 @@
-pub(crate) mod background;
 mod builder;
 pub(crate) mod control;
 mod error;
@@ -19,7 +18,11 @@ use crate::{
     tool::ExecutableTool,
 };
 
-pub use background::{BackgroundTaskStatus, BackgroundTaskSummary};
+pub use crate::background::{BackgroundTaskStatus, BackgroundTaskSummary};
+pub use crate::team::{
+    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
+    TeamProtocolRequestSummary, TeamProtocolStatus,
+};
 pub use control::{
     AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
     CommandSpec, RunOptions, RuntimeExecutor, RuntimeHook, RuntimeHookEvent, RuntimeHooks,
@@ -32,10 +35,6 @@ pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot
 pub use store::{RuntimeStore, SqliteRuntimeStore};
 pub(crate) use task::TaskIntrinsicTool;
 pub use task::{TaskItem, TaskStatus};
-pub use crate::team::{
-    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
-    TeamProtocolRequestSummary, TeamProtocolStatus,
-};
 
 /// Entry point for configuring providers, tools, and agent lifecycles.
 pub struct Runtime {

@@ -10,14 +10,15 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     agent::{AgentConfig, AgentMemoryState, AgentStatus, SpawnedAgentSummary, TeammateIdentity},
+    background::{BackgroundNotification, BackgroundStore, BackgroundTaskStatus, BackgroundTaskSummary},
     provider::ProviderId,
     runtime::{
-        BackgroundTaskStatus, BackgroundTaskSummary, TaskItem,
+        TaskItem,
     },
     team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary, TeamStore},
 };
 
-use super::{background::BackgroundNotification, error::RuntimeError};
+use super::error::RuntimeError;
 
 static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
@@ -55,8 +56,8 @@ pub struct TaskStateSnapshot {
     pub(crate) tasks: Vec<TaskItem>,
 }
 
-/// Persistence backend used for agents, team state, tasks, and audit events.
-pub trait RuntimeStore: TeamStore + Send + Sync {
+/// Persistence backend used for agents, task state, audit events, and extracted domain stores.
+pub trait RuntimeStore: TeamStore + BackgroundStore + Send + Sync {
     fn prepare_recovery(&self) -> Result<(), RuntimeError>;
     fn create_agent(
         &self,
@@ -92,22 +93,6 @@ pub trait RuntimeStore: TeamStore + Send + Sync {
         snapshot: &TaskStateSnapshot,
     ) -> Result<(), RuntimeError>;
     fn replace_tasks(&self, namespace: &Path, tasks: &[TaskItem]) -> Result<(), RuntimeError>;
-    fn load_background_tasks(
-        &self,
-        agent_id: &str,
-    ) -> Result<Vec<BackgroundTaskSummary>, RuntimeError>;
-    fn upsert_background_task(
-        &self,
-        agent_id: &str,
-        task: &BackgroundTaskSummary,
-        notification_state: i64,
-    ) -> Result<(), RuntimeError>;
-    fn drain_background_notifications(
-        &self,
-        agent_id: &str,
-    ) -> Result<Vec<BackgroundNotification>, RuntimeError>;
-    fn ack_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError>;
-    fn requeue_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError>;
     fn record_audit_event(
         &self,
         scope: &str,
@@ -305,6 +290,117 @@ impl TeamStore for SqliteRuntimeStore {
         .map_err(sqlite_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(sqlite_error)
+    }
+}
+
+impl BackgroundStore for SqliteRuntimeStore {
+    fn load_background_tasks(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<BackgroundTaskSummary>, RuntimeError> {
+        let conn = self.open()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT payload_json FROM background_jobs WHERE agent_id = ?1 ORDER BY created_at, id",
+            )
+            .map_err(sqlite_error)?;
+        let rows = stmt
+            .query_map(params![agent_id], |row| row.get::<_, String>(0))
+            .map_err(sqlite_error)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(from_json(&row.map_err(sqlite_error)?)?);
+        }
+        Ok(tasks)
+    }
+
+    fn upsert_background_task(
+        &self,
+        agent_id: &str,
+        task: &BackgroundTaskSummary,
+        notification_state: i64,
+    ) -> Result<(), RuntimeError> {
+        let conn = self.open()?;
+        conn.execute(
+            r#"
+            INSERT INTO background_jobs (id, agent_id, payload_json, notification_state, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                agent_id = excluded.agent_id,
+                payload_json = excluded.payload_json,
+                notification_state = excluded.notification_state,
+                updated_at = excluded.updated_at
+            "#,
+            params![task.id, agent_id, to_json(task)?, notification_state, now_secs()],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    fn drain_background_notifications(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<BackgroundNotification>, RuntimeError> {
+        let mut conn = self.open()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        let jobs = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, payload_json FROM background_jobs WHERE agent_id = ?1 AND notification_state = ?2 ORDER BY updated_at, id",
+                )
+                .map_err(sqlite_error)?;
+            stmt.query_map(params![agent_id, DELIVERY_PENDING], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sqlite_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_error)?
+        };
+        for (id, _) in &jobs {
+            tx.execute(
+                "UPDATE background_jobs SET notification_state = ?2 WHERE id = ?1",
+                params![id, DELIVERY_INFLIGHT],
+            )
+            .map_err(sqlite_error)?;
+        }
+        tx.commit().map_err(sqlite_error)?;
+
+        jobs.into_iter()
+            .map(|(_, payload)| {
+                let task: BackgroundTaskSummary = from_json(&payload)?;
+                Ok(BackgroundNotification {
+                    task_id: task.id,
+                    command: task.command,
+                    cwd: task.cwd,
+                    status: task.status,
+                    output_preview: task
+                        .output_preview
+                        .unwrap_or_else(|| "(no output)".to_string()),
+                })
+            })
+            .collect()
+    }
+
+    fn ack_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError> {
+        let conn = self.open()?;
+        conn.execute(
+            "UPDATE background_jobs SET notification_state = ?2 WHERE agent_id = ?1 AND notification_state = ?3",
+            params![agent_id, DELIVERY_ACKED, DELIVERY_INFLIGHT],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    fn requeue_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError> {
+        let conn = self.open()?;
+        conn.execute(
+            "UPDATE background_jobs SET notification_state = ?2 WHERE agent_id = ?1 AND notification_state = ?3",
+            params![agent_id, DELIVERY_PENDING, DELIVERY_INFLIGHT],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
     }
 }
 
@@ -847,115 +943,6 @@ impl RuntimeStore for SqliteRuntimeStore {
             }
         }
         tx.commit().map_err(sqlite_error)
-    }
-
-    fn load_background_tasks(
-        &self,
-        agent_id: &str,
-    ) -> Result<Vec<BackgroundTaskSummary>, RuntimeError> {
-        let conn = self.open()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT payload_json FROM background_jobs WHERE agent_id = ?1 ORDER BY created_at, id",
-            )
-            .map_err(sqlite_error)?;
-        let rows = stmt
-            .query_map(params![agent_id], |row| row.get::<_, String>(0))
-            .map_err(sqlite_error)?;
-        let mut tasks = Vec::new();
-        for row in rows {
-            tasks.push(from_json(&row.map_err(sqlite_error)?)?);
-        }
-        Ok(tasks)
-    }
-
-    fn upsert_background_task(
-        &self,
-        agent_id: &str,
-        task: &BackgroundTaskSummary,
-        notification_state: i64,
-    ) -> Result<(), RuntimeError> {
-        let conn = self.open()?;
-        conn.execute(
-            r#"
-            INSERT INTO background_jobs (id, agent_id, payload_json, notification_state, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-            ON CONFLICT(id) DO UPDATE SET
-                agent_id = excluded.agent_id,
-                payload_json = excluded.payload_json,
-                notification_state = excluded.notification_state,
-                updated_at = excluded.updated_at
-            "#,
-            params![task.id, agent_id, to_json(task)?, notification_state, now_secs()],
-        )
-        .map_err(sqlite_error)?;
-        Ok(())
-    }
-
-    fn drain_background_notifications(
-        &self,
-        agent_id: &str,
-    ) -> Result<Vec<BackgroundNotification>, RuntimeError> {
-        let mut conn = self.open()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_error)?;
-        let jobs = {
-            let mut stmt = tx
-                .prepare(
-                    "SELECT id, payload_json FROM background_jobs WHERE agent_id = ?1 AND notification_state = ?2 ORDER BY updated_at, id",
-                )
-                .map_err(sqlite_error)?;
-            stmt.query_map(params![agent_id, DELIVERY_PENDING], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(sqlite_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_error)?
-        };
-        for (id, _) in &jobs {
-            tx.execute(
-                "UPDATE background_jobs SET notification_state = ?2 WHERE id = ?1",
-                params![id, DELIVERY_INFLIGHT],
-            )
-            .map_err(sqlite_error)?;
-        }
-        tx.commit().map_err(sqlite_error)?;
-
-        jobs.into_iter()
-            .map(|(_, payload)| {
-                let task: BackgroundTaskSummary = from_json(&payload)?;
-                Ok(BackgroundNotification {
-                    task_id: task.id,
-                    command: task.command,
-                    cwd: task.cwd,
-                    status: task.status,
-                    output_preview: task
-                        .output_preview
-                        .unwrap_or_else(|| "(no output)".to_string()),
-                })
-            })
-            .collect()
-    }
-
-    fn ack_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError> {
-        let conn = self.open()?;
-        conn.execute(
-            "UPDATE background_jobs SET notification_state = ?2 WHERE agent_id = ?1 AND notification_state = ?3",
-            params![agent_id, DELIVERY_ACKED, DELIVERY_INFLIGHT],
-        )
-        .map_err(sqlite_error)?;
-        Ok(())
-    }
-
-    fn requeue_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError> {
-        let conn = self.open()?;
-        conn.execute(
-            "UPDATE background_jobs SET notification_state = ?2 WHERE agent_id = ?1 AND notification_state = ?3",
-            params![agent_id, DELIVERY_PENDING, DELIVERY_INFLIGHT],
-        )
-        .map_err(sqlite_error)?;
-        Ok(())
     }
 
     fn record_audit_event(
