@@ -191,13 +191,13 @@ async fn run_respects_tool_budget() {
 }
 
 #[tokio::test]
-async fn policy_can_deny_bash_tool_execution() {
+async fn policy_can_deny_shell_tool_execution() {
     let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
         ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "pwd", "bash", r#"{"command":"pwd"}"#),
+            tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
             text_stream("done"),
         ],
     );
@@ -225,6 +225,61 @@ async fn policy_can_deny_bash_tool_execution() {
         ContentBlock::ToolResult { content, is_error: true, .. }
             if content.contains("disabled by the runtime policy")
     ));
+}
+
+#[tokio::test]
+async fn approval_required_shell_emits_hook_and_returns_tool_error() {
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "tool-shell",
+                "shell",
+                r#"{"command":"python -c 'print(1)'","justification":"needed for validation"}"#,
+            ),
+            text_stream("done"),
+        ],
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_policy(RuntimePolicy::default().allow_shell_commands(true))
+        .with_hook(RecordingHook {
+            events: recorded.clone(),
+        })
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).unwrap();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "run python".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    assert!(matches!(
+        &agent.history()[2].content[0],
+        ContentBlock::ToolResult { content, is_error: true, .. }
+            if content.contains("Command requires approval")
+    ));
+
+    let events = recorded.lock().expect("hook events poisoned").clone();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeHookEvent::ShellApprovalRequired {
+            tool_name,
+            parsed_kind,
+            justification,
+            ..
+        } if tool_name == "shell"
+            && parsed_kind == "unknown"
+            && justification.as_deref() == Some("needed for validation")
+    )));
 }
 
 #[tokio::test]

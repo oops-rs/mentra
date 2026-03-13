@@ -6,18 +6,18 @@ use crate::tool::{
     ToolSpec,
 };
 
-pub struct BashTool;
+pub struct ShellTool;
 pub struct BackgroundRunTool;
 pub struct CheckBackgroundTool;
 pub struct LoadSkillTool;
 pub struct ReadFileTool;
 
 #[async_trait]
-impl ExecutableTool for BashTool {
+impl ExecutableTool for ShellTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "bash".to_string(),
-            description: Some("Execute a single local bash command.".into()),
+            name: "shell".to_string(),
+            description: Some("Execute a single local shell command.".into()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -28,6 +28,14 @@ impl ExecutableTool for BashTool {
                     "workingDirectory": {
                         "type": "string",
                         "description": "Optional directory to run inside"
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "description": "Optional timeout override in milliseconds"
+                    },
+                    "justification": {
+                        "type": "string",
+                        "description": "Optional explanation surfaced when approval is required"
                     }
                 },
                 "required": ["command"]
@@ -48,15 +56,38 @@ impl ExecutableTool for BashTool {
             .get("workingDirectory")
             .and_then(|value| value.as_str());
         let working_directory = ctx.resolve_working_directory(working_directory)?;
+        let justification = input
+            .get("justification")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned);
+        let requested_timeout = input
+            .get("timeoutMs")
+            .and_then(|value| value.as_u64())
+            .map(std::time::Duration::from_millis);
 
         let output = ctx
-            .execute_shell_command(command.to_string(), working_directory)
+            .execute_shell_command(
+                command.to_string(),
+                justification,
+                requested_timeout,
+                working_directory,
+            )
             .await?;
 
         if output.success() {
-            Ok(output.stdout)
+            if !output.stdout.is_empty() {
+                Ok(output.stdout)
+            } else {
+                Ok(output.stderr)
+            }
         } else {
-            let message = if output.stderr.trim().is_empty() {
+            let message = if !output.stderr.trim().is_empty() {
+                output.stderr
+            } else if !output.stdout.trim().is_empty() {
+                output.stdout
+            } else if output.timed_out {
+                "Command timed out after the configured limit".to_string()
+            } else {
                 format!(
                     "Command exited with status {}",
                     output
@@ -64,8 +95,6 @@ impl ExecutableTool for BashTool {
                         .map(|code| code.to_string())
                         .unwrap_or_else(|| "unknown".to_string())
                 )
-            } else {
-                output.stderr
             };
             Err(message)
         }
@@ -78,7 +107,7 @@ impl ExecutableTool for BackgroundRunTool {
         ToolSpec {
             name: "background_run".to_string(),
             description: Some(
-                "Start a bash command in the background and return a task ID immediately.".into(),
+                "Start a shell command in the background and return a task ID immediately.".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -90,6 +119,10 @@ impl ExecutableTool for BackgroundRunTool {
                     "workingDirectory": {
                         "type": "string",
                         "description": "Optional directory to run inside"
+                    },
+                    "justification": {
+                        "type": "string",
+                        "description": "Optional explanation surfaced when approval is required"
                     }
                 },
                 "required": ["command"]
@@ -112,8 +145,13 @@ impl ExecutableTool for BackgroundRunTool {
             .get("workingDirectory")
             .and_then(|value| value.as_str());
         let working_directory = ctx.resolve_working_directory(working_directory)?;
+        let justification = input
+            .get("justification")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned);
 
-        let task = ctx.start_background_task(command.to_string(), working_directory)?;
+        let task =
+            ctx.start_background_task(command.to_string(), justification, None, working_directory)?;
         Ok(format!(
             "Started background task {} in {} for `{}`",
             task.id,

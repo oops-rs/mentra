@@ -24,9 +24,10 @@ pub use crate::team::{
     TeamProtocolRequestSummary, TeamProtocolStatus,
 };
 pub use control::{
-    AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
-    CommandSpec, RunOptions, RuntimeExecutor, RuntimeHook, RuntimeHookEvent, RuntimeHooks,
-    RuntimePolicy,
+    ApprovalPolicy, AuditHook, AuditLogHook, CancellationFlag, CancellationToken,
+    CommandEvaluation, CommandOutput, CommandParse, CommandRequest, CommandSpec, CommandStage,
+    Decision, ExecOutput, ExecRule, ParsedCommand, RuleMatch, RunOptions, RuntimeExecutor,
+    RuntimeHook, RuntimeHookEvent, RuntimeHooks, RuntimePolicy, ShellRequest,
 };
 pub use error::RuntimeError;
 pub(crate) use handle::RuntimeHandle;

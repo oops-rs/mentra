@@ -1,23 +1,95 @@
-use crate::runtime::TaskIntrinsicTool;
+use crate::runtime::{CommandEvaluation, Decision, ShellRequest, TaskIntrinsicTool};
 
 use super::*;
 
 impl RuntimeHandle {
+    fn evaluate_shell_request(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        request: ShellRequest,
+    ) -> Result<(AgentExecutionConfig, CommandEvaluation, CommandRequest), String> {
+        let config = self.agent_config(agent_id)?;
+        let evaluation = match self
+            .policy
+            .evaluate_shell_request(&config.base_dir, &request)
+        {
+            Ok(evaluation) => evaluation,
+            Err(detail) => {
+                let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
+                    agent_id: agent_id.to_string(),
+                    action: if request.background {
+                        "background_command".to_string()
+                    } else {
+                        "shell_command".to_string()
+                    },
+                    detail: detail.clone(),
+                });
+                return Err(detail);
+            }
+        };
+
+        match evaluation.decision {
+            Decision::Allow => {}
+            Decision::Forbidden => {
+                let detail = format!("Command forbidden by runtime policy: {}", request.command);
+                let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
+                    agent_id: agent_id.to_string(),
+                    action: if request.background {
+                        "background_command".to_string()
+                    } else {
+                        "shell_command".to_string()
+                    },
+                    detail: detail.clone(),
+                });
+                return Err(detail);
+            }
+            Decision::Prompt => {
+                let _ = self.emit_hook(RuntimeHookEvent::ShellApprovalRequired {
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    command: request.command.clone(),
+                    cwd: request.cwd.clone(),
+                    parsed_kind: evaluation.parsed.kind().to_string(),
+                    matched_rules: evaluation.matched_rules.clone(),
+                    justification: request.justification.clone(),
+                });
+                return Err(format!("Command requires approval: {}", request.command));
+            }
+        }
+
+        let command_request = CommandRequest {
+            spec: CommandSpec::Shell {
+                command: request.command.clone(),
+            },
+            cwd: request.cwd,
+            timeout: self.policy.effective_timeout(request.requested_timeout),
+            env: self.policy.allowed_environment(),
+            max_output_bytes_per_stream: self.policy.max_output_bytes_per_stream,
+        };
+
+        Ok((config, evaluation, command_request))
+    }
+
     pub fn start_background_task(
         &self,
         agent_id: &str,
         command: String,
+        justification: Option<String>,
+        requested_timeout: Option<Duration>,
         cwd: PathBuf,
     ) -> Result<BackgroundTaskSummary, String> {
-        let config = self.agent_config(agent_id)?;
-        if let Err(detail) = self.policy.authorize_command(&config.base_dir, &cwd, true) {
-            let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
-                agent_id: agent_id.to_string(),
-                action: "background_command".to_string(),
-                detail: detail.clone(),
-            });
-            return Err(detail);
-        }
+        let (_config, _evaluation, command_request) = self.evaluate_shell_request(
+            agent_id,
+            "background_run",
+            ShellRequest {
+                command,
+                cwd,
+                requested_timeout,
+                justification,
+                background: true,
+            },
+        )?;
 
         if let Some(limit) = self.policy.background_task_limit
             && self.background_tasks.running_task_count(agent_id) >= limit
@@ -31,14 +103,7 @@ impl RuntimeHandle {
             return Err(detail);
         }
 
-        self.background_tasks.start_task(
-            agent_id,
-            CommandRequest {
-                spec: CommandSpec::Shell { command },
-                cwd,
-                timeout: self.policy.command_timeout,
-            },
-        )
+        self.background_tasks.start_task(agent_id, command_request)
     }
 
     pub fn check_background_task(
@@ -175,25 +240,23 @@ impl RuntimeHandle {
         &self,
         agent_id: &str,
         command: String,
+        justification: Option<String>,
+        requested_timeout: Option<Duration>,
         cwd: PathBuf,
     ) -> Result<CommandOutput, String> {
-        let config = self.agent_config(agent_id)?;
-        if let Err(detail) = self.policy.authorize_command(&config.base_dir, &cwd, false) {
-            let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
-                agent_id: agent_id.to_string(),
-                action: "shell_command".to_string(),
-                detail: detail.clone(),
-            });
-            return Err(detail);
-        }
-
-        self.executor
-            .run(CommandRequest {
-                spec: CommandSpec::Shell { command },
+        let (_config, _evaluation, command_request) = self.evaluate_shell_request(
+            agent_id,
+            "shell",
+            ShellRequest {
+                command,
                 cwd,
-                timeout: self.policy.command_timeout,
-            })
-            .await
+                requested_timeout,
+                justification,
+                background: false,
+            },
+        )?;
+
+        self.executor.run(command_request).await
     }
 
     pub async fn read_file(

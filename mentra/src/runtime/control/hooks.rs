@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     provider::ProviderError,
-    runtime::{error::RuntimeError, store::RuntimeStore},
+    runtime::{RuleMatch, error::RuntimeError, store::RuntimeStore},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +14,15 @@ pub enum RuntimeHookEvent {
         agent_id: String,
         action: String,
         detail: String,
+    },
+    ShellApprovalRequired {
+        agent_id: String,
+        tool_name: String,
+        command: String,
+        cwd: PathBuf,
+        parsed_kind: String,
+        matched_rules: Vec<RuleMatch>,
+        justification: Option<String>,
     },
     RecoveryPrepared {
         runtime_instance_id: String,
@@ -69,6 +78,7 @@ impl RuntimeHookEvent {
     fn scope(&self) -> String {
         match self {
             Self::AuthorizationDenied { agent_id, .. } => agent_id.clone(),
+            Self::ShellApprovalRequired { agent_id, .. } => agent_id.clone(),
             Self::RecoveryPrepared {
                 runtime_instance_id,
             } => runtime_instance_id.clone(),
@@ -86,6 +96,7 @@ impl RuntimeHookEvent {
     fn event_type(&self) -> &'static str {
         match self {
             Self::AuthorizationDenied { .. } => "authorization_denied",
+            Self::ShellApprovalRequired { .. } => "shell_approval_required",
             Self::RecoveryPrepared { .. } => "recovery_prepared",
             Self::ModelRequestStarted { .. } => "model_request_started",
             Self::ModelRequestFinished { .. } => "model_request_finished",

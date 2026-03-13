@@ -65,7 +65,7 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         let mut registry = Self::new_empty();
-        registry.register_tool(builtin::BashTool);
+        registry.register_tool(builtin::ShellTool);
         registry.register_tool(builtin::BackgroundRunTool);
         registry.register_tool(builtin::CheckBackgroundTool);
         registry.register_tool(builtin::ReadFileTool);

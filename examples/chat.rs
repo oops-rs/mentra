@@ -29,11 +29,7 @@ async fn main() {
             mentra::BuiltinProvider::Gemini,
             std::env::var("GEMINI_API_KEY").ok(),
         )
-        .with_policy(
-            mentra::RuntimePolicy::default()
-                .allow_shell_commands(true)
-                .allow_background_commands(true),
-        )
+        .with_policy(mentra::RuntimePolicy::permissive())
         .with_skills_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills"))
         .expect("Failed to register example skills")
         .build()
@@ -472,7 +468,7 @@ fn subscribe_events(agent: &mentra::Agent) -> tokio::task::JoinHandle<()> {
 }
 
 fn describe_tool_call(call: &ToolCall) -> String {
-    if call.name == "bash"
+    if call.name == "shell"
         && let Some(command) = call.input.get("command").and_then(|value| value.as_str())
     {
         return command.to_string();

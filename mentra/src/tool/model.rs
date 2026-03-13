@@ -127,10 +127,18 @@ impl ToolContext<'_> {
     pub async fn execute_shell_command(
         &self,
         command: String,
+        justification: Option<String>,
+        requested_timeout: Option<std::time::Duration>,
         cwd: PathBuf,
     ) -> Result<crate::runtime::CommandOutput, String> {
         self.runtime
-            .execute_shell_command(&self.agent_id, command, cwd)
+            .execute_shell_command(
+                &self.agent_id,
+                command,
+                justification,
+                requested_timeout,
+                cwd,
+            )
             .await
     }
 
@@ -138,10 +146,17 @@ impl ToolContext<'_> {
     pub fn start_background_task(
         &self,
         command: String,
+        justification: Option<String>,
+        requested_timeout: Option<std::time::Duration>,
         cwd: PathBuf,
     ) -> Result<BackgroundTaskSummary, String> {
-        self.runtime
-            .start_background_task(&self.agent_id, command, cwd)
+        self.runtime.start_background_task(
+            &self.agent_id,
+            command,
+            justification,
+            requested_timeout,
+            cwd,
+        )
     }
 
     /// Reads the status of one or more background tasks.

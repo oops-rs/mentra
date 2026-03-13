@@ -215,11 +215,7 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
     );
 
     let runtime = Runtime::builder()
-        .with_policy(
-            RuntimePolicy::default()
-                .allow_shell_commands(true)
-                .allow_background_commands(true),
-        )
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -281,11 +277,7 @@ async fn completed_background_results_are_injected_on_next_send() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
-        .with_policy(
-            RuntimePolicy::default()
-                .allow_shell_commands(true)
-                .allow_background_commands(true),
-        )
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -340,11 +332,7 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
     );
 
     let runtime = Runtime::builder()
-        .with_policy(
-            RuntimePolicy::default()
-                .allow_shell_commands(true)
-                .allow_background_commands(true),
-        )
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -393,7 +381,7 @@ async fn task_working_directory_routes_shell_for_teammate() {
         ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "pwd", "bash", r#"{"command":"pwd"}"#),
+            tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
             text_stream(&model.id, "done"),
         ],
     );
@@ -416,11 +404,7 @@ async fn task_working_directory_routes_shell_for_teammate() {
 
     let runtime = Runtime::builder()
         .with_store(store.clone())
-        .with_policy(
-            RuntimePolicy::default()
-                .allow_shell_commands(true)
-                .allow_background_commands(true),
-        )
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -468,7 +452,7 @@ async fn teammate_shell_without_working_directory_uses_base_dir() {
         ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "pwd", "bash", r#"{"command":"pwd"}"#),
+            tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
             text_stream(&model.id, "handled"),
         ],
     );
@@ -482,11 +466,7 @@ async fn teammate_shell_without_working_directory_uses_base_dir() {
 
     let runtime = Runtime::builder()
         .with_store(store)
-        .with_policy(
-            RuntimePolicy::default()
-                .allow_shell_commands(true)
-                .allow_background_commands(true),
-        )
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -520,7 +500,7 @@ async fn teammate_shell_without_working_directory_uses_base_dir() {
 }
 
 #[tokio::test]
-async fn bash_working_directory_overrides_default_routing() {
+async fn shell_working_directory_overrides_default_routing() {
     let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
         ProviderId::ANTHROPIC,
@@ -529,7 +509,7 @@ async fn bash_working_directory_overrides_default_routing() {
             tool_use_stream(
                 &model.id,
                 "pwd",
-                "bash",
+                "shell",
                 r#"{"command":"pwd","workingDirectory":"custom"}"#,
             ),
             text_stream(&model.id, "done"),
@@ -541,11 +521,7 @@ async fn bash_working_directory_overrides_default_routing() {
     let working_dir = repo_dir.join("custom");
     fs::create_dir_all(&working_dir).expect("create working dir");
     let runtime = Runtime::builder()
-        .with_policy(
-            RuntimePolicy::default()
-                .allow_shell_commands(true)
-                .allow_background_commands(true),
-        )
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -579,13 +555,13 @@ async fn bash_working_directory_overrides_default_routing() {
 }
 
 #[tokio::test]
-async fn bash_tool_is_denied_by_default_policy_and_audited() {
+async fn shell_tool_is_denied_by_default_policy_and_audited() {
     let model = model_info("model", ProviderId::ANTHROPIC);
     let provider = ScriptedProvider::new(
         ProviderId::ANTHROPIC,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "pwd", "bash", r#"{"command":"pwd"}"#),
+            tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
             text_stream(&model.id, "done"),
         ],
     );
@@ -600,7 +576,7 @@ async fn bash_tool_is_denied_by_default_policy_and_audited() {
 
     agent
         .send(vec![ContentBlock::Text {
-            text: "try bash".to_string(),
+            text: "try shell".to_string(),
         }])
         .await
         .expect("send");
@@ -615,6 +591,48 @@ async fn bash_tool_is_denied_by_default_policy_and_audited() {
         .expect("load audit payload");
     assert!(payload.contains("\"action\":\"shell_command\""));
     assert!(payload.contains("\"agent_id\":\"agent"));
+}
+
+#[tokio::test]
+async fn background_run_reuses_shell_policy_evaluation() {
+    let model = model_info("model", ProviderId::ANTHROPIC);
+    let provider = ScriptedProvider::new(
+        ProviderId::ANTHROPIC,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "tool-bg",
+                "background_run",
+                r#"{"command":"python -c 'print(1)'","justification":"background probe"}"#,
+            ),
+            text_stream(&model.id, "handled"),
+        ],
+    );
+
+    let runtime = Runtime::builder()
+        .with_policy(
+            RuntimePolicy::default()
+                .allow_shell_commands(true)
+                .allow_background_commands(true),
+        )
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).unwrap();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "run an unknown background command".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    assert!(matches!(
+        &agent.history()[2].content[0],
+        ContentBlock::ToolResult { content, is_error: true, .. }
+            if content.contains("Command requires approval")
+    ));
 }
 
 #[tokio::test]
@@ -962,7 +980,7 @@ async fn default_runtime_exposes_task_and_new_empty_does_not() {
 
     let default_requests = default_handle.recorded_requests().await;
     let default_tools = tool_names(&default_requests[0]);
-    assert!(default_tools.contains("bash"));
+    assert!(default_tools.contains("shell"));
     assert!(default_tools.contains("background_run"));
     assert!(default_tools.contains("check_background"));
     assert!(default_tools.contains("compact"));
@@ -1182,7 +1200,7 @@ async fn task_tool_runs_child_with_isolated_history_and_filtered_tools() {
     );
 
     let child_tools = tool_names(&requests[1]);
-    assert!(child_tools.contains("bash"));
+    assert!(child_tools.contains("shell"));
     assert!(child_tools.contains("read_file"));
     assert!(!child_tools.contains("idle"));
     assert!(!child_tools.contains("task"));

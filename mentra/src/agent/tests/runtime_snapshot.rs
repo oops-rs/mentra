@@ -129,11 +129,7 @@ async fn snapshot_updates_when_background_task_finishes() {
     );
 
     let runtime = Runtime::builder()
-        .with_policy(
-            RuntimePolicy::default()
-                .allow_shell_commands(true)
-                .allow_background_commands(true),
-        )
+        .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
