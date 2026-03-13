@@ -86,13 +86,7 @@ impl Provider for ScriptedProvider {
 }
 
 pub(super) fn model_info(id: &str, provider: impl Into<ProviderId>) -> ModelInfo {
-    ModelInfo {
-        id: id.to_string(),
-        provider: provider.into(),
-        display_name: None,
-        description: None,
-        created_at: None,
-    }
+    ModelInfo::new(id, provider)
 }
 
 pub(super) fn ok_stream(events: Vec<ProviderEvent>) -> StreamScript {

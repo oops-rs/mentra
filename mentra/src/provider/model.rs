@@ -101,6 +101,19 @@ pub struct ModelInfo {
     pub created_at: Option<OffsetDateTime>,
 }
 
+impl ModelInfo {
+    /// Creates model metadata with only the required identifier and provider.
+    pub fn new(id: impl Into<String>, provider: impl Into<ProviderId>) -> Self {
+        Self {
+            id: id.into(),
+            provider: provider.into(),
+            display_name: None,
+            description: None,
+            created_at: None,
+        }
+    }
+}
+
 /// Errors returned by provider implementations and stream adapters.
 #[derive(Debug, Error)]
 pub enum ProviderError {
@@ -238,6 +251,18 @@ impl Message {
             content: vec![content],
         }
     }
+
+    /// Returns the concatenated text from every text content block in order.
+    pub fn text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
 }
 
 /// A provider-neutral content block exchanged with models.
@@ -319,7 +344,9 @@ pub enum ToolChoice {
 mod tests {
     use std::error::Error;
 
-    use super::{ProviderError, ProviderId};
+    use super::{
+        BuiltinProvider, ContentBlock, ImageSource, Message, ProviderError, ProviderId, Role,
+    };
 
     #[test]
     fn provider_id_new_accepts_runtime_strings() {
@@ -348,5 +375,82 @@ mod tests {
         );
 
         assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn model_info_new_sets_required_fields_and_defaults_optional_metadata() {
+        let info = super::ModelInfo::new("model", BuiltinProvider::Anthropic);
+
+        assert_eq!(info.id, "model");
+        assert_eq!(info.provider, ProviderId::from(BuiltinProvider::Anthropic));
+        assert_eq!(info.display_name, None);
+        assert_eq!(info.description, None);
+        assert_eq!(info.created_at, None);
+    }
+
+    #[test]
+    fn message_text_returns_single_text_block() {
+        let message = Message::assistant(ContentBlock::text("hello"));
+
+        assert_eq!(message.text(), "hello");
+    }
+
+    #[test]
+    fn message_text_concatenates_multiple_text_blocks() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::text("hello"), ContentBlock::text(" world")],
+        };
+
+        assert_eq!(message.text(), "hello world");
+    }
+
+    #[test]
+    fn message_text_ignores_non_text_blocks() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::text("before"),
+                ContentBlock::Image {
+                    source: ImageSource::url("https://example.com/image.png"),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    content: "tool output".to_string(),
+                    is_error: false,
+                },
+                ContentBlock::text("after"),
+            ],
+        };
+
+        assert_eq!(message.text(), "beforeafter");
+    }
+
+    #[test]
+    fn message_text_returns_empty_string_when_no_text_blocks_exist() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "files".to_string(),
+                input: serde_json::json!({}),
+            }],
+        };
+
+        assert_eq!(message.text(), "");
+    }
+
+    #[test]
+    fn message_text_preserves_empty_text_blocks_when_concatenating() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::text(""),
+                ContentBlock::text("hello"),
+                ContentBlock::text(""),
+            ],
+        };
+
+        assert_eq!(message.text(), "hello");
     }
 }

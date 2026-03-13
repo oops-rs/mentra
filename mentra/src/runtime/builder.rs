@@ -132,6 +132,43 @@ impl RuntimeBuilder {
     }
 
     /// Registers a custom provider implementation.
+    ///
+    /// This is the supported seam for test-time provider injection when you
+    /// want to script model responses without live API calls.
+    ///
+    /// ```rust,no_run
+    /// use async_trait::async_trait;
+    /// use mentra::{BuiltinProvider, ModelInfo, ProviderDescriptor, Runtime};
+    /// use mentra::error::{ProviderError, RuntimeError};
+    /// use mentra::provider::{Provider, ProviderEventStream, Request};
+    /// use tokio::sync::mpsc;
+    ///
+    /// struct TestProvider;
+    ///
+    /// #[async_trait]
+    /// impl Provider for TestProvider {
+    ///     fn descriptor(&self) -> ProviderDescriptor {
+    ///         ProviderDescriptor::new(BuiltinProvider::Anthropic)
+    ///     }
+    ///
+    ///     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+    ///         Ok(vec![ModelInfo::new("test-model", BuiltinProvider::Anthropic)])
+    ///     }
+    ///
+    ///     async fn stream(
+    ///         &self,
+    ///         _request: Request<'_>,
+    ///     ) -> Result<ProviderEventStream, ProviderError> {
+    ///         let (_tx, rx) = mpsc::unbounded_channel();
+    ///         Ok(rx)
+    ///     }
+    /// }
+    ///
+    /// let runtime = Runtime::empty_builder()
+    ///     .with_provider_instance(TestProvider)
+    ///     .build()?;
+    /// # Ok::<(), RuntimeError>(())
+    /// ```
     pub fn with_provider_instance<P>(mut self, provider: P) -> Self
     where
         P: Provider + 'static,

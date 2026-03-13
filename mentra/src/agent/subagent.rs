@@ -1,4 +1,4 @@
-use crate::{ContentBlock, Role, error::RuntimeError};
+use crate::{Role, error::RuntimeError};
 
 use super::{Agent, SpawnedAgentStatus, SpawnedAgentSummary};
 
@@ -45,16 +45,7 @@ impl Agent {
             return "(no summary)".to_string();
         }
 
-        let text = message
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::Image { .. } => None,
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let text = message.text();
 
         if text.is_empty() {
             "(no summary)".to_string()

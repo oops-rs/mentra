@@ -1,7 +1,6 @@
 use crate::memory::journal::CompactionOutcome;
 use crate::{
-    ContentBlock,
-    Message,
+    ContentBlock, Message,
     agent::AgentEvent,
     error::RuntimeError,
     memory::{

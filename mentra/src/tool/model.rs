@@ -408,6 +408,17 @@ impl ParallelToolContext {
 }
 
 /// String result returned by Mentra tools.
+///
+/// `Ok(content)` is sent back to the model as a `tool_result` block with
+/// `is_error = false`.
+///
+/// `Err(content)` is also sent back to the model as a `tool_result` block, but
+/// with `is_error = true`. Returning `Err(...)` from a tool does not by itself
+/// abort the run; it lets the model inspect the failure and decide what to do
+/// next.
+///
+/// Runs fail only when execution cannot continue at the runtime level, such as
+/// when a tool panics or the runtime itself returns an execution error.
 pub type ToolResult = Result<String, String>;
 
 /// Trait implemented by custom tools exposed to models.
@@ -422,6 +433,10 @@ pub trait ExecutableTool: Send + Sync {
     }
 
     /// Executes the tool with a context that does not permit agent mutation.
+    ///
+    /// Return `Ok(content)` for successful tool output and `Err(content)` for
+    /// tool-level failures you still want surfaced back to the model as an
+    /// error `tool_result`.
     async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
         Err(format!(
             "Tool '{}' does not support parallel execution",
@@ -430,6 +445,9 @@ pub trait ExecutableTool: Send + Sync {
     }
 
     /// Executes the tool with mutable access to the current agent.
+    ///
+    /// As with [`ExecutableTool::execute`], `Err(content)` produces an error
+    /// `tool_result` visible to the model rather than aborting the run.
     async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         self.execute(ctx.into(), input).await
     }

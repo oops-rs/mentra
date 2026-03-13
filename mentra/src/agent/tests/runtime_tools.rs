@@ -172,6 +172,7 @@ async fn tool_execution_error_is_wrapped_and_loop_continues() {
         ],
     );
 
+    let provider_handle = provider.clone();
     let runtime = Runtime::empty_builder()
         .with_provider_instance(provider)
         .with_tool(StaticTool::failure("failing_tool", "tool failed"))
@@ -198,6 +199,17 @@ async fn tool_execution_error_is_wrapped_and_loop_continues() {
         agent.last_message(),
         Some(&Message::assistant(ContentBlock::text("handled")))
     );
+
+    let requests = provider_handle.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(matches!(
+        &requests[1].messages[2].content[0],
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error: true,
+        } if tool_use_id == "tool-1" && content == "tool failed"
+    ));
 }
 
 #[tokio::test]
