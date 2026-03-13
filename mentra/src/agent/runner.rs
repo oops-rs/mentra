@@ -1,4 +1,6 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Duration};
+
+use tokio::task::JoinSet;
 
 use crate::{
     ContentBlock, Message,
@@ -7,7 +9,9 @@ use crate::{
     provider::Request,
     runtime::{RunOptions, RuntimeHookEvent, control::is_transient_provider_error},
     team::format_inbox,
-    tool::{ToolCapability, ToolContext},
+    tool::{
+        ParallelToolContext, ToolCall, ToolCapability, ToolContext, ToolExecutionMode, ToolSpec,
+    },
 };
 
 use super::{Agent, AgentEvent, AgentStatus, PendingAssistantTurn, memory::PendingTurnState};
@@ -17,6 +21,14 @@ pub(super) struct TurnRunner<'a> {
     options: RunOptions,
     model_requests: usize,
     tool_calls: usize,
+}
+
+const PARALLEL_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+struct CompletedToolExecution {
+    result: ContentBlock,
+    task_succeeded: bool,
+    should_end_turn: bool,
 }
 
 impl<'a> TurnRunner<'a> {
@@ -54,32 +66,36 @@ impl<'a> TurnRunner<'a> {
             let mut tool_results = Vec::new();
             let mut successful_task = false;
             let mut end_turn = false;
-            for call in tool_calls {
+            let mut index = 0usize;
+            while index < tool_calls.len() {
                 self.options.check_limits()?;
-                if self.tool_calls >= self.options.tool_budget() {
+
+                let batch_len = self.parallel_batch_len(&tool_calls[index..]);
+                let execution_count = if batch_len > 0 { batch_len } else { 1 };
+                if self.tool_calls + execution_count > self.options.tool_budget() {
                     return Err(RuntimeError::ToolBudgetExceeded(self.options.tool_budget()));
                 }
-                self.tool_calls += 1;
-                self.agent.set_status(AgentStatus::ExecutingTool {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                });
-                self.agent
-                    .emit_event(AgentEvent::ToolExecutionStarted { call: call.clone() });
-                self.agent.update_run_state("executing_tool", None)?;
+                self.tool_calls += execution_count;
 
-                let (result, task_succeeded, should_end_turn) =
-                    if !self.agent.can_use_tool(&call.name) {
-                        (self.unavailable_tool_result(call), false, false)
-                    } else {
-                        self.execute_registered_tool(call).await
-                    };
-                self.agent.emit_event(AgentEvent::ToolExecutionFinished {
-                    result: result.clone(),
-                });
-                successful_task |= task_succeeded;
-                end_turn |= should_end_turn;
-                tool_results.push(result);
+                if batch_len > 0 {
+                    let executions = self
+                        .execute_parallel_batch(tool_calls[index..index + batch_len].to_vec())
+                        .await?;
+                    for execution in executions {
+                        successful_task |= execution.task_succeeded;
+                        end_turn |= execution.should_end_turn;
+                        tool_results.push(execution.result);
+                    }
+                    index += batch_len;
+                    continue;
+                }
+
+                let call = tool_calls[index].clone();
+                let execution = self.execute_one_tool(call).await?;
+                successful_task |= execution.task_succeeded;
+                end_turn |= execution.should_end_turn;
+                tool_results.push(execution.result);
+                index += 1;
             }
 
             self.agent.memory.append_tool_results(tool_results)?;
@@ -121,6 +137,7 @@ impl<'a> TurnRunner<'a> {
             temperature: self.agent.config.temperature,
             max_output_tokens: self.agent.config.max_output_tokens,
             metadata: Cow::Borrowed(&self.agent.config.metadata),
+            provider_request_options: self.agent.config.provider_request_options.clone(),
         };
         let mut attempt = 0usize;
         let mut stream = loop {
@@ -237,20 +254,258 @@ impl<'a> TurnRunner<'a> {
         }
     }
 
-    async fn execute_registered_tool(
+    fn parallel_batch_len(&self, calls: &[ToolCall]) -> usize {
+        calls
+            .iter()
+            .take_while(|call| self.call_execution_mode(call) == ToolExecutionMode::Parallel)
+            .count()
+    }
+
+    fn call_execution_mode(&self, call: &ToolCall) -> ToolExecutionMode {
+        if !self.agent.can_use_tool(&call.name) {
+            return ToolExecutionMode::Exclusive;
+        }
+
+        self.agent
+            .runtime
+            .get_tool(&call.name)
+            .map(|tool| tool.execution_mode(&call.input))
+            .unwrap_or(ToolExecutionMode::Exclusive)
+    }
+
+    fn note_tool_started(&mut self, call: &ToolCall) -> Result<(), RuntimeError> {
+        self.agent.set_status(AgentStatus::ExecutingTool {
+            id: call.id.clone(),
+            name: call.name.clone(),
+        });
+        self.agent
+            .emit_event(AgentEvent::ToolExecutionStarted { call: call.clone() });
+        self.agent.update_run_state("executing_tool", None)
+    }
+
+    fn emit_tool_runtime_started(&self, call: &ToolCall) -> Result<(), RuntimeError> {
+        self.agent
+            .runtime
+            .emit_hook(RuntimeHookEvent::ToolExecutionStarted {
+                agent_id: self.agent.id().to_string(),
+                tool_name: call.name.clone(),
+                tool_call_id: call.id.clone(),
+            })
+    }
+
+    fn emit_tool_runtime_finished(&self, call: &ToolCall, result: &ContentBlock) {
+        let is_error = matches!(result, ContentBlock::ToolResult { is_error: true, .. });
+        let output_preview = match result {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            _ => String::new(),
+        };
+        let error = is_error.then_some(output_preview.clone());
+        let _ = self
+            .agent
+            .runtime
+            .emit_hook(RuntimeHookEvent::ToolExecutionFinished {
+                agent_id: self.agent.id().to_string(),
+                tool_name: call.name.clone(),
+                tool_call_id: call.id.clone(),
+                is_error,
+                error,
+                output_preview,
+            });
+    }
+
+    fn blocked_tool_result(&self, call: &ToolCall, error: RuntimeError) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: call.id.clone(),
+            content: format!("Tool execution blocked: {error}"),
+            is_error: true,
+        }
+    }
+
+    fn tool_result_block(call: &ToolCall, result: crate::tool::ToolResult) -> ContentBlock {
+        match result {
+            Ok(content) => ContentBlock::ToolResult {
+                tool_use_id: call.id.clone(),
+                content,
+                is_error: false,
+            },
+            Err(content) => ContentBlock::ToolResult {
+                tool_use_id: call.id.clone(),
+                content,
+                is_error: true,
+            },
+        }
+    }
+
+    fn completed_execution(
+        &self,
+        call: &ToolCall,
+        spec: &ToolSpec,
+        result: ContentBlock,
+        should_end_turn: bool,
+    ) -> CompletedToolExecution {
+        self.emit_tool_runtime_finished(call, &result);
+        self.agent.emit_event(AgentEvent::ToolExecutionFinished {
+            result: result.clone(),
+        });
+        let task_succeeded = matches!(
+            &result,
+            ContentBlock::ToolResult {
+                is_error: false,
+                ..
+            }
+        ) && spec
+            .capabilities
+            .iter()
+            .any(|capability| matches!(capability, ToolCapability::TaskMutation));
+
+        CompletedToolExecution {
+            result,
+            task_succeeded,
+            should_end_turn,
+        }
+    }
+
+    fn parallel_tool_context(&self, call: &ToolCall) -> ParallelToolContext {
+        let working_directory = self
+            .agent
+            .runtime
+            .resolve_working_directory(self.agent.id(), None)
+            .unwrap_or_else(|_| {
+                self.agent
+                    .runtime
+                    .default_working_directory(self.agent.id())
+            });
+
+        ParallelToolContext {
+            agent_id: self.agent.id().to_string(),
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            working_directory,
+            runtime: self.agent.runtime.clone(),
+            agent_name: self.agent.name().to_string(),
+            model: self.agent.model().to_string(),
+            history_len: self.agent.history().len(),
+            tasks: self.agent.tasks().to_vec(),
+        }
+    }
+
+    async fn execute_one_tool(
         &mut self,
-        call: crate::tool::ToolCall,
-    ) -> (ContentBlock, bool, bool) {
-        let Some(tool) = self.agent.runtime.get_tool(&call.name) else {
-            return (
-                ContentBlock::ToolResult {
-                    tool_use_id: call.id,
+        call: ToolCall,
+    ) -> Result<CompletedToolExecution, RuntimeError> {
+        self.note_tool_started(&call)?;
+        if !self.agent.can_use_tool(&call.name) {
+            let result = self.unavailable_tool_result(call.clone());
+            self.agent.emit_event(AgentEvent::ToolExecutionFinished {
+                result: result.clone(),
+            });
+            return Ok(CompletedToolExecution {
+                result,
+                task_succeeded: false,
+                should_end_turn: false,
+            });
+        }
+
+        Ok(self.execute_registered_tool(call).await)
+    }
+
+    async fn execute_parallel_batch(
+        &mut self,
+        calls: Vec<ToolCall>,
+    ) -> Result<Vec<CompletedToolExecution>, RuntimeError> {
+        let len = calls.len();
+        let mut results = (0..len).map(|_| None).collect::<Vec<_>>();
+        let mut join_set = JoinSet::new();
+
+        for (index, call) in calls.iter().cloned().enumerate() {
+            if let Err(error) = self.note_tool_started(&call) {
+                join_set.abort_all();
+                return Err(error);
+            }
+
+            let Some(tool) = self.agent.runtime.get_tool(&call.name) else {
+                let result = ContentBlock::ToolResult {
+                    tool_use_id: call.id.clone(),
                     content: "Tool not found".to_string(),
                     is_error: true,
-                },
-                false,
-                false,
-            );
+                };
+                self.agent.emit_event(AgentEvent::ToolExecutionFinished {
+                    result: result.clone(),
+                });
+                results[index] = Some(CompletedToolExecution {
+                    result,
+                    task_succeeded: false,
+                    should_end_turn: false,
+                });
+                continue;
+            };
+            let spec = tool.spec();
+
+            if let Err(error) = self.emit_tool_runtime_started(&call) {
+                let result = self.blocked_tool_result(&call, error);
+                let execution = self.completed_execution(&call, &spec, result, false);
+                results[index] = Some(execution);
+                continue;
+            }
+
+            let ctx = self.parallel_tool_context(&call);
+            join_set.spawn(async move {
+                let result = tool.execute(ctx, call.input.clone()).await;
+                (index, call, spec, result)
+            });
+        }
+
+        while !join_set.is_empty() {
+            if let Err(error) = self.options.check_limits() {
+                join_set.abort_all();
+                return Err(error);
+            }
+            match tokio::time::timeout(PARALLEL_JOIN_POLL_INTERVAL, join_set.join_next()).await {
+                Ok(Some(Ok((index, call, spec, result)))) => {
+                    let result = Self::tool_result_block(&call, result);
+                    results[index] = Some(self.completed_execution(&call, &spec, result, false));
+                }
+                Ok(Some(Err(error))) => {
+                    join_set.abort_all();
+                    return Err(RuntimeError::Store(format!(
+                        "parallel tool task failed: {error}"
+                    )));
+                }
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+
+        if let Err(error) = self.options.check_limits() {
+            join_set.abort_all();
+            return Err(error);
+        }
+
+        let mut ordered = Vec::with_capacity(len);
+        for result in results {
+            ordered.push(result.ok_or_else(|| {
+                RuntimeError::Store("parallel tool batch lost a result".to_string())
+            })?);
+        }
+
+        Ok(ordered)
+    }
+
+    async fn execute_registered_tool(&mut self, call: ToolCall) -> CompletedToolExecution {
+        let Some(tool) = self.agent.runtime.get_tool(&call.name) else {
+            let result = ContentBlock::ToolResult {
+                tool_use_id: call.id.clone(),
+                content: "Tool not found".to_string(),
+                is_error: true,
+            };
+            self.agent.emit_event(AgentEvent::ToolExecutionFinished {
+                result: result.clone(),
+            });
+            return CompletedToolExecution {
+                result,
+                task_succeeded: false,
+                should_end_turn: false,
+            };
         };
         let spec = tool.spec();
 
@@ -263,28 +518,14 @@ impl<'a> TurnRunner<'a> {
                     .runtime
                     .default_working_directory(self.agent.id())
             });
-        if let Err(error) = self
-            .agent
-            .runtime
-            .emit_hook(RuntimeHookEvent::ToolExecutionStarted {
-                agent_id: self.agent.id().to_string(),
-                tool_name: call.name.clone(),
-                tool_call_id: call.id.clone(),
-            })
-        {
-            return (
-                ContentBlock::ToolResult {
-                    tool_use_id: call.id,
-                    content: format!("Tool execution blocked: {error}"),
-                    is_error: true,
-                },
-                false,
-                false,
-            );
+        if let Err(error) = self.emit_tool_runtime_started(&call) {
+            let result = self.blocked_tool_result(&call, error);
+            return self.completed_execution(&call, &spec, result, false);
         }
 
-        let result = match tool
-            .execute(
+        let result = Self::tool_result_block(
+            &call,
+            tool.execute_mut(
                 ToolContext {
                     agent_id: self.agent.id().to_string(),
                     tool_call_id: call.id.clone(),
@@ -293,49 +534,12 @@ impl<'a> TurnRunner<'a> {
                     runtime: self.agent.runtime.clone(),
                     agent: self.agent,
                 },
-                call.input,
+                call.input.clone(),
             )
-            .await
-        {
-            Ok(content) => ContentBlock::ToolResult {
-                tool_use_id: call.id.clone(),
-                content,
-                is_error: false,
-            },
-            Err(content) => ContentBlock::ToolResult {
-                tool_use_id: call.id.clone(),
-                content,
-                is_error: true,
-            },
-        };
-        let is_error = matches!(&result, ContentBlock::ToolResult { is_error: true, .. });
-        let output_preview = match &result {
-            ContentBlock::ToolResult { content, .. } => content.clone(),
-            _ => String::new(),
-        };
-        let error = if is_error {
-            Some(output_preview.clone())
-        } else {
-            None
-        };
-        let _ = self
-            .agent
-            .runtime
-            .emit_hook(RuntimeHookEvent::ToolExecutionFinished {
-                agent_id: self.agent.id().to_string(),
-                tool_name: call.name,
-                tool_call_id: call.id,
-                is_error,
-                error,
-                output_preview,
-            });
-        let touched_task = !is_error
-            && spec
-                .capabilities
-                .iter()
-                .any(|capability| matches!(capability, ToolCapability::TaskMutation));
+            .await,
+        );
         let should_end_turn = self.agent.take_idle_requested();
-        (result, touched_task, should_end_turn)
+        self.completed_execution(&call, &spec, result, should_end_turn)
     }
 }
 

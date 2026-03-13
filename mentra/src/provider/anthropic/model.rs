@@ -7,7 +7,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     provider::model::{
-        ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ProviderId, Request,
+        BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request,
         Response, Role, ToolChoice,
     },
     tool::ToolSpec,
@@ -33,7 +33,7 @@ impl From<AnthropicModel> for ModelInfo {
     fn from(model: AnthropicModel) -> Self {
         ModelInfo {
             id: model.id,
-            provider: ProviderId::ANTHROPIC,
+            provider: BuiltinProvider::Anthropic.into(),
             display_name: model.display_name,
             description: None,
             created_at: model
@@ -58,6 +58,8 @@ pub(crate) struct AnthropicRequest {
     temperature: Option<f32>,
     #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disable_parallel_tool_use: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +109,10 @@ impl<'a> TryFrom<Request<'a>> for AnthropicRequest {
             tool_choice: value.tool_choice.map(|choice| choice.into()),
             temperature: value.temperature,
             max_output_tokens: value.max_output_tokens,
+            disable_parallel_tool_use: value
+                .provider_request_options
+                .anthropic
+                .disable_parallel_tool_use,
         })
     }
 }
@@ -317,7 +323,10 @@ mod tests {
 
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-    use crate::provider::model::{ContentBlock, Message, ProviderError, Request, Role, ToolChoice};
+    use crate::provider::model::{
+        AnthropicRequestOptions, ContentBlock, Message, ProviderError, ProviderRequestOptions,
+        Request, Role, ToolChoice,
+    };
 
     use super::{AnthropicContentBlock, AnthropicImageSource, AnthropicModel, AnthropicRequest};
 
@@ -360,6 +369,7 @@ mod tests {
             temperature: Some(0.1),
             max_output_tokens: Some(512),
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
@@ -409,5 +419,30 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn serializes_disable_parallel_tool_use_option() {
+        let request = Request {
+            model: Cow::Borrowed("claude-sonnet"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                openai: Default::default(),
+                anthropic: AnthropicRequestOptions {
+                    disable_parallel_tool_use: Some(true),
+                },
+            },
+        };
+
+        let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["disable_parallel_tool_use"], true);
     }
 }

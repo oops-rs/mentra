@@ -5,10 +5,11 @@ use url::Url;
 mod model;
 mod sse;
 
-use crate::provider::{
-    Provider,
-    model::{
-        ModelInfo, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
+use crate::{
+    BuiltinProvider,
+    provider::{
+        Provider,
+        model::{ModelInfo, ProviderDescriptor, ProviderError, ProviderEventStream, Request},
     },
 };
 
@@ -45,7 +46,7 @@ impl OpenAIProvider {
 impl Provider for OpenAIProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
-            id: ProviderId::OPENAI,
+            id: BuiltinProvider::OpenAI.into(),
             display_name: Some("OpenAI".to_string()),
             description: Some("OpenAI Responses API provider".to_string()),
         }

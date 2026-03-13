@@ -7,11 +7,14 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::tool::{
-    ExecutableTool, ToolCapability, ToolContext, ToolDurability, ToolResult, ToolSideEffectLevel,
-    ToolSpec,
+    ExecutableTool, ParallelToolContext, ToolCapability, ToolContext, ToolDurability,
+    ToolExecutionMode, ToolResult, ToolSideEffectLevel, ToolSpec,
 };
 
-use self::{schema::FilesInput, workspace::WorkspaceEditor};
+use self::{
+    schema::{FileOperation, FilesInput},
+    workspace::WorkspaceEditor,
+};
 
 pub struct FilesTool;
 
@@ -143,32 +146,73 @@ impl ExecutableTool for FilesTool {
         }
     }
 
-    async fn execute(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
-        let input = serde_json::from_value::<FilesInput>(input)
-            .map_err(|error| format!("Invalid files input: {error}"))?;
-        if input.operations.is_empty() {
-            return Err("At least one file operation is required".to_string());
+    fn execution_mode(&self, input: &Value) -> ToolExecutionMode {
+        let Ok(input) = serde_json::from_value::<FilesInput>(input.clone()) else {
+            return ToolExecutionMode::Exclusive;
+        };
+
+        if input.operations.iter().all(FileOperation::is_read_only) {
+            ToolExecutionMode::Parallel
+        } else {
+            ToolExecutionMode::Exclusive
         }
-
-        let working_directory =
-            ctx.resolve_working_directory(input.working_directory.as_deref())?;
-        let base_dir = ctx.runtime.agent_config(&ctx.agent_id)?.base_dir;
-        let agent_id = ctx.agent_id.clone();
-        let runtime = ctx.runtime.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let mut editor = WorkspaceEditor::new(agent_id, runtime, base_dir, working_directory);
-            let mut sections = Vec::with_capacity(input.operations.len());
-            for operation in input.operations {
-                sections.push(editor.apply_operation(operation)?);
-            }
-            editor.commit()?;
-
-            Ok(sections.join("\n\n"))
-        })
-        .await
-        .map_err(|error| format!("Files tool task failed: {error}"))?
     }
+
+    async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
+        execute_files_tool(
+            ctx.agent_id.clone(),
+            ctx.runtime.clone(),
+            ctx.resolve_working_directory(None)
+                .unwrap_or_else(|_| ctx.working_directory().to_path_buf()),
+            input,
+        )
+        .await
+    }
+
+    async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
+        execute_files_tool(
+            ctx.agent_id.clone(),
+            ctx.runtime.clone(),
+            ctx.resolve_working_directory(None)
+                .unwrap_or_else(|_| ctx.working_directory().to_path_buf()),
+            input,
+        )
+        .await
+    }
+}
+
+async fn execute_files_tool(
+    agent_id: String,
+    runtime: crate::runtime::RuntimeHandle,
+    default_working_directory: std::path::PathBuf,
+    input: Value,
+) -> ToolResult {
+    let input = serde_json::from_value::<FilesInput>(input)
+        .map_err(|error| format!("Invalid files input: {error}"))?;
+    if input.operations.is_empty() {
+        return Err("At least one file operation is required".to_string());
+    }
+
+    let working_directory = match input.working_directory.as_deref() {
+        Some(directory) => runtime.resolve_working_directory(&agent_id, Some(directory))?,
+        None => runtime
+            .resolve_working_directory(&agent_id, None)
+            .unwrap_or(default_working_directory),
+    };
+    let base_dir = runtime.agent_config(&agent_id)?.base_dir;
+
+    tokio::task::spawn_blocking(move || {
+        let mut editor = WorkspaceEditor::new(agent_id, runtime, base_dir, working_directory);
+        let mut sections = Vec::with_capacity(input.operations.len());
+        for operation in input.operations {
+            sections.push(editor.apply_operation(operation)?);
+        }
+        editor.commit()?;
+
+        Ok(sections.join("\n\n"))
+    })
+    .await
+    .map_err(|error| format!("Files tool task failed: {error}"))?
 }
 
 #[cfg(test)]
@@ -182,5 +226,29 @@ mod tests {
         assert_eq!(spec.durability, ToolDurability::Ephemeral);
         assert!(spec.capabilities.contains(&ToolCapability::FilesystemRead));
         assert!(spec.capabilities.contains(&ToolCapability::FilesystemWrite));
+    }
+
+    #[test]
+    fn read_only_operations_opt_into_parallel_execution() {
+        let mode = FilesTool.execution_mode(&json!({
+            "operations": [
+                { "op": "read", "path": "README.md" },
+                { "op": "search", "path": ".", "pattern": "mentra" }
+            ]
+        }));
+
+        assert_eq!(mode, ToolExecutionMode::Parallel);
+    }
+
+    #[test]
+    fn mutating_operations_stay_exclusive() {
+        let mode = FilesTool.execution_mode(&json!({
+            "operations": [
+                { "op": "read", "path": "README.md" },
+                { "op": "set", "path": "README.md", "content": "updated" }
+            ]
+        }));
+
+        assert_eq!(mode, ToolExecutionMode::Exclusive);
     }
 }

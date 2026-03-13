@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::ToolChoice;
+use crate::provider::{ProviderRequestOptions, ToolChoice};
 
 #[cfg(test)]
 static NEXT_TEST_TRANSCRIPT_DIR_ID: AtomicU64 = AtomicU64::new(1);
@@ -127,6 +127,8 @@ pub struct AgentConfig {
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
     pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub provider_request_options: ProviderRequestOptions,
     pub team: TeamConfig,
     pub task: TaskConfig,
     pub workspace: WorkspaceConfig,
@@ -141,6 +143,7 @@ impl Default for AgentConfig {
             temperature: None,
             max_output_tokens: Some(8192),
             metadata: BTreeMap::new(),
+            provider_request_options: ProviderRequestOptions::default(),
             team: TeamConfig::default(),
             task: TaskConfig::default(),
             workspace: WorkspaceConfig::default(),

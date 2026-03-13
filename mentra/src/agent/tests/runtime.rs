@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    ContentBlock, Message, ProviderId, Role,
+    BuiltinProvider, ContentBlock, Message, Role,
     agent::{AgentConfig, AgentEvent, AgentStatus},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{RunOptions, Runtime, RuntimeHook, RuntimeHookEvent, RuntimePolicy},
@@ -11,9 +11,9 @@ use super::support::{ScriptedProvider, StaticTool, erroring_stream, model_info, 
 
 #[tokio::test]
 async fn send_streamed_text_turn_emits_events_and_commits_history() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![ok_stream(vec![
             ProviderEvent::MessageStarted {
@@ -83,9 +83,9 @@ async fn send_streamed_text_turn_emits_events_and_commits_history() {
 
 #[tokio::test]
 async fn send_failure_rolls_history_back_and_emits_run_failed() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             ok_stream(vec![
@@ -152,9 +152,9 @@ fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -
 
 #[tokio::test]
 async fn run_respects_tool_budget() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![tool_use_stream(
             &model.id,
@@ -192,9 +192,9 @@ async fn run_respects_tool_budget() {
 
 #[tokio::test]
 async fn policy_can_deny_shell_tool_execution() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
@@ -229,9 +229,9 @@ async fn policy_can_deny_shell_tool_execution() {
 
 #[tokio::test]
 async fn approval_required_shell_emits_hook_and_returns_tool_error() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -284,9 +284,9 @@ async fn approval_required_shell_emits_hook_and_returns_tool_error() {
 
 #[tokio::test]
 async fn custom_hooks_observe_model_and_tool_execution() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "tool-1", "test_tool", r#"{"value":"hi"}"#),

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 use crate::{
-    ContentBlock, Message, ProviderId, Role,
+    BuiltinProvider, ContentBlock, Message, Role,
     agent::{AgentConfig, AgentSnapshot, AgentStatus, TeamConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     runtime::{Runtime, RuntimeStore, SqliteRuntimeStore, TeamMemberStatus},
@@ -25,10 +25,14 @@ use super::support::{ScriptedProvider, controlled_stream, model_info, ok_stream}
 
 #[tokio::test]
 async fn runtime_startup_preserves_memory_until_resume_and_resume_rolls_back_pending_turn() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let store = temp_store("pending-recovery");
     let (script, tx) = controlled_stream();
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![script]);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![script],
+    );
 
     let runtime = Runtime::empty_builder()
         .with_store(store.clone())
@@ -80,7 +84,7 @@ async fn runtime_startup_preserves_memory_until_resume_and_resume_rolls_back_pen
     let reboot_runtime = Runtime::empty_builder()
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             Vec::new(),
         ))
@@ -122,12 +126,12 @@ async fn runtime_startup_preserves_memory_until_resume_and_resume_rolls_back_pen
 
 #[tokio::test]
 async fn resume_agent_keeps_committed_transcript_when_tool_execution_was_interrupted() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let store = temp_store("committed-recovery");
     let tool_started = Arc::new(Notify::new());
     let tool_release = Arc::new(Notify::new());
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![tool_use_stream(
             &model.id,
@@ -181,7 +185,7 @@ async fn resume_agent_keeps_committed_transcript_when_tool_execution_was_interru
     let reboot_runtime = Runtime::empty_builder()
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             Vec::new(),
         ))
@@ -215,12 +219,12 @@ async fn resume_agent_keeps_committed_transcript_when_tool_execution_was_interru
 
 #[tokio::test]
 async fn resume_all_rebuilds_agents_from_agent_memory() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let store = temp_store("resume-all");
     let runtime = Runtime::empty_builder()
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             vec![text_stream(&model.id, "done")],
         ))
@@ -240,7 +244,7 @@ async fn resume_all_rebuilds_agents_from_agent_memory() {
     let reboot_runtime = Runtime::empty_builder()
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model],
             Vec::new(),
         ))
@@ -259,14 +263,14 @@ async fn resume_all_rebuilds_agents_from_agent_memory() {
 
 #[tokio::test]
 async fn resume_filters_agents_by_runtime_identifier() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let store = temp_store("resume-filter");
 
     let runtime_a = Runtime::empty_builder()
         .with_runtime_identifier("session-a")
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             Vec::new(),
         ))
@@ -280,7 +284,7 @@ async fn resume_filters_agents_by_runtime_identifier() {
         .with_runtime_identifier("session-b")
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             Vec::new(),
         ))
@@ -296,7 +300,7 @@ async fn resume_filters_agents_by_runtime_identifier() {
         .with_runtime_identifier("session-a")
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model],
             Vec::new(),
         ))
@@ -313,7 +317,7 @@ async fn resume_filters_agents_by_runtime_identifier() {
 
 #[tokio::test]
 async fn list_persisted_agents_includes_teammates_for_runtime() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let store = temp_store("persisted-agent-list");
     let runtime_identifier = "persisted-agent-list";
 
@@ -321,7 +325,7 @@ async fn list_persisted_agents_includes_teammates_for_runtime() {
         .with_runtime_identifier(runtime_identifier)
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             Vec::new(),
         ))
@@ -353,14 +357,14 @@ async fn list_persisted_agents_includes_teammates_for_runtime() {
 
 #[tokio::test]
 async fn dropping_runtime_releases_agent_lease_for_next_resume() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let store = temp_store("lease-release");
 
     let runtime = Runtime::empty_builder()
         .with_runtime_identifier("lease-release")
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             vec![text_stream(&model.id, "done")],
         ))
@@ -382,7 +386,7 @@ async fn dropping_runtime_releases_agent_lease_for_next_resume() {
         .with_runtime_identifier("lease-release")
         .with_store(store)
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model],
             Vec::new(),
         ))
@@ -398,7 +402,7 @@ async fn dropping_runtime_releases_agent_lease_for_next_resume() {
 
 #[tokio::test]
 async fn resume_revives_persisted_teammate_actors_for_lead_runtime() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let store = temp_store("teammate-revive-resume");
     let runtime_identifier = "teammate-revive";
 
@@ -406,7 +410,7 @@ async fn resume_revives_persisted_teammate_actors_for_lead_runtime() {
         .with_runtime_identifier(runtime_identifier)
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             Vec::new(),
         ))
@@ -430,7 +434,7 @@ async fn resume_revives_persisted_teammate_actors_for_lead_runtime() {
     clear_leases(&store);
 
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -497,7 +501,7 @@ impl ExecutableTool for BlockingTool {
         }
     }
 
-    async fn execute(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
+    async fn execute_mut(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         self.started.notify_one();
         self.release.notified().await;
         Ok("released".to_string())

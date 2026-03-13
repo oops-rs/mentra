@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    ContentBlock, Message, ProviderId, Role,
+    BuiltinProvider, ContentBlock, Message, Role,
     agent::{AgentConfig, AgentEvent, ContextCompactionConfig, ContextCompactionTrigger},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent, Request},
     runtime::Runtime,
@@ -16,10 +16,10 @@ use super::support::{ScriptedProvider, StaticTool, StreamScript, model_info, ok_
 
 #[tokio::test]
 async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let long_output = "x".repeat(140);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "tool-1", "echo_tool", r#"{"value":"one"}"#),
@@ -83,9 +83,9 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
 
 #[tokio::test]
 async fn auto_compaction_persists_transcript_and_rewrites_history() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             text_stream(&model.id, "first done"),
@@ -170,9 +170,9 @@ async fn auto_compaction_persists_transcript_and_rewrites_history() {
 
 #[tokio::test]
 async fn compact_tool_compacts_history_and_continues() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "compact-1", "compact", "{}"),

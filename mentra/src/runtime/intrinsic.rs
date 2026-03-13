@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::json;
-use strum::Display;
+use strum::{Display, VariantArray};
 
 use crate::{
     ContentBlock,
@@ -12,18 +12,18 @@ use crate::{
 };
 
 pub(crate) fn register_tools(registry: &mut crate::tool::ToolRegistry) {
-    RuntimeIntrinsicTool::ALL
+    RuntimeIntrinsicTool::VARIANTS
         .iter()
         .for_each(|tool| registry.register_tool(*tool));
-    crate::runtime::task::TaskIntrinsicTool::ALL
+    crate::runtime::task::TaskIntrinsicTool::VARIANTS
         .iter()
         .for_each(|tool| registry.register_tool(*tool));
-    crate::team::TeamIntrinsicTool::ALL
+    crate::team::TeamIntrinsicTool::VARIANTS
         .iter()
         .for_each(|tool| registry.register_tool(*tool));
 }
 
-#[derive(Display, Copy, Clone)]
+#[derive(Display, Copy, Clone, VariantArray)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum RuntimeIntrinsicTool {
     Compact,
@@ -32,8 +32,6 @@ pub(crate) enum RuntimeIntrinsicTool {
 }
 
 impl RuntimeIntrinsicTool {
-    const ALL: [Self; 3] = [Self::Compact, Self::Idle, Self::Task];
-
     fn intrinsic_spec(
         &self,
         description: &str,
@@ -96,7 +94,7 @@ impl ExecutableTool for RuntimeIntrinsicTool {
         }
     }
 
-    async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
+    async fn execute_mut(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
         let call = ToolCall {
             id: ctx.tool_call_id.clone(),
             name: self.spec().name,

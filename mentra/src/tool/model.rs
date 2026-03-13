@@ -49,6 +49,14 @@ pub enum ToolDurability {
     ReplaySafe,
 }
 
+/// Declares whether a tool call may execute concurrently with other calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ToolExecutionMode {
+    #[default]
+    Exclusive,
+    Parallel,
+}
+
 /// Provider-facing description of a tool and its input schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSpec {
@@ -275,6 +283,130 @@ impl ToolContext<'_> {
     }
 }
 
+/// Execution context made available to a parallel-safe running tool.
+#[derive(Clone)]
+pub struct ParallelToolContext {
+    pub agent_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub(crate) working_directory: PathBuf,
+    pub(crate) runtime: crate::runtime::RuntimeHandle,
+    pub(crate) agent_name: String,
+    pub(crate) model: String,
+    pub(crate) history_len: usize,
+    pub(crate) tasks: Vec<TaskItem>,
+}
+
+impl From<ToolContext<'_>> for ParallelToolContext {
+    fn from(ctx: ToolContext) -> Self {
+        ParallelToolContext {
+            agent_id: ctx.agent_id,
+            tool_call_id: ctx.tool_call_id,
+            tool_name: ctx.tool_name,
+            working_directory: ctx.working_directory,
+            runtime: ctx.runtime,
+            agent_name: ctx.agent.name().to_string(),
+            model: ctx.agent.model().to_string(),
+            history_len: ctx.agent.history().len(),
+            tasks: ctx.agent.tasks().to_vec(),
+        }
+    }
+}
+
+impl ParallelToolContext {
+    /// Returns the resolved working directory for the current tool execution.
+    pub fn working_directory(&self) -> &Path {
+        self.working_directory.as_path()
+    }
+
+    /// Returns the current agent's display name.
+    pub fn agent_name(&self) -> &str {
+        &self.agent_name
+    }
+
+    /// Returns the current model identifier.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Returns the number of messages currently stored in history.
+    pub fn history_len(&self) -> usize {
+        self.history_len
+    }
+
+    /// Returns the current agent's task snapshot.
+    pub fn tasks(&self) -> &[TaskItem] {
+        &self.tasks
+    }
+
+    /// Resolves an optional working-directory override.
+    pub fn resolve_working_directory(
+        &self,
+        working_directory: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        self.runtime
+            .resolve_working_directory(&self.agent_id, working_directory)
+    }
+
+    /// Loads a named skill body from the registered skills directory.
+    pub fn load_skill(&self, name: &str) -> Result<String, String> {
+        self.runtime.load_skill(name)
+    }
+
+    /// Returns skill descriptions exposed to the model, when available.
+    pub fn skill_descriptions(&self) -> Option<String> {
+        self.runtime.skill_descriptions()
+    }
+
+    /// Executes a foreground shell command through the runtime policy and executor.
+    pub async fn execute_shell_command(
+        &self,
+        command: String,
+        justification: Option<String>,
+        requested_timeout: Option<std::time::Duration>,
+        cwd: PathBuf,
+    ) -> Result<crate::runtime::CommandOutput, String> {
+        self.runtime
+            .execute_shell_command(
+                &self.agent_id,
+                command,
+                justification,
+                requested_timeout,
+                cwd,
+            )
+            .await
+    }
+
+    /// Starts a background shell command through the runtime policy and executor.
+    pub fn start_background_task(
+        &self,
+        command: String,
+        justification: Option<String>,
+        requested_timeout: Option<std::time::Duration>,
+        cwd: PathBuf,
+    ) -> Result<BackgroundTaskSummary, String> {
+        self.runtime.start_background_task(
+            &self.agent_id,
+            command,
+            justification,
+            requested_timeout,
+            cwd,
+        )
+    }
+
+    /// Reads the status of one or more background tasks.
+    pub fn check_background_task(&self, task_id: Option<&str>) -> Result<String, String> {
+        self.runtime.check_background_task(&self.agent_id, task_id)
+    }
+
+    /// Reads a file through the runtime's read policy.
+    pub async fn read_file(&self, path: &str, max_lines: Option<usize>) -> Result<String, String> {
+        self.runtime
+            .read_file(&self.agent_id, path, max_lines)
+            .await
+    }
+}
+
 /// String result returned by Mentra tools.
 pub type ToolResult = Result<String, String>;
 
@@ -284,6 +416,21 @@ pub trait ExecutableTool: Send + Sync {
     /// Returns the static tool metadata used in model requests.
     fn spec(&self) -> ToolSpec;
 
-    /// Executes the tool for one model-emitted input payload.
-    async fn execute(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult;
+    /// Declares whether this tool call may execute in parallel for the given payload.
+    fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
+        ToolExecutionMode::Exclusive
+    }
+
+    /// Executes the tool with a context that does not permit agent mutation.
+    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+        Err(format!(
+            "Tool '{}' does not support parallel execution",
+            self.spec().name
+        ))
+    }
+
+    /// Executes the tool with mutable access to the current agent.
+    async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
+        self.execute(ctx.into(), input).await
+    }
 }

@@ -58,6 +58,15 @@ pub(crate) enum FileOperation {
     },
 }
 
+impl FileOperation {
+    pub(crate) fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Read { .. } | Self::List { .. } | Self::Search { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum InsertPosition {

@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
+    BuiltinProvider,
     provider::model::{
-        ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ProviderId, Request, Role,
-        ToolChoice,
+        ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request, Role, ToolChoice,
     },
     tool::ToolSpec,
 };
@@ -30,7 +30,7 @@ impl From<OpenAIModel> for ModelInfo {
     fn from(model: OpenAIModel) -> Self {
         ModelInfo {
             id: model.id,
-            provider: ProviderId::OPENAI,
+            provider: BuiltinProvider::OpenAI.into(),
             display_name: None,
             description: model.owned_by.map(|owner| format!("Owned by {owner}")),
             created_at: model
@@ -54,6 +54,8 @@ pub(crate) struct OpenAIResponsesRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata: BTreeMap<String, String>,
 }
@@ -76,6 +78,7 @@ impl<'a> TryFrom<Request<'a>> for OpenAIResponsesRequest {
             tool_choice: value.tool_choice.map(Into::into),
             temperature: value.temperature,
             max_output_tokens: value.max_output_tokens,
+            parallel_tool_calls: value.provider_request_options.openai.parallel_tool_calls,
             metadata: value.metadata.into_owned(),
         })
     }
@@ -309,7 +312,10 @@ mod tests {
     use time::OffsetDateTime;
 
     use crate::{
-        provider::model::{ContentBlock, Message, Request, Role, ToolChoice},
+        provider::model::{
+            ContentBlock, Message, OpenAIRequestOptions, ProviderRequestOptions, Request, Role,
+            ToolChoice,
+        },
         tool::ToolSpec,
     };
 
@@ -356,6 +362,7 @@ mod tests {
                 "agent".to_string(),
                 "mentra".to_string(),
             )])),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
@@ -406,6 +413,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
@@ -432,6 +440,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
@@ -461,6 +470,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
@@ -485,5 +495,30 @@ mod tests {
             info.created_at,
             Some(OffsetDateTime::from_unix_timestamp(1_741_049_700).expect("valid timestamp"))
         );
+    }
+
+    #[test]
+    fn serializes_parallel_tool_calls_option() {
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                openai: OpenAIRequestOptions {
+                    parallel_tool_calls: Some(true),
+                },
+                anthropic: Default::default(),
+            },
+        };
+
+        let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["parallel_tool_calls"], true);
     }
 }

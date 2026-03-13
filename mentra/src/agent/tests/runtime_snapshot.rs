@@ -1,7 +1,7 @@
 use tokio::sync::watch;
 
 use crate::{
-    ContentBlock, ProviderId, Role,
+    BuiltinProvider, ContentBlock, Role,
     agent::{AgentSnapshot, AgentStatus},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     runtime::{BackgroundTaskStatus, Runtime, RuntimePolicy},
@@ -11,9 +11,13 @@ use super::support::{ScriptedProvider, controlled_stream, model_info, ok_stream}
 
 #[tokio::test]
 async fn snapshot_progresses_during_streaming() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let (script, tx) = controlled_stream();
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![script]);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![script],
+    );
 
     let runtime = Runtime::empty_builder()
         .with_provider_instance(provider)
@@ -81,9 +85,9 @@ async fn snapshot_progresses_during_streaming() {
 
 #[tokio::test]
 async fn snapshot_updates_when_background_task_finishes() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             ok_stream(vec![

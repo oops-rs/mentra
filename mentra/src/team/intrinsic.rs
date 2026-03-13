@@ -2,14 +2,14 @@ mod execute;
 mod schema;
 
 use async_trait::async_trait;
-use strum::Display;
+use strum::{Display, VariantArray};
 
 use crate::{
     ContentBlock,
     tool::{ExecutableTool, ToolCall, ToolContext, ToolResult, ToolSpec},
 };
 
-#[derive(Clone, Copy, Debug, Display)]
+#[derive(Clone, Copy, Debug, Display, VariantArray)]
 #[strum(prefix = "team_")]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum TeamIntrinsicTool {
@@ -22,25 +22,13 @@ pub(crate) enum TeamIntrinsicTool {
     ListRequests,
 }
 
-impl TeamIntrinsicTool {
-    pub(crate) const ALL: [Self; 7] = [
-        Self::Spawn,
-        Self::Send,
-        Self::ReadInbox,
-        Self::Broadcast,
-        Self::Request,
-        Self::Respond,
-        Self::ListRequests,
-    ];
-}
-
 #[async_trait]
 impl ExecutableTool for TeamIntrinsicTool {
     fn spec(&self) -> ToolSpec {
         self.tool_spec()
     }
 
-    async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
+    async fn execute_mut(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
         let call = ToolCall {
             id: ctx.tool_call_id.clone(),
             name: self.to_string(),

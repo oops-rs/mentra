@@ -7,9 +7,10 @@ mod store;
 mod tests;
 mod types;
 
-use std::{fmt, io, path::Path};
+use std::{io, path::Path};
 
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::runtime::store::RuntimeStore;
 
@@ -25,33 +26,16 @@ pub(crate) enum TaskAccess<'a> {
     Teammate(&'a str),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum TaskError {
-    Io(io::Error),
-    Serde(serde_json::Error),
+    #[error("Task storage I/O failed: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("Task serialization failed: {0}")]
+    Serde(#[from] serde_json::Error),
+
+    #[error("Task validation failed: {0}")]
     Validation(String),
-}
-
-impl fmt::Display for TaskError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "Task storage I/O failed: {error}"),
-            Self::Serde(error) => write!(f, "Task serialization failed: {error}"),
-            Self::Validation(message) => f.write_str(message),
-        }
-    }
-}
-
-impl From<io::Error> for TaskError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
-    }
-}
-
-impl From<serde_json::Error> for TaskError {
-    fn from(value: serde_json::Error) -> Self {
-        Self::Serde(value)
-    }
 }
 
 pub(crate) fn execute_with_store(

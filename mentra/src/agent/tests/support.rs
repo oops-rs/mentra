@@ -1,15 +1,27 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, mpsc};
+use tokio::{
+    sync::{Mutex, mpsc},
+    time::sleep,
+};
 
 use crate::{
     provider::{
         ModelInfo, Provider, ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream,
         ProviderId, Request,
     },
-    tool::{ExecutableTool, ToolContext, ToolResult, ToolSpec},
+    tool::{
+        ExecutableTool, ParallelToolContext, ToolContext, ToolExecutionMode, ToolResult, ToolSpec,
+    },
 };
 
 pub(super) enum StreamScript {
@@ -138,7 +150,80 @@ impl ExecutableTool for StaticTool {
         }
     }
 
-    async fn execute(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
+    async fn execute_mut(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         self.result.clone()
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ProbeTool {
+    name: &'static str,
+    parallel: bool,
+    delay: Duration,
+    log: Arc<Mutex<Vec<String>>>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+impl ProbeTool {
+    pub(super) fn new(
+        name: &'static str,
+        parallel: bool,
+        delay: Duration,
+        log: Arc<Mutex<Vec<String>>>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            name,
+            parallel,
+            delay,
+            log,
+            active,
+            max_active,
+        }
+    }
+
+    async fn run(&self) -> ToolResult {
+        self.log.lock().await.push(format!("{}:start", self.name));
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self
+            .max_active
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                (active > current).then_some(active)
+            });
+        sleep(self.delay).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.log.lock().await.push(format!("{}:end", self.name));
+        Ok(format!("{} complete", self.name))
+    }
+}
+
+#[async_trait]
+impl ExecutableTool for ProbeTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.to_string(),
+            description: Some("probe tool".to_string()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+            capabilities: vec![],
+            side_effect_level: crate::tool::ToolSideEffectLevel::None,
+            durability: crate::tool::ToolDurability::ReplaySafe,
+        }
+    }
+
+    fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
+        if self.parallel {
+            ToolExecutionMode::Parallel
+        } else {
+            ToolExecutionMode::Exclusive
+        }
+    }
+
+    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+        self.run().await
     }
 }

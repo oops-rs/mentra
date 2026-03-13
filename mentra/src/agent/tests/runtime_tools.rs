@@ -2,13 +2,16 @@ use serde_json::json;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{Duration, sleep, timeout};
 
 use crate::{
-    ContentBlock, Message, ProviderId, Role,
+    BuiltinProvider, ContentBlock, Message, Role,
     agent::{
         Agent, AgentConfig, AgentEvent, SpawnedAgentStatus, TaskConfig, TeamAutonomyConfig,
         TeamConfig, WorkspaceConfig,
@@ -25,15 +28,15 @@ use crate::{
 };
 
 use super::support::{
-    ScriptedProvider, StaticTool, StreamScript, controlled_stream, erroring_stream, model_info,
-    ok_stream,
+    ProbeTool, ScriptedProvider, StaticTool, StreamScript, controlled_stream, erroring_stream,
+    model_info, ok_stream,
 };
 
 #[tokio::test]
 async fn send_tool_use_turn_executes_tool_and_commits_follow_up_response() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             ok_stream(vec![
@@ -124,9 +127,9 @@ async fn send_tool_use_turn_executes_tool_and_commits_follow_up_response() {
 
 #[tokio::test]
 async fn tool_execution_error_is_wrapped_and_loop_continues() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             ok_stream(vec![
@@ -199,9 +202,9 @@ async fn tool_execution_error_is_wrapped_and_loop_continues() {
 
 #[tokio::test]
 async fn background_run_tool_starts_task_and_continues_the_turn() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -259,9 +262,9 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
 
 #[tokio::test]
 async fn completed_background_results_are_injected_on_next_send() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -308,9 +311,9 @@ async fn completed_background_results_are_injected_on_next_send() {
 
 #[tokio::test]
 async fn check_background_reports_single_task_and_lists_all_tasks() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -376,9 +379,9 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
 
 #[tokio::test]
 async fn task_working_directory_routes_shell_for_teammate() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
@@ -447,9 +450,9 @@ async fn task_working_directory_routes_shell_for_teammate() {
 
 #[tokio::test]
 async fn teammate_shell_without_working_directory_uses_base_dir() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
@@ -501,9 +504,9 @@ async fn teammate_shell_without_working_directory_uses_base_dir() {
 
 #[tokio::test]
 async fn shell_working_directory_overrides_default_routing() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -556,9 +559,9 @@ async fn shell_working_directory_overrides_default_routing() {
 
 #[tokio::test]
 async fn shell_tool_is_denied_by_default_policy_and_audited() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
@@ -595,9 +598,9 @@ async fn shell_tool_is_denied_by_default_policy_and_audited() {
 
 #[tokio::test]
 async fn files_tool_reads_numbered_lines() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -646,9 +649,9 @@ async fn files_tool_reads_numbered_lines() {
 
 #[tokio::test]
 async fn files_tool_can_stage_create_then_read_in_one_call() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -713,9 +716,9 @@ async fn files_tool_can_stage_create_then_read_in_one_call() {
 
 #[tokio::test]
 async fn files_tool_can_update_existing_files() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -780,9 +783,9 @@ async fn files_tool_can_update_existing_files() {
 
 #[tokio::test]
 async fn files_tool_lists_and_searches_with_staged_state() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -840,9 +843,9 @@ async fn files_tool_lists_and_searches_with_staged_state() {
 
 #[tokio::test]
 async fn files_tool_aborts_without_partial_mutation_on_validation_error() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -897,9 +900,9 @@ async fn files_tool_aborts_without_partial_mutation_on_validation_error() {
 
 #[tokio::test]
 async fn files_tool_denies_writes_outside_workspace_roots() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -957,9 +960,9 @@ async fn files_tool_denies_writes_outside_workspace_roots() {
 async fn files_tool_search_handles_symlink_loops() {
     use std::os::unix::fs::symlink;
 
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1019,9 +1022,9 @@ async fn files_tool_search_handles_symlink_loops() {
 
 #[tokio::test]
 async fn background_run_reuses_shell_policy_evaluation() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1061,9 +1064,9 @@ async fn background_run_reuses_shell_policy_evaluation() {
 
 #[tokio::test]
 async fn run_options_tool_budget_blocks_second_tool_call() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![multi_tool_use_stream(
             &model.id,
@@ -1117,10 +1120,224 @@ async fn run_options_tool_budget_blocks_second_tool_call() {
 }
 
 #[tokio::test]
-async fn run_options_model_budget_blocks_follow_up_round() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+async fn parallel_tools_run_concurrently_and_preserve_history_order() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            multi_tool_use_stream(
+                &model.id,
+                &[
+                    ("call-1", "probe_one", r#"{}"#),
+                    ("call-2", "probe_two", r#"{}"#),
+                ],
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(ProbeTool::new(
+            "probe_one",
+            true,
+            Duration::from_millis(40),
+            Arc::clone(&log),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))
+        .with_tool(ProbeTool::new(
+            "probe_two",
+            true,
+            Duration::from_millis(40),
+            Arc::clone(&log),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("run the probes")])
+        .await
+        .expect("send");
+
+    assert!(max_active.load(Ordering::SeqCst) >= 2);
+    let tool_result_ids = agent
+        .history()
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .flat_map(|message| {
+            message.content.iter().filter_map(|block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_result_ids,
+        vec!["call-1".to_string(), "call-2".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn parallel_batches_respect_exclusive_barriers() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            multi_tool_use_stream(
+                &model.id,
+                &[
+                    ("call-1", "probe_one", r#"{}"#),
+                    ("call-2", "probe_two", r#"{}"#),
+                    ("call-3", "exclusive_probe", r#"{}"#),
+                    ("call-4", "probe_three", r#"{}"#),
+                ],
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(ProbeTool::new(
+            "probe_one",
+            true,
+            Duration::from_millis(30),
+            Arc::clone(&log),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))
+        .with_tool(ProbeTool::new(
+            "probe_two",
+            true,
+            Duration::from_millis(30),
+            Arc::clone(&log),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))
+        .with_tool(ProbeTool::new(
+            "exclusive_probe",
+            false,
+            Duration::from_millis(5),
+            Arc::clone(&log),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))
+        .with_tool(ProbeTool::new(
+            "probe_three",
+            true,
+            Duration::from_millis(30),
+            Arc::clone(&log),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("run probes with barrier")])
+        .await
+        .expect("send");
+
+    let log = log.lock().await.clone();
+    let exclusive_start = log
+        .iter()
+        .position(|entry| entry == "exclusive_probe:start")
+        .expect("exclusive start");
+    let probe_one_start = log
+        .iter()
+        .position(|entry| entry == "probe_one:start")
+        .expect("probe one start");
+    let probe_two_start = log
+        .iter()
+        .position(|entry| entry == "probe_two:start")
+        .expect("probe two start");
+    let probe_three_start = log
+        .iter()
+        .position(|entry| entry == "probe_three:start")
+        .expect("probe three start");
+
+    assert!(probe_one_start < exclusive_start);
+    assert!(probe_two_start < exclusive_start);
+    assert!(exclusive_start < probe_three_start);
+    assert!(max_active.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn cancellation_during_parallel_batch_rolls_back_run() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![multi_tool_use_stream(
+            &model.id,
+            &[
+                ("call-1", "probe_one", r#"{}"#),
+                ("call-2", "probe_two", r#"{}"#),
+            ],
+        )],
+    );
+    let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(ProbeTool::new(
+            "probe_one",
+            true,
+            Duration::from_millis(150),
+            Arc::clone(&log),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))
+        .with_tool(ProbeTool::new(
+            "probe_two",
+            true,
+            Duration::from_millis(150),
+            Arc::clone(&log),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+        ))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let cancellation = CancellationToken::default();
+    let cancellation_clone = cancellation.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(20)).await;
+        cancellation_clone.cancel();
+    });
+
+    let error = agent
+        .run(
+            vec![ContentBlock::text("cancel while probes run")],
+            RunOptions {
+                cancellation: Some(cancellation),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("run should cancel");
+
+    assert!(matches!(error, RuntimeError::Cancelled));
+    assert!(agent.history().is_empty());
+}
+
+#[tokio::test]
+async fn run_options_model_budget_blocks_follow_up_round() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1169,9 +1386,9 @@ async fn run_options_model_budget_blocks_follow_up_round() {
 
 #[tokio::test]
 async fn run_options_cancelled_run_stops_before_provider_request() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![text_stream(&model.id, "done")],
     );
@@ -1204,9 +1421,9 @@ async fn run_options_cancelled_run_stops_before_provider_request() {
 
 #[tokio::test]
 async fn completed_background_results_are_batched_in_completion_order() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             multi_tool_use_stream(
@@ -1264,9 +1481,9 @@ async fn completed_background_results_are_batched_in_completion_order() {
 
 #[tokio::test]
 async fn failed_background_results_surface_in_snapshot_events_and_notifications() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1331,9 +1548,9 @@ async fn failed_background_results_surface_in_snapshot_events_and_notifications(
 
 #[tokio::test]
 async fn drained_background_notifications_are_requeued_after_failed_run() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1395,10 +1612,10 @@ async fn drained_background_notifications_are_requeued_after_failed_run() {
 
 #[tokio::test]
 async fn default_runtime_exposes_task_and_new_empty_does_not() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
 
     let default_provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![text_stream(&model.id, "ok")],
     );
@@ -1432,7 +1649,7 @@ async fn default_runtime_exposes_task_and_new_empty_does_not() {
     assert!(!default_tools.contains("load_skill"));
 
     let empty_provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![text_stream(&model.id, "ok")],
     );
@@ -1466,9 +1683,9 @@ async fn default_runtime_exposes_task_and_new_empty_does_not() {
 
 #[tokio::test]
 async fn registered_skills_are_exposed_and_load_skill_returns_wrapped_content() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "tool-skill", "load_skill", r#"{"name":"git"}"#),
@@ -1530,9 +1747,9 @@ async fn registered_skills_are_exposed_and_load_skill_returns_wrapped_content() 
 
 #[tokio::test]
 async fn task_subagent_keeps_load_skill_while_hiding_task() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1582,9 +1799,9 @@ async fn task_subagent_keeps_load_skill_while_hiding_task() {
 
 #[tokio::test]
 async fn task_tool_runs_child_with_isolated_history_and_filtered_tools() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1665,9 +1882,9 @@ async fn task_tool_runs_child_with_isolated_history_and_filtered_tools() {
 
 #[tokio::test]
 async fn task_subagent_does_not_force_hidden_task_tool_choice() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1719,9 +1936,9 @@ async fn task_subagent_does_not_force_hidden_task_tool_choice() {
 
 #[tokio::test]
 async fn task_tool_wraps_child_failure_and_parent_continues() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1780,9 +1997,9 @@ async fn task_tool_wraps_child_failure_and_parent_continues() {
 
 #[tokio::test]
 async fn child_rejects_nested_task_requests_without_recursing() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "parent-task", "task", r#"{"prompt":"delegate"}"#),
@@ -1831,7 +2048,7 @@ async fn child_rejects_nested_task_requests_without_recursing() {
 
 #[tokio::test]
 async fn task_tool_returns_error_when_child_hits_round_limit() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let mut scripts = vec![tool_use_stream(
         &model.id,
         "parent-task",
@@ -1848,7 +2065,7 @@ async fn task_tool_returns_error_when_child_hits_round_limit() {
     }
     scripts.push(text_stream(&model.id, "parent handled"));
 
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], scripts);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], scripts);
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
@@ -1883,9 +2100,9 @@ async fn task_tool_returns_error_when_child_hits_round_limit() {
 
 #[tokio::test]
 async fn team_spawn_tool_registers_persistent_teammate() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -1953,9 +2170,9 @@ async fn team_spawn_tool_registers_persistent_teammate() {
 
 #[tokio::test]
 async fn persistent_teammate_processes_mail_and_reports_back_to_lead() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -2028,9 +2245,9 @@ async fn persistent_teammate_processes_mail_and_reports_back_to_lead() {
 
 #[tokio::test]
 async fn broadcast_tool_sends_to_every_other_known_agent() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -2117,9 +2334,9 @@ async fn broadcast_tool_sends_to_every_other_known_agent() {
 
 #[tokio::test]
 async fn teammate_message_updates_lead_unread_count_before_next_turn() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -2172,9 +2389,9 @@ async fn teammate_message_updates_lead_unread_count_before_next_turn() {
 
 #[tokio::test]
 async fn protocol_messages_update_lead_unread_count_and_clear_on_drain() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -2244,9 +2461,9 @@ async fn protocol_messages_update_lead_unread_count_and_clear_on_drain() {
 
 #[tokio::test]
 async fn team_request_tool_persists_pending_request_and_updates_snapshot() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -2299,13 +2516,13 @@ async fn team_request_tool_persists_pending_request_and_updates_snapshot() {
 
 #[tokio::test]
 async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let team_dir = temp_team_dir("protocol-respond-tool");
     let store = temp_store("protocol-respond-tool");
     let runtime = Runtime::builder()
         .with_store(store.clone())
         .with_provider_instance(ScriptedProvider::new(
-            ProviderId::ANTHROPIC,
+            BuiltinProvider::Anthropic,
             vec![model.clone()],
             vec![],
         ))
@@ -2337,7 +2554,7 @@ async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
         .expect("create request");
     let request_id = request.request_id.clone();
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -2413,9 +2630,9 @@ async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
 
 #[tokio::test]
 async fn team_list_requests_tool_filters_visible_requests() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -2499,9 +2716,9 @@ async fn team_list_requests_tool_filters_visible_requests() {
 
 #[tokio::test]
 async fn plan_approval_request_response_keeps_teammate_alive() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -2560,10 +2777,10 @@ async fn plan_approval_request_response_keeps_teammate_alive() {
 
 #[tokio::test]
 async fn shutdown_approval_shuts_down_teammate_after_current_wake_cycle() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let (stream, tx) = controlled_stream();
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![stream, text_stream(&model.id, "shutting down now")],
     );
@@ -2638,9 +2855,9 @@ async fn shutdown_approval_shuts_down_teammate_after_current_wake_cycle() {
 
 #[tokio::test]
 async fn failed_run_requeues_protocol_messages_and_preserves_request_state() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![erroring_stream(
             vec![
@@ -2719,9 +2936,9 @@ async fn failed_run_requeues_protocol_messages_and_preserves_request_state() {
 
 #[tokio::test]
 async fn failed_teammate_can_recover_on_next_wake() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             erroring_stream(
@@ -2771,8 +2988,8 @@ async fn failed_teammate_can_recover_on_next_wake() {
 
 #[tokio::test]
 async fn persisted_protocol_requests_load_on_restart() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![]);
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
 
     let team_dir = temp_team_dir("protocol-restart");
     let store = temp_store("protocol-restart");
@@ -2806,7 +3023,7 @@ async fn persisted_protocol_requests_load_on_restart() {
         .request_team_protocol("lead", "plan_approval", "plan one")
         .expect("create request");
 
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![]);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
     let runtime = Runtime::builder()
         .with_store(store)
         .with_provider_instance(provider)
@@ -2837,8 +3054,8 @@ async fn persisted_protocol_requests_load_on_restart() {
 
 #[tokio::test]
 async fn persisted_teammates_reload_as_shutdown_without_live_actor() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![]);
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
 
     let team_dir = temp_team_dir("teammate-restart-status");
     let store = temp_store("teammate-restart-status");
@@ -2862,7 +3079,7 @@ async fn persisted_teammates_reload_as_shutdown_without_live_actor() {
         .await
         .expect("spawn teammate");
 
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![]);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
     let runtime = Runtime::builder()
         .with_store(store)
         .with_provider_instance(provider)
@@ -2887,8 +3104,8 @@ async fn persisted_teammates_reload_as_shutdown_without_live_actor() {
 
 #[tokio::test]
 async fn team_spawn_revives_shutdown_teammate_name_after_restart() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![]);
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
 
     let team_dir = temp_team_dir("teammate-revive");
     let store = temp_store("teammate-revive");
@@ -2912,7 +3129,7 @@ async fn team_spawn_revives_shutdown_teammate_name_after_restart() {
         .await
         .expect("spawn teammate");
 
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![]);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
     let runtime = Runtime::builder()
         .with_store(store)
         .with_provider_instance(provider)
@@ -2943,9 +3160,9 @@ async fn team_spawn_revives_shutdown_teammate_name_after_restart() {
 
 #[tokio::test]
 async fn autonomous_teammate_auto_claims_ready_task_after_spawn() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![text_stream(&model.id, "claimed work")],
     );
@@ -3004,9 +3221,9 @@ async fn autonomous_teammate_auto_claims_ready_task_after_spawn() {
 
 #[tokio::test]
 async fn autonomous_teammates_do_not_double_claim_same_task() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![text_stream(&model.id, "picked it up")],
     );
@@ -3059,9 +3276,9 @@ async fn autonomous_teammates_do_not_double_claim_same_task() {
 
 #[tokio::test]
 async fn autonomous_teammate_does_not_claim_more_work_while_owning_unfinished_task() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![text_stream(&model.id, "looking into task 1")],
     );
@@ -3115,9 +3332,9 @@ async fn autonomous_teammate_does_not_claim_more_work_while_owning_unfinished_ta
 
 #[tokio::test]
 async fn autonomous_teammate_claims_task_after_dependency_unblocks() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![text_stream(&model.id, "starting unblocked task")],
     );
@@ -3173,9 +3390,9 @@ async fn autonomous_teammate_claims_task_after_dependency_unblocks() {
 
 #[tokio::test]
 async fn teammate_task_updates_are_limited_to_owned_tasks() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -3242,9 +3459,9 @@ async fn teammate_task_updates_are_limited_to_owned_tasks() {
 
 #[tokio::test]
 async fn teammate_task_subagent_inherits_owner_restrictions() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(
@@ -3302,9 +3519,9 @@ async fn teammate_task_subagent_inherits_owner_restrictions() {
 
 #[tokio::test]
 async fn idle_tool_returns_teammate_to_idle() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![tool_use_stream(&model.id, "idle-now", "idle", "{}")],
     );
@@ -3336,8 +3553,8 @@ async fn idle_tool_returns_teammate_to_idle() {
 
 #[tokio::test]
 async fn autonomous_idle_timeout_shuts_down_and_same_name_can_respawn() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
-    let provider = ScriptedProvider::new(ProviderId::ANTHROPIC, vec![model.clone()], vec![]);
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
 
     let team_dir = temp_team_dir("idle-timeout-team");
     let runtime = Runtime::builder()
@@ -3371,9 +3588,9 @@ async fn autonomous_idle_timeout_shuts_down_and_same_name_can_respawn() {
 
 #[tokio::test]
 async fn teammate_identity_is_reinjected_after_compaction() {
-    let model = model_info("model", ProviderId::ANTHROPIC);
+    let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
-        ProviderId::ANTHROPIC,
+        BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             text_stream(&model.id, "first done"),

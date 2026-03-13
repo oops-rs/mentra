@@ -4,10 +4,11 @@ use url::Url;
 mod model;
 mod sse;
 
-use crate::provider::{
-    Provider,
-    model::{
-        ModelInfo, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
+use crate::{
+    BuiltinProvider,
+    provider::{
+        Provider,
+        model::{ModelInfo, ProviderDescriptor, ProviderError, ProviderEventStream, Request},
     },
 };
 
@@ -44,7 +45,7 @@ impl GeminiProvider {
 impl Provider for GeminiProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
-            id: ProviderId::GEMINI,
+            id: BuiltinProvider::Gemini.into(),
             display_name: Some("Gemini".to_string()),
             description: Some("Google Gemini Developer API provider".to_string()),
         }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::json;
-use strum::Display;
+use strum::{Display, VariantArray};
 
 use crate::{
     ContentBlock,
@@ -11,7 +11,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Display)]
+#[derive(Clone, Copy, Display, VariantArray)]
 #[strum(prefix = "task_")]
 #[strum(serialize_all = "snake_case")]
 pub enum TaskIntrinsicTool {
@@ -23,14 +23,6 @@ pub enum TaskIntrinsicTool {
 }
 
 impl TaskIntrinsicTool {
-    pub const ALL: [Self; 5] = [
-        Self::Create,
-        Self::Claim,
-        Self::Update,
-        Self::List,
-        Self::Get,
-    ];
-
     fn task_spec(&self, description: &str, input_schema: serde_json::Value) -> ToolSpec {
         ToolSpec {
             name: self.to_string(),
@@ -166,7 +158,7 @@ impl ExecutableTool for TaskIntrinsicTool {
         }
     }
 
-    async fn execute(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
+    async fn execute_mut(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
         let call = ToolCall {
             id: ctx.tool_call_id.clone(),
             name: self.spec().name,
@@ -180,7 +172,7 @@ impl ExecutableTool for TaskIntrinsicTool {
 }
 
 pub(crate) fn execute_intrinsic(agent: &mut Agent, call: ToolCall) -> Option<ContentBlock> {
-    let tool = TaskIntrinsicTool::ALL
+    let tool = TaskIntrinsicTool::VARIANTS
         .iter()
         .find(|tool| tool.spec().name == call.name)?;
 

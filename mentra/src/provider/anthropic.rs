@@ -7,10 +7,11 @@ mod model;
 mod sse;
 mod stream_model;
 
-use crate::provider::{
-    Provider,
-    model::{
-        ModelInfo, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
+use crate::{
+    BuiltinProvider,
+    provider::{
+        Provider,
+        model::{ModelInfo, ProviderDescriptor, ProviderError, ProviderEventStream, Request},
     },
 };
 
@@ -51,7 +52,7 @@ impl AnthropicProvider {
 impl Provider for AnthropicProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
-            id: ProviderId::ANTHROPIC,
+            id: BuiltinProvider::Anthropic.into(),
             display_name: Some("Anthropic".to_string()),
             description: Some("Anthropic Messages API provider".to_string()),
         }

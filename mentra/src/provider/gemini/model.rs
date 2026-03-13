@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use crate::{
     provider::model::{
-        ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ProviderId, Request, Role,
-        ToolChoice,
+        BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request,
+        Role, ToolChoice,
     },
     tool::ToolSpec,
 };
@@ -57,7 +57,7 @@ impl From<GeminiModel> for ModelInfo {
 
         ModelInfo {
             id,
-            provider: ProviderId::GEMINI,
+            provider: BuiltinProvider::Gemini.into(),
             display_name: model.display_name,
             description: model.description,
             created_at: None,
@@ -369,8 +369,10 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        ProviderId,
-        provider::model::{ContentBlock, Message, ProviderError, Request, Role, ToolChoice},
+        BuiltinProvider,
+        provider::model::{
+            ContentBlock, Message, ProviderError, ProviderRequestOptions, Request, Role, ToolChoice,
+        },
         tool::ToolSpec,
     };
 
@@ -416,6 +418,7 @@ mod tests {
                 "agent".to_string(),
                 "mentra".to_string(),
             )])),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let payload =
@@ -480,6 +483,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let payload =
@@ -510,6 +514,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let error = GeminiGenerateContentRequest::try_from(request)
@@ -541,6 +546,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
         let any_payload =
             serde_json::to_value(GeminiGenerateContentRequest::try_from(request).unwrap())
@@ -566,6 +572,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
         let auto_payload =
             serde_json::to_value(GeminiGenerateContentRequest::try_from(request).unwrap())
@@ -594,6 +601,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
         };
 
         let payload =
@@ -615,7 +623,7 @@ mod tests {
 
         let info = crate::provider::model::ModelInfo::from(model);
         assert_eq!(info.id, "gemini-2.0-flash");
-        assert_eq!(info.provider, ProviderId::GEMINI);
+        assert_eq!(info.provider, BuiltinProvider::Gemini.into());
         assert_eq!(info.display_name.as_deref(), Some("Gemini 2.0 Flash"));
         assert_eq!(info.description.as_deref(), Some("Fast Gemini model"));
         assert_eq!(info.created_at, None);

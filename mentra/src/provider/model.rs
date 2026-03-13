@@ -5,7 +5,7 @@ use std::{borrow::Cow, collections::BTreeMap, fmt::Display};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use strum::Display;
+use strum::{Display, IntoStaticStr};
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -18,8 +18,8 @@ pub use stream::{
 };
 
 /// Builtin model providers that Mentra can construct from API keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
-#[strum(serialize_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
 pub enum BuiltinProvider {
     Anthropic,
     OpenAI,
@@ -28,23 +28,13 @@ pub enum BuiltinProvider {
 
 impl From<BuiltinProvider> for ProviderId {
     fn from(value: BuiltinProvider) -> Self {
-        match value {
-            BuiltinProvider::Anthropic => ProviderId::ANTHROPIC,
-            BuiltinProvider::OpenAI => ProviderId::OPENAI,
-            BuiltinProvider::Gemini => ProviderId::GEMINI,
-        }
+        ProviderId(Cow::Borrowed(value.into()))
     }
 }
 
 /// Stable identifier for a registered provider implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct ProviderId(Cow<'static, str>);
-
-impl ProviderId {
-    pub const ANTHROPIC: Self = ProviderId(Cow::Borrowed("anthropic"));
-    pub const OPENAI: Self = ProviderId(Cow::Borrowed("openai"));
-    pub const GEMINI: Self = ProviderId(Cow::Borrowed("gemini"));
-}
 
 impl ProviderId {
     /// Creates a provider identifier from a runtime string.
@@ -154,6 +144,7 @@ pub struct Request<'a> {
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
     pub metadata: Cow<'a, BTreeMap<String, String>>,
+    pub provider_request_options: ProviderRequestOptions,
 }
 
 impl Request<'_> {
@@ -168,8 +159,32 @@ impl Request<'_> {
             temperature: self.temperature,
             max_output_tokens: self.max_output_tokens,
             metadata: Cow::Owned(self.metadata.into_owned()),
+            provider_request_options: self.provider_request_options,
         }
     }
+}
+
+/// Provider-specific request options that should be forwarded on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProviderRequestOptions {
+    #[serde(default)]
+    pub openai: OpenAIRequestOptions,
+    #[serde(default)]
+    pub anthropic: AnthropicRequestOptions,
+}
+
+/// OpenAI-specific request options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OpenAIRequestOptions {
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
+}
+
+/// Anthropic-specific request options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AnthropicRequestOptions {
+    #[serde(default)]
+    pub disable_parallel_tool_use: Option<bool>,
 }
 
 /// A complete response collected from a provider stream.

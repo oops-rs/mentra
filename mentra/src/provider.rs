@@ -10,10 +10,10 @@ pub mod openai;
 use self::{anthropic::AnthropicProvider, gemini::GeminiProvider, openai::OpenAIProvider};
 
 pub use model::{
-    BuiltinProvider, ContentBlock, ContentBlockDelta, ContentBlockStart, ImageSource, Message,
-    ModelInfo, ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderId,
-    Request, Response, Role, ToolChoice, collect_response_from_stream,
-    provider_event_stream_from_response,
+    AnthropicRequestOptions, BuiltinProvider, ContentBlock, ContentBlockDelta, ContentBlockStart,
+    ImageSource, Message, ModelInfo, OpenAIRequestOptions, ProviderDescriptor, ProviderError,
+    ProviderEvent, ProviderEventStream, ProviderId, ProviderRequestOptions, Request, Response,
+    Role, ToolChoice, collect_response_from_stream, provider_event_stream_from_response,
 };
 
 /// Transport-neutral interface implemented by model providers.

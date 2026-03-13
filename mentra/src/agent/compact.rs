@@ -226,6 +226,7 @@ impl Agent {
                 temperature: Some(0.0),
                 max_output_tokens: Some(self.config.context_compaction.summary_max_output_tokens),
                 metadata: Cow::Borrowed(&self.config.metadata),
+                provider_request_options: self.config.provider_request_options.clone(),
             })
             .await
             .map_err(RuntimeError::FailedToCompactHistory)?;

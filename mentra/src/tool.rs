@@ -1,12 +1,13 @@
 mod builtin;
+mod context;
 mod files;
 mod model;
 
 use std::{collections::HashMap, sync::Arc};
 
 pub use model::{
-    ExecutableTool, ToolCall, ToolCapability, ToolContext, ToolDurability, ToolResult,
-    ToolSideEffectLevel, ToolSpec,
+    ExecutableTool, ParallelToolContext, ToolCall, ToolCapability, ToolContext, ToolDurability,
+    ToolExecutionMode, ToolResult, ToolSideEffectLevel, ToolSpec,
 };
 
 use builtin::{BackgroundRunTool, CheckBackgroundTool, LoadSkillTool, ShellTool};
