@@ -118,10 +118,6 @@ pub trait MemoryStore: Send + Sync {
     ) -> Result<(), RuntimeError>;
 }
 
-pub trait MemoryBackend: MemoryStore {}
-
-impl<T> MemoryBackend for T where T: MemoryStore + ?Sized {}
-
 #[derive(Clone)]
 pub struct MemoryEngine {
     store: Arc<dyn RuntimeStore>,

@@ -1084,6 +1084,9 @@ impl MemoryStore for SqliteRuntimeStore {
         if query.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
+        let Some(query) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
 
         let conn = self.open()?;
         let mut stmt = conn
@@ -1103,12 +1106,12 @@ impl MemoryStore for SqliteRuntimeStore {
                 WHERE long_term_memory_fts.agent_id = ?1
                   AND long_term_memory_fts.content MATCH ?2
                 ORDER BY rank, memory.created_at DESC
-                LIMIT ?3
+                    LIMIT ?3
                 "#,
             )
             .map_err(sqlite_error)?;
 
-        stmt.query_map(params![agent_id, fts_query(query), limit as i64], |row| {
+        stmt.query_map(params![agent_id, query, limit as i64], |row| {
             let kind = row.get::<_, String>(2)?;
             Ok(MemoryRecord {
                 record_id: row.get(0)?,
@@ -1233,13 +1236,18 @@ fn parse_memory_kind(kind: &str) -> crate::memory::MemoryRecordKind {
     }
 }
 
-fn fts_query(query: &str) -> String {
-    query
-        .split_whitespace()
+fn fts_query(query: &str) -> Option<String> {
+    let tokens = query
+        .split(|ch: char| !ch.is_alphanumeric())
         .filter(|token| !token.is_empty())
-        .map(|token| format!("\"{}\"", token.replace('"', " ")))
-        .collect::<Vec<_>>()
-        .join(" OR ")
+        .map(|token| format!("\"{token}\""))
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" OR "))
+    }
 }
 
 fn to_sql_error(error: RuntimeError) -> rusqlite::Error {
@@ -1362,6 +1370,7 @@ fn default_store_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::{MemoryRecord, MemoryRecordKind, MemoryStore};
 
     #[test]
     fn runtime_identifier_round_trips_through_filename_encoding() {
@@ -1408,5 +1417,59 @@ mod tests {
             .acquire_lease("agent:test", "runtime-123", Duration::from_secs(60))
             .expect("acquire lease");
         assert!(acquired);
+    }
+
+    #[test]
+    fn fts_query_returns_none_when_input_has_no_searchable_terms() {
+        assert_eq!(fts_query("... --- \"\""), None);
+    }
+
+    #[test]
+    fn sqlite_memory_search_sanitizes_punctuation_heavy_queries() {
+        let store = SqliteRuntimeStore::new(
+            std::env::temp_dir().join(format!("mentra-store-memory-{}.sqlite", now_nanos())),
+        );
+        store
+            .upsert_records(&[MemoryRecord {
+                record_id: "episode:agent:1".to_string(),
+                agent_id: "agent-1".to_string(),
+                kind: MemoryRecordKind::Episode,
+                content: "shared phrase alpha".to_string(),
+                source_revision: 1,
+                created_at: 1,
+                metadata_json: "{}".to_string(),
+                score: None,
+            }])
+            .expect("seed records");
+
+        let records = store
+            .search_records("agent-1", "(shared) alpha!!!", 10)
+            .expect("search records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_id, "episode:agent:1");
+    }
+
+    #[test]
+    fn sqlite_memory_search_ignores_non_searchable_queries() {
+        let store = SqliteRuntimeStore::new(
+            std::env::temp_dir().join(format!("mentra-store-empty-query-{}.sqlite", now_nanos())),
+        );
+        store
+            .upsert_records(&[MemoryRecord {
+                record_id: "episode:agent:1".to_string(),
+                agent_id: "agent-1".to_string(),
+                kind: MemoryRecordKind::Episode,
+                content: "shared phrase alpha".to_string(),
+                source_revision: 1,
+                created_at: 1,
+                metadata_json: "{}".to_string(),
+                score: None,
+            }])
+            .expect("seed records");
+
+        let records = store
+            .search_records("agent-1", "... ---", 10)
+            .expect("search records");
+        assert!(records.is_empty());
     }
 }
