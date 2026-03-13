@@ -45,6 +45,8 @@ impl WorkspaceEditor {
         base_dir: PathBuf,
         working_directory: PathBuf,
     ) -> Self {
+        let base_dir = canonicalize_existing_path(base_dir);
+        let working_directory = canonicalize_existing_path(working_directory);
         Self {
             agent_id,
             runtime,
@@ -135,13 +137,7 @@ impl WorkspaceEditor {
                 fs::write(&temp_path, bytes).map_err(|error| {
                     format!("Failed to write '{}': {error}", temp_path.display())
                 })?;
-                fs::rename(&temp_path, path).map_err(|error| {
-                    format!(
-                        "Failed to rename '{}' into '{}': {error}",
-                        temp_path.display(),
-                        path.display()
-                    )
-                })?;
+                replace_file(&temp_path, path)?;
             }
 
             for path in deletes {
@@ -169,7 +165,7 @@ impl WorkspaceEditor {
         }
 
         let path = self.resolve_path(&path)?;
-        self.authorize_read(&path, "files_read")?;
+        let path = self.authorize_read(&path, "files_read")?;
         let content = self.load_text_file(&path)?;
         let lines = content.lines().collect::<Vec<_>>();
         let start = offset.saturating_sub(1).min(lines.len());
@@ -190,7 +186,7 @@ impl WorkspaceEditor {
 
     fn list(&self, path: String, depth: usize, limit: usize) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
-        self.authorize_read(&path, "files_list")?;
+        let path = self.authorize_read(&path, "files_list")?;
         let kind = self.entry_kind(&path)?;
         if kind == EntryKind::Missing {
             return Err(format!(
@@ -205,7 +201,16 @@ impl WorkspaceEditor {
                 entries.push(format!("[file] {}", self.display_relative_to(&path, &path)));
             }
             EntryKind::Dir => {
-                self.collect_list_entries(&path, &path, 1, depth, limit, &mut entries)?
+                let mut visited = BTreeSet::new();
+                self.collect_list_entries(
+                    &path,
+                    &path,
+                    1,
+                    depth,
+                    limit,
+                    &mut visited,
+                    &mut entries,
+                )?
             }
             EntryKind::Missing => unreachable!(),
         }
@@ -220,7 +225,7 @@ impl WorkspaceEditor {
 
     fn search(&self, path: String, pattern: &str, limit: usize) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
-        self.authorize_read(&path, "files_search")?;
+        let path = self.authorize_read(&path, "files_search")?;
         let regex =
             Regex::new(pattern).map_err(|error| format!("Invalid regex pattern: {error}"))?;
         let kind = self.entry_kind(&path)?;
@@ -234,7 +239,10 @@ impl WorkspaceEditor {
         let mut matches = Vec::new();
         match kind {
             EntryKind::File => self.search_file(&path, &regex, limit, &mut matches)?,
-            EntryKind::Dir => self.collect_search_matches(&path, &regex, limit, &mut matches)?,
+            EntryKind::Dir => {
+                let mut visited = BTreeSet::new();
+                self.collect_search_matches(&path, &regex, limit, &mut visited, &mut matches)?
+            }
             EntryKind::Missing => unreachable!(),
         }
 
@@ -252,7 +260,7 @@ impl WorkspaceEditor {
 
     fn create(&mut self, path: String, content: String) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
-        self.authorize_write(&path, "files_write")?;
+        let path = self.authorize_write(&path, "files_write")?;
         match self.entry_kind(&path)? {
             EntryKind::Missing => {
                 self.overlay
@@ -268,7 +276,7 @@ impl WorkspaceEditor {
 
     fn set(&mut self, path: String, content: String) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
-        self.authorize_write(&path, "files_write")?;
+        let path = self.authorize_write(&path, "files_write")?;
         if self.entry_kind(&path)? != EntryKind::File {
             return Err(format!(
                 "Path '{}' does not exist as a file",
@@ -294,7 +302,7 @@ impl WorkspaceEditor {
         }
 
         let path = self.resolve_path(&path)?;
-        self.authorize_write(&path, "files_write")?;
+        let path = self.authorize_write(&path, "files_write")?;
         let content = self.load_text_file(&path)?;
         let actual_replacements = content.match_indices(old).count();
         if actual_replacements != expected_replacements {
@@ -332,7 +340,7 @@ impl WorkspaceEditor {
         }
 
         let path = self.resolve_path(&path)?;
-        self.authorize_write(&path, "files_write")?;
+        let path = self.authorize_write(&path, "files_write")?;
         let current = self.load_text_file(&path)?;
         let locations = current
             .match_indices(anchor)
@@ -385,8 +393,8 @@ impl WorkspaceEditor {
     fn move_path(&mut self, from: String, to: String) -> Result<String, String> {
         let from = self.resolve_path(&from)?;
         let to = self.resolve_path(&to)?;
-        self.authorize_write(&from, "files_write")?;
-        self.authorize_write(&to, "files_write")?;
+        let from = self.authorize_write(&from, "files_write")?;
+        let to = self.authorize_write(&to, "files_write")?;
 
         if self.entry_kind(&from)? != EntryKind::File {
             return Err(format!(
@@ -413,7 +421,7 @@ impl WorkspaceEditor {
 
     fn delete(&mut self, path: String) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
-        self.authorize_write(&path, "files_write")?;
+        let path = self.authorize_write(&path, "files_write")?;
         if self.entry_kind(&path)? != EntryKind::File {
             return Err(format!(
                 "Path '{}' does not exist as a file",
@@ -451,13 +459,7 @@ impl WorkspaceEditor {
                             temp_path.display()
                         )
                     })?;
-                    fs::rename(&temp_path, path).map_err(|error| {
-                        format!(
-                            "Failed to restore '{}' from '{}': {error}",
-                            path.display(),
-                            temp_path.display()
-                        )
-                    })?;
+                    replace_file(&temp_path, path)?;
                 }
             }
         }
@@ -474,11 +476,10 @@ impl WorkspaceEditor {
         normalize_path(path)
     }
 
-    fn authorize_read(&self, path: &Path, action: &str) -> Result<(), String> {
+    fn authorize_read(&self, path: &Path, action: &str) -> Result<PathBuf, String> {
         self.runtime
             .policy
             .authorize_file_read(&self.base_dir, path)
-            .map(|_| ())
             .map_err(|detail| {
                 let _ = self
                     .runtime
@@ -491,11 +492,10 @@ impl WorkspaceEditor {
             })
     }
 
-    fn authorize_write(&self, path: &Path, action: &str) -> Result<(), String> {
+    fn authorize_write(&self, path: &Path, action: &str) -> Result<PathBuf, String> {
         self.runtime
             .policy
             .authorize_file_write(&self.base_dir, path)
-            .map(|_| ())
             .map_err(|detail| {
                 let _ = self
                     .runtime
@@ -592,9 +592,13 @@ impl WorkspaceEditor {
         current_depth: usize,
         max_depth: usize,
         limit: usize,
+        visited: &mut BTreeSet<PathBuf>,
         entries: &mut Vec<String>,
     ) -> Result<(), String> {
         if current_depth > max_depth || entries.len() >= limit {
+            return Ok(());
+        }
+        if !self.mark_directory_visited(dir, visited)? {
             return Ok(());
         }
 
@@ -616,6 +620,7 @@ impl WorkspaceEditor {
                         current_depth + 1,
                         max_depth,
                         limit,
+                        visited,
                         entries,
                     )?;
                 }
@@ -631,8 +636,13 @@ impl WorkspaceEditor {
         dir: &Path,
         regex: &Regex,
         limit: usize,
+        visited: &mut BTreeSet<PathBuf>,
         matches: &mut Vec<String>,
     ) -> Result<(), String> {
+        if !self.mark_directory_visited(dir, visited)? {
+            return Ok(());
+        }
+
         for child_name in self.child_names(dir)? {
             if matches.len() >= limit {
                 break;
@@ -641,11 +651,31 @@ impl WorkspaceEditor {
             let child = dir.join(&child_name);
             match self.entry_kind(&child)? {
                 EntryKind::File => self.search_file(&child, regex, limit, matches)?,
-                EntryKind::Dir => self.collect_search_matches(&child, regex, limit, matches)?,
+                EntryKind::Dir => {
+                    self.collect_search_matches(&child, regex, limit, visited, matches)?
+                }
                 EntryKind::Missing => {}
             }
         }
         Ok(())
+    }
+
+    fn mark_directory_visited(
+        &self,
+        dir: &Path,
+        visited: &mut BTreeSet<PathBuf>,
+    ) -> Result<bool, String> {
+        let key = match fs::canonicalize(dir) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => dir.to_path_buf(),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to resolve directory '{}': {error}",
+                    self.display_path(dir)
+                ));
+            }
+        };
+        Ok(visited.insert(key))
     }
 
     fn search_file(
@@ -755,10 +785,22 @@ fn normalize_path(path: PathBuf) -> Result<PathBuf, String> {
             Component::RootDir => normalized.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
-                normalized.pop();
+                if !normalized.pop() || !normalized.is_absolute() {
+                    return Err(format!(
+                        "Path '{}' escapes the filesystem root",
+                        path.display()
+                    ));
+                }
             }
             Component::Normal(segment) => normalized.push(segment),
         }
+    }
+
+    if !normalized.is_absolute() {
+        return Err(format!(
+            "Path '{}' must resolve to an absolute path",
+            path.display()
+        ));
     }
 
     Ok(normalized)
@@ -774,4 +816,40 @@ fn temporary_path(path: &Path) -> PathBuf {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_string());
     path.with_file_name(format!(".{file_name}.mentra-tmp-{unique}"))
+}
+
+fn canonicalize_existing_path(path: PathBuf) -> PathBuf {
+    fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn replace_file(temp_path: &Path, path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|error| format!("Failed to replace existing '{}': {error}", path.display()))?;
+    }
+
+    fs::rename(temp_path, path).map_err(|error| {
+        format!(
+            "Failed to rename '{}' into '{}': {error}",
+            temp_path.display(),
+            path.display()
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_path_rejects_parent_past_root() {
+        let mut path = std::env::temp_dir();
+        for _ in 0..10 {
+            path.push("..");
+        }
+        path.push("escape");
+        let error = normalize_path(path).expect_err("path should be rejected");
+        assert!(error.contains("escapes the filesystem root"));
+    }
 }

@@ -135,12 +135,11 @@ impl ExecutableTool for FilesTool {
                 "required": ["operations"]
             }),
             capabilities: vec![
-                ToolCapability::ReadOnly,
                 ToolCapability::FilesystemRead,
                 ToolCapability::FilesystemWrite,
             ],
             side_effect_level: ToolSideEffectLevel::LocalState,
-            durability: ToolDurability::ReplaySafe,
+            durability: ToolDurability::Ephemeral,
         }
     }
 
@@ -154,19 +153,34 @@ impl ExecutableTool for FilesTool {
         let working_directory =
             ctx.resolve_working_directory(input.working_directory.as_deref())?;
         let base_dir = ctx.runtime.agent_config(&ctx.agent_id)?.base_dir;
-        let mut editor = WorkspaceEditor::new(
-            ctx.agent_id.clone(),
-            ctx.runtime.clone(),
-            base_dir,
-            working_directory,
-        );
+        let agent_id = ctx.agent_id.clone();
+        let runtime = ctx.runtime.clone();
 
-        let mut sections = Vec::with_capacity(input.operations.len());
-        for operation in input.operations {
-            sections.push(editor.apply_operation(operation)?);
-        }
-        editor.commit()?;
+        tokio::task::spawn_blocking(move || {
+            let mut editor = WorkspaceEditor::new(agent_id, runtime, base_dir, working_directory);
+            let mut sections = Vec::with_capacity(input.operations.len());
+            for operation in input.operations {
+                sections.push(editor.apply_operation(operation)?);
+            }
+            editor.commit()?;
 
-        Ok(sections.join("\n\n"))
+            Ok(sections.join("\n\n"))
+        })
+        .await
+        .map_err(|error| format!("Files tool task failed: {error}"))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn files_tool_metadata_marks_local_mutation() {
+        let spec = FilesTool.spec();
+        assert!(!spec.capabilities.contains(&ToolCapability::ReadOnly));
+        assert_eq!(spec.durability, ToolDurability::Ephemeral);
+        assert!(spec.capabilities.contains(&ToolCapability::FilesystemRead));
+        assert!(spec.capabilities.contains(&ToolCapability::FilesystemWrite));
     }
 }
