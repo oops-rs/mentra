@@ -6,6 +6,8 @@ mod default_paths;
 pub mod agent;
 /// Background task coordination types and services.
 pub mod background;
+/// Working-memory journal and long-term memory services.
+pub mod memory;
 /// Provider integrations and transport-neutral request/response types.
 pub mod provider;
 /// Runtime orchestration, persistence, policies, and agent APIs.

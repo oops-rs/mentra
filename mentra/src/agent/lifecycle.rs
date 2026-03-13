@@ -51,10 +51,18 @@ impl Agent {
 
         match TurnRunner::new(self, options).run().await {
             Ok(()) => {
+                let run_delta = self.memory.current_run_delta().unwrap_or_default();
                 self.clear_inflight_team_messages();
                 self.clear_inflight_background_notifications();
                 self.memory.finish_run()?;
                 self.sync_memory_snapshot();
+                self.runtime
+                    .memory_engine()
+                    .schedule_ingest(crate::memory::IngestRequest {
+                        agent_id: self.id().to_string(),
+                        source_revision: self.memory.revision(),
+                        messages: run_delta,
+                    });
                 self.set_status(AgentStatus::Finished);
                 self.persist_agent_record()?;
                 self.finish_run_checkpoint()?;

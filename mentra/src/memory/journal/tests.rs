@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     ContentBlock, Message,
-    agent::memory::{AgentMemory, AgentMemoryState, CompactionOutcome, PendingTurnState},
+    memory::journal::{AgentMemory, AgentMemoryState, CompactionOutcome, PendingTurnState},
     runtime::SqliteRuntimeStore,
 };
 

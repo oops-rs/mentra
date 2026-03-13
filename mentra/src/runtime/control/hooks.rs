@@ -68,6 +68,42 @@ pub enum RuntimeHookEvent {
         task_id: String,
         status: String,
     },
+    MemorySearchStarted {
+        agent_id: String,
+        limit: usize,
+        query_preview: String,
+    },
+    MemorySearchFinished {
+        agent_id: String,
+        success: bool,
+        result_count: usize,
+        error: Option<String>,
+    },
+    MemoryIngestStarted {
+        agent_id: String,
+        source_revision: u64,
+    },
+    MemoryIngestFinished {
+        agent_id: String,
+        source_revision: u64,
+        success: bool,
+        stored_records: usize,
+        error: Option<String>,
+    },
+    MemoryCompactionProposed {
+        agent_id: String,
+        base_revision: u64,
+        transcript_path: PathBuf,
+    },
+    MemoryCompactionApplied {
+        agent_id: String,
+        base_revision: u64,
+        resulting_history_len: usize,
+    },
+    MemoryCompactionSkipped {
+        agent_id: String,
+        base_revision: u64,
+    },
     RunAborted {
         agent_id: String,
         reason: String,
@@ -89,6 +125,13 @@ impl RuntimeHookEvent {
             | Self::PolicyDenied { agent_id, .. }
             | Self::BackgroundTaskStarted { agent_id, .. }
             | Self::BackgroundTaskFinished { agent_id, .. }
+            | Self::MemorySearchStarted { agent_id, .. }
+            | Self::MemorySearchFinished { agent_id, .. }
+            | Self::MemoryIngestStarted { agent_id, .. }
+            | Self::MemoryIngestFinished { agent_id, .. }
+            | Self::MemoryCompactionProposed { agent_id, .. }
+            | Self::MemoryCompactionApplied { agent_id, .. }
+            | Self::MemoryCompactionSkipped { agent_id, .. }
             | Self::RunAborted { agent_id, .. } => agent_id.clone(),
         }
     }
@@ -105,6 +148,13 @@ impl RuntimeHookEvent {
             Self::PolicyDenied { .. } => "policy_denied",
             Self::BackgroundTaskStarted { .. } => "background_task_started",
             Self::BackgroundTaskFinished { .. } => "background_task_finished",
+            Self::MemorySearchStarted { .. } => "memory_search_started",
+            Self::MemorySearchFinished { .. } => "memory_search_finished",
+            Self::MemoryIngestStarted { .. } => "memory_ingest_started",
+            Self::MemoryIngestFinished { .. } => "memory_ingest_finished",
+            Self::MemoryCompactionProposed { .. } => "memory_compaction_proposed",
+            Self::MemoryCompactionApplied { .. } => "memory_compaction_applied",
+            Self::MemoryCompactionSkipped { .. } => "memory_compaction_skipped",
             Self::RunAborted { .. } => "run_aborted",
         }
     }

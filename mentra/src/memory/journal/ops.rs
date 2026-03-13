@@ -74,6 +74,7 @@ impl AgentMemory {
         self.persist()
     }
 
+    #[allow(dead_code)]
     pub fn compact(&mut self, outcome: CompactionOutcome) -> Result<(), RuntimeError> {
         self.state.transcript = outcome.transcript;
         self.state.compaction.last_compacted_transcript_path = Some(outcome.transcript_path);
@@ -118,6 +119,10 @@ impl AgentMemory {
         &self.state.transcript
     }
 
+    pub fn revision(&self) -> u64 {
+        self.state.revision
+    }
+
     pub fn last_message(&self) -> Option<&Message> {
         self.state.transcript.last()
     }
@@ -132,6 +137,29 @@ impl AgentMemory {
 
     pub fn state(&self) -> &AgentMemoryState {
         &self.state
+    }
+
+    pub fn current_run_delta(&self) -> Option<Vec<Message>> {
+        let run = self.state.run.as_ref()?;
+        let start = run.baseline_transcript.len();
+        if start >= self.state.transcript.len() {
+            return Some(self.state.transcript.clone());
+        }
+        Some(self.state.transcript[start..].to_vec())
+    }
+
+    pub fn try_apply_compaction(
+        &mut self,
+        base_revision: u64,
+        outcome: CompactionOutcome,
+    ) -> Result<bool, RuntimeError> {
+        if self.state.revision != base_revision {
+            return Ok(false);
+        }
+        self.state.transcript = outcome.transcript;
+        self.state.compaction.last_compacted_transcript_path = Some(outcome.transcript_path);
+        self.persist()?;
+        Ok(true)
     }
 
     fn persist(&mut self) -> Result<(), RuntimeError> {

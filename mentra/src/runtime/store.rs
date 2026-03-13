@@ -9,10 +9,12 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    agent::{AgentConfig, AgentMemoryState, AgentStatus, SpawnedAgentSummary, TeammateIdentity},
+    agent::{AgentConfig, AgentStatus, SpawnedAgentSummary, TeammateIdentity},
     background::{
         BackgroundNotification, BackgroundStore, BackgroundTaskStatus, BackgroundTaskSummary,
     },
+    memory::journal::AgentMemoryState,
+    memory::{MemoryCursor, MemoryRecord, MemoryStore},
     provider::ProviderId,
     runtime::TaskItem,
     team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary, TeamStore},
@@ -57,7 +59,7 @@ pub struct TaskStateSnapshot {
 }
 
 /// Persistence backend used for agents, task state, audit events, and extracted domain stores.
-pub trait RuntimeStore: TeamStore + BackgroundStore + Send + Sync {
+pub trait RuntimeStore: TeamStore + BackgroundStore + MemoryStore + Send + Sync {
     fn prepare_recovery(&self) -> Result<(), RuntimeError>;
     fn create_agent(
         &self,
@@ -584,6 +586,25 @@ impl SqliteRuntimeStore {
                 owner TEXT NOT NULL,
                 expires_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS long_term_memory (
+                record_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source_revision INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS long_term_memory_fts USING fts5(
+                record_id UNINDEXED,
+                agent_id UNINDEXED,
+                content
+            );
+            CREATE TABLE IF NOT EXISTS long_term_memory_cursor (
+                agent_id TEXT PRIMARY KEY,
+                cursor_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             "#,
         )
         .map_err(sqlite_error)
@@ -1002,6 +1023,170 @@ impl RuntimeStore for SqliteRuntimeStore {
     }
 }
 
+impl MemoryStore for SqliteRuntimeStore {
+    fn upsert_records(&self, records: &[MemoryRecord]) -> Result<(), RuntimeError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.open()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+
+        for record in records {
+            tx.execute(
+                r#"
+                INSERT INTO long_term_memory (
+                    record_id, agent_id, kind, content, source_revision, created_at, metadata_json
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(record_id) DO UPDATE SET
+                    agent_id = excluded.agent_id,
+                    kind = excluded.kind,
+                    content = excluded.content,
+                    source_revision = excluded.source_revision,
+                    created_at = excluded.created_at,
+                    metadata_json = excluded.metadata_json
+                "#,
+                params![
+                    record.record_id,
+                    record.agent_id,
+                    format!("{:?}", record.kind).to_lowercase(),
+                    record.content,
+                    record.source_revision as i64,
+                    record.created_at,
+                    record.metadata_json,
+                ],
+            )
+            .map_err(sqlite_error)?;
+            tx.execute(
+                "DELETE FROM long_term_memory_fts WHERE record_id = ?1",
+                params![record.record_id],
+            )
+            .map_err(sqlite_error)?;
+            tx.execute(
+                "INSERT INTO long_term_memory_fts (record_id, agent_id, content) VALUES (?1, ?2, ?3)",
+                params![record.record_id, record.agent_id, record.content],
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        tx.commit().map_err(sqlite_error)
+    }
+
+    fn search_records(
+        &self,
+        agent_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, RuntimeError> {
+        if query.trim().is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.open()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT
+                    memory.record_id,
+                    memory.agent_id,
+                    memory.kind,
+                    memory.content,
+                    memory.source_revision,
+                    memory.created_at,
+                    memory.metadata_json,
+                    bm25(long_term_memory_fts) AS rank
+                FROM long_term_memory_fts
+                JOIN long_term_memory AS memory ON memory.record_id = long_term_memory_fts.record_id
+                WHERE long_term_memory_fts.agent_id = ?1
+                  AND long_term_memory_fts.content MATCH ?2
+                ORDER BY rank, memory.created_at DESC
+                LIMIT ?3
+                "#,
+            )
+            .map_err(sqlite_error)?;
+
+        stmt.query_map(params![agent_id, fts_query(query), limit as i64], |row| {
+            let kind = row.get::<_, String>(2)?;
+            Ok(MemoryRecord {
+                record_id: row.get(0)?,
+                agent_id: row.get(1)?,
+                kind: parse_memory_kind(&kind),
+                content: row.get(3)?,
+                source_revision: row.get::<_, i64>(4)? as u64,
+                created_at: row.get(5)?,
+                metadata_json: row.get(6)?,
+                score: row.get::<_, Option<f64>>(7)?,
+            })
+        })
+        .map_err(sqlite_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_error)
+    }
+
+    fn delete_records(&self, record_ids: &[String]) -> Result<(), RuntimeError> {
+        if record_ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.open()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        for record_id in record_ids {
+            tx.execute(
+                "DELETE FROM long_term_memory_fts WHERE record_id = ?1",
+                params![record_id],
+            )
+            .map_err(sqlite_error)?;
+            tx.execute(
+                "DELETE FROM long_term_memory WHERE record_id = ?1",
+                params![record_id],
+            )
+            .map_err(sqlite_error)?;
+        }
+        tx.commit().map_err(sqlite_error)
+    }
+
+    fn load_agent_memory_cursor(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<MemoryCursor>, RuntimeError> {
+        let conn = self.open()?;
+        conn.query_row(
+            "SELECT cursor_json FROM long_term_memory_cursor WHERE agent_id = ?1",
+            params![agent_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite_error)?
+        .map(|json| from_json(&json))
+        .transpose()
+    }
+
+    fn save_agent_memory_cursor(
+        &self,
+        agent_id: &str,
+        cursor: &MemoryCursor,
+    ) -> Result<(), RuntimeError> {
+        let conn = self.open()?;
+        conn.execute(
+            r#"
+            INSERT INTO long_term_memory_cursor (agent_id, cursor_json, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                cursor_json = excluded.cursor_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![agent_id, to_json(cursor)?, now_secs()],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    }
+}
+
 impl SqliteRuntimeStore {
     fn load_tasks_from_conn(
         &self,
@@ -1038,6 +1223,23 @@ fn from_json<T: DeserializeOwned>(value: &str) -> Result<T, RuntimeError> {
 
 fn sqlite_error(error: rusqlite::Error) -> RuntimeError {
     RuntimeError::Store(error.to_string())
+}
+
+fn parse_memory_kind(kind: &str) -> crate::memory::MemoryRecordKind {
+    match kind {
+        "summary" => crate::memory::MemoryRecordKind::Summary,
+        "fact" => crate::memory::MemoryRecordKind::Fact,
+        _ => crate::memory::MemoryRecordKind::Episode,
+    }
+}
+
+fn fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{}\"", token.replace('"', " ")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 fn to_sql_error(error: RuntimeError) -> rusqlite::Error {

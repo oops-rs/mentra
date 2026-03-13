@@ -1,6 +1,7 @@
 mod pending;
 mod runtime;
 mod runtime_compact;
+mod runtime_memory;
 mod runtime_resume;
 mod runtime_snapshot;
 mod runtime_tasks;

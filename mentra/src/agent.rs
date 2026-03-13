@@ -2,7 +2,6 @@ mod compact;
 mod config;
 mod events;
 mod lifecycle;
-pub(crate) mod memory;
 mod pending;
 mod pending_block;
 mod runner;
@@ -28,6 +27,7 @@ use crate::{
     Message,
     background::BackgroundNotification,
     error::RuntimeError,
+    memory::journal::{AgentMemory, AgentMemoryState as MemoryState},
     provider::{Provider, ProviderId, ToolChoice},
     runtime::{
         LoadedAgentState, RuntimeIntrinsicTool, TaskItem,
@@ -36,7 +36,6 @@ use crate::{
     team::TeamMessage,
 };
 
-pub(crate) use memory::AgentMemoryState;
 pub(crate) use team::parse_task_input;
 
 pub use config::{
@@ -47,7 +46,6 @@ pub use events::{
     AgentEvent, AgentSnapshot, AgentStatus, ContextCompactionDetails, ContextCompactionTrigger,
     PendingToolUseSummary, SpawnedAgentStatus, SpawnedAgentSummary,
 };
-use memory::{AgentMemory, AgentMemoryState as MemoryState};
 pub use pending::PendingAssistantTurn;
 use runner::TurnRunner;
 

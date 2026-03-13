@@ -4,16 +4,19 @@ use crate::{
     ContentBlock, Message,
     background::BackgroundNotification,
     error::RuntimeError,
+    memory::journal::PendingTurnState,
+    memory::{SearchRequest, build_search_query, recalled_memory_message},
     provider::Request,
     runtime::{RunOptions, RuntimeHookEvent, control::is_transient_provider_error},
     team::format_inbox,
     tool::ToolRuntime,
 };
 
-use super::{Agent, AgentEvent, AgentStatus, PendingAssistantTurn, memory::PendingTurnState};
+use super::{Agent, AgentEvent, AgentStatus, PendingAssistantTurn};
 
 const PROVIDER_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 const PROVIDER_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const MEMORY_SEARCH_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub(super) struct TurnRunner<'a> {
     agent: &'a mut Agent,
@@ -83,6 +86,9 @@ impl<'a> TurnRunner<'a> {
         let provider = self.agent.provider.clone();
         let tools = self.agent.tools();
         let mut request_history = self.agent.micro_compacted_history();
+        if let Some(recalled) = self.recalled_memory_message(&request_history).await {
+            request_history.push(recalled);
+        }
         self.agent.inject_teammate_identity(&mut request_history);
         if self.model_requests >= self.options.model_budget() {
             return Err(RuntimeError::ModelBudgetExceeded(
@@ -207,6 +213,37 @@ impl<'a> TurnRunner<'a> {
             pending.current_text().to_string(),
             pending.pending_tool_use_summaries(),
         )
+    }
+
+    async fn recalled_memory_message(&self, request_history: &[Message]) -> Option<Message> {
+        let query = build_search_query(request_history, self.agent.tasks());
+        if query.trim().is_empty() {
+            return None;
+        }
+
+        let memory = self.agent.runtime.memory_engine();
+        let search = memory.search(SearchRequest {
+            agent_id: self.agent.id().to_string(),
+            query,
+            limit: 3,
+        });
+        let hits = match tokio::time::timeout(MEMORY_SEARCH_TIMEOUT, search).await {
+            Ok(Ok(hits)) => hits,
+            Ok(Err(_error)) => return None,
+            Err(_) => {
+                let _ = self
+                    .agent
+                    .runtime
+                    .emit_hook(RuntimeHookEvent::MemorySearchFinished {
+                        agent_id: self.agent.id().to_string(),
+                        success: false,
+                        result_count: 0,
+                        error: Some("memory search timed out".to_string()),
+                    });
+                return None;
+            }
+        };
+        recalled_memory_message(&hits, 2_000)
     }
 }
 

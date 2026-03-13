@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, watch};
 use crate::{
     agent::{AgentEvent, AgentSnapshot},
     background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
+    memory::MemoryEngine,
     runtime::{
         control::{
             AuditHook, CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor,
@@ -43,6 +44,7 @@ pub struct RuntimeHandle {
     pub(crate) executor: Arc<dyn RuntimeExecutor>,
     pub(crate) policy: Arc<RuntimePolicy>,
     pub(crate) hooks: RuntimeHooks,
+    pub(crate) memory: Arc<MemoryEngine>,
     pub(crate) runtime_intrinsics_enabled: bool,
     runtime_instance_id: String,
     persisted_runtime_identifier: Arc<str>,
@@ -81,5 +83,11 @@ impl Drop for RuntimeHandle {
         for key in lease_keys {
             let _ = self.store.release_lease(&key, &self.runtime_instance_id);
         }
+    }
+}
+
+impl RuntimeHandle {
+    pub(crate) fn memory_engine(&self) -> Arc<MemoryEngine> {
+        self.memory.clone()
     }
 }

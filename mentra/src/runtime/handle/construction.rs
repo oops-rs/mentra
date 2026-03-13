@@ -1,5 +1,6 @@
 use super::*;
 use crate::background::BackgroundHookSink;
+use crate::memory::MemoryEngine;
 
 #[derive(Clone)]
 struct RuntimeBackgroundHookSink {
@@ -72,6 +73,7 @@ impl RuntimeHandle {
     ) -> Self {
         let _ = store.prepare_recovery();
         let runtime_instance_id = format!("runtime-{}", std::process::id());
+        let memory = Arc::new(MemoryEngine::new(store.clone(), hooks.clone()));
         let mut tool_registry = ToolRegistry::default();
         if runtime_intrinsics_enabled {
             crate::runtime::intrinsic::register_tools(&mut tool_registry);
@@ -90,6 +92,7 @@ impl RuntimeHandle {
             executor,
             policy,
             hooks,
+            memory,
             runtime_intrinsics_enabled,
             runtime_instance_id,
             persisted_runtime_identifier,
@@ -104,6 +107,7 @@ impl RuntimeHandle {
 
     pub fn rebind_store(&self, store: Arc<dyn RuntimeStore>) -> Self {
         let _ = store.prepare_recovery();
+        let memory = Arc::new(MemoryEngine::new(store.clone(), self.hooks.clone()));
         let handle = Self {
             tool_registry: Arc::new(RwLock::new(
                 self.tool_registry
@@ -127,6 +131,7 @@ impl RuntimeHandle {
             executor: self.executor.clone(),
             policy: self.policy.clone(),
             hooks: self.hooks.clone(),
+            memory,
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -140,6 +145,7 @@ impl RuntimeHandle {
     }
 
     pub fn with_executor(&self, executor: Arc<dyn RuntimeExecutor>) -> Self {
+        let memory = Arc::new(MemoryEngine::new(self.store.clone(), self.hooks.clone()));
         Self {
             tool_registry: Arc::new(RwLock::new(
                 self.tool_registry
@@ -163,6 +169,7 @@ impl RuntimeHandle {
             executor,
             policy: self.policy.clone(),
             hooks: self.hooks.clone(),
+            memory,
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -172,6 +179,7 @@ impl RuntimeHandle {
     }
 
     pub fn with_policy(&self, policy: RuntimePolicy) -> Self {
+        let memory = Arc::new(MemoryEngine::new(self.store.clone(), self.hooks.clone()));
         Self {
             tool_registry: Arc::new(RwLock::new(
                 self.tool_registry
@@ -195,6 +203,7 @@ impl RuntimeHandle {
             executor: self.executor.clone(),
             policy: Arc::new(policy),
             hooks: self.hooks.clone(),
+            memory,
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -204,6 +213,7 @@ impl RuntimeHandle {
     }
 
     pub fn with_hooks(&self, hooks: RuntimeHooks) -> Self {
+        let memory = Arc::new(MemoryEngine::new(self.store.clone(), hooks.clone()));
         Self {
             tool_registry: Arc::new(RwLock::new(
                 self.tool_registry
@@ -227,6 +237,7 @@ impl RuntimeHandle {
             executor: self.executor.clone(),
             policy: self.policy.clone(),
             hooks,
+            memory,
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -236,6 +247,7 @@ impl RuntimeHandle {
     }
 
     pub fn with_runtime_identifier(&self, runtime_identifier: impl Into<Arc<str>>) -> Self {
+        let memory = Arc::new(MemoryEngine::new(self.store.clone(), self.hooks.clone()));
         Self {
             tool_registry: Arc::new(RwLock::new(
                 self.tool_registry
@@ -259,6 +271,7 @@ impl RuntimeHandle {
             executor: self.executor.clone(),
             policy: self.policy.clone(),
             hooks: self.hooks.clone(),
+            memory,
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: runtime_identifier.into(),
