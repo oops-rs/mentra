@@ -97,8 +97,7 @@ pub(super) fn add_dependency(
     if blocker_status != TaskStatus::Completed {
         if dependent_status != TaskStatus::Pending {
             return Err(TaskError::Validation(format!(
-                "Task {dependent_id} cannot have unresolved blockers while {:?}",
-                dependent_status
+                "Task {dependent_id} cannot have unresolved blockers while {dependent_status:?}"
             )));
         }
 

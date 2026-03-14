@@ -3015,10 +3015,7 @@ async fn team_respond_tool_resolves_request_and_sends_correlated_response() {
                 &model.id,
                 "team-respond",
                 "team_respond",
-                &format!(
-                    r#"{{"request_id":"{}","approve":true,"reason":"looks good"}}"#,
-                    request_id
-                ),
+                &format!(r#"{{"request_id":"{request_id}","approve":true,"reason":"looks good"}}"#),
             ),
             text_stream(&model.id, "approved"),
         ],
@@ -4145,10 +4142,7 @@ async fn wait_for_background_tasks(
         sleep(Duration::from_millis(10)).await;
     }
 
-    panic!(
-        "timed out waiting for {expected_count} background tasks to reach {:?}",
-        status
-    );
+    panic!("timed out waiting for {expected_count} background tasks to reach {status:?}");
 }
 
 fn latest_background_results_text<'a>(request: &'a Request<'a>) -> Option<&'a str> {
@@ -4473,7 +4467,7 @@ async fn wait_for_teammate_status(agent: &Agent, expected: TeamMemberStatus) {
         sleep(Duration::from_millis(10)).await;
     }
 
-    panic!("timed out waiting for teammate status {:?}", expected);
+    panic!("timed out waiting for teammate status {expected:?}");
 }
 
 async fn wait_for_task_owner(

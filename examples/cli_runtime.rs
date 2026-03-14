@@ -253,10 +253,7 @@ fn print_transcript_summary(history: &[mentra::Message]) {
                     content,
                     is_error,
                 } => {
-                    println!(
-                        "  tool result: {tool_use_id} error={} content={content}",
-                        is_error
-                    );
+                    println!("  tool result: {tool_use_id} error={is_error} content={content}");
                 }
                 _ => {}
             }

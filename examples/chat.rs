@@ -287,7 +287,7 @@ async fn pick_model(runtime: &mentra::Runtime) -> mentra::ModelInfo {
             let created_at = created_at
                 .format(&Rfc3339)
                 .unwrap_or_else(|_| created_at.unix_timestamp().to_string());
-            println!("     created_at: {}", created_at);
+            println!("     created_at: {created_at}");
         }
     }
 
@@ -480,10 +480,7 @@ fn subscribe_events(agent: &mentra::Agent) -> tokio::task::JoinHandle<()> {
                     }
                     Ok(AgentEvent::TeamInboxUpdated { unread_count }) => {
                         end_assistant_line(&mut assistant_line_open);
-                        println!(
-                            "\x1b[32mteam inbox updated\x1b[0m {} unread",
-                            unread_count
-                        );
+                        println!("\x1b[32mteam inbox updated\x1b[0m {unread_count} unread");
                     }
                     Ok(AgentEvent::RunFinished) => {
                         end_assistant_line(&mut assistant_line_open);
@@ -544,7 +541,7 @@ fn describe_tool_call(call: &ToolCall) -> String {
     if call.name == "background_run"
         && let Some(command) = call.input.get("command").and_then(|value| value.as_str())
     {
-        return format!("background_run {}", command);
+        return format!("background_run {command}");
     }
 
     if call.name == "check_background" {
@@ -597,20 +594,20 @@ fn describe_tool_call(call: &ToolCall) -> String {
             .get("role")
             .and_then(|value| value.as_str())
             .unwrap_or("?");
-        return format!("team_spawn {} ({})", name, role);
+        return format!("team_spawn {name} ({role})");
     }
 
     if call.name == "team_send"
         && let Some(to) = call.input.get("to").and_then(|value| value.as_str())
     {
-        return format!("team_send {}", to);
+        return format!("team_send {to}");
     }
 
     if call.name == "team_request"
         && let Some(to) = call.input.get("to").and_then(|value| value.as_str())
         && let Some(protocol) = call.input.get("protocol").and_then(|value| value.as_str())
     {
-        return format!("team_request {} ({})", to, protocol);
+        return format!("team_request {to} ({protocol})");
     }
 
     if call.name == "team_respond"
@@ -619,7 +616,7 @@ fn describe_tool_call(call: &ToolCall) -> String {
             .get("request_id")
             .and_then(|value| value.as_str())
     {
-        return format!("team_respond {}", request_id);
+        return format!("team_respond {request_id}");
     }
 
     if call.name == "team_list_requests" {
