@@ -5,7 +5,10 @@ use mentra::provider::openai::OpenAICredentialSource;
 use time::Duration;
 use tokio::sync::Mutex;
 
-use crate::{OpenAIOAuthClient, OpenAIOAuthError, OpenAITokenSet, TokenStore};
+use crate::{
+    OpenAIOAuthClient, OpenAIOAuthError, OpenAITokenSet, PersistentTokenStoreKind, TokenStore,
+    persistent_token_store,
+};
 
 pub struct OpenAIOAuthCredentialSource {
     client: OpenAIOAuthClient,
@@ -40,6 +43,19 @@ impl OpenAIOAuthCredentialSource {
     ) -> Result<Self, OpenAIOAuthError> {
         let tokens = store.load()?.ok_or(OpenAIOAuthError::MissingStoredTokens)?;
         Ok(Self::new(client, tokens).with_store(store))
+    }
+
+    pub fn from_persistent_store(
+        client: OpenAIOAuthClient,
+        kind: PersistentTokenStoreKind,
+    ) -> Result<Self, OpenAIOAuthError> {
+        Self::from_store(client, persistent_token_store(kind))
+    }
+
+    pub fn from_default_persistent_store(
+        client: OpenAIOAuthClient,
+    ) -> Result<Self, OpenAIOAuthError> {
+        Self::from_persistent_store(client, PersistentTokenStoreKind::Auto)
     }
 
     async fn current_api_key(&self) -> Result<String, OpenAIOAuthError> {

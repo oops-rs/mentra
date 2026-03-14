@@ -21,16 +21,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store_kind = selected_store_kind(PersistentTokenStoreKind::Auto);
     let store: Arc<dyn TokenStore> = persistent_token_store(PersistentTokenStoreKind::Auto);
     let client = OpenAIOAuthClient::default();
-    let tokens = match store.load()? {
-        Some(tokens) => tokens,
-        None => authorize(&client, store.as_ref()).await?,
-    };
     eprintln!("Using OAuth token store backend: {}", store_kind.label());
 
+    let credential_source = match OpenAIOAuthCredentialSource::from_persistent_store(
+        client.clone(),
+        PersistentTokenStoreKind::Auto,
+    ) {
+        Ok(source) => source,
+        Err(mentra_openai_auth::OpenAIOAuthError::MissingStoredTokens) => {
+            let tokens = authorize(&client, store.as_ref()).await?;
+            OpenAIOAuthCredentialSource::new(client.clone(), tokens).with_store(store)
+        }
+        Err(error) => return Err(error.into()),
+    };
+
     let runtime = Runtime::builder()
-        .with_provider_instance(OpenAIProvider::with_credential_source(
-            OpenAIOAuthCredentialSource::new(client, tokens).with_store(store),
-        ))
+        .with_provider_instance(OpenAIProvider::with_credential_source(credential_source))
         .build()?;
 
     let model = pick_model(&runtime).await?;
