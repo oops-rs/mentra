@@ -28,7 +28,11 @@ impl MemoryTokenStore {
 
 impl TokenStore for MemoryTokenStore {
     fn load(&self) -> Result<Option<OpenAITokenSet>, OpenAIOAuthError> {
-        Ok(self.state.lock().expect("memory token store poisoned").clone())
+        Ok(self
+            .state
+            .lock()
+            .expect("memory token store poisoned")
+            .clone())
     }
 
     fn save(&self, tokens: &OpenAITokenSet) -> Result<(), OpenAIOAuthError> {
@@ -136,7 +140,11 @@ mod tests {
 
         store.save(&tokens).expect("save tokens");
         assert_eq!(
-            store.load().expect("load tokens").expect("missing tokens").api_key,
+            store
+                .load()
+                .expect("load tokens")
+                .expect("missing tokens")
+                .api_key,
             Some("api".into())
         );
     }

@@ -60,7 +60,9 @@ impl OpenAITokenSet {
     }
 
     pub fn require_api_key(&self) -> Result<&str, OpenAIOAuthError> {
-        self.api_key.as_deref().ok_or(OpenAIOAuthError::MissingApiKey)
+        self.api_key
+            .as_deref()
+            .ok_or(OpenAIOAuthError::MissingApiKey)
     }
 }
 
@@ -199,7 +201,10 @@ impl PendingAuthorization {
         &self.redirect_uri
     }
 
-    pub async fn complete(self, client: &OpenAIOAuthClient) -> Result<OpenAITokenSet, OpenAIOAuthError> {
+    pub async fn complete(
+        self,
+        client: &OpenAIOAuthClient,
+    ) -> Result<OpenAITokenSet, OpenAIOAuthError> {
         let code = timeout(CALLBACK_TIMEOUT, receive_code(self.listener, &self.state))
             .await
             .map_err(|_| OpenAIOAuthError::CallbackTimeout)??;
@@ -209,7 +214,9 @@ impl PendingAuthorization {
     }
 }
 
-async fn parse_token_response(response: reqwest::Response) -> Result<OpenAITokenSet, OpenAIOAuthError> {
+async fn parse_token_response(
+    response: reqwest::Response,
+) -> Result<OpenAITokenSet, OpenAIOAuthError> {
     if !response.status().is_success() {
         return Err(OpenAIOAuthError::Http {
             status: response.status(),
@@ -221,7 +228,10 @@ async fn parse_token_response(response: reqwest::Response) -> Result<OpenAIToken
     Ok(body.into_tokens())
 }
 
-async fn receive_code(listener: TcpListener, expected_state: &str) -> Result<String, OpenAIOAuthError> {
+async fn receive_code(
+    listener: TcpListener,
+    expected_state: &str,
+) -> Result<String, OpenAIOAuthError> {
     let (mut stream, _) = listener.accept().await?;
     let mut buffer = [0_u8; 8192];
     let bytes_read = stream.read(&mut buffer).await?;
@@ -235,7 +245,10 @@ async fn receive_code(listener: TcpListener, expected_state: &str) -> Result<Str
     let callback_url = Url::parse(&format!("http://localhost{path}"))?;
     let params: BTreeMap<_, _> = callback_url.query_pairs().into_owned().collect();
 
-    let response = if params.get("state").is_some_and(|state| state == expected_state) {
+    let response = if params
+        .get("state")
+        .is_some_and(|state| state == expected_state)
+    {
         success_response().to_string()
     } else {
         error_response("State mismatch")
@@ -257,7 +270,12 @@ async fn receive_code(listener: TcpListener, expected_state: &str) -> Result<Str
 }
 
 fn loopback_redirect_uri(addr: SocketAddr) -> Result<Url, OpenAIOAuthError> {
-    Url::parse(&format!("http://{}:{}{CALLBACK_PATH}", addr.ip(), addr.port())).map_err(Into::into)
+    Url::parse(&format!(
+        "http://{}:{}{CALLBACK_PATH}",
+        addr.ip(),
+        addr.port()
+    ))
+    .map_err(Into::into)
 }
 
 fn pkce_s256(verifier: &str) -> String {

@@ -59,6 +59,8 @@ impl OpenAIOAuthCredentialSource {
 #[async_trait]
 impl OpenAICredentialSource for OpenAIOAuthCredentialSource {
     async fn api_key(&self) -> Result<String, String> {
-        self.current_api_key().await.map_err(|error| error.to_string())
+        self.current_api_key()
+            .await
+            .map_err(|error| error.to_string())
     }
 }

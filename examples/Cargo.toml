@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 mentra = { path = "../mentra" }
+mentra-openai-auth = { path = "../mentra-openai-auth" }
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
 dotenvy = "0.15"
 time = { version = "0.3", features = ["formatting"] }
@@ -18,6 +19,10 @@ path = "chat.rs"
 [[example]]
 name = "quickstart"
 path = "quickstart.rs"
+
+[[example]]
+name = "openai_oauth"
+path = "openai_oauth.rs"
 
 [[example]]
 name = "custom_tool"
