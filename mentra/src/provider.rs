@@ -11,9 +11,9 @@ use self::{anthropic::AnthropicProvider, gemini::GeminiProvider, openai::OpenAIP
 
 pub use model::{
     AnthropicRequestOptions, BuiltinProvider, ContentBlock, ContentBlockDelta, ContentBlockStart,
-    ImageSource, Message, ModelInfo, OpenAIRequestOptions, ProviderDescriptor, ProviderError,
-    ProviderEvent, ProviderEventStream, ProviderId, ProviderRequestOptions, Request, Response,
-    Role, ToolChoice, collect_response_from_stream, provider_event_stream_from_response,
+    ImageSource, Message, ModelInfo, ModelSelector, OpenAIRequestOptions, ProviderDescriptor,
+    ProviderError, ProviderEvent, ProviderEventStream, ProviderId, ProviderRequestOptions, Request,
+    Response, Role, ToolChoice, collect_response_from_stream, provider_event_stream_from_response,
 };
 
 /// Transport-neutral interface implemented by model providers.
@@ -77,12 +77,13 @@ impl ProviderRegistry {
     }
 
     pub(crate) fn get_provider(&self, id: Option<&ProviderId>) -> Option<Arc<dyn Provider>> {
-        id.and_then(|id| self.providers.get(id).cloned())
-            .or_else(|| {
-                self.default_provider
-                    .as_ref()
-                    .and_then(|id| self.providers.get(id).cloned())
-            })
+        match id {
+            Some(id) => self.providers.get(id).cloned(),
+            None => self
+                .default_provider
+                .as_ref()
+                .and_then(|id| self.providers.get(id).cloned()),
+        }
     }
 
     pub(crate) fn descriptors(&self) -> Vec<ProviderDescriptor> {

@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use mentra::{
-    Agent, BuiltinProvider, ContentBlock, ModelInfo, Runtime,
+    Agent, BuiltinProvider, ContentBlock, ModelInfo, ModelSelector, Runtime,
     error::RuntimeError,
     provider::{
         Provider, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
@@ -303,9 +303,170 @@ async fn empty_assistant_response_preserves_committed_tool_results() {
     }
 }
 
+#[tokio::test]
+async fn resolve_model_returns_explicit_id_without_listing_models() {
+    let runtime_id = format!("public-api-{}", now_nanos());
+    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
+    let provider = FailingListModelsProvider {
+        kind: BuiltinProvider::Anthropic.into(),
+    };
+
+    let runtime = Runtime::builder()
+        .with_runtime_identifier(runtime_id)
+        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    let model = runtime
+        .resolve_model(
+            BuiltinProvider::Anthropic,
+            ModelSelector::Id("claude-custom".to_string()),
+        )
+        .await
+        .expect("resolve explicit model");
+
+    assert_eq!(
+        model,
+        ModelInfo::new("claude-custom", BuiltinProvider::Anthropic)
+    );
+}
+
+#[tokio::test]
+async fn resolve_model_selects_newest_available_then_breaks_ties_by_id() {
+    let runtime_id = format!("public-api-{}", now_nanos());
+    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
+    let provider = ModelListingProvider {
+        kind: BuiltinProvider::OpenAI.into(),
+        models: vec![
+            model_with_created_at("zeta", BuiltinProvider::OpenAI, 1_700_000_100),
+            model_with_created_at("alpha", BuiltinProvider::OpenAI, 1_700_000_100),
+            model_with_created_at("older", BuiltinProvider::OpenAI, 1_700_000_000),
+        ],
+    };
+
+    let runtime = Runtime::builder()
+        .with_runtime_identifier(runtime_id)
+        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    let model = runtime
+        .resolve_model(BuiltinProvider::OpenAI, ModelSelector::NewestAvailable)
+        .await
+        .expect("resolve newest model");
+
+    assert_eq!(
+        model,
+        model_with_created_at("alpha", BuiltinProvider::OpenAI, 1_700_000_100)
+    );
+}
+
+#[tokio::test]
+async fn resolve_model_reports_empty_provider_listing() {
+    let runtime_id = format!("public-api-{}", now_nanos());
+    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
+    let provider = ModelListingProvider {
+        kind: BuiltinProvider::Gemini.into(),
+        models: Vec::new(),
+    };
+
+    let runtime = Runtime::builder()
+        .with_runtime_identifier(runtime_id)
+        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    let error = runtime
+        .resolve_model(BuiltinProvider::Gemini, ModelSelector::NewestAvailable)
+        .await
+        .expect_err("empty listing should fail");
+
+    assert!(matches!(
+        error,
+        RuntimeError::NoModelsAvailable(provider) if provider == BuiltinProvider::Gemini.into()
+    ));
+}
+
+#[tokio::test]
+async fn resolve_model_reports_missing_provider() {
+    let harness = Harness::new(vec![Turn::Text("unused".to_string())]);
+
+    let error = harness
+        .runtime
+        .resolve_model(
+            BuiltinProvider::Gemini,
+            ModelSelector::Id("gemini-2.5-pro".to_string()),
+        )
+        .await
+        .expect_err("missing provider should fail");
+
+    assert!(matches!(
+        error,
+        RuntimeError::ProviderNotFound(Some(provider))
+            if provider == BuiltinProvider::Gemini.into()
+    ));
+}
+
+#[derive(Clone)]
+struct FailingListModelsProvider {
+    kind: ProviderId,
+}
+
+#[async_trait]
+impl Provider for FailingListModelsProvider {
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor::new(self.kind.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Err(ProviderError::InvalidResponse(
+            "list_models should not be called".to_string(),
+        ))
+    }
+
+    async fn stream(&self, _request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Ok(rx)
+    }
+}
+
+#[derive(Clone)]
+struct ModelListingProvider {
+    kind: ProviderId,
+    models: Vec<ModelInfo>,
+}
+
+#[async_trait]
+impl Provider for ModelListingProvider {
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor::new(self.kind.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(self.models.clone())
+    }
+
+    async fn stream(&self, _request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Ok(rx)
+    }
+}
+
 fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn model_with_created_at(id: &str, provider: BuiltinProvider, unix_timestamp: i64) -> ModelInfo {
+    let mut model = ModelInfo::new(id, provider);
+    model.created_at = Some(
+        time::OffsetDateTime::from_unix_timestamp(unix_timestamp)
+            .expect("timestamp should be valid"),
+    );
+    model
 }

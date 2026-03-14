@@ -21,8 +21,8 @@ pub mod test;
 pub mod tool;
 
 pub use provider::{
-    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderDescriptor, ProviderId,
-    Role,
+    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ModelSelector,
+    ProviderDescriptor, ProviderId, Role,
 };
 
 pub use agent::{Agent, AgentConfig};

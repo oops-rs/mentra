@@ -13,7 +13,8 @@ use std::{any::Any, path::Path, sync::Arc};
 use crate::{
     agent::{Agent, AgentConfig, AgentSpawnOptions, AgentStatus},
     provider::{
-        BuiltinProvider, ModelInfo, Provider, ProviderDescriptor, ProviderId, ProviderRegistry,
+        BuiltinProvider, ModelInfo, ModelSelector, Provider, ProviderDescriptor, ProviderId,
+        ProviderRegistry,
     },
     runtime::{builder::RuntimeBuilder, skill::SkillLoadError},
     tool::ExecutableTool,
@@ -273,5 +274,38 @@ impl Runtime {
             .list_models()
             .await
             .map_err(RuntimeError::FailedToListModels)
+    }
+
+    /// Resolves a model for a registered provider using a deterministic selection strategy.
+    pub async fn resolve_model(
+        &self,
+        provider: impl Into<ProviderId>,
+        selector: ModelSelector,
+    ) -> Result<ModelInfo, RuntimeError> {
+        let provider = provider.into();
+        if self
+            .provider_registry
+            .get_provider(Some(&provider))
+            .is_none()
+        {
+            return Err(RuntimeError::ProviderNotFound(Some(provider)));
+        }
+
+        match selector {
+            ModelSelector::Id(id) => Ok(ModelInfo::new(id, provider)),
+            ModelSelector::NewestAvailable => {
+                let mut models = self.list_models(Some(&provider)).await?;
+                models.sort_by(|left, right| {
+                    right
+                        .created_at
+                        .cmp(&left.created_at)
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                models
+                    .into_iter()
+                    .next()
+                    .ok_or(RuntimeError::NoModelsAvailable(provider))
+            }
+        }
     }
 }

@@ -114,6 +114,15 @@ impl ModelInfo {
     }
 }
 
+/// Selection strategy used when resolving a model from a registered provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelSelector {
+    /// Use an explicit model identifier without provider-side discovery.
+    Id(String),
+    /// Discover models from the provider and pick the newest available entry.
+    NewestAvailable,
+}
+
 /// Errors returned by provider implementations and stream adapters.
 #[derive(Debug, Error)]
 pub enum ProviderError {

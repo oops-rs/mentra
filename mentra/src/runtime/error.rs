@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum RuntimeError {
     #[error("{message}", message = provider_not_found_message(.0))]
     ProviderNotFound(Option<ProviderId>),
+    #[error("provider '{0}' did not return any models")]
+    NoModelsAvailable(ProviderId),
     #[error("failed to send provider request: {0}")]
     FailedToSendRequest(#[source] ProviderError),
     #[error("failed to list provider models: {0}")]
@@ -88,6 +90,16 @@ mod tests {
         let error = RuntimeError::ProviderNotFound(Some(ProviderId::new("custom")));
 
         assert_eq!(error.to_string(), "provider 'custom' is not registered");
+    }
+
+    #[test]
+    fn display_mentions_missing_models() {
+        let error = RuntimeError::NoModelsAvailable(ProviderId::new("custom"));
+
+        assert_eq!(
+            error.to_string(),
+            "provider 'custom' did not return any models"
+        );
     }
 
     #[test]
