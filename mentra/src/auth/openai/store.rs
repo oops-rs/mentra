@@ -2,9 +2,11 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex},
 };
+
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 use directories::BaseDirs;
 
@@ -12,6 +14,7 @@ use crate::auth::openai::{OpenAIOAuthError, OpenAITokenSet};
 
 const DEFAULT_KEYCHAIN_SERVICE: &str = "com.mentra.openai";
 const DEFAULT_KEYCHAIN_ACCOUNT: &str = "default";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_NOT_FOUND_EXIT_CODE: i32 = 44;
 
 pub trait TokenStore: Send + Sync {
@@ -146,16 +149,25 @@ impl TokenStore for FileTokenStore {
 
 #[derive(Debug, Clone)]
 pub struct KeychainTokenStore {
+    #[cfg(target_os = "macos")]
     service: String,
+    #[cfg(target_os = "macos")]
     account: String,
 }
 
 impl KeychainTokenStore {
+    #[cfg(target_os = "macos")]
     pub fn new(service: impl Into<String>, account: impl Into<String>) -> Self {
         Self {
             service: service.into(),
             account: account.into(),
         }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn new(service: impl Into<String>, account: impl Into<String>) -> Self {
+        let _ = (service.into(), account.into());
+        Self {}
     }
 
     pub fn default_service() -> &'static str {
@@ -287,6 +299,7 @@ pub fn selected_store_kind(kind: PersistentTokenStoreKind) -> PersistentTokenSto
     }
 }
 
+#[cfg(target_os = "macos")]
 fn command_error(output: std::process::Output, command: &'static str) -> OpenAIOAuthError {
     OpenAIOAuthError::CredentialCommand {
         command,
