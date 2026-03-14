@@ -3,10 +3,11 @@ use std::io::{self, Read, Write};
 use dotenvy::dotenv;
 use mentra::{
     Agent, ContentBlock, ModelInfo, ModelSelector, Runtime, agent::AgentEvent,
+    auth::openai::{
+        OpenAIOAuthClient, OpenAIOAuthCredentialSource, PersistentTokenStoreKind,
+        selected_store_kind,
+    },
     provider::openai::OpenAIProvider,
-};
-use mentra_openai_auth::{
-    OpenAIOAuthClient, OpenAIOAuthCredentialSource, PersistentTokenStoreKind, selected_store_kind,
 };
 
 #[tokio::main]

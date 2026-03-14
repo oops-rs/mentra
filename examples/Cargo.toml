@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mentra = { path = "../mentra" }
-mentra-openai-auth = { path = "../mentra-openai-auth" }
+mentra = { path = "../mentra", features = ["openai-oauth"] }
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
 dotenvy = "0.15"
 time = { version = "0.3", features = ["formatting"] }
