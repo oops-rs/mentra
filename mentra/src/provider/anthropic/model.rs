@@ -8,7 +8,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     provider::model::{
         BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request,
-        Response, Role, ToolChoice,
+        Response, Role, TokenUsage, ToolChoice,
     },
     tool::ToolSpec,
 };
@@ -67,6 +67,8 @@ pub(crate) struct AnthropicResponse {
     pub(crate) id: String,
     pub(crate) model: String,
     pub(crate) role: String,
+    #[serde(default)]
+    pub(crate) usage: Option<AnthropicUsage>,
     content: Vec<AnthropicContentBlock>,
     stop_reason: Option<String>,
 }
@@ -89,8 +91,39 @@ impl TryFrom<AnthropicResponse> for Response {
                 .map(ContentBlock::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
             stop_reason: response.stop_reason,
-            usage: None,
+            usage: response.usage.and_then(|usage| usage.into_token_usage()),
         })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AnthropicUsage {
+    #[serde(default)]
+    pub(crate) input_tokens: Option<u64>,
+    #[serde(default)]
+    pub(crate) output_tokens: Option<u64>,
+    #[serde(default)]
+    pub(crate) cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub(crate) cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub(crate) total_tokens: Option<u64>,
+}
+
+impl AnthropicUsage {
+    pub(crate) fn into_token_usage(self) -> Option<TokenUsage> {
+        let usage = TokenUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            total_tokens: self.total_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
+            reasoning_tokens: None,
+            thoughts_tokens: None,
+            tool_input_tokens: None,
+        };
+
+        (!usage.is_empty()).then_some(usage)
     }
 }
 

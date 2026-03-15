@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 use crate::provider::model::{ContentBlockDelta, ContentBlockStart, ProviderEvent, Role};
 
-use super::model::AnthropicResponse;
+use super::model::{AnthropicResponse, AnthropicUsage};
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -87,6 +87,8 @@ impl AnthropicContentBlockDelta {
 #[derive(Deserialize)]
 pub(crate) struct AnthropicMessageDelta {
     pub(crate) stop_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) usage: Option<AnthropicUsage>,
 }
 
 #[derive(Deserialize)]
@@ -97,10 +99,14 @@ pub(crate) struct AnthropicStreamError {
 }
 
 impl AnthropicStreamEvent {
-    pub(crate) fn into_provider_event(self) -> Result<Option<ProviderEvent>, AnthropicStreamError> {
+    pub(crate) fn into_provider_events(self) -> Result<Vec<ProviderEvent>, AnthropicStreamError> {
         match self {
             AnthropicStreamEvent::MessageStart { message } => {
-                Ok(Some(ProviderEvent::MessageStarted {
+                let usage = message
+                    .usage
+                    .clone()
+                    .and_then(AnthropicUsage::into_token_usage);
+                let mut events = vec![ProviderEvent::MessageStarted {
                     id: message.id,
                     model: message.model,
                     role: match message.role.as_str() {
@@ -108,26 +114,35 @@ impl AnthropicStreamEvent {
                         "assistant" => Role::Assistant,
                         _ => Role::Unknown(message.role),
                     },
-                }))
+                }];
+                if let Some(usage) = usage {
+                    events.push(ProviderEvent::MessageDelta {
+                        stop_reason: None,
+                        usage: Some(usage),
+                    });
+                }
+                Ok(events)
             }
             AnthropicStreamEvent::ContentBlockStart {
                 index,
                 content_block,
             } => Ok(content_block
                 .into_provider_start()
-                .map(|kind| ProviderEvent::ContentBlockStarted { index, kind })),
+                .map(|kind| vec![ProviderEvent::ContentBlockStarted { index, kind }])
+                .unwrap_or_default()),
             AnthropicStreamEvent::ContentBlockDelta { index, delta } => Ok(delta
                 .into_provider_delta()
-                .map(|delta| ProviderEvent::ContentBlockDelta { index, delta })),
+                .map(|delta| vec![ProviderEvent::ContentBlockDelta { index, delta }])
+                .unwrap_or_default()),
             AnthropicStreamEvent::ContentBlockStop { index } => {
-                Ok(Some(ProviderEvent::ContentBlockStopped { index }))
+                Ok(vec![ProviderEvent::ContentBlockStopped { index }])
             }
-            AnthropicStreamEvent::MessageDelta { delta } => Ok(Some(ProviderEvent::MessageDelta {
+            AnthropicStreamEvent::MessageDelta { delta } => Ok(vec![ProviderEvent::MessageDelta {
                 stop_reason: delta.stop_reason,
-                usage: None,
-            })),
-            AnthropicStreamEvent::MessageStop => Ok(Some(ProviderEvent::MessageStopped)),
-            AnthropicStreamEvent::Ping => Ok(None),
+                usage: delta.usage.and_then(AnthropicUsage::into_token_usage),
+            }]),
+            AnthropicStreamEvent::MessageStop => Ok(vec![ProviderEvent::MessageStopped]),
+            AnthropicStreamEvent::Ping => Ok(Vec::new()),
             AnthropicStreamEvent::Error { error } => Err(error),
         }
     }

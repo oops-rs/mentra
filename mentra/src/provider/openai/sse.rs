@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::provider::model::{
     ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, ProviderEventStream, Role,
+    TokenUsage,
 };
 
 pub(crate) fn spawn_event_stream(response: reqwest::Response) -> ProviderEventStream {
@@ -176,7 +177,7 @@ fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEven
         | OpenAIStreamEvent::ResponseIncomplete { response } => Ok(vec![
             ProviderEvent::MessageDelta {
                 stop_reason: response.stop_reason(),
-                usage: None,
+                usage: response.usage(),
             },
             ProviderEvent::MessageStopped,
         ]),
@@ -267,6 +268,8 @@ struct OpenAIResponseEnvelope {
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
+    usage: Option<OpenAIUsage>,
+    #[serde(default)]
     incomplete_details: Option<OpenAIIncompleteDetails>,
     #[serde(default)]
     error: Option<OpenAIErrorBody>,
@@ -290,6 +293,10 @@ impl OpenAIResponseEnvelope {
     fn error_message(&self) -> Option<String> {
         self.error.as_ref().and_then(|error| error.message.clone())
     }
+
+    fn usage(&self) -> Option<TokenUsage> {
+        self.usage.as_ref().and_then(OpenAIUsage::to_token_usage)
+    }
 }
 
 #[derive(Deserialize)]
@@ -302,6 +309,55 @@ struct OpenAIIncompleteDetails {
 struct OpenAIErrorBody {
     #[serde(default)]
     message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAIUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens_details: Option<OpenAIInputTokenDetails>,
+    #[serde(default)]
+    output_tokens_details: Option<OpenAIOutputTokenDetails>,
+}
+
+impl OpenAIUsage {
+    fn to_token_usage(&self) -> Option<TokenUsage> {
+        let usage = TokenUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            total_tokens: self.total_tokens,
+            cache_read_input_tokens: self
+                .input_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens),
+            cache_creation_input_tokens: None,
+            reasoning_tokens: self
+                .output_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            thoughts_tokens: None,
+            tool_input_tokens: None,
+        };
+
+        (!usage.is_empty()).then_some(usage)
+    }
+}
+
+#[derive(Deserialize)]
+struct OpenAIInputTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct OpenAIOutputTokenDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -383,7 +439,9 @@ impl OpenAIMessageContent {
 
 #[cfg(test)]
 mod tests {
-    use crate::provider::model::{ContentBlockDelta, ContentBlockStart, ProviderEvent, Role};
+    use crate::provider::model::{
+        ContentBlockDelta, ContentBlockStart, ProviderEvent, Role, TokenUsage,
+    };
 
     use super::{StreamState, parse_frame};
 
@@ -479,6 +537,37 @@ mod tests {
                 ProviderEvent::MessageDelta {
                     stop_reason: None,
                     usage: None,
+                },
+                ProviderEvent::MessageStopped,
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_final_usage_from_completed_response() {
+        let mut state = StreamState::default();
+
+        let completed = parse_frame(
+            br#"data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5","status":"completed","usage":{"input_tokens":328,"input_tokens_details":{"cached_tokens":12},"output_tokens":52,"output_tokens_details":{"reasoning_tokens":7},"total_tokens":380}}}"#,
+            &mut state,
+        )
+        .expect("completion should parse");
+
+        assert_eq!(
+            completed,
+            vec![
+                ProviderEvent::MessageDelta {
+                    stop_reason: None,
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(328),
+                        output_tokens: Some(52),
+                        total_tokens: Some(380),
+                        cache_read_input_tokens: Some(12),
+                        cache_creation_input_tokens: None,
+                        reasoning_tokens: Some(7),
+                        thoughts_tokens: None,
+                        tool_input_tokens: None,
+                    }),
                 },
                 ProviderEvent::MessageStopped,
             ]

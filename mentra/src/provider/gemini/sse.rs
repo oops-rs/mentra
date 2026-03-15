@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::provider::model::{
     ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, ProviderEventStream, Role,
+    TokenUsage,
 };
 
 pub(crate) fn spawn_event_stream(
@@ -70,6 +71,7 @@ struct StreamState {
     model_version: Option<String>,
     started: bool,
     stopped: bool,
+    latest_usage: Option<TokenUsage>,
     open_blocks: BTreeSet<usize>,
     text_snapshots: HashMap<usize, String>,
     tool_snapshots: HashMap<usize, String>,
@@ -84,6 +86,7 @@ impl StreamState {
             model_version: None,
             started: false,
             stopped: false,
+            latest_usage: None,
             open_blocks: BTreeSet::new(),
             text_snapshots: HashMap::new(),
             tool_snapshots: HashMap::new(),
@@ -163,6 +166,20 @@ impl StreamState {
             .map(|index| ProviderEvent::ContentBlockStopped { index })
             .collect()
     }
+
+    fn update_usage(&mut self, usage: Option<TokenUsage>) -> Option<TokenUsage> {
+        match usage {
+            Some(usage) if self.latest_usage.as_ref() != Some(&usage) => {
+                self.latest_usage = Some(usage.clone());
+                Some(usage)
+            }
+            Some(usage) => {
+                self.latest_usage = Some(usage);
+                None
+            }
+            None => None,
+        }
+    }
 }
 
 fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -198,6 +215,10 @@ fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEven
     }
 
     let mut events = Vec::new();
+    let latest_usage = chunk
+        .usage_metadata
+        .as_ref()
+        .and_then(GeminiUsageMetadata::to_token_usage);
 
     if let Some(candidate) = chunk.candidates.first() {
         if let Some(event) = state.ensure_message_started(&chunk) {
@@ -236,23 +257,31 @@ fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEven
             }
         }
 
+        let usage_changed = state.update_usage(latest_usage.clone());
+
         if let Some(stop_reason) = candidate.finish_reason.clone() {
             events.extend(state.close_all_blocks());
             events.push(ProviderEvent::MessageDelta {
                 stop_reason: Some(stop_reason),
-                usage: None,
+                usage: latest_usage.or_else(|| state.latest_usage.clone()),
             });
             events.push(ProviderEvent::MessageStopped);
             state.stopped = true;
+        } else if let Some(usage) = usage_changed {
+            events.push(ProviderEvent::MessageDelta {
+                stop_reason: None,
+                usage: Some(usage),
+            });
         }
     } else if let Some(prompt_feedback) = chunk.prompt_feedback.as_ref() {
         if let Some(event) = state.ensure_message_started(&chunk) {
             events.push(event);
         }
+        let _ = state.update_usage(latest_usage.clone());
         events.extend(state.close_all_blocks());
         events.push(ProviderEvent::MessageDelta {
             stop_reason: Some(prompt_feedback.stop_reason()),
-            usage: None,
+            usage: latest_usage.or_else(|| state.latest_usage.clone()),
         });
         events.push(ProviderEvent::MessageStopped);
         state.stopped = true;
@@ -307,6 +336,8 @@ struct GeminiStreamChunk {
     candidates: Vec<GeminiCandidate>,
     #[serde(default, rename = "promptFeedback", alias = "prompt_feedback")]
     prompt_feedback: Option<GeminiPromptFeedback>,
+    #[serde(default, rename = "usageMetadata", alias = "usage_metadata")]
+    usage_metadata: Option<GeminiUsageMetadata>,
     #[serde(default, rename = "responseId", alias = "response_id")]
     response_id: Option<String>,
     #[serde(default, rename = "modelVersion", alias = "model_version")]
@@ -367,9 +398,54 @@ impl GeminiPromptFeedback {
     }
 }
 
+#[derive(Deserialize)]
+struct GeminiUsageMetadata {
+    #[serde(default, rename = "promptTokenCount", alias = "prompt_token_count")]
+    prompt_token_count: Option<u64>,
+    #[serde(
+        default,
+        rename = "candidatesTokenCount",
+        alias = "candidates_token_count"
+    )]
+    candidates_token_count: Option<u64>,
+    #[serde(default, rename = "totalTokenCount", alias = "total_token_count")]
+    total_token_count: Option<u64>,
+    #[serde(
+        default,
+        rename = "cachedContentTokenCount",
+        alias = "cached_content_token_count"
+    )]
+    cached_content_token_count: Option<u64>,
+    #[serde(default, rename = "thoughtsTokenCount", alias = "thoughts_token_count")]
+    thoughts_token_count: Option<u64>,
+    #[serde(
+        default,
+        rename = "toolUsePromptTokenCount",
+        alias = "tool_use_prompt_token_count"
+    )]
+    tool_use_prompt_token_count: Option<u64>,
+}
+
+impl GeminiUsageMetadata {
+    fn to_token_usage(&self) -> Option<TokenUsage> {
+        let usage = TokenUsage {
+            input_tokens: self.prompt_token_count,
+            output_tokens: self.candidates_token_count,
+            total_tokens: self.total_token_count,
+            cache_read_input_tokens: self.cached_content_token_count,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            thoughts_tokens: self.thoughts_token_count,
+            tool_input_tokens: self.tool_use_prompt_token_count,
+        };
+
+        (!usage.is_empty()).then_some(usage)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::provider::model::{ContentBlockDelta, ContentBlockStart, ProviderEvent};
+    use crate::provider::model::{ContentBlockDelta, ContentBlockStart, ProviderEvent, TokenUsage};
 
     use super::{StreamState, parse_frame};
 
@@ -535,7 +611,7 @@ mod tests {
         let mut state = StreamState::new("gemini-2.0-flash".to_string());
 
         let events = parse_frame(
-            br#"data: {"responseId":"resp-2","promptFeedback":{"blockReason":"SAFETY"}}"#,
+            br#"data: {"responseId":"resp-2","promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":11,"totalTokenCount":11,"cachedContentTokenCount":4}}"#,
             &mut state,
         )
         .expect("frame should parse");
@@ -550,7 +626,86 @@ mod tests {
                 },
                 ProviderEvent::MessageDelta {
                     stop_reason: Some("SAFETY".to_string()),
-                    usage: None,
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(11),
+                        output_tokens: None,
+                        total_tokens: Some(11),
+                        cache_read_input_tokens: Some(4),
+                        cache_creation_input_tokens: None,
+                        reasoning_tokens: None,
+                        thoughts_tokens: None,
+                        tool_input_tokens: None,
+                    }),
+                },
+                ProviderEvent::MessageStopped,
+            ]
+        );
+    }
+
+    #[test]
+    fn emits_usage_metadata_updates_and_final_usage() {
+        let mut state = StreamState::new("gemini-2.0-flash".to_string());
+
+        let events = parse_frame(
+            br#"data: {"responseId":"resp-3","candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":1,"totalTokenCount":9,"thoughtsTokenCount":2,"toolUsePromptTokenCount":1}}"#,
+            &mut state,
+        )
+        .expect("frame should parse");
+
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::MessageStarted {
+                    id: "resp-3".to_string(),
+                    model: "gemini-2.0-flash".to_string(),
+                    role: crate::provider::Role::Assistant,
+                },
+                ProviderEvent::ContentBlockStarted {
+                    index: 0,
+                    kind: ContentBlockStart::Text,
+                },
+                ProviderEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::Text("Hi".to_string()),
+                },
+                ProviderEvent::MessageDelta {
+                    stop_reason: None,
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(8),
+                        output_tokens: Some(1),
+                        total_tokens: Some(9),
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                        reasoning_tokens: None,
+                        thoughts_tokens: Some(2),
+                        tool_input_tokens: Some(1),
+                    }),
+                },
+            ]
+        );
+
+        let events = parse_frame(
+            br#"data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":2,"totalTokenCount":10,"thoughtsTokenCount":2,"toolUsePromptTokenCount":1}}"#,
+            &mut state,
+        )
+        .expect("frame should parse");
+
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::ContentBlockStopped { index: 0 },
+                ProviderEvent::MessageDelta {
+                    stop_reason: Some("STOP".to_string()),
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(8),
+                        output_tokens: Some(2),
+                        total_tokens: Some(10),
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                        reasoning_tokens: None,
+                        thoughts_tokens: Some(2),
+                        tool_input_tokens: Some(1),
+                    }),
                 },
                 ProviderEvent::MessageStopped,
             ]
