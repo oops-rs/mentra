@@ -786,7 +786,7 @@ fn render_tasks(tasks: &[TaskItem]) -> String {
         .join("\n\n")
 }
 
-fn render_teammates(teammates: &[mentra::runtime::TeamMemberSummary]) -> String {
+fn render_teammates(teammates: &[mentra::TeamMemberSummary]) -> String {
     if teammates.is_empty() {
         return String::new();
     }
@@ -801,7 +801,7 @@ fn render_teammates(teammates: &[mentra::runtime::TeamMemberSummary]) -> String 
         .join("\n")
 }
 
-fn render_protocol_requests(requests: &[mentra::runtime::TeamProtocolRequestSummary]) -> String {
+fn render_protocol_requests(requests: &[mentra::TeamProtocolRequestSummary]) -> String {
     if requests.is_empty() {
         return String::new();
     }

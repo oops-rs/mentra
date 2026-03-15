@@ -13,7 +13,7 @@ use tokio::time::timeout;
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    BuiltinProvider, ContentBlock, Message, Role,
+    BackgroundTaskStatus, BuiltinProvider, ContentBlock, Message, Role,
     agent::{
         Agent, AgentConfig, AgentEvent, MemoryConfig, SpawnedAgentStatus, TaskConfig,
         TeamAutonomyConfig, TeamConfig, ToolProfile, WorkspaceConfig,
@@ -23,11 +23,11 @@ use crate::{
         ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, Request, ToolChoice,
     },
     runtime::{
-        BackgroundTaskStatus, CancellationToken, HybridRuntimeStore, RunOptions, Runtime,
-        RuntimeError, RuntimePolicy, SqliteRuntimeStore, TaskIntrinsicTool, TeamMemberStatus,
-        TeamMessageKind, TeamProtocolStatus,
+        CancellationToken, HybridRuntimeStore, RunOptions, Runtime, RuntimeError, RuntimePolicy,
+        SqliteRuntimeStore, TaskIntrinsicTool,
         task::{self, TaskAccess},
     },
+    team::{TeamMemberStatus, TeamMessageKind, TeamProtocolStatus},
 };
 
 use super::support::{

@@ -4,9 +4,9 @@ use crate::{
     provider::{BuiltinProvider, Provider, ProviderRegistry},
     runtime::{
         RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks, RuntimePolicy, RuntimeStore,
-        ToolAuthorizer, error::RuntimeError, skill::SkillLoadError,
+        error::RuntimeError, skill::SkillLoadError,
     },
-    tool::ExecutableTool,
+    tool::{ExecutableTool, ToolAuthorizer},
 };
 
 use super::Runtime;

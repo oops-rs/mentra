@@ -14,11 +14,8 @@ use crate::agent::{
     SpawnedAgentStatus, SpawnedAgentSummary,
 };
 
-use crate::runtime::{
-    BackgroundTaskSummary, TaskItem, TeamDispatch, TeamMemberSummary, TeamMessage,
-    TeamProtocolRequestSummary,
-};
-use crate::runtime::{RuntimeError, TaskIntrinsicTool};
+use crate::runtime::{RuntimeError, TaskIntrinsicTool, TaskItem};
+use crate::team::{TeamDispatch, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary};
 use crate::tool::ToolAuthorizationPreview;
 
 /// High-level capability labels used for tool metadata and policy decisions.
@@ -252,7 +249,7 @@ impl ToolContext<'_> {
         justification: Option<String>,
         requested_timeout: Option<std::time::Duration>,
         cwd: PathBuf,
-    ) -> Result<BackgroundTaskSummary, String> {
+    ) -> Result<crate::BackgroundTaskSummary, String> {
         self.runtime.start_background_task(
             &self.agent_id,
             command,
@@ -489,7 +486,7 @@ impl ParallelToolContext {
         justification: Option<String>,
         requested_timeout: Option<std::time::Duration>,
         cwd: PathBuf,
-    ) -> Result<BackgroundTaskSummary, String> {
+    ) -> Result<crate::BackgroundTaskSummary, String> {
         self.runtime.start_background_task(
             &self.agent_id,
             command,

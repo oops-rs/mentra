@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     provider::{ProviderError, TokenUsage},
-    runtime::{AuditStore, ToolAuthorizationOutcome, error::RuntimeError},
-    tool::ToolAuthorizationPreview,
+    runtime::{AuditStore, error::RuntimeError},
+    tool::{ToolAuthorizationOutcome, ToolAuthorizationPreview},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

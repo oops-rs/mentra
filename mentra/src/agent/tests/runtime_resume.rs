@@ -15,8 +15,8 @@ use crate::{
     BuiltinProvider, ContentBlock, Message, Role,
     agent::{AgentConfig, AgentSnapshot, AgentStatus, TeamConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::{AgentStore, Runtime, SqliteRuntimeStore, TeamMemberStatus},
-    team::{TeamMessage, TeamStore},
+    runtime::{AgentStore, Runtime, SqliteRuntimeStore},
+    team::{TeamMemberStatus, TeamMessage, TeamStore},
     tool::{
         ExecutableTool, ToolContext, ToolDurability, ToolResult, ToolSideEffectLevel, ToolSpec,
     },

@@ -20,11 +20,6 @@ use crate::{
     tool::ExecutableTool,
 };
 
-pub use crate::background::{BackgroundTaskStatus, BackgroundTaskSummary};
-pub use crate::team::{
-    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
-    TeamProtocolRequestSummary, TeamProtocolStatus,
-};
 pub use control::{
     AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
     CommandSpec, ExecOutput, RunOptions, RuntimeExecutor, RuntimeHook, RuntimeHookEvent,
@@ -37,8 +32,6 @@ pub(crate) use intrinsic::RuntimeIntrinsicTool;
 pub use store::{
     AgentStore, AuditStore, LeaseStore, RunStore, RuntimeStore, SqliteRuntimeStore, TaskStore,
 };
-pub use crate::tool::{ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer};
-pub use crate::tool::ToolAuthorizationOutcome;
 pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot};
 pub(crate) use task::TaskIntrinsicTool;
 pub use task::{TaskItem, TaskStatus};

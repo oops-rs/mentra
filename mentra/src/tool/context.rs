@@ -21,7 +21,7 @@ pub(crate) trait RuntimeContext {
         justification: Option<String>,
         requested_timeout: Option<std::time::Duration>,
         cwd: std::path::PathBuf,
-    ) -> Result<crate::runtime::BackgroundTaskSummary, String>;
+    ) -> Result<crate::BackgroundTaskSummary, String>;
 }
 
 #[async_trait]
@@ -50,7 +50,7 @@ impl RuntimeContext for ToolContext<'_> {
         justification: Option<String>,
         requested_timeout: Option<std::time::Duration>,
         cwd: std::path::PathBuf,
-    ) -> Result<crate::runtime::BackgroundTaskSummary, String> {
+    ) -> Result<crate::BackgroundTaskSummary, String> {
         self.start_background_task(command, justification, requested_timeout, cwd)
     }
 }
@@ -81,7 +81,7 @@ impl RuntimeContext for ParallelToolContext {
         justification: Option<String>,
         requested_timeout: Option<std::time::Duration>,
         cwd: std::path::PathBuf,
-    ) -> Result<crate::runtime::BackgroundTaskSummary, String> {
+    ) -> Result<crate::BackgroundTaskSummary, String> {
         self.start_background_task(command, justification, requested_timeout, cwd)
     }
 }

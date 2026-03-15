@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ContentBlock, Message,
-    runtime::{BackgroundTaskSummary, TaskItem, TeamMemberSummary, TeamProtocolRequestSummary},
-    tool::ToolCall,
+    BackgroundTaskSummary, ContentBlock, Message, TeamMemberSummary, TeamProtocolRequestSummary,
+    runtime::TaskItem, tool::ToolCall,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

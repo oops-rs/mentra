@@ -6,10 +6,10 @@ use crate::{
     ContentBlock,
     agent::{Agent, AgentEvent, AgentStatus},
     error::RuntimeError,
-    runtime::{RunOptions, RuntimeHookEvent, ToolAuthorizationOutcome, ToolAuthorizationRequest},
+    runtime::{RunOptions, RuntimeHookEvent},
     tool::{
-        ExecutableTool, ParallelToolContext, ToolCall, ToolCapability, ToolContext,
-        ToolExecutionMode, ToolSpec,
+        ExecutableTool, ParallelToolContext, ToolAuthorizationOutcome, ToolAuthorizationRequest,
+        ToolCall, ToolCapability, ToolContext, ToolExecutionMode, ToolSpec,
     },
 };
 

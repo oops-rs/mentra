@@ -93,7 +93,7 @@ let _ = model;
 ```rust,no_run
 use async_trait::async_trait;
 use mentra::{BuiltinProvider, Runtime, RuntimePolicy};
-use mentra::runtime::{
+use mentra::tool::{
     ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer,
 };
 
@@ -150,7 +150,7 @@ Every authorization request includes a `ToolAuthorizationPreview` with tool meta
 
 ```rust,no_run
 use async_trait::async_trait;
-use mentra::runtime::{
+use mentra::tool::{
     ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer,
 };
 
