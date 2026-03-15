@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     provider::ProviderError,
-    runtime::{RuleMatch, error::RuntimeError, store::RuntimeStore},
+    runtime::{AuditStore, RuleMatch, error::RuntimeError},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,7 +163,7 @@ impl RuntimeHookEvent {
 pub trait RuntimeHook: Send + Sync {
     fn on_event(
         &self,
-        store: &dyn RuntimeStore,
+        store: &dyn AuditStore,
         event: &RuntimeHookEvent,
     ) -> Result<(), RuntimeError>;
 }
@@ -174,7 +174,7 @@ pub type AuditLogHook = AuditHook;
 impl RuntimeHook for AuditHook {
     fn on_event(
         &self,
-        store: &dyn RuntimeStore,
+        store: &dyn AuditStore,
         event: &RuntimeHookEvent,
     ) -> Result<(), RuntimeError> {
         store.record_audit_event(
@@ -213,7 +213,7 @@ impl RuntimeHooks {
 
     pub fn emit(
         &self,
-        store: &dyn RuntimeStore,
+        store: &dyn AuditStore,
         event: &RuntimeHookEvent,
     ) -> Result<(), RuntimeError> {
         for hook in &self.hooks {

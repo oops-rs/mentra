@@ -346,7 +346,7 @@ struct RecordingHook {
 impl RuntimeHook for RecordingHook {
     fn on_event(
         &self,
-        _store: &dyn crate::runtime::RuntimeStore,
+        _store: &dyn crate::runtime::AuditStore,
         event: &RuntimeHookEvent,
     ) -> Result<(), crate::runtime::RuntimeError> {
         self.events

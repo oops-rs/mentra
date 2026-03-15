@@ -9,7 +9,8 @@ use crate::{
         MemoryCursor, MemoryRecord, MemorySearchRequest, MemoryStore, SqliteHybridMemoryStore,
     },
     runtime::{
-        LoadedAgentState, PersistedAgentRecord, RuntimeStore, SqliteRuntimeStore, TaskStateSnapshot,
+        AgentStore, AuditStore, LeaseStore, LoadedAgentState, PersistedAgentRecord, RunStore,
+        SqliteRuntimeStore, TaskStateSnapshot, TaskStore,
     },
     team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary, TeamStore},
 };
@@ -213,7 +214,7 @@ impl MemoryStore for HybridRuntimeStore {
     }
 }
 
-impl RuntimeStore for HybridRuntimeStore {
+impl AgentStore for HybridRuntimeStore {
     fn prepare_recovery(&self) -> Result<(), RuntimeError> {
         self.inner.prepare_recovery()
     }
@@ -252,7 +253,9 @@ impl RuntimeStore for HybridRuntimeStore {
     ) -> Result<Vec<LoadedAgentState>, RuntimeError> {
         self.inner.list_agents_by_runtime(runtime_identifier)
     }
+}
 
+impl RunStore for HybridRuntimeStore {
     fn start_run(&self, agent_id: &str) -> Result<String, RuntimeError> {
         self.inner.start_run(agent_id)
     }
@@ -273,7 +276,9 @@ impl RuntimeStore for HybridRuntimeStore {
     fn fail_run(&self, run_id: &str, error: &str) -> Result<(), RuntimeError> {
         self.inner.fail_run(run_id, error)
     }
+}
 
+impl TaskStore for HybridRuntimeStore {
     fn load_tasks(&self, namespace: &Path) -> Result<Vec<TaskItem>, RuntimeError> {
         self.inner.load_tasks(namespace)
     }
@@ -293,7 +298,9 @@ impl RuntimeStore for HybridRuntimeStore {
     fn replace_tasks(&self, namespace: &Path, tasks: &[TaskItem]) -> Result<(), RuntimeError> {
         self.inner.replace_tasks(namespace, tasks)
     }
+}
 
+impl AuditStore for HybridRuntimeStore {
     fn record_audit_event(
         &self,
         scope: &str,
@@ -302,7 +309,9 @@ impl RuntimeStore for HybridRuntimeStore {
     ) -> Result<(), RuntimeError> {
         self.inner.record_audit_event(scope, event_type, payload)
     }
+}
 
+impl LeaseStore for HybridRuntimeStore {
     fn acquire_lease(&self, key: &str, owner: &str, ttl: Duration) -> Result<bool, RuntimeError> {
         self.inner.acquire_lease(key, owner, ttl)
     }
@@ -326,7 +335,7 @@ mod tests {
     use super::*;
     use crate::{
         agent::{AgentConfig, AgentStatus},
-        runtime::RuntimeStore,
+        runtime::AgentStore,
     };
 
     #[test]

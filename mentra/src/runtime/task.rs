@@ -12,7 +12,7 @@ use std::{io, path::Path};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::runtime::store::RuntimeStore;
+use crate::runtime::store::TaskStore;
 
 pub(crate) use intrinsic::TaskIntrinsicTool;
 pub(crate) const TASK_REMINDER_TEXT: &str = "Reminder: use task_create, task_claim, task_update, task_list, or task_get only for persisted project-task tracking. Do not use task tools to manage persistent teammates or team protocol flows.";
@@ -39,7 +39,7 @@ pub(crate) enum TaskError {
 }
 
 pub(crate) fn execute_with_store(
-    store: &dyn RuntimeStore,
+    store: &dyn TaskStore,
     tool: &TaskIntrinsicTool,
     input: Value,
     namespace: &Path,
@@ -236,7 +236,7 @@ impl<'a> TaskAccess<'a> {
     }
 }
 
-fn load_store_tasks(store: &dyn RuntimeStore, namespace: &Path) -> Result<Vec<TaskItem>, String> {
+fn load_store_tasks(store: &dyn TaskStore, namespace: &Path) -> Result<Vec<TaskItem>, String> {
     store
         .load_tasks(namespace)
         .map_err(|error| format!("Task storage failed: {error}"))

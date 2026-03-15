@@ -58,8 +58,8 @@ pub struct TaskStateSnapshot {
     pub(crate) tasks: Vec<TaskItem>,
 }
 
-/// Persistence backend used for agents, task state, audit events, and extracted domain stores.
-pub trait RuntimeStore: TeamStore + BackgroundStore + MemoryStore + Send + Sync {
+/// Persistence backend for agent records and working memory snapshots.
+pub trait AgentStore: Send + Sync {
     fn prepare_recovery(&self) -> Result<(), RuntimeError>;
     fn create_agent(
         &self,
@@ -78,6 +78,10 @@ pub trait RuntimeStore: TeamStore + BackgroundStore + MemoryStore + Send + Sync 
         &self,
         runtime_identifier: &str,
     ) -> Result<Vec<LoadedAgentState>, RuntimeError>;
+}
+
+/// Persistence backend for tracked agent runs.
+pub trait RunStore: Send + Sync {
     fn start_run(&self, agent_id: &str) -> Result<String, RuntimeError>;
     fn update_run_state(
         &self,
@@ -87,6 +91,10 @@ pub trait RuntimeStore: TeamStore + BackgroundStore + MemoryStore + Send + Sync 
     ) -> Result<(), RuntimeError>;
     fn finish_run(&self, run_id: &str) -> Result<(), RuntimeError>;
     fn fail_run(&self, run_id: &str, error: &str) -> Result<(), RuntimeError>;
+}
+
+/// Persistence backend for the dependency-aware task board.
+pub trait TaskStore: Send + Sync {
     fn load_tasks(&self, namespace: &Path) -> Result<Vec<TaskItem>, RuntimeError>;
     fn capture_tasks(&self, namespace: &Path) -> Result<TaskStateSnapshot, RuntimeError>;
     fn restore_tasks(
@@ -95,14 +103,52 @@ pub trait RuntimeStore: TeamStore + BackgroundStore + MemoryStore + Send + Sync 
         snapshot: &TaskStateSnapshot,
     ) -> Result<(), RuntimeError>;
     fn replace_tasks(&self, namespace: &Path, tasks: &[TaskItem]) -> Result<(), RuntimeError>;
+}
+
+/// Persistence backend for runtime audit hooks.
+pub trait AuditStore: Send + Sync {
     fn record_audit_event(
         &self,
         scope: &str,
         event_type: &str,
         payload: serde_json::Value,
     ) -> Result<(), RuntimeError>;
+}
+
+/// Persistence backend for runtime leases.
+pub trait LeaseStore: Send + Sync {
     fn acquire_lease(&self, key: &str, owner: &str, ttl: Duration) -> Result<bool, RuntimeError>;
     fn release_lease(&self, key: &str, owner: &str) -> Result<(), RuntimeError>;
+}
+
+/// Full persistence backend used by the runtime.
+pub trait RuntimeStore:
+    AgentStore
+    + RunStore
+    + TaskStore
+    + AuditStore
+    + LeaseStore
+    + TeamStore
+    + BackgroundStore
+    + MemoryStore
+    + Send
+    + Sync
+{
+}
+
+impl<T> RuntimeStore for T
+where
+    T: AgentStore
+        + RunStore
+        + TaskStore
+        + AuditStore
+        + LeaseStore
+        + TeamStore
+        + BackgroundStore
+        + MemoryStore
+        + Send
+        + Sync,
+{
 }
 
 impl TeamStore for SqliteRuntimeStore {
@@ -702,7 +748,7 @@ impl SqliteRuntimeStore {
     }
 }
 
-impl RuntimeStore for SqliteRuntimeStore {
+impl AgentStore for SqliteRuntimeStore {
     fn prepare_recovery(&self) -> Result<(), RuntimeError> {
         let mut conn = self.open()?;
         let tx = conn
@@ -892,6 +938,9 @@ impl RuntimeStore for SqliteRuntimeStore {
             .collect()
     }
 
+}
+
+impl RunStore for SqliteRuntimeStore {
     fn start_run(&self, agent_id: &str) -> Result<String, RuntimeError> {
         let run_id = next_id("run");
         let conn = self.open()?;
@@ -926,6 +975,9 @@ impl RuntimeStore for SqliteRuntimeStore {
         self.update_run_state(run_id, "failed", Some(error))
     }
 
+}
+
+impl TaskStore for SqliteRuntimeStore {
     fn load_tasks(&self, namespace: &Path) -> Result<Vec<TaskItem>, RuntimeError> {
         let conn = self.open()?;
         self.load_tasks_from_conn(&conn, namespace)
@@ -978,6 +1030,9 @@ impl RuntimeStore for SqliteRuntimeStore {
         tx.commit().map_err(sqlite_error)
     }
 
+}
+
+impl AuditStore for SqliteRuntimeStore {
     fn record_audit_event(
         &self,
         scope: &str,
@@ -993,6 +1048,9 @@ impl RuntimeStore for SqliteRuntimeStore {
         Ok(())
     }
 
+}
+
+impl LeaseStore for SqliteRuntimeStore {
     fn acquire_lease(&self, key: &str, owner: &str, ttl: Duration) -> Result<bool, RuntimeError> {
         let mut conn = self.open()?;
         let tx = conn

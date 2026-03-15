@@ -30,7 +30,10 @@ pub use provider::{
 
 pub use agent::{Agent, AgentConfig};
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
-pub use runtime::{HybridRuntimeStore, Runtime, RuntimePolicy};
+pub use runtime::{
+    AgentStore, AuditStore, HybridRuntimeStore, LeaseStore, RunStore, Runtime, RuntimePolicy,
+    TaskStore,
+};
 pub use team::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
     TeamProtocolRequestSummary, TeamProtocolStatus,

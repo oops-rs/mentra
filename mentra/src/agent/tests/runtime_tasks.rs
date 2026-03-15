@@ -10,7 +10,7 @@ use crate::{
     agent::{AgentConfig, ContextCompactionConfig, TaskConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{
-        Runtime, RuntimeStore, SqliteRuntimeStore, TaskItem, TaskStatus, task::TASK_REMINDER_TEXT,
+        Runtime, SqliteRuntimeStore, TaskItem, TaskStatus, TaskStore, task::TASK_REMINDER_TEXT,
     },
 };
 
