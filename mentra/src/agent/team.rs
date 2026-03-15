@@ -2,14 +2,14 @@ use std::{borrow::Cow, sync::Arc};
 
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::RuntimeError;
 use crate::runtime::task::TaskIntrinsicTool;
 use crate::team::{
     TEAMMATE_MAX_ROUNDS, TeamDispatch, TeamIntrinsicTool, TeamMemberStatus, TeamMemberSummary,
     TeamMessage, TeamProtocolRequestSummary, TeamProtocolStatus, TeamRequestDirection,
-    TeamRequestFilter, build_teammate_system_prompt, teammate_actor_loop,
+    TeamRequestFilter, build_teammate_system_prompt,
 };
 
 use super::{Agent, AgentSpawnOptions, TeammateIdentity};
@@ -74,33 +74,13 @@ impl Agent {
             status: TeamMemberStatus::Idle,
         };
 
-        let (wake_tx, wake_rx) = mpsc::unbounded_channel();
-        let manager = self.runtime.team_manager();
         let team_dir = self.config.team.team_dir.clone();
         let actor = Arc::new(AsyncMutex::new(teammate));
-        let actor_team_dir = team_dir.clone();
-        let actor_name = name.clone();
-        let task = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("teammate runtime");
-            runtime.block_on(teammate_actor_loop(
-                manager,
-                actor_team_dir,
-                actor_name,
-                actor,
-                wake_rx,
-            ));
-        });
+        let actor_handle = self.runtime.spawn_teammate_actor(&team_dir, &name, actor)?;
 
         let summary = self
             .runtime
-            .register_teammate(&team_dir, summary, wake_tx, task)?;
-
-        if self.config.team.autonomy.enabled {
-            let _ = self.runtime.wake_teammate(&team_dir, &name);
-        }
+            .register_teammate(&team_dir, summary, actor_handle)?;
 
         if let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) {
             self.send_team_message(&name, prompt)?;
@@ -126,27 +106,9 @@ impl Agent {
 
         let runtime = self.runtime.clone();
         let team_dir = self.config.team.team_dir.clone();
-        let (wake_tx, wake_rx) = mpsc::unbounded_channel();
-        let manager = runtime.team_manager();
         let actor = Arc::new(AsyncMutex::new(self));
-        let actor_team_dir = team_dir.clone();
-        let actor_name = summary.name.clone();
-        let task = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("teammate runtime");
-            runtime.block_on(teammate_actor_loop(
-                manager,
-                actor_team_dir,
-                actor_name,
-                actor,
-                wake_rx,
-            ));
-        });
-
-        runtime.register_teammate(&team_dir, summary, wake_tx.clone(), task)?;
-        let _ = wake_tx.send(());
+        let actor_handle = runtime.spawn_teammate_actor(&team_dir, &summary.name, actor)?;
+        runtime.register_teammate(&team_dir, summary, actor_handle)?;
         Ok(())
     }
 

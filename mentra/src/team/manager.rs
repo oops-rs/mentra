@@ -1,3 +1,4 @@
+use crate::{agent::AgentEvent, error::RuntimeError};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -7,13 +8,10 @@ use std::{
     },
 };
 
-use tokio::sync::mpsc;
-
-use crate::{agent::AgentEvent, error::RuntimeError};
-
 use super::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamObserverSink,
     TeamProtocolRequestSummary, TeamProtocolStatus, TeamRegistration, TeamRequestFilter, TeamStore,
+    TeammateActorHandle,
 };
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -55,11 +53,6 @@ struct TeamObserver {
 struct ObserverUpdate {
     observer: TeamObserver,
     unread_count: usize,
-}
-
-struct TeammateActorHandle {
-    wake_tx: mpsc::UnboundedSender<()>,
-    _task: std::thread::JoinHandle<()>,
 }
 
 impl TeamManager {
@@ -115,8 +108,7 @@ impl TeamManager {
         &self,
         team_dir: &Path,
         summary: TeamMemberSummary,
-        wake_tx: mpsc::UnboundedSender<()>,
-        task: std::thread::JoinHandle<()>,
+        actor: TeammateActorHandle,
     ) -> Result<TeamMemberSummary, RuntimeError> {
         let (observer_updates, members, requests) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
@@ -138,13 +130,7 @@ impl TeamManager {
                 team.members.push(summary.clone());
             }
             team.known_agents.insert(summary.name.clone());
-            team.actors.insert(
-                summary.name.clone(),
-                TeammateActorHandle {
-                    wake_tx,
-                    _task: task,
-                },
-            );
+            team.actors.insert(summary.name.clone(), actor);
             self.inner
                 .store
                 .upsert_team_member(&team.team_dir, &summary)?;

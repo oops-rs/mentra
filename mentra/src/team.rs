@@ -1,4 +1,5 @@
 mod actor;
+mod host;
 mod intrinsic;
 mod manager;
 mod observer;
@@ -7,6 +8,7 @@ mod store;
 mod types;
 
 pub(crate) use actor::teammate_actor_loop;
+pub(crate) use host::{TeammateActorHandle, TeammateHost};
 pub(crate) use manager::TeamManager;
 pub(crate) use observer::{TeamObserverSink, TeamRegistration};
 pub(crate) use prompt::{TEAMMATE_MAX_ROUNDS, build_teammate_system_prompt};

@@ -121,7 +121,9 @@ impl RuntimeHandle {
         agent_id: &str,
         task_id: Option<&str>,
     ) -> Result<String, String> {
-        self.collaboration.background_tasks.check_task(agent_id, task_id)
+        self.collaboration
+            .background_tasks
+            .check_task(agent_id, task_id)
     }
 
     pub fn drain_background_notifications(&self, agent_id: &str) -> Vec<BackgroundNotification> {
@@ -130,10 +132,10 @@ impl RuntimeHandle {
             .drain_notifications(agent_id)
     }
 
-    pub fn has_pending_background_notifications(&self, agent_id: &str) -> bool {
+    pub fn has_deliverable_background_notifications(&self, agent_id: &str) -> bool {
         self.collaboration
             .background_tasks
-            .has_pending_notifications(agent_id)
+            .has_deliverable_notifications(agent_id)
     }
 
     pub fn requeue_background_notifications(
@@ -152,26 +154,29 @@ impl RuntimeHandle {
             .acknowledge_notifications(agent_id);
     }
 
-    pub fn team_manager(&self) -> TeamManager {
-        self.collaboration.team.clone()
+    pub fn spawn_teammate_actor(
+        &self,
+        team_dir: &Path,
+        teammate_name: &str,
+        agent: std::sync::Arc<tokio::sync::Mutex<crate::Agent>>,
+    ) -> Result<crate::team::TeammateActorHandle, RuntimeError> {
+        Ok(self.collaboration.teammate_host.spawn_teammate(
+            self.collaboration.team.clone(),
+            team_dir.to_path_buf(),
+            teammate_name.to_string(),
+            agent,
+        ))
     }
 
     pub fn register_teammate(
         &self,
         team_dir: &Path,
         summary: TeamMemberSummary,
-        wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
-        task: std::thread::JoinHandle<()>,
+        actor: crate::team::TeammateActorHandle,
     ) -> Result<TeamMemberSummary, RuntimeError> {
         self.collaboration
             .team
-            .spawn_teammate(team_dir, summary, wake_tx, task)
-    }
-
-    pub fn wake_teammate(&self, team_dir: &Path, teammate_name: &str) -> Result<(), RuntimeError> {
-        self.collaboration
-            .team
-            .wake_teammate(team_dir, teammate_name)
+            .spawn_teammate(team_dir, summary, actor)
     }
 
     pub fn send_team_message(

@@ -28,7 +28,7 @@ use crate::{
     },
     team::{
         TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
-        TeamRequestFilter,
+        TeamRequestFilter, TeammateHost,
     },
     tool::{ExecutableTool, ToolRegistry, ToolSpec},
 };
@@ -65,6 +65,7 @@ pub(crate) struct PersistenceServices {
 pub(crate) struct CollaborationServices {
     pub(crate) background_tasks: BackgroundTaskManager,
     pub(crate) team: TeamManager,
+    pub(crate) teammate_host: TeammateHost,
 }
 
 #[derive(Clone)]

@@ -17,6 +17,10 @@ pub trait BackgroundStore: Send + Sync {
         &self,
         agent_id: &str,
     ) -> Result<Vec<BackgroundNotification>, RuntimeError>;
+    fn has_deliverable_background_notifications(
+        &self,
+        agent_id: &str,
+    ) -> Result<bool, RuntimeError>;
     fn has_pending_background_notifications(&self, agent_id: &str) -> Result<bool, RuntimeError>;
     fn ack_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError>;
     fn requeue_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError>;

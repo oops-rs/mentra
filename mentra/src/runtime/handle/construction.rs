@@ -116,6 +116,7 @@ impl RuntimeHandle {
                     background_hook_sink(store.clone(), hooks),
                 ),
                 team: TeamManager::new(store),
+                teammate_host: TeammateHost::new().expect("teammate host"),
             },
             tooling: ToolingServices {
                 tool_registry: Arc::new(RwLock::new(tool_registry)),
@@ -152,6 +153,7 @@ impl RuntimeHandle {
                     background_hook_sink(store.clone(), self.execution.hooks.clone()),
                 ),
                 team: TeamManager::new(store),
+                teammate_host: self.collaboration.teammate_host.clone(),
             },
             tooling: clone_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
@@ -190,6 +192,7 @@ impl RuntimeHandle {
                     ),
                 ),
                 team: self.collaboration.team.clone(),
+                teammate_host: self.collaboration.teammate_host.clone(),
             },
             tooling: clone_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
@@ -224,6 +227,7 @@ impl RuntimeHandle {
                     ),
                 ),
                 team: self.collaboration.team.clone(),
+                teammate_host: self.collaboration.teammate_host.clone(),
             },
             tooling: clone_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
@@ -243,7 +247,10 @@ impl RuntimeHandle {
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
-                memory: Arc::new(MemoryEngine::new(self.persistence.store.clone(), hooks.clone())),
+                memory: Arc::new(MemoryEngine::new(
+                    self.persistence.store.clone(),
+                    hooks.clone(),
+                )),
             },
             collaboration: CollaborationServices {
                 background_tasks: BackgroundTaskManager::new(
@@ -252,6 +259,7 @@ impl RuntimeHandle {
                     background_hook_sink(self.persistence.store.clone(), hooks),
                 ),
                 team: self.collaboration.team.clone(),
+                teammate_host: self.collaboration.teammate_host.clone(),
             },
             tooling: clone_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
@@ -282,6 +290,7 @@ impl RuntimeHandle {
                     ),
                 ),
                 team: self.collaboration.team.clone(),
+                teammate_host: self.collaboration.teammate_host.clone(),
             },
             tooling: clone_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,

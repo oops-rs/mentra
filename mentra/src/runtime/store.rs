@@ -58,7 +58,10 @@ pub struct TaskStateSnapshot {
     pub(crate) tasks: Vec<TaskItem>,
 }
 
-/// Persistence backend for agent records and working memory snapshots.
+/// Persistence backend for agent records and working-memory snapshots.
+///
+/// Custom runtime backends implement this trait to store durable agent identity,
+/// configuration, and transcript state.
 pub trait AgentStore: Send + Sync {
     fn prepare_recovery(&self) -> Result<(), RuntimeError>;
     fn create_agent(
@@ -81,6 +84,8 @@ pub trait AgentStore: Send + Sync {
 }
 
 /// Persistence backend for tracked agent runs.
+///
+/// This trait stores lifecycle transitions for turns and interrupted runs.
 pub trait RunStore: Send + Sync {
     fn start_run(&self, agent_id: &str) -> Result<String, RuntimeError>;
     fn update_run_state(
@@ -94,6 +99,9 @@ pub trait RunStore: Send + Sync {
 }
 
 /// Persistence backend for the dependency-aware task board.
+///
+/// Task persistence is intentionally separate so applications can replace the
+/// task board without reimplementing unrelated runtime storage.
 pub trait TaskStore: Send + Sync {
     fn load_tasks(&self, namespace: &Path) -> Result<Vec<TaskItem>, RuntimeError>;
     fn capture_tasks(&self, namespace: &Path) -> Result<TaskStateSnapshot, RuntimeError>;
@@ -116,12 +124,19 @@ pub trait AuditStore: Send + Sync {
 }
 
 /// Persistence backend for runtime leases.
+///
+/// Leases coordinate exclusive ownership when multiple runtime processes may try
+/// to resume the same persisted agents.
 pub trait LeaseStore: Send + Sync {
     fn acquire_lease(&self, key: &str, owner: &str, ttl: Duration) -> Result<bool, RuntimeError>;
     fn release_lease(&self, key: &str, owner: &str) -> Result<(), RuntimeError>;
 }
 
 /// Full persistence backend used by the runtime.
+///
+/// `RuntimeStore` is a composition trait over the narrower persistence seams
+/// plus the collaboration and memory stores. Custom backends can implement the
+/// smaller traits directly and then satisfy `RuntimeStore` automatically.
 pub trait RuntimeStore:
     AgentStore
     + RunStore
@@ -136,8 +151,7 @@ pub trait RuntimeStore:
 {
 }
 
-impl<T> RuntimeStore for T
-where
+impl<T> RuntimeStore for T where
     T: AgentStore
         + RunStore
         + TaskStore
@@ -147,7 +161,7 @@ where
         + BackgroundStore
         + MemoryStore
         + Send
-        + Sync,
+        + Sync
 {
 }
 
@@ -432,6 +446,21 @@ impl BackgroundStore for SqliteRuntimeStore {
     }
 
     fn has_pending_background_notifications(&self, agent_id: &str) -> Result<bool, RuntimeError> {
+        let conn = self.open()?;
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM background_jobs WHERE agent_id = ?1 AND notification_state IN (?2, ?3))",
+                params![agent_id, DELIVERY_PENDING, DELIVERY_INFLIGHT],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sqlite_error)?;
+        Ok(exists != 0)
+    }
+
+    fn has_deliverable_background_notifications(
+        &self,
+        agent_id: &str,
+    ) -> Result<bool, RuntimeError> {
         let conn = self.open()?;
         let exists = conn
             .query_row(
@@ -937,7 +966,6 @@ impl AgentStore for SqliteRuntimeStore {
             })
             .collect()
     }
-
 }
 
 impl RunStore for SqliteRuntimeStore {
@@ -974,7 +1002,6 @@ impl RunStore for SqliteRuntimeStore {
     fn fail_run(&self, run_id: &str, error: &str) -> Result<(), RuntimeError> {
         self.update_run_state(run_id, "failed", Some(error))
     }
-
 }
 
 impl TaskStore for SqliteRuntimeStore {
@@ -1029,7 +1056,6 @@ impl TaskStore for SqliteRuntimeStore {
         }
         tx.commit().map_err(sqlite_error)
     }
-
 }
 
 impl AuditStore for SqliteRuntimeStore {
@@ -1047,7 +1073,6 @@ impl AuditStore for SqliteRuntimeStore {
         .map_err(sqlite_error)?;
         Ok(())
     }
-
 }
 
 impl LeaseStore for SqliteRuntimeStore {

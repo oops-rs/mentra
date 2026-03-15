@@ -1,19 +1,20 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::Instant,
 };
 
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use crate::{Agent, ContentBlock, agent::TeamAutonomyConfig, error::RuntimeError};
+use crate::{
+    Agent, ContentBlock, agent::TeamAutonomyConfig, error::RuntimeError, runtime::CancellationToken,
+};
 
 use super::{TeamManager, TeamMemberStatus};
 
 const TEAM_WAKE_PROMPT: &str = "Process any new team inbox messages and continue your work.";
 const BACKGROUND_WAKE_PROMPT: &str =
     "Review any completed background task results and continue your work.";
-const BACKGROUND_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 pub(crate) async fn teammate_actor_loop(
     manager: TeamManager,
@@ -21,126 +22,152 @@ pub(crate) async fn teammate_actor_loop(
     teammate_name: String,
     agent: Arc<AsyncMutex<Agent>>,
     mut wake_rx: mpsc::UnboundedReceiver<()>,
+    cancellation: CancellationToken,
 ) {
-    while wait_for_wake_or_background(&agent, &mut wake_rx).await {
-        match work_cycle(&manager, &team_dir, &teammate_name, &agent).await {
-            Ok(true) | Err(()) => {}
-            Ok(false) => break,
+    let autonomy = {
+        let guard = agent.lock().await;
+        guard.config().team.autonomy.clone()
+    };
+    let mut should_process = false;
+    let mut idle_since = None;
+
+    loop {
+        if cancellation.is_cancelled() {
+            break;
+        }
+
+        if should_process {
+            match process_pending_work(&manager, &team_dir, &teammate_name, &agent).await {
+                Ok(ActorState::Idle) => {
+                    idle_since.get_or_insert_with(Instant::now);
+                }
+                Ok(ActorState::Shutdown) => break,
+                Err(()) => {
+                    idle_since.get_or_insert_with(Instant::now);
+                }
+            }
+            should_process = false;
+        }
+
+        if cancellation.is_cancelled() {
+            break;
+        }
+
+        if autonomy.enabled {
+            let started_idle_at = idle_since.unwrap_or_else(|| {
+                let now = Instant::now();
+                idle_since = Some(now);
+                now
+            });
+
+            let wait = tokio::time::sleep(autonomy.poll_interval);
+            tokio::pin!(wait);
+
+            tokio::select! {
+                wake = wake_rx.recv() => {
+                    match wake {
+                        Some(()) => {
+                            should_process = true;
+                            idle_since = None;
+                        }
+                        None => break,
+                    }
+                }
+                _ = &mut wait => {
+                    match autonomy_tick(
+                        &manager,
+                        &team_dir,
+                        &teammate_name,
+                        &agent,
+                        started_idle_at,
+                        &autonomy,
+                    ).await {
+                        Ok(AutonomyState::ContinueIdle) => {}
+                        Ok(AutonomyState::Claimed(prompt)) => {
+                            if execute_prompt(&manager, &team_dir, &teammate_name, &agent, prompt)
+                                .await
+                                .is_err()
+                            {
+                                idle_since.get_or_insert_with(Instant::now);
+                                continue;
+                            }
+                            let _ = manager.update_member_status(
+                                &team_dir,
+                                &teammate_name,
+                                TeamMemberStatus::Idle,
+                            );
+                            should_process = true;
+                            idle_since = Some(Instant::now());
+                        }
+                        Ok(AutonomyState::Shutdown) => break,
+                        Err(()) => {
+                            idle_since.get_or_insert_with(Instant::now);
+                        }
+                    }
+                }
+            }
+        } else {
+            match wake_rx.recv().await {
+                Some(()) => {
+                    should_process = true;
+                    idle_since = None;
+                }
+                None => break,
+            }
         }
     }
 
     let _ = manager.unregister_teammate_actor(&team_dir, &teammate_name);
 }
 
-async fn wait_for_wake_or_background(
-    agent: &Arc<AsyncMutex<Agent>>,
-    wake_rx: &mut mpsc::UnboundedReceiver<()>,
-) -> bool {
-    loop {
-        let has_background_notifications = {
-            let guard = agent.lock().await;
-            guard
-                .runtime_handle()
-                .has_pending_background_notifications(guard.id())
-        };
-        if has_background_notifications {
-            return true;
-        }
-
-        match tokio::time::timeout(BACKGROUND_IDLE_POLL_INTERVAL, wake_rx.recv()).await {
-            Ok(Some(())) => return true,
-            Ok(None) => return false,
-            Err(_) => continue,
-        }
-    }
+enum ActorState {
+    Idle,
+    Shutdown,
 }
 
-async fn work_cycle(
+enum PendingWork {
+    Prompt(String),
+    Idle,
+    Shutdown,
+}
+
+enum AutonomyState {
+    ContinueIdle,
+    Claimed(String),
+    Shutdown,
+}
+
+async fn process_pending_work(
     manager: &TeamManager,
     team_dir: &Path,
     teammate_name: &str,
     agent: &Arc<AsyncMutex<Agent>>,
-) -> Result<bool, ()> {
-    let autonomy = {
-        let guard = agent.lock().await;
-        guard.config().team.autonomy.clone()
-    };
-    let mut next_prompt = None;
+) -> Result<ActorState, ()> {
+    let mut processed_prompt = false;
 
     loop {
-        let prompt = match next_prompt.take() {
-            Some(prompt) => prompt,
-            None => match manager.has_pending_messages(team_dir, teammate_name) {
-                Ok(true) => TEAM_WAKE_PROMPT.to_string(),
-                Ok(false) => {
-                    let has_background_notifications = {
-                        let guard = agent.lock().await;
-                        guard
-                            .runtime_handle()
-                            .has_pending_background_notifications(guard.id())
-                    };
-                    if has_background_notifications {
-                        BACKGROUND_WAKE_PROMPT.to_string()
-                    } else {
-                        match manager.take_shutdown_signal(team_dir, teammate_name) {
-                            Ok(true) => {
-                                let _ = manager.update_member_status(
-                                    team_dir,
-                                    teammate_name,
-                                    TeamMemberStatus::Shutdown,
-                                );
-                                return Ok(false);
-                            }
-                            Ok(false) => {}
-                            Err(error) => {
-                                let _ = mark_failed(manager, team_dir, teammate_name, error);
-                                return Err(());
-                            }
-                        }
-                        if autonomy.enabled {
-                            match idle_poll(manager, team_dir, teammate_name, agent, &autonomy)
-                                .await
-                            {
-                                Ok(Some(prompt)) => prompt,
-                                Ok(None) => {
-                                    let _ = manager.update_member_status(
-                                        team_dir,
-                                        teammate_name,
-                                        TeamMemberStatus::Shutdown,
-                                    );
-                                    return Ok(false);
-                                }
-                                Err(error) => {
-                                    let _ = mark_failed(manager, team_dir, teammate_name, error);
-                                    return Err(());
-                                }
-                            }
-                        } else {
-                            let _ = manager.update_member_status(
-                                team_dir,
-                                teammate_name,
-                                TeamMemberStatus::Idle,
-                            );
-                            return Ok(true);
-                        }
-                    }
+        match next_pending_work(manager, team_dir, teammate_name, agent).await {
+            Ok(PendingWork::Prompt(prompt)) => {
+                processed_prompt = true;
+                execute_prompt(manager, team_dir, teammate_name, agent, prompt).await?
+            }
+            Ok(PendingWork::Idle) => {
+                if processed_prompt {
+                    let _ = manager.update_member_status(
+                        team_dir,
+                        teammate_name,
+                        TeamMemberStatus::Idle,
+                    );
                 }
-                Err(error) => {
-                    let _ = mark_failed(manager, team_dir, teammate_name, error);
-                    return Err(());
-                }
-            },
-        };
-
-        let _ = manager.update_member_status(team_dir, teammate_name, TeamMemberStatus::Working);
-        let result = {
-            let mut guard = agent.lock().await;
-            guard.send(vec![ContentBlock::Text { text: prompt }]).await
-        };
-
-        match result {
-            Ok(_) | Err(RuntimeError::EmptyAssistantResponse) => {
-                next_prompt = None;
+                return Ok(ActorState::Idle);
+            }
+            Ok(PendingWork::Shutdown) => {
+                let _ = manager.update_member_status(
+                    team_dir,
+                    teammate_name,
+                    TeamMemberStatus::Shutdown,
+                );
+                return Ok(ActorState::Shutdown);
             }
             Err(error) => {
                 let _ = mark_failed(manager, team_dir, teammate_name, error);
@@ -150,56 +177,106 @@ async fn work_cycle(
     }
 }
 
-async fn idle_poll(
+async fn next_pending_work(
     manager: &TeamManager,
     team_dir: &Path,
     teammate_name: &str,
     agent: &Arc<AsyncMutex<Agent>>,
+) -> Result<PendingWork, RuntimeError> {
+    if manager.has_pending_messages(team_dir, teammate_name)? {
+        return Ok(PendingWork::Prompt(TEAM_WAKE_PROMPT.to_string()));
+    }
+
+    let has_background_notifications = {
+        let guard = agent.lock().await;
+        guard
+            .runtime_handle()
+            .has_deliverable_background_notifications(guard.id())
+    };
+    if has_background_notifications {
+        return Ok(PendingWork::Prompt(BACKGROUND_WAKE_PROMPT.to_string()));
+    }
+
+    if manager.take_shutdown_signal(team_dir, teammate_name)? {
+        return Ok(PendingWork::Shutdown);
+    }
+
+    Ok(PendingWork::Idle)
+}
+
+async fn autonomy_tick(
+    manager: &TeamManager,
+    team_dir: &Path,
+    teammate_name: &str,
+    agent: &Arc<AsyncMutex<Agent>>,
+    idle_since: Instant,
     autonomy: &TeamAutonomyConfig,
-) -> Result<Option<String>, RuntimeError> {
-    manager.update_member_status(team_dir, teammate_name, TeamMemberStatus::Idle)?;
-    let idle_ms = autonomy.idle_timeout.as_millis();
-    let poll_ms = autonomy.poll_interval.as_millis().max(1);
-    let poll_count = idle_ms.div_ceil(poll_ms);
-
-    for _ in 0..poll_count {
-        tokio::time::sleep(autonomy.poll_interval).await;
-        if manager.take_shutdown_signal(team_dir, teammate_name)? {
-            return Ok(None);
+) -> Result<AutonomyState, ()> {
+    match manager.take_shutdown_signal(team_dir, teammate_name) {
+        Ok(true) => {
+            let _ =
+                manager.update_member_status(team_dir, teammate_name, TeamMemberStatus::Shutdown);
+            return Ok(AutonomyState::Shutdown);
         }
-        if manager.has_pending_messages(team_dir, teammate_name)? {
-            return Ok(Some(TEAM_WAKE_PROMPT.to_string()));
-        }
-        let has_background_notifications = {
-            let guard = agent.lock().await;
-            guard
-                .runtime_handle()
-                .has_pending_background_notifications(guard.id())
-        };
-        if has_background_notifications {
-            return Ok(Some(BACKGROUND_WAKE_PROMPT.to_string()));
-        }
-
-        let claimed = {
-            let mut guard = agent.lock().await;
-            guard.try_claim_ready_task()?
-        };
-        if let Some(task) = claimed {
-            let task_body = if task.description.trim().is_empty() {
-                format!("Task #{}: {}", task.id, task.subject)
-            } else {
-                format!(
-                    "Task #{}: {}\nDescription: {}",
-                    task.id, task.subject, task.description
-                )
-            };
-            return Ok(Some(format!(
-                "<auto-claimed>{task_body}</auto-claimed>\n<reminder>Update your task status. Mark it in_progress when you start and completed when you finish.</reminder>"
-            )));
+        Ok(false) => {}
+        Err(error) => {
+            let _ = mark_failed(manager, team_dir, teammate_name, error);
+            return Err(());
         }
     }
 
-    Ok(None)
+    let claimed = {
+        let mut guard = agent.lock().await;
+        match guard.try_claim_ready_task() {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = mark_failed(manager, team_dir, teammate_name, error);
+                return Err(());
+            }
+        }
+    };
+    if let Some(task) = claimed {
+        let task_body = if task.description.trim().is_empty() {
+            format!("Task #{}: {}", task.id, task.subject)
+        } else {
+            format!(
+                "Task #{}: {}\nDescription: {}",
+                task.id, task.subject, task.description
+            )
+        };
+        return Ok(AutonomyState::Claimed(format!(
+            "<auto-claimed>{task_body}</auto-claimed>\n<reminder>Update your task status. Mark it in_progress when you start and completed when you finish.</reminder>"
+        )));
+    }
+
+    if idle_since.elapsed() >= autonomy.idle_timeout {
+        let _ = manager.update_member_status(team_dir, teammate_name, TeamMemberStatus::Shutdown);
+        return Ok(AutonomyState::Shutdown);
+    }
+
+    Ok(AutonomyState::ContinueIdle)
+}
+
+async fn execute_prompt(
+    manager: &TeamManager,
+    team_dir: &Path,
+    teammate_name: &str,
+    agent: &Arc<AsyncMutex<Agent>>,
+    prompt: String,
+) -> Result<(), ()> {
+    let _ = manager.update_member_status(team_dir, teammate_name, TeamMemberStatus::Working);
+    let result = {
+        let mut guard = agent.lock().await;
+        guard.send(vec![ContentBlock::Text { text: prompt }]).await
+    };
+
+    match result {
+        Ok(_) | Err(RuntimeError::EmptyAssistantResponse) => Ok(()),
+        Err(error) => {
+            let _ = mark_failed(manager, team_dir, teammate_name, error);
+            Err(())
+        }
+    }
 }
 
 fn mark_failed(

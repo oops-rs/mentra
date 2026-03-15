@@ -18,7 +18,8 @@ use crate::{
 use super::{RuntimeError, TaskItem};
 
 #[derive(Clone)]
-/// Runtime store that keeps the existing SQLite runtime data path and swaps in a richer memory store.
+/// Runtime store that keeps SQLite for runtime state and uses the hybrid memory
+/// store for long-term memory records.
 pub struct HybridRuntimeStore {
     inner: SqliteRuntimeStore,
     memory: SqliteHybridMemoryStore,
@@ -31,6 +32,7 @@ impl Default for HybridRuntimeStore {
 }
 
 impl HybridRuntimeStore {
+    /// Creates a hybrid store that colocates runtime state with a derived memory database.
     pub fn new(runtime_path: impl Into<PathBuf>) -> Self {
         let runtime_path = runtime_path.into();
         let memory_path = derive_memory_path(runtime_path.as_path());
@@ -40,6 +42,7 @@ impl HybridRuntimeStore {
         }
     }
 
+    /// Creates a hybrid store with explicit runtime and memory database paths.
     pub fn with_memory_path(
         runtime_path: impl Into<PathBuf>,
         memory_path: impl Into<PathBuf>,
@@ -50,6 +53,7 @@ impl HybridRuntimeStore {
         }
     }
 
+    /// Creates a hybrid store using the default runtime-scoped SQLite path layout.
     pub fn for_runtime_identifier(runtime_identifier: &str) -> Self {
         Self::new(SqliteRuntimeStore::path_for_runtime_identifier(
             runtime_identifier,
@@ -154,6 +158,14 @@ impl BackgroundStore for HybridRuntimeStore {
 
     fn has_pending_background_notifications(&self, agent_id: &str) -> Result<bool, RuntimeError> {
         self.inner.has_pending_background_notifications(agent_id)
+    }
+
+    fn has_deliverable_background_notifications(
+        &self,
+        agent_id: &str,
+    ) -> Result<bool, RuntimeError> {
+        self.inner
+            .has_deliverable_background_notifications(agent_id)
     }
 
     fn ack_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError> {

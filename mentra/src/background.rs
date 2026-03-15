@@ -209,6 +209,13 @@ impl BackgroundTaskManager {
             .unwrap_or(false)
     }
 
+    pub(crate) fn has_deliverable_notifications(&self, agent_id: &str) -> bool {
+        self.inner
+            .store
+            .has_deliverable_background_notifications(agent_id)
+            .unwrap_or(false)
+    }
+
     pub(crate) fn requeue_notifications(
         &self,
         agent_id: &str,

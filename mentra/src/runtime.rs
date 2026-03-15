@@ -36,14 +36,20 @@ pub use error::RuntimeError;
 pub(crate) use handle::RuntimeHandle;
 pub use hybrid_store::HybridRuntimeStore;
 pub(crate) use intrinsic::RuntimeIntrinsicTool;
-pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot};
 pub use store::{
     AgentStore, AuditStore, LeaseStore, RunStore, RuntimeStore, SqliteRuntimeStore, TaskStore,
 };
+pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot};
 pub(crate) use task::TaskIntrinsicTool;
 pub use task::{TaskItem, TaskStatus};
 
 /// Entry point for configuring providers, tools, and agent lifecycles.
+///
+/// A runtime composes four main subsystems:
+/// - execution: providers, policies, hooks, and command execution
+/// - persistence: agent state, runs, tasks, leases, and memory
+/// - tooling: registered tools, skills, and app context
+/// - collaboration: persistent teams and background task coordination
 pub struct Runtime {
     handle: RuntimeHandle,
     provider_registry: ProviderRegistry,

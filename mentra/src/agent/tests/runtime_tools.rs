@@ -376,7 +376,8 @@ async fn teammate_auto_wakes_after_background_task_finishes() {
     let teammate_id = lead.watch_snapshot().borrow().teammates[0].id.clone();
     wait_for_recorded_requests(&provider_handle, 2).await;
     wait_for_background_task_record(&store, &teammate_id, 1).await;
-    wait_for_background_notification(&store, &teammate_id).await;
+    wait_for_background_task_status(&store, &teammate_id, "bg-1", BackgroundTaskStatus::Finished)
+        .await;
     wait_for_recorded_requests(&provider_handle, 3).await;
     wait_for_teammate_status(&lead, TeamMemberStatus::Idle).await;
 
@@ -4425,19 +4426,28 @@ async fn wait_for_recorded_requests(provider: &ScriptedProvider, expected: usize
     panic!("timed out waiting for {expected} recorded requests");
 }
 
-async fn wait_for_background_notification(store: &SqliteRuntimeStore, agent_id: &str) {
+async fn wait_for_background_task_status(
+    store: &SqliteRuntimeStore,
+    agent_id: &str,
+    task_id: &str,
+    expected_status: BackgroundTaskStatus,
+) {
     for _ in 0..500 {
-        if <SqliteRuntimeStore as crate::background::BackgroundStore>::has_pending_background_notifications(
-            store, agent_id,
-        )
-        .expect("check pending background notifications")
+        let tasks =
+            <SqliteRuntimeStore as crate::background::BackgroundStore>::load_background_tasks(
+                store, agent_id,
+            )
+            .expect("load background tasks");
+        if tasks
+            .iter()
+            .any(|task| task.id == task_id && task.status == expected_status)
         {
             return;
         }
         sleep(Duration::from_millis(10)).await;
     }
 
-    panic!("timed out waiting for pending background notification");
+    panic!("timed out waiting for background task {task_id} to reach {expected_status:?}");
 }
 
 async fn wait_for_background_task_record(
