@@ -88,15 +88,32 @@ let _ = model;
 
 ## Coding Agent Setup
 
-`Runtime::builder()` registers Mentra's builtin tools, including `shell`, `background_run`, `check_background`, `files`, and the runtime/task/team intrinsics. Shell and background execution remain disabled by default, so coding-agent setups must opt in with a runtime policy.
+`Runtime::builder()` registers Mentra's builtin tools, including `shell`, `background_run`, `check_background`, `files`, and the runtime/task/team intrinsics. Shell and background execution remain disabled by default, so coding-agent setups must opt in with a runtime policy. If you want semantic review before tools execute, install a `ToolAuthorizer`.
 
 ```rust,no_run
+use async_trait::async_trait;
 use mentra::{BuiltinProvider, Runtime, RuntimePolicy};
+use mentra::runtime::{
+    ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer,
+};
+
+struct AllowAllAuthorizer;
+
+#[async_trait]
+impl ToolAuthorizer for AllowAllAuthorizer {
+    async fn authorize(
+        &self,
+        _request: &ToolAuthorizationRequest,
+    ) -> Result<ToolAuthorizationDecision, mentra::error::RuntimeError> {
+        Ok(ToolAuthorizationDecision::allow())
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder()
         .with_provider(BuiltinProvider::OpenAI, std::env::var("OPENAI_API_KEY")?)
         .with_policy(RuntimePolicy::permissive())
+        .with_tool_authorizer(AllowAllAuthorizer)
         .build()?;
 
     let _ = runtime;
@@ -111,9 +128,54 @@ Mentra's builtin runtime tools are available by default, but command execution i
 - `Runtime::builder()` registers the builtin shell, background, file, task, team, and memory-oriented intrinsics
 - foreground shell execution is disabled by default
 - background command execution is disabled by default
-- `RuntimePolicy::permissive()` enables both shell and background command execution and suppresses approval prompts
+- `RuntimePolicy::permissive()` enables both shell and background command execution
+- runtime policy still enforces hard limits such as working-directory roots, file read/write roots, allowed environment variables, timeouts, output caps, and background task limits
+- semantic review is opt-in through `RuntimeBuilder::with_tool_authorizer(...)`
 
 Use the default policy when you want a safer runtime surface, and opt into `RuntimePolicy::permissive()` only when you are intentionally building a coding-agent or automation workflow that should be able to act on the local workspace.
+
+## Tool Authorization
+
+Mentra can run a caller-provided authorization pass before any tool executes. This is the recommended integration point for LLM-based security review, human approval, or custom policy engines.
+
+- no authorizer installed: tools run under the remaining hard runtime constraints
+- authorizer returns `Allow`: the tool executes
+- authorizer returns `Prompt` or `Deny`: Mentra blocks execution and returns an error `tool_result`
+- authorizer timeout or error: Mentra fails closed and blocks execution
+
+Every authorization request includes a `ToolAuthorizationPreview` with tool metadata plus structured input. Builtin tools provide more specific previews:
+
+- `shell` and `background_run` include the raw command, resolved working directory, timeout, background flag, and justification
+- `files` includes resolved paths and operation kinds such as `read`, `search`, `set`, `move`, and `delete`, without file contents
+
+```rust,no_run
+use async_trait::async_trait;
+use mentra::runtime::{
+    ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer,
+};
+
+struct DenyDeletes;
+
+#[async_trait]
+impl ToolAuthorizer for DenyDeletes {
+    async fn authorize(
+        &self,
+        request: &ToolAuthorizationRequest,
+    ) -> Result<ToolAuthorizationDecision, mentra::error::RuntimeError> {
+        let structured = &request.preview.structured_input;
+        let denies_delete = structured
+            .get("operations")
+            .and_then(|value| value.as_array())
+            .is_some_and(|ops| ops.iter().any(|op| op.get("op").and_then(|v| v.as_str()) == Some("delete")));
+
+        if request.tool_name == "files" && denies_delete {
+            Ok(ToolAuthorizationDecision::deny("delete operations require manual approval"))
+        } else {
+            Ok(ToolAuthorizationDecision::allow())
+        }
+    }
+}
+```
 
 Registering a skills directory also makes the builtin `load_skill` tool available:
 
@@ -229,6 +291,8 @@ impl ExecutableTool for UppercaseTool {
 `ToolSpec::execution_timeout(...)` is enforced by Mentra around the tool future itself, which is useful for network-backed tools that need a tighter budget than the overall agent run.
 
 When a tool needs disposable delegated work, `ParallelToolContext::spawn_subagent()` can create a child agent that inherits the current runtime and model defaults. See the `subagent_tool` example in the workspace examples crate for a complete usage pattern.
+
+Override `ExecutableTool::authorization_preview(...)` when your custom tool needs to expose structured metadata to the installed `ToolAuthorizer`. The default preview includes the resolved working directory, tool capabilities, side-effect level, durability, the raw JSON input, and the same JSON as `structured_input`.
 
 ## Tool Profiles
 
