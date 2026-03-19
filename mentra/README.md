@@ -296,6 +296,64 @@ When a tool needs disposable delegated work, `ParallelToolContext::spawn_subagen
 
 Override `ExecutableTool::authorization_preview(...)` when your custom tool needs to expose structured metadata to the installed `ToolAuthorizer`. The default preview includes the resolved working directory, tool capabilities, side-effect level, durability, the raw JSON input, and the same JSON as `structured_input`.
 
+## Hosted Tool Search
+
+Mentra can mark custom tools as deferred and let a provider load them on demand with native hosted tool search.
+
+Mark a tool as deferred in its `ToolSpec`:
+
+```rust,no_run
+use async_trait::async_trait;
+use mentra::tool::{ExecutableTool, ParallelToolContext, ToolResult, ToolSpec};
+use serde_json::{Value, json};
+
+struct LookupOrderTool;
+
+#[async_trait]
+impl ExecutableTool for LookupOrderTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::builder("lookup_order")
+            .description("Look up an order by id.")
+            .input_schema(json!({
+                "type": "object",
+                "properties": {
+                    "order_id": { "type": "string" }
+                },
+                "required": ["order_id"]
+            }))
+            .defer_loading(true)
+            .build()
+    }
+
+    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+        Ok("order loaded".to_string())
+    }
+}
+```
+
+Enable hosted tool search per agent with `ProviderRequestOptions`:
+
+```rust,no_run
+use mentra::agent::AgentConfig;
+use mentra::provider::{ProviderRequestOptions, ToolSearchMode};
+
+let config = AgentConfig {
+    provider_request_options: ProviderRequestOptions {
+        tool_search_mode: ToolSearchMode::Hosted,
+        ..Default::default()
+    },
+    ..Default::default()
+};
+```
+
+Current provider support:
+
+- OpenAI: supported through the Responses API hosted `tool_search` surface
+- Anthropic: supported through the Messages API BM25 tool-search server tool
+- Gemini: deferred custom tools are not supported; Mentra returns `InvalidRequest`
+
+Deferred tools are filtered through `ToolProfile` just like immediate tools. If you force a deferred tool with `ToolChoice::Tool { name }`, Mentra serializes that specific tool as immediate for the request so explicit invocation still works.
+
 ## Tool Profiles
 
 Register tools once on the runtime, then use `AgentConfig::tool_profile` to expose different subsets for different operating modes.

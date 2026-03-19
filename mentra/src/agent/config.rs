@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{ProviderRequestOptions, ToolChoice};
 #[cfg(test)]
 use crate::provider::ToolSearchMode;
+use crate::provider::{ProviderRequestOptions, ToolChoice};
 
 #[cfg(test)]
 static NEXT_TEST_TRANSCRIPT_DIR_ID: AtomicU64 = AtomicU64::new(1);

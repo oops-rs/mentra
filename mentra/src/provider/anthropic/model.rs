@@ -568,7 +568,10 @@ mod tests {
 
         assert_eq!(payload["tools"][0]["name"], "lookup_order");
         assert_eq!(payload["tools"][0]["defer_loading"], true);
-        assert_eq!(payload["tools"][1]["type"], "tool_search_tool_bm25_20251119");
+        assert_eq!(
+            payload["tools"][1]["type"],
+            "tool_search_tool_bm25_20251119"
+        );
         assert_eq!(payload["tools"][1]["name"], "tool_search_tool_bm25");
     }
 

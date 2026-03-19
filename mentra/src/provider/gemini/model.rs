@@ -725,7 +725,10 @@ mod tests {
             serde_json::to_value(GeminiGenerateContentRequest::try_from(request).unwrap())
                 .expect("request should serialize");
 
-        assert_eq!(payload["tools"][0]["functionDeclarations"][0]["name"], "echo");
+        assert_eq!(
+            payload["tools"][0]["functionDeclarations"][0]["name"],
+            "echo"
+        );
         assert_eq!(
             payload["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"][0],
             "echo"
