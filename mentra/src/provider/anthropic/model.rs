@@ -8,9 +8,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     provider::model::{
         BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request,
-        Response, Role, TokenUsage, ToolChoice,
+        Response, Role, TokenUsage, ToolChoice, ToolSearchMode,
     },
-    tool::ToolSpec,
+    tool::{ToolLoadingPolicy, ToolSpec},
 };
 
 #[derive(Deserialize)]
@@ -139,7 +139,11 @@ impl<'a> TryFrom<Request<'a>> for AnthropicRequest {
                 .iter()
                 .map(AnthropicMessage::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
-            tools: value.tools.iter().map(|tool| tool.into()).collect(),
+            tools: build_anthropic_tools(
+                value.tools.as_ref(),
+                value.tool_choice.as_ref(),
+                value.provider_request_options.tool_search_mode,
+            )?,
             tool_choice: value.tool_choice.map(|choice| choice.into()),
             temperature: value.temperature,
             max_output_tokens: value.max_output_tokens,
@@ -303,27 +307,78 @@ impl TryFrom<AnthropicImageSource> for ImageSource {
 }
 
 #[derive(Serialize)]
-struct AnthropicTool {
+#[serde(untagged)]
+enum AnthropicTool {
+    Custom(AnthropicCustomTool),
+    HostedSearch(AnthropicHostedSearchTool),
+}
+
+#[derive(Serialize)]
+struct AnthropicCustomTool {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     input_schema: Value,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    defer_loading: bool,
 }
 
-impl From<ToolSpec> for AnthropicTool {
-    fn from(tool: ToolSpec) -> Self {
-        AnthropicTool::from(&tool)
-    }
+#[derive(Serialize)]
+struct AnthropicHostedSearchTool {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    name: &'static str,
 }
 
-impl From<&ToolSpec> for AnthropicTool {
-    fn from(tool: &ToolSpec) -> Self {
-        AnthropicTool {
+impl AnthropicTool {
+    fn custom(tool: &ToolSpec, force_immediate: bool) -> Self {
+        Self::Custom(AnthropicCustomTool {
             name: tool.name.clone(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
-        }
+            defer_loading: tool.loading_policy == ToolLoadingPolicy::Deferred && !force_immediate,
+        })
     }
+
+    fn hosted_search() -> Self {
+        Self::HostedSearch(AnthropicHostedSearchTool {
+            kind: "tool_search_tool_bm25_20251119",
+            name: "tool_search_tool_bm25",
+        })
+    }
+}
+
+fn build_anthropic_tools(
+    tools: &[ToolSpec],
+    tool_choice: Option<&ToolChoice>,
+    tool_search_mode: ToolSearchMode,
+) -> Result<Vec<AnthropicTool>, ProviderError> {
+    let forced_tool_name = match tool_choice {
+        Some(ToolChoice::Tool { name }) => Some(name.as_str()),
+        _ => None,
+    };
+
+    let has_deferred_tools = tools.iter().any(|tool| {
+        tool.loading_policy == ToolLoadingPolicy::Deferred
+            && forced_tool_name != Some(tool.name.as_str())
+    });
+
+    if has_deferred_tools && tool_search_mode != ToolSearchMode::Hosted {
+        return Err(ProviderError::InvalidRequest(
+            "Anthropic deferred tools require hosted tool search".to_string(),
+        ));
+    }
+
+    let mut provider_tools = tools
+        .iter()
+        .map(|tool| AnthropicTool::custom(tool, forced_tool_name == Some(tool.name.as_str())))
+        .collect::<Vec<_>>();
+
+    if has_deferred_tools {
+        provider_tools.push(AnthropicTool::hosted_search());
+    }
+
+    Ok(provider_tools)
 }
 
 #[derive(Serialize)]
@@ -359,8 +414,9 @@ mod tests {
 
     use crate::provider::model::{
         AnthropicRequestOptions, ContentBlock, Message, ProviderError, ProviderRequestOptions,
-        Request, Role, ToolChoice,
+        Request, Role, ToolChoice, ToolSearchMode,
     };
+    use crate::tool::{ToolLoadingPolicy, ToolSpec};
 
     use super::{AnthropicContentBlock, AnthropicImageSource, AnthropicModel, AnthropicRequest};
 
@@ -479,5 +535,108 @@ mod tests {
             .expect("request should serialize");
 
         assert_eq!(payload["disable_parallel_tool_use"], true);
+    }
+
+    #[test]
+    fn hosted_tool_search_adds_search_tool_for_deferred_tools() {
+        let request = Request {
+            model: Cow::Borrowed("claude-sonnet"),
+            system: None,
+            messages: Cow::Owned(vec![Message::user(ContentBlock::text("hello"))]),
+            tools: Cow::Owned(vec![ToolSpec {
+                name: "lookup_order".to_string(),
+                description: Some("Look up an order".to_string()),
+                input_schema: serde_json::json!({"type":"object"}),
+                capabilities: vec![],
+                side_effect_level: crate::tool::ToolSideEffectLevel::None,
+                durability: crate::tool::ToolDurability::ReplaySafe,
+                loading_policy: ToolLoadingPolicy::Deferred,
+                execution_timeout: None,
+            }]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                tool_search_mode: ToolSearchMode::Hosted,
+                ..Default::default()
+            },
+        };
+
+        let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["tools"][0]["name"], "lookup_order");
+        assert_eq!(payload["tools"][0]["defer_loading"], true);
+        assert_eq!(payload["tools"][1]["type"], "tool_search_tool_bm25_20251119");
+        assert_eq!(payload["tools"][1]["name"], "tool_search_tool_bm25");
+    }
+
+    #[test]
+    fn rejects_deferred_tools_without_hosted_tool_search() {
+        let request = Request {
+            model: Cow::Borrowed("claude-sonnet"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![ToolSpec {
+                name: "lookup_order".to_string(),
+                description: None,
+                input_schema: serde_json::json!({"type":"object"}),
+                capabilities: vec![],
+                side_effect_level: crate::tool::ToolSideEffectLevel::None,
+                durability: crate::tool::ToolDurability::ReplaySafe,
+                loading_policy: ToolLoadingPolicy::Deferred,
+                execution_timeout: None,
+            }]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        let error = AnthropicRequest::try_from(request)
+            .err()
+            .expect("request should fail");
+        match error {
+            ProviderError::InvalidRequest(message) => {
+                assert!(message.contains("deferred tools require hosted tool search"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forced_deferred_tool_serializes_as_immediate() {
+        let request = Request {
+            model: Cow::Borrowed("claude-sonnet"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![ToolSpec {
+                name: "lookup_order".to_string(),
+                description: Some("Look up an order".to_string()),
+                input_schema: serde_json::json!({"type":"object"}),
+                capabilities: vec![],
+                side_effect_level: crate::tool::ToolSideEffectLevel::None,
+                durability: crate::tool::ToolDurability::ReplaySafe,
+                loading_policy: ToolLoadingPolicy::Deferred,
+                execution_timeout: None,
+            }]),
+            tool_choice: Some(ToolChoice::Tool {
+                name: "lookup_order".to_string(),
+            }),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["tools"][0]["name"], "lookup_order");
+        assert!(payload["tools"][0].get("defer_loading").is_none());
+        assert!(payload["tools"].get(1).is_none());
+        assert_eq!(payload["tool_choice"]["name"], "lookup_order");
     }
 }
