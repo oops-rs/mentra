@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 use crate::{
     provider::model::{
         BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request,
-        Role, ToolChoice,
+        Role, ToolChoice, ToolSearchMode,
     },
-    tool::ToolSpec,
+    tool::{ToolLoadingPolicy, ToolSpec},
 };
 
 #[derive(Deserialize)]
@@ -92,6 +92,11 @@ impl<'a> TryFrom<Request<'a>> for GeminiGenerateContentRequest {
             .into_iter()
             .filter(|content| !content.parts.is_empty())
             .collect::<Vec<_>>();
+        validate_gemini_tools(
+            value.tools.as_ref(),
+            value.tool_choice.as_ref(),
+            value.provider_request_options.tool_search_mode,
+        )?;
         let tools = if value.tools.is_empty() {
             Vec::new()
         } else {
@@ -119,6 +124,37 @@ impl<'a> TryFrom<Request<'a>> for GeminiGenerateContentRequest {
             generation_config,
         })
     }
+}
+
+fn validate_gemini_tools(
+    tools: &[ToolSpec],
+    tool_choice: Option<&ToolChoice>,
+    tool_search_mode: ToolSearchMode,
+) -> Result<(), ProviderError> {
+    let forced_tool_name = match tool_choice {
+        Some(ToolChoice::Tool { name }) => Some(name.as_str()),
+        _ => None,
+    };
+
+    let has_deferred_tools = tools.iter().any(|tool| {
+        tool.loading_policy == ToolLoadingPolicy::Deferred
+            && forced_tool_name != Some(tool.name.as_str())
+    });
+
+    if !has_deferred_tools {
+        return Ok(());
+    }
+
+    let message = match tool_search_mode {
+        ToolSearchMode::Hosted => {
+            "Gemini does not support hosted tool search for deferred custom tools"
+        }
+        ToolSearchMode::Disabled => {
+            "Gemini does not support deferred custom tools without hosted tool search"
+        }
+    };
+
+    Err(ProviderError::InvalidRequest(message.to_string()))
 }
 
 fn collect_tool_name_by_id(messages: &[Message]) -> BTreeMap<String, String> {
@@ -371,9 +407,10 @@ mod tests {
     use crate::{
         BuiltinProvider,
         provider::model::{
-            ContentBlock, Message, ProviderError, ProviderRequestOptions, Request, Role, ToolChoice,
+            ContentBlock, Message, ProviderError, ProviderRequestOptions, Request, Role,
+            ToolChoice, ToolSearchMode,
         },
-        tool::ToolSpec,
+        tool::{ToolLoadingPolicy, ToolSpec},
     };
 
     use super::{GeminiGenerateContentRequest, GeminiModel};
@@ -617,6 +654,82 @@ mod tests {
                 .expect("request should serialize");
 
         assert!(payload.get("toolConfig").is_none());
+    }
+
+    #[test]
+    fn rejects_hosted_tool_search_with_deferred_tools() {
+        let request = Request {
+            model: Cow::Borrowed("gemini-2.0-flash"),
+            system: None,
+            messages: Cow::Owned(vec![Message::user(ContentBlock::text("hi"))]),
+            tools: Cow::Owned(vec![ToolSpec {
+                name: "echo".to_string(),
+                description: None,
+                input_schema: json!({"type":"object"}),
+                capabilities: vec![],
+                side_effect_level: crate::tool::ToolSideEffectLevel::None,
+                durability: crate::tool::ToolDurability::ReplaySafe,
+                loading_policy: ToolLoadingPolicy::Deferred,
+                execution_timeout: None,
+            }]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                tool_search_mode: ToolSearchMode::Hosted,
+                ..Default::default()
+            },
+        };
+
+        let error = GeminiGenerateContentRequest::try_from(request)
+            .err()
+            .expect("request should fail");
+        match error {
+            ProviderError::InvalidRequest(message) => {
+                assert!(message.contains("does not support hosted tool search"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forced_deferred_tool_still_serializes_as_function_declaration() {
+        let request = Request {
+            model: Cow::Borrowed("gemini-2.0-flash"),
+            system: None,
+            messages: Cow::Owned(vec![Message::user(ContentBlock::text("hi"))]),
+            tools: Cow::Owned(vec![ToolSpec {
+                name: "echo".to_string(),
+                description: None,
+                input_schema: json!({"type":"object"}),
+                capabilities: vec![],
+                side_effect_level: crate::tool::ToolSideEffectLevel::None,
+                durability: crate::tool::ToolDurability::ReplaySafe,
+                loading_policy: ToolLoadingPolicy::Deferred,
+                execution_timeout: None,
+            }]),
+            tool_choice: Some(ToolChoice::Tool {
+                name: "echo".to_string(),
+            }),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                tool_search_mode: ToolSearchMode::Hosted,
+                ..Default::default()
+            },
+        };
+
+        let payload =
+            serde_json::to_value(GeminiGenerateContentRequest::try_from(request).unwrap())
+                .expect("request should serialize");
+
+        assert_eq!(payload["tools"][0]["functionDeclarations"][0]["name"], "echo");
+        assert_eq!(
+            payload["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"][0],
+            "echo"
+        );
     }
 
     #[test]
