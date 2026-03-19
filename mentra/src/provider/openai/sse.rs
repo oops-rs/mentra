@@ -573,4 +573,30 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn ignores_hosted_tool_search_output_items() {
+        let mut state = StreamState::default();
+
+        let added = parse_frame(
+            br#"data: {"type":"response.output_item.added","output_index":3,"item":{"type":"tool_search_call","id":"search_1","status":"in_progress"}}"#,
+            &mut state,
+        )
+        .expect("hosted search start should parse");
+        assert!(added.is_empty());
+
+        let delta = parse_frame(
+            br#"data: {"type":"response.tool_search_call.delta","output_index":3,"delta":"ignored"}"#,
+            &mut state,
+        )
+        .expect("hosted search delta should parse");
+        assert!(delta.is_empty());
+
+        let done = parse_frame(
+            br#"data: {"type":"response.output_item.done","output_index":3,"item":{"type":"tool_search_call","id":"search_1","status":"completed"}}"#,
+            &mut state,
+        )
+        .expect("hosted search completion should parse");
+        assert!(done.is_empty());
+    }
 }

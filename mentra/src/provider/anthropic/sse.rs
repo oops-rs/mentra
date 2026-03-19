@@ -223,4 +223,30 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn ignores_hosted_tool_search_bookkeeping_blocks() {
+        let mut state = StreamState::default();
+
+        let started = parse_frame(
+            br#"data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25"}}"#,
+            &mut state,
+        )
+        .expect("server tool use should parse");
+        assert!(started.is_empty());
+
+        let delta = parse_frame(
+            br#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"weather\"}"}}"#,
+            &mut state,
+        )
+        .expect("ignored delta should parse");
+        assert!(delta.is_empty());
+
+        let stopped = parse_frame(
+            br#"data: {"type":"content_block_stop","index":1}"#,
+            &mut state,
+        )
+        .expect("ignored stop should parse");
+        assert!(stopped.is_empty());
+    }
 }
