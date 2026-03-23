@@ -18,26 +18,47 @@ pub(crate) struct OpenAIModelsPage {
     pub(crate) data: Vec<OpenAIModel>,
 }
 
+impl OpenAIModelsPage {
+    pub(crate) fn into_model_info(self, provider: BuiltinProvider) -> Vec<ModelInfo> {
+        self.data
+            .into_iter()
+            .map(|model| model.into_model_info(provider))
+            .collect()
+    }
+}
+
 #[derive(Deserialize)]
 pub(crate) struct OpenAIModel {
     pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
     #[serde(default)]
     pub(crate) owned_by: Option<String>,
     #[serde(default)]
     pub(crate) created: Option<u64>,
 }
 
-impl From<OpenAIModel> for ModelInfo {
-    fn from(model: OpenAIModel) -> Self {
+impl OpenAIModel {
+    pub(crate) fn into_model_info(self, provider: BuiltinProvider) -> ModelInfo {
         ModelInfo {
-            id: model.id,
-            provider: BuiltinProvider::OpenAI.into(),
-            display_name: None,
-            description: model.owned_by.map(|owner| format!("Owned by {owner}")),
-            created_at: model
+            id: self.id,
+            provider: provider.into(),
+            display_name: self.name,
+            description: self
+                .description
+                .or_else(|| self.owned_by.map(|owner| format!("Owned by {owner}"))),
+            created_at: self
                 .created
                 .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp as i64).ok()),
         }
+    }
+}
+
+impl From<OpenAIModel> for ModelInfo {
+    fn from(model: OpenAIModel) -> Self {
+        model.into_model_info(BuiltinProvider::OpenAI)
     }
 }
 
@@ -65,6 +86,15 @@ impl<'a> TryFrom<Request<'a>> for OpenAIResponsesRequest {
     type Error = ProviderError;
 
     fn try_from(value: Request<'a>) -> Result<Self, Self::Error> {
+        Self::try_from_request(value, "OpenAI")
+    }
+}
+
+impl OpenAIResponsesRequest {
+    pub(crate) fn try_from_request<'a>(
+        value: Request<'a>,
+        provider_name: &'static str,
+    ) -> Result<Self, ProviderError> {
         let mut input = Vec::new();
 
         for message in value.messages.iter() {
@@ -79,6 +109,7 @@ impl<'a> TryFrom<Request<'a>> for OpenAIResponsesRequest {
                 value.tools.as_ref(),
                 value.tool_choice.as_ref(),
                 value.provider_request_options.tool_search_mode,
+                provider_name,
             )?,
             tool_choice: value.tool_choice.map(Into::into),
             temperature: value.temperature,
@@ -281,6 +312,7 @@ fn build_openai_tools(
     tools: &[ToolSpec],
     tool_choice: Option<&ToolChoice>,
     tool_search_mode: ToolSearchMode,
+    provider_name: &str,
 ) -> Result<Vec<OpenAITool>, ProviderError> {
     let forced_tool_name = match tool_choice {
         Some(ToolChoice::Tool { name }) => Some(name.as_str()),
@@ -293,9 +325,9 @@ fn build_openai_tools(
     });
 
     if has_deferred_tools && tool_search_mode != ToolSearchMode::Hosted {
-        return Err(ProviderError::InvalidRequest(
-            "OpenAI deferred tools require hosted tool search".to_string(),
-        ));
+        return Err(ProviderError::InvalidRequest(format!(
+            "{provider_name} deferred tools require hosted tool search"
+        )));
     }
 
     let mut provider_tools = tools
@@ -352,6 +384,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use crate::{
+        BuiltinProvider,
         provider::model::{
             ContentBlock, Message, OpenAIRequestOptions, ProviderError, ProviderRequestOptions,
             Request, Role, ToolChoice, ToolSearchMode,
@@ -528,6 +561,8 @@ mod tests {
     fn converts_openai_unix_timestamp_to_offset_datetime() {
         let model = OpenAIModel {
             id: "gpt-5".to_string(),
+            name: None,
+            description: None,
             owned_by: None,
             created: Some(1_741_049_700),
         };
@@ -602,6 +637,23 @@ mod tests {
     }
 
     #[test]
+    fn converts_openrouter_model_metadata() {
+        let model = OpenAIModel {
+            id: "openai/gpt-4.1-mini".to_string(),
+            name: Some("GPT-4.1 Mini".to_string()),
+            description: Some("Fast multimodal model".to_string()),
+            owned_by: None,
+            created: Some(1_741_049_700),
+        };
+
+        let info = model.into_model_info(BuiltinProvider::OpenRouter);
+
+        assert_eq!(info.provider, BuiltinProvider::OpenRouter.into());
+        assert_eq!(info.display_name.as_deref(), Some("GPT-4.1 Mini"));
+        assert_eq!(info.description.as_deref(), Some("Fast multimodal model"));
+    }
+
+    #[test]
     fn rejects_deferred_tools_without_hosted_tool_search() {
         let request = Request {
             model: Cow::Borrowed("gpt-5.4"),
@@ -630,6 +682,40 @@ mod tests {
         match error {
             ProviderError::InvalidRequest(message) => {
                 assert!(message.contains("deferred tools require hosted tool search"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_openrouter_deferred_tools_without_hosted_tool_search() {
+        let request = Request {
+            model: Cow::Borrowed("openai/gpt-4.1-mini"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![ToolSpec {
+                name: "lookup_order".to_string(),
+                description: None,
+                input_schema: json!({"type":"object"}),
+                capabilities: vec![],
+                side_effect_level: crate::tool::ToolSideEffectLevel::None,
+                durability: crate::tool::ToolDurability::ReplaySafe,
+                loading_policy: ToolLoadingPolicy::Deferred,
+                execution_timeout: None,
+            }]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        let error = OpenAIResponsesRequest::try_from_request(request, "OpenRouter")
+            .err()
+            .expect("request should fail");
+        match error {
+            ProviderError::InvalidRequest(message) => {
+                assert!(message.contains("OpenRouter deferred tools require hosted tool search"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

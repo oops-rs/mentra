@@ -393,6 +393,41 @@ async fn resolve_model_reports_empty_provider_listing() {
 }
 
 #[tokio::test]
+async fn resolve_model_supports_openrouter_provider() {
+    let runtime_id = format!("public-api-{}", now_nanos());
+    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
+    let provider = ModelListingProvider {
+        kind: BuiltinProvider::OpenRouter.into(),
+        models: vec![model_with_created_at(
+            "openai/gpt-4.1-mini",
+            BuiltinProvider::OpenRouter,
+            1_741_049_700,
+        )],
+    };
+
+    let runtime = Runtime::builder()
+        .with_runtime_identifier(runtime_id)
+        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    let model = runtime
+        .resolve_model(BuiltinProvider::OpenRouter, ModelSelector::NewestAvailable)
+        .await
+        .expect("resolve newest model");
+
+    assert_eq!(
+        model,
+        model_with_created_at(
+            "openai/gpt-4.1-mini",
+            BuiltinProvider::OpenRouter,
+            1_741_049_700,
+        )
+    );
+}
+
+#[tokio::test]
 async fn resolve_model_reports_missing_provider() {
     let harness = Harness::new(vec![Turn::Text("unused".to_string())]);
 

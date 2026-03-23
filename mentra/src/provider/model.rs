@@ -50,6 +50,7 @@ impl TokenUsage {
 pub enum BuiltinProvider {
     Anthropic,
     OpenAI,
+    OpenRouter,
     Gemini,
 }
 

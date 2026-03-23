@@ -6,8 +6,12 @@ pub mod anthropic;
 pub mod gemini;
 mod model;
 pub mod openai;
+pub mod openrouter;
 
-use self::{anthropic::AnthropicProvider, gemini::GeminiProvider, openai::OpenAIProvider};
+use self::{
+    anthropic::AnthropicProvider, gemini::GeminiProvider, openai::OpenAIProvider,
+    openrouter::OpenRouterProvider,
+};
 
 pub use model::{
     AnthropicRequestOptions, BuiltinProvider, ContentBlock, ContentBlockDelta, ContentBlockStart,
@@ -51,6 +55,7 @@ impl ProviderRegistry {
             BuiltinProvider::Anthropic => Arc::new(AnthropicProvider::new(api_key)),
             BuiltinProvider::Gemini => Arc::new(GeminiProvider::new(api_key)),
             BuiltinProvider::OpenAI => Arc::new(OpenAIProvider::new(api_key)),
+            BuiltinProvider::OpenRouter => Arc::new(OpenRouterProvider::new(api_key)),
         };
 
         let id: ProviderId = id.into();

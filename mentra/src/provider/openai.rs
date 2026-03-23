@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use url::Url;
 
-mod model;
-mod sse;
+pub(crate) mod model;
+pub(crate) mod sse;
 
 use crate::{
     BuiltinProvider,

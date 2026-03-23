@@ -30,6 +30,10 @@ async fn main() {
             std::env::var("OPENAI_API_KEY").ok(),
         )
         .with_optional_provider(
+            mentra::BuiltinProvider::OpenRouter,
+            std::env::var("OPENROUTER_API_KEY").ok(),
+        )
+        .with_optional_provider(
             mentra::BuiltinProvider::Anthropic,
             std::env::var("ANTHROPIC_API_KEY").ok(),
         )

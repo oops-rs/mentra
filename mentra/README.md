@@ -7,7 +7,7 @@ MSRV: Rust 1.85.
 ## Current Features
 
 - streaming model response handling
-- provider-neutral token usage reporting across OpenAI, Anthropic, and Gemini
+- provider-neutral token usage reporting across OpenAI, OpenRouter, Anthropic, and Gemini
 - optional tool authorization with structured previews and fail-closed execution blocking
 - recoverable malformed tool-call input handling that feeds retry guidance back to the model
 - custom tool execution through the async `ExecutableTool` trait
@@ -19,6 +19,7 @@ MSRV: Rust 1.85.
 - Anthropic provider support
 - Gemini Developer API provider support
 - OpenAI provider support via the Responses API
+- OpenRouter provider support via the Responses API
 - image inputs for OpenAI and Anthropic, plus inline image bytes for Gemini
 
 ## Quickstart Example
@@ -41,6 +42,10 @@ use mentra::{BuiltinProvider, Runtime};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder()
         .with_provider(BuiltinProvider::OpenAI, std::env::var("OPENAI_API_KEY")?)
+        .with_optional_provider(
+            BuiltinProvider::OpenRouter,
+            std::env::var("OPENROUTER_API_KEY").ok(),
+        )
         .with_optional_provider(
             BuiltinProvider::Gemini,
             std::env::var("GEMINI_API_KEY").ok(),
@@ -522,7 +527,7 @@ See `mentra::test` and the crate tests for a full example of asserting runtime a
 
 Clone the repository when you want the richer interactive demo with provider selection, persisted runtime inspection, skills loading, and team/task visibility.
 
-Set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`, then run. The example lets you choose a provider and shows up to 10 models from that provider ordered newest to oldest.
+Set `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`, then run. The example lets you choose a provider and shows up to 10 models from that provider ordered newest to oldest.
 
 ```bash
 cargo run -p mentra-examples --example chat

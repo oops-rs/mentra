@@ -42,7 +42,7 @@ major pieces:
 * Tool execution primitives, including builtin `shell`, `background_run`,
   `check_background`, `files`, `task`, and team coordination tools.
 
-* Provider integrations for OpenAI, Anthropic, and Gemini, with streaming
+* Provider integrations for OpenAI, OpenRouter, Anthropic, and Gemini, with streaming
   responses and normalized token usage reporting.
 
 * Persistence and coordination for agents, subagents, teams, task boards,
@@ -124,9 +124,10 @@ cargo run -p mentra-examples --example chat
 ```
 
 The examples load environment variables from `.env` when available. Set
-`OPENAI_API_KEY` for the OpenAI-backed examples, and optionally `MENTRA_MODEL`
-to force a specific model instead of resolving the newest available OpenAI
-model.
+`OPENAI_API_KEY` for the OpenAI-backed quickstart, or `OPENAI_API_KEY`,
+`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, and/or `GEMINI_API_KEY` for the
+interactive chat example. You can also set `MENTRA_MODEL` to force a specific
+OpenAI model instead of resolving the newest available OpenAI model.
 
 ## Getting Help
 
