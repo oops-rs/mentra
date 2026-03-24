@@ -7,8 +7,8 @@ use time::OffsetDateTime;
 use crate::{
     BuiltinProvider,
     provider::model::{
-        ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request, Role, ToolChoice,
-        ToolSearchMode,
+        ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ReasoningEffort,
+        ReasoningOptions, Request, Role, ToolChoice, ToolSearchMode,
     },
     tool::{ToolLoadingPolicy, ToolSpec},
 };
@@ -78,6 +78,8 @@ pub(crate) struct OpenAIResponsesRequest {
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<OpenAIReasoningConfig>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata: BTreeMap<String, String>,
 }
@@ -115,8 +117,43 @@ impl OpenAIResponsesRequest {
             temperature: value.temperature,
             max_output_tokens: value.max_output_tokens,
             parallel_tool_calls: value.provider_request_options.openai.parallel_tool_calls,
+            reasoning: value
+                .provider_request_options
+                .reasoning
+                .map(OpenAIReasoningConfig::from),
             metadata: value.metadata.into_owned(),
         })
+    }
+}
+
+#[derive(Serialize)]
+struct OpenAIReasoningConfig {
+    effort: OpenAIReasoningEffort,
+}
+
+impl From<ReasoningOptions> for OpenAIReasoningConfig {
+    fn from(value: ReasoningOptions) -> Self {
+        Self {
+            effort: value.effort.into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OpenAIReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<ReasoningEffort> for OpenAIReasoningEffort {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+        }
     }
 }
 
@@ -387,7 +424,7 @@ mod tests {
         BuiltinProvider,
         provider::model::{
             ContentBlock, Message, OpenAIRequestOptions, ProviderError, ProviderRequestOptions,
-            Request, Role, ToolChoice, ToolSearchMode,
+            ReasoningEffort, ReasoningOptions, Request, Role, ToolChoice, ToolSearchMode,
         },
         tool::{ToolLoadingPolicy, ToolSpec},
     };
@@ -588,6 +625,7 @@ mod tests {
             metadata: Cow::Owned(BTreeMap::new()),
             provider_request_options: ProviderRequestOptions {
                 tool_search_mode: crate::provider::ToolSearchMode::Disabled,
+                reasoning: None,
                 openai: OpenAIRequestOptions {
                     parallel_tool_calls: Some(true),
                 },
@@ -599,6 +637,58 @@ mod tests {
             .expect("request should serialize");
 
         assert_eq!(payload["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn serializes_reasoning_effort_option() {
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                reasoning: Some(ReasoningOptions {
+                    effort: ReasoningEffort::High,
+                }),
+                ..Default::default()
+            },
+        };
+
+        let payload = serde_json::to_value(OpenAIResponsesRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn openrouter_serializes_reasoning_effort_option() {
+        let request = Request {
+            model: Cow::Borrowed("openai/gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                reasoning: Some(ReasoningOptions {
+                    effort: ReasoningEffort::Medium,
+                }),
+                ..Default::default()
+            },
+        };
+
+        let payload = serde_json::to_value(
+            OpenAIResponsesRequest::try_from_request(request, "OpenRouter").unwrap(),
+        )
+        .expect("request should serialize");
+
+        assert_eq!(payload["reasoning"]["effort"], "medium");
     }
 
     #[test]

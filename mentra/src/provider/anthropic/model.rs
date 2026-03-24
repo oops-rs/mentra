@@ -7,8 +7,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     provider::model::{
-        BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request,
-        Response, Role, TokenUsage, ToolChoice, ToolSearchMode,
+        BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError,
+        ReasoningEffort, Request, Response, Role, TokenUsage, ToolChoice, ToolSearchMode,
     },
     tool::{ToolLoadingPolicy, ToolSpec},
 };
@@ -60,6 +60,10 @@ pub(crate) struct AnthropicRequest {
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     disable_parallel_tool_use: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<AnthropicReasoningEffort>,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +135,15 @@ impl<'a> TryFrom<Request<'a>> for AnthropicRequest {
     type Error = ProviderError;
 
     fn try_from(value: Request<'a>) -> Result<Self, Self::Error> {
+        if value.provider_request_options.reasoning.is_some()
+            && !supports_anthropic_adaptive_thinking(&value.model)
+        {
+            return Err(ProviderError::InvalidRequest(format!(
+                "Anthropic reasoning effort requires a Claude 4.6 model, got '{}'",
+                value.model
+            )));
+        }
+
         Ok(AnthropicRequest {
             model: value.model.into_owned(),
             system: value.system.map(Cow::into_owned),
@@ -151,8 +164,52 @@ impl<'a> TryFrom<Request<'a>> for AnthropicRequest {
                 .provider_request_options
                 .anthropic
                 .disable_parallel_tool_use,
+            thinking: value
+                .provider_request_options
+                .reasoning
+                .as_ref()
+                .map(|_| AnthropicThinkingConfig::adaptive()),
+            effort: value
+                .provider_request_options
+                .reasoning
+                .map(|reasoning| reasoning.effort.into()),
         })
     }
+}
+
+#[derive(Serialize)]
+struct AnthropicThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl AnthropicThinkingConfig {
+    fn adaptive() -> Self {
+        Self { kind: "adaptive" }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AnthropicReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<ReasoningEffort> for AnthropicReasoningEffort {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+        }
+    }
+}
+
+fn supports_anthropic_adaptive_thinking(model: &str) -> bool {
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    model.contains("claude-opus-4-6") || model.contains("claude-sonnet-4-6")
 }
 
 #[derive(Serialize)]
@@ -414,7 +471,7 @@ mod tests {
 
     use crate::provider::model::{
         AnthropicRequestOptions, ContentBlock, Message, ProviderError, ProviderRequestOptions,
-        Request, Role, ToolChoice, ToolSearchMode,
+        ReasoningEffort, ReasoningOptions, Request, Role, ToolChoice, ToolSearchMode,
     };
     use crate::tool::{ToolLoadingPolicy, ToolSpec};
 
@@ -524,6 +581,7 @@ mod tests {
             metadata: Cow::Owned(BTreeMap::new()),
             provider_request_options: ProviderRequestOptions {
                 tool_search_mode: crate::provider::ToolSearchMode::Disabled,
+                reasoning: None,
                 openai: Default::default(),
                 anthropic: AnthropicRequestOptions {
                     disable_parallel_tool_use: Some(true),
@@ -535,6 +593,62 @@ mod tests {
             .expect("request should serialize");
 
         assert_eq!(payload["disable_parallel_tool_use"], true);
+    }
+
+    #[test]
+    fn serializes_reasoning_effort_as_adaptive_thinking() {
+        let request = Request {
+            model: Cow::Borrowed("claude-sonnet-4-6"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: Some(512),
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                reasoning: Some(ReasoningOptions {
+                    effort: ReasoningEffort::Medium,
+                }),
+                ..Default::default()
+            },
+        };
+
+        let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["thinking"]["type"], "adaptive");
+        assert_eq!(payload["effort"], "medium");
+    }
+
+    #[test]
+    fn rejects_reasoning_effort_for_older_anthropic_models() {
+        let request = Request {
+            model: Cow::Borrowed("claude-sonnet-4-5"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: Some(512),
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                reasoning: Some(ReasoningOptions {
+                    effort: ReasoningEffort::Low,
+                }),
+                ..Default::default()
+            },
+        };
+
+        let error = AnthropicRequest::try_from(request)
+            .err()
+            .expect("request should fail");
+        match error {
+            ProviderError::InvalidRequest(message) => {
+                assert!(message.contains("Claude 4.6"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

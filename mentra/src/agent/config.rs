@@ -249,6 +249,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    use crate::provider::{ReasoningEffort, ReasoningOptions};
+
     #[test]
     fn explicit_paths_override_defaults() {
         let tasks_dir = PathBuf::from("/tmp/custom-tasks");
@@ -339,6 +341,7 @@ mod tests {
         let options = ProviderRequestOptions::default();
 
         assert_eq!(options.tool_search_mode, ToolSearchMode::Disabled);
+        assert_eq!(options.reasoning, None);
     }
 
     #[test]
@@ -369,6 +372,35 @@ mod tests {
         assert_eq!(
             config.provider_request_options.openai.parallel_tool_calls,
             Some(true)
+        );
+    }
+
+    #[test]
+    fn agent_config_deserializes_reasoning_options() {
+        let config: AgentConfig = serde_json::from_value(json!({
+            "system": null,
+            "tool_choice": serde_json::to_value(ToolChoice::Auto).expect("serialize tool choice"),
+            "temperature": null,
+            "max_output_tokens": 8192,
+            "metadata": {},
+            "provider_request_options": {
+                "reasoning": {
+                    "effort": "high"
+                }
+            },
+            "team": TeamConfig::default(),
+            "task": TaskConfig::default(),
+            "workspace": WorkspaceConfig::default(),
+            "memory": MemoryConfig::default(),
+            "context_compaction": ContextCompactionConfig::default()
+        }))
+        .expect("deserialize config with reasoning options");
+
+        assert_eq!(
+            config.provider_request_options.reasoning,
+            Some(ReasoningOptions {
+                effort: ReasoningEffort::High,
+            })
         );
     }
 }

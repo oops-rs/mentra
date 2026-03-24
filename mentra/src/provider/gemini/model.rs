@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use crate::{
     provider::model::{
-        BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, Request,
-        Role, ToolChoice, ToolSearchMode,
+        BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError,
+        ReasoningEffort, Request, Role, ToolChoice, ToolSearchMode,
     },
     tool::{ToolLoadingPolicy, ToolSpec},
 };
@@ -82,7 +82,7 @@ impl<'a> TryFrom<Request<'a>> for GeminiGenerateContentRequest {
     type Error = ProviderError;
 
     fn try_from(value: Request<'a>) -> Result<Self, Self::Error> {
-        let generation_config = GeminiGenerationConfig::from_request(&value);
+        let generation_config = GeminiGenerationConfig::from_request(&value)?;
         let tool_name_by_id = collect_tool_name_by_id(value.messages.as_ref());
         let contents = value
             .messages
@@ -381,21 +381,71 @@ struct GeminiGenerationConfig {
     temperature: Option<f32>,
     #[serde(rename = "maxOutputTokens", skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<GeminiThinkingConfig>,
 }
 
 impl GeminiGenerationConfig {
-    fn from_request(request: &Request<'_>) -> Option<Self> {
+    fn from_request(request: &Request<'_>) -> Result<Option<Self>, ProviderError> {
+        let thinking_config =
+            if let Some(reasoning) = request.provider_request_options.reasoning.as_ref() {
+                if !supports_gemini_thinking_level(&request.model) {
+                    return Err(ProviderError::InvalidRequest(format!(
+                        "Gemini reasoning effort requires a Gemini 3 model, got '{}'",
+                        request.model
+                    )));
+                }
+
+                Some(GeminiThinkingConfig {
+                    thinking_level: reasoning.effort.into(),
+                })
+            } else {
+                None
+            };
+
         let config = GeminiGenerationConfig {
             temperature: request.temperature,
             max_output_tokens: request.max_output_tokens,
+            thinking_config,
         };
 
-        (!config.is_empty()).then_some(config)
+        Ok((!config.is_empty()).then_some(config))
     }
 
     fn is_empty(&self) -> bool {
-        self.temperature.is_none() && self.max_output_tokens.is_none()
+        self.temperature.is_none()
+            && self.max_output_tokens.is_none()
+            && self.thinking_config.is_none()
     }
+}
+
+#[derive(Serialize)]
+struct GeminiThinkingConfig {
+    #[serde(rename = "thinkingLevel")]
+    thinking_level: GeminiThinkingLevel,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GeminiThinkingLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<ReasoningEffort> for GeminiThinkingLevel {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+        }
+    }
+}
+
+fn supports_gemini_thinking_level(model: &str) -> bool {
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    model.starts_with("gemini-3")
 }
 
 #[cfg(test)]
@@ -407,8 +457,8 @@ mod tests {
     use crate::{
         BuiltinProvider,
         provider::model::{
-            ContentBlock, Message, ProviderError, ProviderRequestOptions, Request, Role,
-            ToolChoice, ToolSearchMode,
+            ContentBlock, Message, ProviderError, ProviderRequestOptions, ReasoningEffort,
+            ReasoningOptions, Request, Role, ToolChoice, ToolSearchMode,
         },
         tool::{ToolLoadingPolicy, ToolSpec},
     };
@@ -654,6 +704,65 @@ mod tests {
                 .expect("request should serialize");
 
         assert!(payload.get("toolConfig").is_none());
+    }
+
+    #[test]
+    fn serializes_reasoning_effort_for_gemini_3_models() {
+        let request = Request {
+            model: Cow::Borrowed("gemini-3-flash-preview"),
+            system: None,
+            messages: Cow::Owned(vec![Message::user(ContentBlock::text("hi"))]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                reasoning: Some(ReasoningOptions {
+                    effort: ReasoningEffort::High,
+                }),
+                ..Default::default()
+            },
+        };
+
+        let payload =
+            serde_json::to_value(GeminiGenerateContentRequest::try_from(request).unwrap())
+                .expect("request should serialize");
+
+        assert_eq!(
+            payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "high"
+        );
+    }
+
+    #[test]
+    fn rejects_reasoning_effort_for_gemini_2_5_models() {
+        let request = Request {
+            model: Cow::Borrowed("gemini-2.5-flash"),
+            system: None,
+            messages: Cow::Owned(vec![Message::user(ContentBlock::text("hi"))]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                reasoning: Some(ReasoningOptions {
+                    effort: ReasoningEffort::Low,
+                }),
+                ..Default::default()
+            },
+        };
+
+        let error = GeminiGenerateContentRequest::try_from(request)
+            .err()
+            .expect("request should fail");
+        match error {
+            ProviderError::InvalidRequest(message) => {
+                assert!(message.contains("Gemini 3"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

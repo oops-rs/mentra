@@ -219,10 +219,27 @@ impl Request<'_> {
 pub struct ProviderRequestOptions {
     #[serde(default)]
     pub tool_search_mode: ToolSearchMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningOptions>,
     #[serde(default)]
     pub openai: OpenAIRequestOptions,
     #[serde(default)]
     pub anthropic: AnthropicRequestOptions,
+}
+
+/// Provider-neutral reasoning controls supported across multiple providers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningOptions {
+    pub effort: ReasoningEffort,
+}
+
+/// Shared reasoning effort levels supported by Mentra's public API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
 }
 
 /// Provider-neutral tool search behavior requested for a model call.
