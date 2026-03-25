@@ -4,12 +4,13 @@ use async_trait::async_trait;
 
 pub use mentra_provider::{
     AnthropicRequestOptions, AuthScheme, BuiltinProvider, ContentBlock, ContentBlockDelta,
-    ContentBlockStart, GeminiRequestOptions, ImageSource, Message, ModelInfo, ModelSelector,
-    OpenAIRequestOptions, ProviderCapabilities, ProviderCredentials, ProviderDefinition,
-    ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderId,
-    ProviderRequestOptions, ReasoningEffort, ReasoningOptions, Request, Response,
-    ResponsesRequestOptions, RetryPolicy, Role, TokenUsage, ToolChoice, ToolSearchMode, WireApi,
-    collect_response_from_stream, provider_event_stream_from_response,
+    ContentBlockStart, CompactionInputItem, CompactionRequest, CompactionResponse,
+    GeminiRequestOptions, ImageSource, Message, ModelInfo, ModelSelector, OpenAIRequestOptions,
+    ProviderCapabilities, ProviderCredentials, ProviderDefinition, ProviderDescriptor,
+    ProviderError, ProviderEvent, ProviderEventStream, ProviderId, ProviderRequestOptions,
+    ReasoningEffort, ReasoningOptions, Request, Response, ResponsesRequestOptions, RetryPolicy,
+    Role, TokenUsage, ToolChoice, ToolSearchMode, WireApi, collect_response_from_stream,
+    provider_event_stream_from_response,
 };
 
 pub mod model {
@@ -37,6 +38,16 @@ pub trait Provider: Send + Sync {
     /// Sends a request and collects the full response in memory.
     async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
         collect_response_from_stream(self.stream(request).await?).await
+    }
+
+    /// Compacts transcript history using a provider-native endpoint when supported.
+    async fn compact(
+        &self,
+        _request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "history_compaction".to_string(),
+        ))
     }
 }
 
@@ -142,6 +153,13 @@ where
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
         self.inner.stream(request).await
     }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.inner.compact(request).await
+    }
 }
 
 pub mod openai {
@@ -150,9 +168,10 @@ pub mod openai {
     use async_trait::async_trait;
 
     use super::{
-        AuthScheme, BuiltinProvider, Provider, ProviderCapabilities, ProviderDefinition,
-        ProviderDescriptor, ProviderError, ProviderEventStream, Request, Response, RetryPolicy,
-        WireApi, collect_response_from_stream, shared_provider,
+        AuthScheme, BuiltinProvider, CompactionRequest, CompactionResponse, Provider,
+        ProviderCapabilities, ProviderDefinition, ProviderDescriptor, ProviderError,
+        ProviderEventStream, Request, Response, RetryPolicy, WireApi,
+        collect_response_from_stream, shared_provider,
     };
 
     use crate::provider::model::ModelInfo;
@@ -192,6 +211,7 @@ pub mod openai {
                 supports_websockets: false,
                 supports_tool_calls: true,
                 supports_images: true,
+                supports_history_compaction: false,
             };
             definition.base_url = Some(base_url.to_string());
             definition.headers = Some(HashMap::new());
@@ -234,6 +254,13 @@ pub mod openai {
 
         async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
             collect_response_from_stream(self.stream(request).await?).await
+        }
+
+        async fn compact(
+            &self,
+            request: CompactionRequest<'_>,
+        ) -> Result<CompactionResponse, ProviderError> {
+            self.inner.compact(request).await
         }
     }
 
@@ -280,8 +307,8 @@ pub mod openrouter {
     use async_trait::async_trait;
 
     use super::{
-        Provider, ProviderDescriptor, ProviderError, ProviderEventStream, Request, Response,
-        collect_response_from_stream, shared_provider,
+        CompactionRequest, CompactionResponse, Provider, ProviderDescriptor, ProviderError,
+        ProviderEventStream, Request, Response, collect_response_from_stream, shared_provider,
     };
     use crate::provider::model::ModelInfo;
 
@@ -314,6 +341,13 @@ pub mod openrouter {
 
         async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
             collect_response_from_stream(self.stream(request).await?).await
+        }
+
+        async fn compact(
+            &self,
+            request: CompactionRequest<'_>,
+        ) -> Result<CompactionResponse, ProviderError> {
+            self.inner.compact(request).await
         }
     }
 }

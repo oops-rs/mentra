@@ -86,6 +86,7 @@ pub struct ProviderCapabilities {
     pub supports_websockets: bool,
     pub supports_tool_calls: bool,
     pub supports_images: bool,
+    pub supports_history_compaction: bool,
 }
 
 /// Wire protocol supported by a provider.
@@ -174,6 +175,7 @@ impl ProviderDefinition {
                 supports_websockets: false,
                 supports_tool_calls: true,
                 supports_images: true,
+                supports_history_compaction: false,
             },
             base_url: None,
             query_params: None,

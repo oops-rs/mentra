@@ -83,6 +83,7 @@ where
             supports_websockets: false,
             supports_tool_calls: true,
             supports_images: true,
+            supports_history_compaction: false,
         };
         definition.base_url = Some(DEFAULT_BASE_URL.to_string());
         definition

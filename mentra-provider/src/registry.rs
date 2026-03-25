@@ -5,8 +5,8 @@ use crate::{
     definition::{ProviderDefinition, ProviderDescriptor, ProviderId},
     error::ProviderError,
     model::ModelInfo,
-    request::Request,
-    response::{Response, collect_response_from_stream},
+    request::{CompactionRequest, Request},
+    response::{CompactionResponse, Response, collect_response_from_stream},
     stream::ProviderEventStream,
 };
 
@@ -30,6 +30,15 @@ pub trait ProviderSession: Send + Sync {
     async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
         collect_response_from_stream(self.stream(request).await?).await
     }
+
+    async fn compact(
+        &self,
+        _request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "history_compaction".to_string(),
+        ))
+    }
 }
 
 /// Transport-neutral provider registration interface.
@@ -47,6 +56,13 @@ pub trait Provider: ModelCatalog + ProviderSessionFactory {
 
     async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
         collect_response_from_stream(self.stream(request).await?).await
+    }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.create_session().await?.compact(request).await
     }
 }
 

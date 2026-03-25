@@ -92,3 +92,60 @@ impl Request<'_> {
         }
     }
 }
+
+/// Provider-neutral transcript item used for history compaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompactionInputItem {
+    UserTurn {
+        content: String,
+    },
+    AssistantTurn {
+        content: String,
+    },
+    ToolExchange {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<String>,
+        result: String,
+        is_error: bool,
+    },
+    CanonicalContext {
+        content: String,
+    },
+    MemoryRecall {
+        content: String,
+    },
+    DelegationResult {
+        agent_id: String,
+        agent_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        status: String,
+        content: String,
+    },
+    CompactionSummary {
+        content: String,
+    },
+}
+
+/// Provider-neutral request assembled for history compaction.
+#[derive(Debug, Clone)]
+pub struct CompactionRequest<'a> {
+    pub model: Cow<'a, str>,
+    pub instructions: Cow<'a, str>,
+    pub input: Cow<'a, [CompactionInputItem]>,
+    pub metadata: Cow<'a, BTreeMap<String, String>>,
+    pub provider_request_options: ProviderRequestOptions,
+}
+
+impl CompactionRequest<'_> {
+    pub fn into_owned(self) -> CompactionRequest<'static> {
+        CompactionRequest {
+            model: Cow::Owned(self.model.into_owned()),
+            instructions: Cow::Owned(self.instructions.into_owned()),
+            input: Cow::Owned(self.input.into_owned()),
+            metadata: Cow::Owned(self.metadata.into_owned()),
+            provider_request_options: self.provider_request_options,
+        }
+    }
+}

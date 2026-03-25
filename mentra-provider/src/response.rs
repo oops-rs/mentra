@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::ProviderError,
     model::{ContentBlock, Role, TokenUsage},
+    request::CompactionInputItem,
     stream::{ContentBlockDelta, ContentBlockStart, ProviderEvent, ProviderEventStream},
 };
 
@@ -15,6 +16,12 @@ pub struct Response {
     pub content: Vec<ContentBlock>,
     pub stop_reason: Option<String>,
     pub usage: Option<TokenUsage>,
+}
+
+/// A complete history-compaction response collected from a provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionResponse {
+    pub output: Vec<CompactionInputItem>,
 }
 
 /// Rebuilds a full response from a provider event stream.

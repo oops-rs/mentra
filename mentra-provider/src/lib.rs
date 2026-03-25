@@ -25,10 +25,13 @@ pub use registry::{
     RegisteredProvider,
 };
 pub use request::{
-    AnthropicRequestOptions, GeminiRequestOptions, ProviderRequestOptions, ReasoningEffort,
-    ReasoningOptions, Request, ResponsesRequestOptions, ToolSearchMode,
+    AnthropicRequestOptions, CompactionInputItem, CompactionRequest, GeminiRequestOptions,
+    ProviderRequestOptions, ReasoningEffort, ReasoningOptions, Request, ResponsesRequestOptions,
+    ToolSearchMode,
 };
-pub use response::{Response, collect_response_from_stream, provider_event_stream_from_response};
+pub use response::{
+    CompactionResponse, Response, collect_response_from_stream, provider_event_stream_from_response,
+};
 pub use stream::{ContentBlockDelta, ContentBlockStart, ProviderEvent, ProviderEventStream};
 pub use tool::{
     ToolCapability, ToolDurability, ToolExecutionMode, ToolLoadingPolicy, ToolSideEffectLevel,

@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum ProviderError {
     #[error("provider transport error: {0}")]
     Transport(#[source] reqwest::Error),
+    #[error("provider does not support capability: {0}")]
+    UnsupportedCapability(String),
     #[error("{message}", message = provider_http_error(.status, .body))]
     Http {
         status: reqwest::StatusCode,

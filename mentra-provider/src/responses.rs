@@ -141,6 +141,7 @@ fn build_definition(
         supports_websockets: true,
         supports_tool_calls: true,
         supports_images: true,
+        supports_history_compaction: false,
     };
     definition.base_url = Some(base_url.to_string());
     definition.headers = Some(HashMap::new());
