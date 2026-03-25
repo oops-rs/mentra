@@ -47,6 +47,20 @@ where
     }
 
     pub fn with_shared_credential_source(credential_source: Arc<C>) -> Self {
+        Self::with_definition_and_shared_credential_source(Self::definition(), credential_source)
+    }
+
+    pub fn with_definition_and_credential_source(
+        definition: ProviderDefinition,
+        credential_source: C,
+    ) -> Self {
+        Self::with_definition_and_shared_credential_source(definition, Arc::new(credential_source))
+    }
+
+    pub fn with_definition_and_shared_credential_source(
+        definition: ProviderDefinition,
+        credential_source: Arc<C>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .build()
             .expect("Failed to build client");
@@ -54,7 +68,7 @@ where
         Self {
             client,
             credential_source,
-            definition: Self::definition(),
+            definition,
         }
     }
 
