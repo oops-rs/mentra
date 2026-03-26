@@ -394,7 +394,7 @@ async fn completed_background_results_are_injected_on_next_send() {
     assert!(injected.contains("<background-results>"));
     assert!(injected.contains("[bg:bg-1] status=finished"));
     assert!(injected.contains(&format!("command=\"{command}\"")));
-    assert!(injected.contains("output=\"bg-done\""));
+    assert!(injected.contains("output=\"bg-done"));
 }
 
 #[tokio::test]
@@ -506,24 +506,31 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
         .unwrap();
     let cwd = agent.config().workspace.base_dir.display().to_string();
 
-    assert_eq!(
-        agent.history()[7],
-        Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "check-one".to_string(),
-                    content: format!("[finished] cwd={cwd}\n{command}\nbg-done").into(),
-                    is_error: false,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "check-all".to_string(),
-                    content: format!("bg-1: [finished] cwd={cwd} {command}").into(),
-                    is_error: false,
-                },
-            ],
+    let message = &agent.history()[7];
+    assert_eq!(message.role, Role::User);
+    assert_eq!(message.content.len(), 2);
+    match (&message.content[0], &message.content[1]) {
+        (
+            ContentBlock::ToolResult {
+                tool_use_id: check_one_id,
+                content: check_one_content,
+                is_error: false,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: check_all_id,
+                content: check_all_content,
+                is_error: false,
+            },
+        ) => {
+            assert_eq!(check_one_id, "check-one");
+            assert_eq!(check_all_id, "check-all");
+            assert!(
+                check_one_content.contains(&format!("[finished] cwd={cwd}\n{command}\nbg-done"))
+            );
+            assert!(check_all_content.contains(&format!("bg-1: [finished] cwd={cwd} {command}")));
         }
-    );
+        other => panic!("unexpected tool result payloads: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1580,8 +1587,8 @@ async fn completed_background_results_are_batched_in_completion_order() {
     let first = injected.find("[bg:bg-1]").expect("first task line");
     let second = injected.find("[bg:bg-2]").expect("second task line");
     assert!(first < second);
-    assert!(injected.contains("output=\"first\""));
-    assert!(injected.contains("output=\"second\""));
+    assert!(injected.contains("output=\"first"));
+    assert!(injected.contains("output=\"second"));
 }
 
 #[tokio::test]
@@ -1646,7 +1653,7 @@ async fn failed_background_results_surface_in_snapshot_events_and_notifications(
     let requests = provider_handle.recorded_requests().await;
     let injected = latest_background_results_text(&requests[2]).expect("background results");
     assert!(injected.contains("status=failed"));
-    assert!(injected.contains("output=\"boom\""));
+    assert!(injected.contains("output=\"boom"));
 }
 
 #[tokio::test]

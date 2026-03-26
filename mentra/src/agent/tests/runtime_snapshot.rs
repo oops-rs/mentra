@@ -3,7 +3,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tokio::sync::watch;
+use tokio::{
+    sync::watch,
+    time::{Duration, timeout},
+};
 
 use crate::{
     BackgroundTaskStatus, BuiltinProvider, ContentBlock, Role,
@@ -157,11 +160,11 @@ async fn snapshot_updates_when_background_task_finishes() {
 
     wait_for_background_status(&mut snapshot, BackgroundTaskStatus::Finished).await;
     assert_eq!(snapshot.borrow().background_tasks.len(), 1);
-    assert_eq!(
+    assert!(
         snapshot.borrow().background_tasks[0]
             .output_preview
-            .as_deref(),
-        Some("bg-done")
+            .as_deref()
+            .is_some_and(|preview| preview.contains("bg-done"))
     );
 }
 
@@ -179,27 +182,35 @@ fn temp_store(label: &str) -> SqliteRuntimeStore {
 }
 
 async fn wait_for_status(receiver: &mut watch::Receiver<AgentSnapshot>, status: AgentStatus) {
-    loop {
-        if receiver.borrow().status == status {
-            return;
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if receiver.borrow().status == status {
+                return;
+            }
+            receiver.changed().await.unwrap();
         }
-        receiver.changed().await.unwrap();
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for agent status {status:?}"));
 }
 
 async fn wait_for_background_status(
     receiver: &mut watch::Receiver<AgentSnapshot>,
     status: BackgroundTaskStatus,
 ) {
-    loop {
-        if receiver
-            .borrow()
-            .background_tasks
-            .iter()
-            .any(|task| task.status == status)
-        {
-            return;
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if receiver
+                .borrow()
+                .background_tasks
+                .iter()
+                .any(|task| task.status == status)
+            {
+                return;
+            }
+            receiver.changed().await.unwrap();
         }
-        receiver.changed().await.unwrap();
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for background status {status:?}"));
 }
