@@ -27,12 +27,32 @@ impl Default for RuntimePolicy {
             allowed_working_roots: Vec::new(),
             allowed_read_roots: Vec::new(),
             allowed_write_roots: Vec::new(),
-            allowed_env_vars: vec!["PATH".to_string()],
+            allowed_env_vars: default_allowed_env_vars(),
             background_task_limit: Some(8),
             default_command_timeout: Duration::from_secs(30),
             max_command_timeout: Duration::from_secs(30),
             max_output_bytes_per_stream: 64 * 1024,
         }
+    }
+}
+
+fn default_allowed_env_vars() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let mut vars = vec!["PATH".to_string()];
+        vars.extend([
+            "PATHEXT".to_string(),
+            "SystemRoot".to_string(),
+            "COMSPEC".to_string(),
+            "TEMP".to_string(),
+            "TMP".to_string(),
+        ]);
+        vars
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec!["PATH".to_string()]
     }
 }
 
@@ -207,12 +227,13 @@ impl RuntimePolicy {
 }
 
 fn path_is_allowed(path: &Path, default_root: &Path, extra_roots: &[PathBuf]) -> bool {
+    let candidate_path = canonicalize_policy_root(path);
     let default_root = canonicalize_policy_root(default_root);
-    path.starts_with(&default_root)
+    candidate_path.starts_with(&default_root)
         || extra_roots
             .iter()
             .map(|root| canonicalize_policy_root(root))
-            .any(|root| path.starts_with(root))
+            .any(|root| candidate_path.starts_with(root))
 }
 
 fn canonicalize_policy_root(path: &Path) -> PathBuf {
@@ -316,9 +337,15 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    fn test_path(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("mentra-runtime-policy-tests")
+            .join(label)
+    }
+
     #[test]
     fn shell_roots_and_background_switches_short_circuit() {
-        let cwd = PathBuf::from("/tmp/repo");
+        let cwd = test_path("repo");
         let policy = RuntimePolicy::default()
             .allow_shell_commands(true)
             .allow_background_commands(false);
@@ -330,8 +357,8 @@ mod tests {
 
     #[test]
     fn authorize_command_execution_rejects_working_directory_outside_roots() {
-        let base_dir = PathBuf::from("/tmp/repo");
-        let cwd = PathBuf::from("/tmp/other");
+        let base_dir = test_path("repo");
+        let cwd = test_path("other");
         let policy = RuntimePolicy::default().allow_shell_commands(true);
 
         let error = policy

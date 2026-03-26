@@ -385,15 +385,14 @@ impl BackgroundStore for SqliteRuntimeStore {
         let conn = self.open()?;
         conn.execute(
             r#"
-            INSERT INTO background_jobs (id, agent_id, payload_json, notification_state, created_at, updated_at)
+            INSERT INTO background_jobs (agent_id, id, payload_json, notification_state, created_at, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-            ON CONFLICT(id) DO UPDATE SET
-                agent_id = excluded.agent_id,
+            ON CONFLICT(agent_id, id) DO UPDATE SET
                 payload_json = excluded.payload_json,
                 notification_state = excluded.notification_state,
                 updated_at = excluded.updated_at
             "#,
-            params![task.id, agent_id, to_json(task)?, notification_state, now_secs()],
+            params![agent_id, task.id, to_json(task)?, notification_state, now_secs()],
         )
         .map_err(sqlite_error)?;
         Ok(())
@@ -422,8 +421,8 @@ impl BackgroundStore for SqliteRuntimeStore {
         };
         for (id, _) in &jobs {
             tx.execute(
-                "UPDATE background_jobs SET notification_state = ?2 WHERE id = ?1",
-                params![id, DELIVERY_INFLIGHT],
+                "UPDATE background_jobs SET notification_state = ?3 WHERE agent_id = ?1 AND id = ?2",
+                params![agent_id, id, DELIVERY_INFLIGHT],
             )
             .map_err(sqlite_error)?;
         }
@@ -642,12 +641,13 @@ impl SqliteRuntimeStore {
                 created_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS background_jobs (
-                id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
+                id TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 notification_state INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (agent_id, id)
             );
             CREATE TABLE IF NOT EXISTS audit_events (
                 id TEXT PRIMARY KEY,
@@ -682,7 +682,50 @@ impl SqliteRuntimeStore {
             );
             "#,
         )
-        .map_err(sqlite_error)
+        .map_err(sqlite_error)?;
+        self.migrate_background_jobs_schema(conn)
+    }
+
+    fn migrate_background_jobs_schema(&self, conn: &Connection) -> Result<(), RuntimeError> {
+        let Some(schema_sql) = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'background_jobs'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?
+        else {
+            return Ok(());
+        };
+
+        if schema_sql.contains("PRIMARY KEY (agent_id, id)")
+            || schema_sql.contains("PRIMARY KEY(agent_id, id)")
+        {
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            r#"
+            ALTER TABLE background_jobs RENAME TO background_jobs_legacy;
+            CREATE TABLE background_jobs (
+                agent_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                notification_state INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (agent_id, id)
+            );
+            INSERT INTO background_jobs (agent_id, id, payload_json, notification_state, created_at, updated_at)
+            SELECT agent_id, id, payload_json, notification_state, created_at, updated_at
+            FROM background_jobs_legacy;
+            DROP TABLE background_jobs_legacy;
+            "#,
+        )
+        .map_err(sqlite_error)?;
+
+        Ok(())
     }
 
     fn write_agent(
@@ -797,21 +840,25 @@ impl AgentStore for SqliteRuntimeStore {
 
         {
             let mut stmt = tx
-                .prepare("SELECT id, payload_json FROM background_jobs")
+                .prepare("SELECT agent_id, id, payload_json FROM background_jobs")
                 .map_err(sqlite_error)?;
             let rows = stmt
                 .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(sqlite_error)?;
             for row in rows {
-                let (id, payload) = row.map_err(sqlite_error)?;
+                let (agent_id, id, payload) = row.map_err(sqlite_error)?;
                 let mut task: BackgroundTaskSummary = from_json(&payload)?;
                 if task.status == BackgroundTaskStatus::Running {
                     task.status = BackgroundTaskStatus::Interrupted;
                     tx.execute(
-                        "UPDATE background_jobs SET payload_json = ?2, notification_state = ?3, updated_at = ?4 WHERE id = ?1",
-                        params![id, to_json(&task)?, DELIVERY_PENDING, now_secs()],
+                        "UPDATE background_jobs SET payload_json = ?3, notification_state = ?4, updated_at = ?5 WHERE agent_id = ?1 AND id = ?2",
+                        params![agent_id, id, to_json(&task)?, DELIVERY_PENDING, now_secs()],
                     )
                     .map_err(sqlite_error)?;
                 }
@@ -1420,13 +1467,14 @@ fn prune_stale_runtime_leases(tx: &rusqlite::Transaction<'_>) -> Result<(), Runt
 fn runtime_owner_is_stale(owner: &str) -> bool {
     let Some(pid) = owner
         .strip_prefix("runtime-")
-        .and_then(|value| value.parse::<i32>().ok())
+        .and_then(|value| value.parse::<u32>().ok())
     else {
         return false;
     };
 
     #[cfg(unix)]
     {
+        let pid = pid as i32;
         let result = unsafe { libc::kill(pid, 0) };
         if result == 0 {
             return false;
@@ -1439,9 +1487,43 @@ fn runtime_owner_is_stale(owner: &str) -> bool {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const ERROR_INVALID_PARAMETER: i32 = 87;
+
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return match std::io::Error::last_os_error().raw_os_error() {
+                    Some(ERROR_INVALID_PARAMETER) => true,
+                    Some(ERROR_ACCESS_DENIED) => false,
+                    _ => false,
+                };
+            }
+
+            let mut exit_code = 0u32;
+            let result = GetExitCodeProcess(handle, &mut exit_code);
+            let close_result = CloseHandle(handle);
+            debug_assert_ne!(close_result, 0, "process handle should close");
+
+            if result == 0 {
+                return false;
+            }
+
+            exit_code != STILL_ACTIVE as u32
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
         false
     }
 }
@@ -1534,6 +1616,54 @@ mod tests {
             .acquire_lease("agent:test", "runtime-123", Duration::from_secs(60))
             .expect("acquire lease");
         assert!(acquired);
+    }
+
+    #[test]
+    fn background_tasks_are_scoped_per_agent() {
+        let store = SqliteRuntimeStore::new(
+            std::env::temp_dir().join(format!("mentra-store-background-{}.sqlite", now_nanos())),
+        );
+
+        store
+            .upsert_background_task(
+                "agent-a",
+                &BackgroundTaskSummary {
+                    id: "bg-1".to_string(),
+                    command: "echo a".to_string(),
+                    cwd: std::env::temp_dir().join("a"),
+                    status: BackgroundTaskStatus::Running,
+                    output_preview: None,
+                },
+                DELIVERY_ACKED,
+            )
+            .expect("seed agent a background task");
+        store
+            .upsert_background_task(
+                "agent-b",
+                &BackgroundTaskSummary {
+                    id: "bg-1".to_string(),
+                    command: "echo b".to_string(),
+                    cwd: std::env::temp_dir().join("b"),
+                    status: BackgroundTaskStatus::Finished,
+                    output_preview: Some("done".to_string()),
+                },
+                DELIVERY_PENDING,
+            )
+            .expect("seed agent b background task");
+
+        let agent_a_tasks = store
+            .load_background_tasks("agent-a")
+            .expect("load agent a background tasks");
+        let agent_b_tasks = store
+            .load_background_tasks("agent-b")
+            .expect("load agent b background tasks");
+
+        assert_eq!(agent_a_tasks.len(), 1);
+        assert_eq!(agent_a_tasks[0].command, "echo a");
+        assert_eq!(agent_a_tasks[0].status, BackgroundTaskStatus::Running);
+        assert_eq!(agent_b_tasks.len(), 1);
+        assert_eq!(agent_b_tasks[0].command, "echo b");
+        assert_eq!(agent_b_tasks[0].status, BackgroundTaskStatus::Finished);
     }
 
     #[test]

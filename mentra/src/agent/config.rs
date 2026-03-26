@@ -262,11 +262,17 @@ mod tests {
 
     use crate::provider::{ReasoningEffort, ReasoningOptions};
 
+    fn test_path(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("mentra-agent-config-tests")
+            .join(label)
+    }
+
     #[test]
     fn explicit_paths_override_defaults() {
-        let tasks_dir = PathBuf::from("/tmp/custom-tasks");
-        let team_dir = PathBuf::from("/tmp/custom-team");
-        let transcript_dir = PathBuf::from("/tmp/custom-transcripts");
+        let tasks_dir = test_path("custom-tasks");
+        let team_dir = test_path("custom-team");
+        let transcript_dir = test_path("custom-transcripts");
 
         let config = AgentConfig {
             task: TaskConfig {

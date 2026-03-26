@@ -32,8 +32,9 @@ use crate::{
 };
 
 use super::support::{
-    ProbeTool, ScriptedProvider, StaticTool, StreamScript, controlled_stream, erroring_stream,
-    model_info, ok_stream,
+    ProbeTool, ScriptedProvider, StaticTool, StreamScript, background_failure_command,
+    background_success_command, command_input_json, command_input_with_working_directory_json,
+    controlled_stream, erroring_stream, model_info, ok_stream, shell_pwd_command,
 };
 
 #[tokio::test]
@@ -296,17 +297,14 @@ async fn malformed_tool_json_is_reported_back_to_model_instead_of_aborting() {
 
 #[tokio::test]
 async fn background_run_tool_starts_task_and_continues_the_turn() {
+    let command = background_success_command("bg-done", 200);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.2; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "continued"),
         ],
     );
@@ -331,10 +329,7 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "tool-bg".to_string(),
-            content: format!(
-                "Started background task bg-1 in {cwd} for `sleep 0.2; printf bg-done`"
-            )
-            .into(),
+            content: format!("Started background task bg-1 in {cwd} for `{command}`").into(),
             is_error: false,
         })
     );
@@ -351,23 +346,20 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::BackgroundTaskStarted { task }
-            if task.id == "bg-1" && task.command == "sleep 0.2; printf bg-done"
+            if task.id == "bg-1" && task.command == command
     )));
 }
 
 #[tokio::test]
 async fn completed_background_results_are_injected_on_next_send() {
+    let command = background_success_command("bg-done", 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "continued"),
             text_stream(&model.id, "next turn"),
         ],
@@ -375,6 +367,7 @@ async fn completed_background_results_are_injected_on_next_send() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-results-next-send"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -400,23 +393,20 @@ async fn completed_background_results_are_injected_on_next_send() {
     let injected = latest_background_results_text(&requests[2]).expect("background results");
     assert!(injected.contains("<background-results>"));
     assert!(injected.contains("[bg:bg-1] status=finished"));
-    assert!(injected.contains("command=\"sleep 0.05; printf bg-done\""));
-    assert!(injected.contains("output=\"bg-done\""));
+    assert!(injected.contains(&format!("command=\"{command}\"")));
+    assert!(injected.contains("output=\"bg-done"));
 }
 
 #[tokio::test]
 async fn teammate_auto_wakes_after_background_task_finishes() {
+    let command = background_success_command("bg-done", 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "started"),
             text_stream(&model.id, "processed background result"),
         ],
@@ -472,17 +462,14 @@ async fn teammate_auto_wakes_after_background_task_finishes() {
 
 #[tokio::test]
 async fn check_background_reports_single_task_and_lists_all_tasks() {
+    let command = background_success_command("bg-done", 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "started"),
             multi_tool_use_stream(
                 &model.id,
@@ -496,6 +483,7 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
     );
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-check-reports"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -518,36 +506,43 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
         .unwrap();
     let cwd = agent.config().workspace.base_dir.display().to_string();
 
-    assert_eq!(
-        agent.history()[7],
-        Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "check-one".to_string(),
-                    content: format!("[finished] cwd={cwd}\nsleep 0.05; printf bg-done\nbg-done")
-                        .into(),
-                    is_error: false,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "check-all".to_string(),
-                    content: format!("bg-1: [finished] cwd={cwd} sleep 0.05; printf bg-done")
-                        .into(),
-                    is_error: false,
-                },
-            ],
+    let message = &agent.history()[7];
+    assert_eq!(message.role, Role::User);
+    assert_eq!(message.content.len(), 2);
+    match (&message.content[0], &message.content[1]) {
+        (
+            ContentBlock::ToolResult {
+                tool_use_id: check_one_id,
+                content: check_one_content,
+                is_error: false,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: check_all_id,
+                content: check_all_content,
+                is_error: false,
+            },
+        ) => {
+            assert_eq!(check_one_id, "check-one");
+            assert_eq!(check_all_id, "check-all");
+            assert!(
+                check_one_content.contains(&format!("[finished] cwd={cwd}\n{command}\nbg-done"))
+            );
+            assert!(check_all_content.contains(&format!("bg-1: [finished] cwd={cwd} {command}")));
         }
-    );
+        other => panic!("unexpected tool result payloads: {other:?}"),
+    }
 }
 
 #[tokio::test]
 async fn task_working_directory_routes_shell_for_teammate() {
+    let command = shell_pwd_command();
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
+            tool_use_stream(&model.id, "pwd", "shell", &input),
             text_stream(&model.id, "done"),
         ],
     );
@@ -613,12 +608,14 @@ async fn task_working_directory_routes_shell_for_teammate() {
 
 #[tokio::test]
 async fn teammate_shell_without_working_directory_uses_base_dir() {
+    let command = shell_pwd_command();
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
+            tool_use_stream(&model.id, "pwd", "shell", &input),
             text_stream(&model.id, "handled"),
         ],
     );
@@ -667,17 +664,14 @@ async fn teammate_shell_without_working_directory_uses_base_dir() {
 
 #[tokio::test]
 async fn shell_working_directory_overrides_default_routing() {
+    let command = shell_pwd_command();
+    let input = command_input_with_working_directory_json(&command, "custom");
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "pwd",
-                "shell",
-                r#"{"command":"pwd","workingDirectory":"custom"}"#,
-            ),
+            tool_use_stream(&model.id, "pwd", "shell", &input),
             text_stream(&model.id, "done"),
         ],
     );
@@ -1542,6 +1536,10 @@ async fn run_options_cancelled_run_stops_before_provider_request() {
 
 #[tokio::test]
 async fn completed_background_results_are_batched_in_completion_order() {
+    let first_command = background_success_command("first", 20);
+    let second_command = background_success_command("second", 50);
+    let first_input = command_input_json(&first_command);
+    let second_input = command_input_json(&second_command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
@@ -1550,16 +1548,8 @@ async fn completed_background_results_are_batched_in_completion_order() {
             multi_tool_use_stream(
                 &model.id,
                 &[
-                    (
-                        "tool-bg-1",
-                        "background_run",
-                        r#"{"command":"sleep 0.02; printf first"}"#,
-                    ),
-                    (
-                        "tool-bg-2",
-                        "background_run",
-                        r#"{"command":"sleep 0.05; printf second"}"#,
-                    ),
+                    ("tool-bg-1", "background_run", first_input.as_str()),
+                    ("tool-bg-2", "background_run", second_input.as_str()),
                 ],
             ),
             text_stream(&model.id, "continued"),
@@ -1569,6 +1559,7 @@ async fn completed_background_results_are_batched_in_completion_order() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-results-batched-order"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -1596,23 +1587,20 @@ async fn completed_background_results_are_batched_in_completion_order() {
     let first = injected.find("[bg:bg-1]").expect("first task line");
     let second = injected.find("[bg:bg-2]").expect("second task line");
     assert!(first < second);
-    assert!(injected.contains("output=\"first\""));
-    assert!(injected.contains("output=\"second\""));
+    assert!(injected.contains("output=\"first"));
+    assert!(injected.contains("output=\"second"));
 }
 
 #[tokio::test]
 async fn failed_background_results_surface_in_snapshot_events_and_notifications() {
+    let command = background_failure_command("boom", 7, 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; echo boom >&2; exit 7"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "continued"),
             text_stream(&model.id, "next turn"),
         ],
@@ -1620,6 +1608,7 @@ async fn failed_background_results_surface_in_snapshot_events_and_notifications(
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-failure-results"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -1664,22 +1653,19 @@ async fn failed_background_results_surface_in_snapshot_events_and_notifications(
     let requests = provider_handle.recorded_requests().await;
     let injected = latest_background_results_text(&requests[2]).expect("background results");
     assert!(injected.contains("status=failed"));
-    assert!(injected.contains("output=\"boom\""));
+    assert!(injected.contains("output=\"boom"));
 }
 
 #[tokio::test]
 async fn drained_background_notifications_are_requeued_after_failed_run() {
+    let command = background_success_command("bg-done", 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "continued"),
             erroring_stream(
                 vec![ProviderEvent::MessageStarted {
@@ -1695,6 +1681,7 @@ async fn drained_background_notifications_are_requeued_after_failed_run() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-requeue-failed-run"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -4244,23 +4231,27 @@ fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -
     events
 }
 
+const SHORT_WAIT_ATTEMPTS: usize = 200;
+const BACKGROUND_WAIT_ATTEMPTS: usize = 6000;
+const POLL_INTERVAL_MS: u64 = 10;
+
 async fn wait_for_pending_team_messages(agent: &Agent, expected_count: usize) {
-    for _ in 0..200 {
+    for _ in 0..SHORT_WAIT_ATTEMPTS {
         if agent.watch_snapshot().borrow().pending_team_messages == expected_count {
             return;
         }
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 
     panic!("timed out waiting for {expected_count} pending team messages");
 }
 
 async fn wait_for_background_task_count(agent: &Agent, expected_count: usize) {
-    for _ in 0..200 {
+    for _ in 0..BACKGROUND_WAIT_ATTEMPTS {
         if agent.watch_snapshot().borrow().background_tasks.len() == expected_count {
             return;
         }
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 
     panic!("timed out waiting for {expected_count} background tasks");
@@ -4271,14 +4262,14 @@ async fn wait_for_background_tasks(
     expected_count: usize,
     status: BackgroundTaskStatus,
 ) {
-    for _ in 0..200 {
+    for _ in 0..BACKGROUND_WAIT_ATTEMPTS {
         let background_tasks = agent.watch_snapshot().borrow().background_tasks.clone();
         if background_tasks.len() == expected_count
             && background_tasks.iter().all(|task| task.status == status)
         {
             return;
         }
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 
     panic!("timed out waiting for {expected_count} background tasks to reach {status:?}");
@@ -4552,11 +4543,11 @@ fn write_skill(root: &Path, name: &str, content: &str) {
 }
 
 async fn wait_for_recorded_requests(provider: &ScriptedProvider, expected: usize) {
-    for _ in 0..500 {
+    for _ in 0..BACKGROUND_WAIT_ATTEMPTS {
         if provider.recorded_requests().await.len() >= expected {
             return;
         }
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 
     panic!("timed out waiting for {expected} recorded requests");
@@ -4568,7 +4559,7 @@ async fn wait_for_background_task_status(
     task_id: &str,
     expected_status: BackgroundTaskStatus,
 ) {
-    for _ in 0..500 {
+    for _ in 0..BACKGROUND_WAIT_ATTEMPTS {
         let tasks =
             <SqliteRuntimeStore as crate::background::BackgroundStore>::load_background_tasks(
                 store, agent_id,
@@ -4580,7 +4571,7 @@ async fn wait_for_background_task_status(
         {
             return;
         }
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 
     panic!("timed out waiting for background task {task_id} to reach {expected_status:?}");
@@ -4591,7 +4582,7 @@ async fn wait_for_background_task_record(
     agent_id: &str,
     expected_count: usize,
 ) {
-    for _ in 0..500 {
+    for _ in 0..BACKGROUND_WAIT_ATTEMPTS {
         let tasks =
             <SqliteRuntimeStore as crate::background::BackgroundStore>::load_background_tasks(
                 store, agent_id,
@@ -4600,7 +4591,7 @@ async fn wait_for_background_task_record(
         if tasks.len() == expected_count {
             return;
         }
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 
     panic!("timed out waiting for {expected_count} background task records");

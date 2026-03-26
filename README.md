@@ -106,6 +106,11 @@ including:
 * [`openai_oauth`](./examples/openai_oauth.rs): OpenAI OAuth-backed provider
   setup.
 
+The builtin runtime shell uses `/bin/sh` on Unix hosts and `cmd.exe` on
+Windows hosts. The OpenAI OAuth example keeps `PersistentTokenStoreKind::Auto`
+platform-native as well: macOS uses Keychain, while Windows and Linux use the
+file-backed store.
+
 ## Getting Started
 
 If you want to explore the workspace after cloning the repository, the quickest

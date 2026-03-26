@@ -1,13 +1,24 @@
-use tokio::sync::watch;
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use tokio::{
+    sync::watch,
+    time::{Duration, timeout},
+};
 
 use crate::{
     BackgroundTaskStatus, BuiltinProvider, ContentBlock, Role,
     agent::{AgentSnapshot, AgentStatus},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::{Runtime, RuntimePolicy},
+    runtime::{Runtime, RuntimePolicy, SqliteRuntimeStore},
 };
 
-use super::support::{ScriptedProvider, controlled_stream, model_info, ok_stream};
+use super::support::{
+    ScriptedProvider, background_success_command, command_input_json, controlled_stream,
+    model_info, ok_stream,
+};
 
 #[tokio::test]
 async fn snapshot_progresses_during_streaming() {
@@ -85,6 +96,7 @@ async fn snapshot_progresses_during_streaming() {
 
 #[tokio::test]
 async fn snapshot_updates_when_background_task_finishes() {
+    let command = background_success_command("bg-done", 50);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
@@ -105,9 +117,7 @@ async fn snapshot_updates_when_background_task_finishes() {
                 },
                 ProviderEvent::ContentBlockDelta {
                     index: 0,
-                    delta: ContentBlockDelta::ToolUseInputJson(
-                        r#"{"command":"sleep 0.05; printf bg-done"}"#.to_string(),
-                    ),
+                    delta: ContentBlockDelta::ToolUseInputJson(command_input_json(&command)),
                 },
                 ProviderEvent::ContentBlockStopped { index: 0 },
                 ProviderEvent::MessageStopped,
@@ -133,6 +143,7 @@ async fn snapshot_updates_when_background_task_finishes() {
     );
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("snapshot-background-finish"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -147,39 +158,59 @@ async fn snapshot_updates_when_background_task_finishes() {
         .await
         .unwrap();
 
-    wait_for_background_status(&mut snapshot, BackgroundTaskStatus::Running).await;
     wait_for_background_status(&mut snapshot, BackgroundTaskStatus::Finished).await;
     assert_eq!(snapshot.borrow().background_tasks.len(), 1);
-    assert_eq!(
+    assert!(
         snapshot.borrow().background_tasks[0]
             .output_preview
-            .as_deref(),
-        Some("bg-done")
+            .as_deref()
+            .is_some_and(|preview| preview.contains("bg-done"))
     );
 }
 
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+fn temp_store(label: &str) -> SqliteRuntimeStore {
+    let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
+        "mentra-runtime-store-{label}-{timestamp}-{unique}.sqlite"
+    )))
+}
+
 async fn wait_for_status(receiver: &mut watch::Receiver<AgentSnapshot>, status: AgentStatus) {
-    loop {
-        if receiver.borrow().status == status {
-            return;
+    timeout(Duration::from_secs(90), async {
+        loop {
+            if receiver.borrow().status == status {
+                return;
+            }
+            receiver.changed().await.unwrap();
         }
-        receiver.changed().await.unwrap();
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for agent status {status:?}"));
 }
 
 async fn wait_for_background_status(
     receiver: &mut watch::Receiver<AgentSnapshot>,
     status: BackgroundTaskStatus,
 ) {
-    loop {
-        if receiver
-            .borrow()
-            .background_tasks
-            .iter()
-            .any(|task| task.status == status)
-        {
-            return;
+    timeout(Duration::from_secs(90), async {
+        loop {
+            if receiver
+                .borrow()
+                .background_tasks
+                .iter()
+                .any(|task| task.status == status)
+            {
+                return;
+            }
+            receiver.changed().await.unwrap();
         }
-        receiver.changed().await.unwrap();
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for background status {status:?}"));
 }

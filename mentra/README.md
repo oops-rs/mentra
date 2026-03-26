@@ -143,10 +143,13 @@ Mentra's builtin runtime tools are available by default, but command execution i
 - foreground shell execution is disabled by default
 - background command execution is disabled by default
 - `RuntimePolicy::permissive()` enables both shell and background command execution
+- builtin shell commands run through `/bin/sh -c` on Unix and `cmd.exe /C` on Windows
 - runtime policy still enforces hard limits such as working-directory roots, file read/write roots, allowed environment variables, timeouts, output caps, and background task limits
 - semantic review is opt-in through `RuntimeBuilder::with_tool_authorizer(...)`
 
 Use the default policy when you want a safer runtime surface, and opt into `RuntimePolicy::permissive()` only when you are intentionally building a coding-agent or automation workflow that should be able to act on the local workspace.
+
+If you need different command semantics, such as PowerShell on Windows or a sandboxed executor, replace the default local executor with `RuntimeBuilder::with_executor(...)`.
 
 ## Tool Authorization
 

@@ -91,6 +91,93 @@ pub(super) fn ok_stream(events: Vec<ProviderEvent>) -> StreamScript {
     StreamScript::Buffered(events.into_iter().map(Ok).collect())
 }
 
+pub(super) fn command_input_json(command: &str) -> String {
+    json!({ "command": command }).to_string()
+}
+
+pub(super) fn command_input_with_working_directory_json(
+    command: &str,
+    working_directory: &str,
+) -> String {
+    json!({
+        "command": command,
+        "workingDirectory": working_directory,
+    })
+    .to_string()
+}
+
+pub(super) fn shell_pwd_command() -> String {
+    #[cfg(unix)]
+    {
+        "pwd".to_string()
+    }
+
+    #[cfg(windows)]
+    {
+        "cd".to_string()
+    }
+}
+
+pub(super) fn background_success_command(output: &str, delay_ms: u64) -> String {
+    #[cfg(unix)]
+    {
+        format!(
+            "sleep {}; printf {}",
+            delay_seconds(delay_ms),
+            shell_single_quoted(output)
+        )
+    }
+
+    #[cfg(windows)]
+    {
+        let delay_seconds = (delay_ms / 1000).saturating_add(1);
+        format!(
+            "ping -n {delay_seconds} 127.0.0.1 >NUL & echo {output}",
+            output = cmd_echo_literal(output)
+        )
+    }
+}
+
+pub(super) fn background_failure_command(stderr: &str, exit_code: i32, delay_ms: u64) -> String {
+    #[cfg(unix)]
+    {
+        format!(
+            "sleep {}; printf {} >&2; exit {exit_code}",
+            delay_seconds(delay_ms),
+            shell_single_quoted(stderr)
+        )
+    }
+
+    #[cfg(windows)]
+    {
+        let delay_seconds = (delay_ms / 1000).saturating_add(1);
+        format!(
+            "ping -n {delay_seconds} 127.0.0.1 >NUL & echo {stderr} 1>&2 & exit /b {exit_code}",
+            stderr = cmd_echo_literal(stderr)
+        )
+    }
+}
+
+#[cfg(unix)]
+fn delay_seconds(delay_ms: u64) -> String {
+    format!("{:.3}", delay_ms as f64 / 1000.0)
+}
+
+#[cfg(unix)]
+fn shell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+#[cfg(windows)]
+fn cmd_echo_literal(value: &str) -> String {
+    value
+        .replace('^', "^^")
+        .replace('&', "^&")
+        .replace('|', "^|")
+        .replace('<', "^<")
+        .replace('>', "^>")
+}
+
 pub(super) fn erroring_stream(events: Vec<ProviderEvent>, error: ProviderError) -> StreamScript {
     let mut items = events.into_iter().map(Ok).collect::<Vec<_>>();
     items.push(Err(error));
