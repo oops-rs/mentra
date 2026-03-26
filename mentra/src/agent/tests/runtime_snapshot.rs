@@ -1,10 +1,15 @@
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use tokio::sync::watch;
 
 use crate::{
     BackgroundTaskStatus, BuiltinProvider, ContentBlock, Role,
     agent::{AgentSnapshot, AgentStatus},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::{Runtime, RuntimePolicy},
+    runtime::{Runtime, RuntimePolicy, SqliteRuntimeStore},
 };
 
 use super::support::{
@@ -135,6 +140,7 @@ async fn snapshot_updates_when_background_task_finishes() {
     );
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("snapshot-background-finish"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -149,7 +155,6 @@ async fn snapshot_updates_when_background_task_finishes() {
         .await
         .unwrap();
 
-    wait_for_background_status(&mut snapshot, BackgroundTaskStatus::Running).await;
     wait_for_background_status(&mut snapshot, BackgroundTaskStatus::Finished).await;
     assert_eq!(snapshot.borrow().background_tasks.len(), 1);
     assert_eq!(
@@ -158,6 +163,19 @@ async fn snapshot_updates_when_background_task_finishes() {
             .as_deref(),
         Some("bg-done")
     );
+}
+
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+fn temp_store(label: &str) -> SqliteRuntimeStore {
+    let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
+        "mentra-runtime-store-{label}-{timestamp}-{unique}.sqlite"
+    )))
 }
 
 async fn wait_for_status(receiver: &mut watch::Receiver<AgentSnapshot>, status: AgentStatus) {

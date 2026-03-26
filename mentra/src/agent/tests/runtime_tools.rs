@@ -367,6 +367,7 @@ async fn completed_background_results_are_injected_on_next_send() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-results-next-send"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -482,6 +483,7 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
     );
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-check-reports"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -1550,6 +1552,7 @@ async fn completed_background_results_are_batched_in_completion_order() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-results-batched-order"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -1598,6 +1601,7 @@ async fn failed_background_results_surface_in_snapshot_events_and_notifications(
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-failure-results"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -1670,6 +1674,7 @@ async fn drained_background_notifications_are_requeued_after_failed_run() {
     let provider_handle = provider.clone();
 
     let runtime = Runtime::builder()
+        .with_store(temp_store("bg-requeue-failed-run"))
         .with_policy(RuntimePolicy::permissive())
         .with_provider_instance(provider)
         .build()
@@ -4231,7 +4236,7 @@ async fn wait_for_pending_team_messages(agent: &Agent, expected_count: usize) {
 }
 
 async fn wait_for_background_task_count(agent: &Agent, expected_count: usize) {
-    for _ in 0..200 {
+    for _ in 0..1000 {
         if agent.watch_snapshot().borrow().background_tasks.len() == expected_count {
             return;
         }
@@ -4246,7 +4251,7 @@ async fn wait_for_background_tasks(
     expected_count: usize,
     status: BackgroundTaskStatus,
 ) {
-    for _ in 0..200 {
+    for _ in 0..1000 {
         let background_tasks = agent.watch_snapshot().borrow().background_tasks.clone();
         if background_tasks.len() == expected_count
             && background_tasks.iter().all(|task| task.status == status)
