@@ -329,7 +329,7 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "tool-bg".to_string(),
-            content: format!("Started background task bg-1 in {cwd} for `{command}`"),
+            content: format!("Started background task bg-1 in {cwd} for `{command}`").into(),
             is_error: false,
         })
     );
@@ -511,12 +511,12 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
             content: vec![
                 ContentBlock::ToolResult {
                     tool_use_id: "check-one".to_string(),
-                    content: format!("[finished] cwd={cwd}\n{command}\nbg-done"),
+                    content: format!("[finished] cwd={cwd}\n{command}\nbg-done").into(),
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "check-all".to_string(),
-                    content: format!("bg-1: [finished] cwd={cwd} {command}"),
+                    content: format!("bg-1: [finished] cwd={cwd} {command}").into(),
                     is_error: false,
                 },
             ],
