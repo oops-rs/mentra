@@ -32,8 +32,9 @@ use crate::{
 };
 
 use super::support::{
-    ProbeTool, ScriptedProvider, StaticTool, StreamScript, controlled_stream, erroring_stream,
-    model_info, ok_stream,
+    ProbeTool, ScriptedProvider, StaticTool, StreamScript, background_failure_command,
+    background_success_command, command_input_json, command_input_with_working_directory_json,
+    controlled_stream, erroring_stream, model_info, ok_stream, shell_pwd_command,
 };
 
 #[tokio::test]
@@ -296,17 +297,14 @@ async fn malformed_tool_json_is_reported_back_to_model_instead_of_aborting() {
 
 #[tokio::test]
 async fn background_run_tool_starts_task_and_continues_the_turn() {
+    let command = background_success_command("bg-done", 200);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.2; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "continued"),
         ],
     );
@@ -331,10 +329,7 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "tool-bg".to_string(),
-            content: format!(
-                "Started background task bg-1 in {cwd} for `sleep 0.2; printf bg-done`"
-            )
-            .into(),
+            content: format!("Started background task bg-1 in {cwd} for `{command}`"),
             is_error: false,
         })
     );
@@ -351,23 +346,20 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::BackgroundTaskStarted { task }
-            if task.id == "bg-1" && task.command == "sleep 0.2; printf bg-done"
+            if task.id == "bg-1" && task.command == command
     )));
 }
 
 #[tokio::test]
 async fn completed_background_results_are_injected_on_next_send() {
+    let command = background_success_command("bg-done", 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "continued"),
             text_stream(&model.id, "next turn"),
         ],
@@ -400,23 +392,20 @@ async fn completed_background_results_are_injected_on_next_send() {
     let injected = latest_background_results_text(&requests[2]).expect("background results");
     assert!(injected.contains("<background-results>"));
     assert!(injected.contains("[bg:bg-1] status=finished"));
-    assert!(injected.contains("command=\"sleep 0.05; printf bg-done\""));
+    assert!(injected.contains(&format!("command=\"{command}\"")));
     assert!(injected.contains("output=\"bg-done\""));
 }
 
 #[tokio::test]
 async fn teammate_auto_wakes_after_background_task_finishes() {
+    let command = background_success_command("bg-done", 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "started"),
             text_stream(&model.id, "processed background result"),
         ],
@@ -472,17 +461,14 @@ async fn teammate_auto_wakes_after_background_task_finishes() {
 
 #[tokio::test]
 async fn check_background_reports_single_task_and_lists_all_tasks() {
+    let command = background_success_command("bg-done", 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "started"),
             multi_tool_use_stream(
                 &model.id,
@@ -525,14 +511,12 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
             content: vec![
                 ContentBlock::ToolResult {
                     tool_use_id: "check-one".to_string(),
-                    content: format!("[finished] cwd={cwd}\nsleep 0.05; printf bg-done\nbg-done")
-                        .into(),
+                    content: format!("[finished] cwd={cwd}\n{command}\nbg-done"),
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "check-all".to_string(),
-                    content: format!("bg-1: [finished] cwd={cwd} sleep 0.05; printf bg-done")
-                        .into(),
+                    content: format!("bg-1: [finished] cwd={cwd} {command}"),
                     is_error: false,
                 },
             ],
@@ -542,12 +526,14 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
 
 #[tokio::test]
 async fn task_working_directory_routes_shell_for_teammate() {
+    let command = shell_pwd_command();
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
+            tool_use_stream(&model.id, "pwd", "shell", &input),
             text_stream(&model.id, "done"),
         ],
     );
@@ -613,12 +599,14 @@ async fn task_working_directory_routes_shell_for_teammate() {
 
 #[tokio::test]
 async fn teammate_shell_without_working_directory_uses_base_dir() {
+    let command = shell_pwd_command();
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(&model.id, "pwd", "shell", r#"{"command":"pwd"}"#),
+            tool_use_stream(&model.id, "pwd", "shell", &input),
             text_stream(&model.id, "handled"),
         ],
     );
@@ -667,17 +655,14 @@ async fn teammate_shell_without_working_directory_uses_base_dir() {
 
 #[tokio::test]
 async fn shell_working_directory_overrides_default_routing() {
+    let command = shell_pwd_command();
+    let input = command_input_with_working_directory_json(&command, "custom");
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "pwd",
-                "shell",
-                r#"{"command":"pwd","workingDirectory":"custom"}"#,
-            ),
+            tool_use_stream(&model.id, "pwd", "shell", &input),
             text_stream(&model.id, "done"),
         ],
     );
@@ -1542,6 +1527,10 @@ async fn run_options_cancelled_run_stops_before_provider_request() {
 
 #[tokio::test]
 async fn completed_background_results_are_batched_in_completion_order() {
+    let first_command = background_success_command("first", 20);
+    let second_command = background_success_command("second", 50);
+    let first_input = command_input_json(&first_command);
+    let second_input = command_input_json(&second_command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
@@ -1550,16 +1539,8 @@ async fn completed_background_results_are_batched_in_completion_order() {
             multi_tool_use_stream(
                 &model.id,
                 &[
-                    (
-                        "tool-bg-1",
-                        "background_run",
-                        r#"{"command":"sleep 0.02; printf first"}"#,
-                    ),
-                    (
-                        "tool-bg-2",
-                        "background_run",
-                        r#"{"command":"sleep 0.05; printf second"}"#,
-                    ),
+                    ("tool-bg-1", "background_run", first_input.as_str()),
+                    ("tool-bg-2", "background_run", second_input.as_str()),
                 ],
             ),
             text_stream(&model.id, "continued"),
@@ -1602,17 +1583,14 @@ async fn completed_background_results_are_batched_in_completion_order() {
 
 #[tokio::test]
 async fn failed_background_results_surface_in_snapshot_events_and_notifications() {
+    let command = background_failure_command("boom", 7, 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; echo boom >&2; exit 7"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "continued"),
             text_stream(&model.id, "next turn"),
         ],
@@ -1669,17 +1647,14 @@ async fn failed_background_results_surface_in_snapshot_events_and_notifications(
 
 #[tokio::test]
 async fn drained_background_notifications_are_requeued_after_failed_run() {
+    let command = background_success_command("bg-done", 50);
+    let input = command_input_json(&command);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
-            tool_use_stream(
-                &model.id,
-                "tool-bg",
-                "background_run",
-                r#"{"command":"sleep 0.05; printf bg-done"}"#,
-            ),
+            tool_use_stream(&model.id, "tool-bg", "background_run", &input),
             text_stream(&model.id, "continued"),
             erroring_stream(
                 vec![ProviderEvent::MessageStarted {

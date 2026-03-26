@@ -78,10 +78,16 @@ fn workspace_hash(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    fn test_path(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("mentra-default-paths-tests")
+            .join(label)
+    }
+
     #[test]
     fn uses_platform_data_directory_when_available() {
-        let workspace = PathBuf::from("/tmp/workspaces/release-check");
-        let data_dir = PathBuf::from("/Users/example/Library/Application Support");
+        let workspace = test_path("release-check-workspace");
+        let data_dir = test_path("release-check-data");
 
         let paths = workspace_default_paths_for(workspace.clone(), Some(data_dir.clone()));
 
@@ -105,7 +111,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_workspace_dot_directory_without_platform_data_dir() {
-        let workspace = PathBuf::from("/tmp/workspaces/fallback-check");
+        let workspace = test_path("fallback-check-workspace");
 
         let paths = workspace_default_paths_for(workspace.clone(), None);
 
@@ -120,8 +126,8 @@ mod tests {
 
     #[test]
     fn same_workspace_produces_shared_root_for_all_default_paths() {
-        let workspace = PathBuf::from("/tmp/workspaces/shared-root");
-        let data_dir = PathBuf::from("/var/data");
+        let workspace = test_path("shared-root-workspace");
+        let data_dir = test_path("shared-root-data");
 
         let paths = workspace_default_paths_for(workspace, Some(data_dir));
 

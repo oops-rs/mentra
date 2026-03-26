@@ -7,7 +7,10 @@ use crate::{
     runtime::{Runtime, RuntimePolicy},
 };
 
-use super::support::{ScriptedProvider, controlled_stream, model_info, ok_stream};
+use super::support::{
+    ScriptedProvider, background_success_command, command_input_json, controlled_stream,
+    model_info, ok_stream,
+};
 
 #[tokio::test]
 async fn snapshot_progresses_during_streaming() {
@@ -85,6 +88,7 @@ async fn snapshot_progresses_during_streaming() {
 
 #[tokio::test]
 async fn snapshot_updates_when_background_task_finishes() {
+    let command = background_success_command("bg-done", 50);
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
@@ -105,9 +109,7 @@ async fn snapshot_updates_when_background_task_finishes() {
                 },
                 ProviderEvent::ContentBlockDelta {
                     index: 0,
-                    delta: ContentBlockDelta::ToolUseInputJson(
-                        r#"{"command":"sleep 0.05; printf bg-done"}"#.to_string(),
-                    ),
+                    delta: ContentBlockDelta::ToolUseInputJson(command_input_json(&command)),
                 },
                 ProviderEvent::ContentBlockStopped { index: 0 },
                 ProviderEvent::MessageStopped,

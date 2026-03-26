@@ -91,6 +91,86 @@ pub(super) fn ok_stream(events: Vec<ProviderEvent>) -> StreamScript {
     StreamScript::Buffered(events.into_iter().map(Ok).collect())
 }
 
+pub(super) fn command_input_json(command: &str) -> String {
+    json!({ "command": command }).to_string()
+}
+
+pub(super) fn command_input_with_working_directory_json(
+    command: &str,
+    working_directory: &str,
+) -> String {
+    json!({
+        "command": command,
+        "workingDirectory": working_directory,
+    })
+    .to_string()
+}
+
+pub(super) fn shell_pwd_command() -> String {
+    #[cfg(unix)]
+    {
+        "pwd".to_string()
+    }
+
+    #[cfg(windows)]
+    {
+        "cd".to_string()
+    }
+}
+
+pub(super) fn background_success_command(output: &str, delay_ms: u64) -> String {
+    #[cfg(unix)]
+    {
+        format!(
+            "sleep {}; printf {}",
+            delay_seconds(delay_ms),
+            shell_single_quoted(output)
+        )
+    }
+
+    #[cfg(windows)]
+    {
+        format!(
+            "powershell -NoProfile -Command \"Start-Sleep -Milliseconds {delay_ms}; [Console]::Out.Write('{}')\"",
+            powershell_single_quoted(output)
+        )
+    }
+}
+
+pub(super) fn background_failure_command(stderr: &str, exit_code: i32, delay_ms: u64) -> String {
+    #[cfg(unix)]
+    {
+        format!(
+            "sleep {}; printf {} >&2; exit {exit_code}",
+            delay_seconds(delay_ms),
+            shell_single_quoted(stderr)
+        )
+    }
+
+    #[cfg(windows)]
+    {
+        format!(
+            "powershell -NoProfile -Command \"Start-Sleep -Milliseconds {delay_ms}; [Console]::Error.Write('{}'); exit {exit_code}\"",
+            powershell_single_quoted(stderr)
+        )
+    }
+}
+
+#[cfg(unix)]
+fn delay_seconds(delay_ms: u64) -> String {
+    format!("{:.3}", delay_ms as f64 / 1000.0)
+}
+
+#[cfg(unix)]
+fn shell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+#[cfg(windows)]
+fn powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
 pub(super) fn erroring_stream(events: Vec<ProviderEvent>, error: ProviderError) -> StreamScript {
     let mut items = events.into_iter().map(Ok).collect::<Vec<_>>();
     items.push(Err(error));

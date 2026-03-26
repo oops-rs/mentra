@@ -316,9 +316,15 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    fn test_path(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("mentra-runtime-policy-tests")
+            .join(label)
+    }
+
     #[test]
     fn shell_roots_and_background_switches_short_circuit() {
-        let cwd = PathBuf::from("/tmp/repo");
+        let cwd = test_path("repo");
         let policy = RuntimePolicy::default()
             .allow_shell_commands(true)
             .allow_background_commands(false);
@@ -330,8 +336,8 @@ mod tests {
 
     #[test]
     fn authorize_command_execution_rejects_working_directory_outside_roots() {
-        let base_dir = PathBuf::from("/tmp/repo");
-        let cwd = PathBuf::from("/tmp/other");
+        let base_dir = test_path("repo");
+        let cwd = test_path("other");
         let policy = RuntimePolicy::default().allow_shell_commands(true);
 
         let error = policy
