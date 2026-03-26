@@ -1,8 +1,18 @@
-use http::{HeaderMap, HeaderName, HeaderValue, header};
-use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::HashMap, fmt::Display, time::Duration};
-use strum::{Display as StrumDisplay, IntoStaticStr};
+use http::HeaderMap;
+use http::HeaderName;
+use http::HeaderValue;
+use http::header;
+use serde::Deserialize;
+use serde::Serialize;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::time::Duration;
+use strum::Display as StrumDisplay;
+use strum::IntoStaticStr;
 use url::Url;
+
+use crate::request::SessionRequestOptions;
 
 /// Builtin provider families Mentra can construct from presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, StrumDisplay, IntoStaticStr)]
@@ -270,6 +280,49 @@ impl ProviderDefinition {
                 let token = required_auth_value(credentials)?;
                 insert_header(&mut headers, name, token)?;
             }
+        }
+
+        Ok(headers)
+    }
+
+    pub fn build_headers_for_session(
+        &self,
+        credentials: &crate::ProviderCredentials,
+        session: Option<&SessionRequestOptions>,
+        fallback_turn_state: Option<&str>,
+    ) -> Result<HeaderMap, crate::ProviderError> {
+        let mut headers = self.build_headers(credentials)?;
+
+        if let Some(turn_state) = session
+            .and_then(|session| session.sticky_turn_state.as_deref())
+            .or(fallback_turn_state)
+            && let Ok(value) = HeaderValue::from_str(turn_state)
+        {
+            headers.insert("x-mentra-turn-state", value.clone());
+            headers.insert("x-codex-turn-state", value);
+        }
+        if let Some(value) = session.and_then(|session| session.turn_metadata.as_deref())
+            && let Ok(value) = HeaderValue::from_str(value)
+        {
+            headers.insert("x-mentra-turn-metadata", value.clone());
+            headers.insert("x-codex-turn-metadata", value);
+        }
+        if let Some(value) = session.and_then(|session| session.session_affinity.as_deref())
+            && let Ok(value) = HeaderValue::from_str(value)
+        {
+            headers.insert("x-mentra-session-affinity", value);
+        }
+        if let Some(prefer_connection_reuse) =
+            session.and_then(|session| session.prefer_connection_reuse)
+        {
+            headers.insert(
+                "x-mentra-connection-reuse",
+                HeaderValue::from_static(if prefer_connection_reuse {
+                    "prefer-reuse"
+                } else {
+                    "prefer-fresh"
+                }),
+            );
         }
 
         Ok(headers)

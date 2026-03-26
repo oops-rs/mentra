@@ -7,11 +7,21 @@ pub(crate) mod model;
 pub(crate) mod sse;
 pub(crate) mod stream_model;
 
-use crate::{
-    AuthScheme, BuiltinProvider, CredentialSource, ModelCatalog, ModelInfo, ProviderCapabilities,
-    ProviderDefinition, ProviderError, ProviderEventStream, ProviderSession,
-    ProviderSessionFactory, RegisteredProvider, Request, StaticCredentialSource, WireApi,
-};
+use crate::AuthScheme;
+use crate::BuiltinProvider;
+use crate::CredentialSource;
+use crate::ModelCatalog;
+use crate::ModelInfo;
+use crate::ProviderCapabilities;
+use crate::ProviderDefinition;
+use crate::ProviderError;
+use crate::ProviderEventStream;
+use crate::ProviderSession;
+use crate::ProviderSessionFactory;
+use crate::RegisteredProvider;
+use crate::Request;
+use crate::StaticCredentialSource;
+use crate::WireApi;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -194,6 +204,7 @@ where
         request: Request<'_>,
         stream: bool,
     ) -> Result<reqwest::Response, ProviderError> {
+        let session = request.provider_request_options.session.clone();
         let request = model::AnthropicRequest::try_from(request)?;
         let mut body = serde_json::to_value(request).map_err(ProviderError::Serialize)?;
         if stream {
@@ -206,7 +217,11 @@ where
                 self.definition
                     .request_url_with_auth_for_path("v1/messages", &credentials)?,
             )
-            .headers(self.definition.build_headers(&credentials)?)
+            .headers(self.definition.build_headers_for_session(
+                &credentials,
+                Some(&session),
+                None,
+            )?)
             .json(&body)
             .send()
             .await

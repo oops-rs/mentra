@@ -4,11 +4,21 @@ use std::sync::Arc;
 pub(crate) mod model;
 pub(crate) mod sse;
 
-use crate::{
-    AuthScheme, BuiltinProvider, CredentialSource, ModelCatalog, ModelInfo, ProviderCapabilities,
-    ProviderDefinition, ProviderError, ProviderEventStream, ProviderSession,
-    ProviderSessionFactory, RegisteredProvider, Request, StaticCredentialSource, WireApi,
-};
+use crate::AuthScheme;
+use crate::BuiltinProvider;
+use crate::CredentialSource;
+use crate::ModelCatalog;
+use crate::ModelInfo;
+use crate::ProviderCapabilities;
+use crate::ProviderDefinition;
+use crate::ProviderError;
+use crate::ProviderEventStream;
+use crate::ProviderSession;
+use crate::ProviderSessionFactory;
+use crate::RegisteredProvider;
+use crate::Request;
+use crate::StaticCredentialSource;
+use crate::WireApi;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
 
@@ -168,6 +178,7 @@ where
     C: CredentialSource + 'static,
 {
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let session = request.provider_request_options.session.clone();
         let model_name = request.model.to_string();
         let request = model::GeminiGenerateContentRequest::try_from(request)?;
         let credentials = self.credential_source.credentials().await?;
@@ -180,7 +191,11 @@ where
                 ),
                 &credentials,
             )?)
-            .headers(self.definition.build_headers(&credentials)?)
+            .headers(self.definition.build_headers_for_session(
+                &credentials,
+                Some(&session),
+                None,
+            )?)
             .query(&[("alt", "sse")])
             .json(&request)
             .send()

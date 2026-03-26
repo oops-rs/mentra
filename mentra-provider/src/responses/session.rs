@@ -5,17 +5,24 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use http::{HeaderMap, HeaderValue};
+use http::HeaderMap;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use url::Url;
 
-use crate::{
-    CredentialSource, ModelInfo, ProviderCredentials, ProviderDefinition, ProviderError,
-    ProviderEventStream, ProviderSession, Request, Response, SessionRequestOptions,
-};
+use crate::CredentialSource;
+use crate::ModelInfo;
+use crate::ProviderCredentials;
+use crate::ProviderDefinition;
+use crate::ProviderError;
+use crate::ProviderEventStream;
+use crate::ProviderSession;
+use crate::Request;
+use crate::Response;
+use crate::SessionRequestOptions;
 
-use super::model::{ResponsesModelsPage, ResponsesRequest};
+use super::model::ResponsesModelsPage;
+use super::model::ResponsesRequest;
 use super::sse::spawn_event_stream;
 
 /// Session-scoped Responses transport state.
@@ -149,39 +156,11 @@ where
         credentials: &ProviderCredentials,
         session: Option<&SessionRequestOptions>,
     ) -> Result<HeaderMap, ProviderError> {
-        let mut headers = self.definition.build_headers(credentials)?;
-        if let Some(turn_state) = session
-            .and_then(|session| session.sticky_turn_state.as_deref())
-            .or_else(|| self.state.turn_state.get().map(String::as_str))
-            && let Ok(value) = HeaderValue::from_str(turn_state)
-        {
-            headers.insert("x-mentra-turn-state", value.clone());
-            headers.insert("x-codex-turn-state", value);
-        }
-        if let Some(value) = session.and_then(|session| session.turn_metadata.as_deref())
-            && let Ok(value) = HeaderValue::from_str(value)
-        {
-            headers.insert("x-mentra-turn-metadata", value.clone());
-            headers.insert("x-codex-turn-metadata", value);
-        }
-        if let Some(value) = session.and_then(|session| session.session_affinity.as_deref())
-            && let Ok(value) = HeaderValue::from_str(value)
-        {
-            headers.insert("x-mentra-session-affinity", value);
-        }
-        if let Some(prefer_connection_reuse) =
-            session.and_then(|session| session.prefer_connection_reuse)
-        {
-            headers.insert(
-                "x-mentra-connection-reuse",
-                HeaderValue::from_static(if prefer_connection_reuse {
-                    "prefer-reuse"
-                } else {
-                    "prefer-fresh"
-                }),
-            );
-        }
-        Ok(headers)
+        self.definition.build_headers_for_session(
+            credentials,
+            session,
+            self.state.turn_state.get().map(String::as_str),
+        )
     }
 
     pub fn set_turn_state(&self, turn_state: impl Into<String>) -> bool {
@@ -230,6 +209,7 @@ where
             .display_name
             .as_deref()
             .unwrap_or(self.definition.descriptor.id.as_str());
+        let session = request.provider_request_options.session.clone();
         let request = ResponsesRequest::try_from_request(request, provider_name)?;
         let credentials = self.credential_source.credentials().await?;
         let response = self
@@ -238,7 +218,7 @@ where
                 self.definition
                     .request_url_with_auth_for_path("v1/responses", &credentials)?,
             )
-            .headers(self.definition.build_headers(&credentials)?)
+            .headers(self.build_websocket_headers_for_session(&credentials, Some(&session))?)
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&request)
             .send()
@@ -283,5 +263,124 @@ where
 {
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
         self.stream_response(request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::collections::BTreeMap;
+    use std::io::Read;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
+
+    use super::*;
+    use crate::ProviderRequestOptions;
+    use crate::StaticCredentialSource;
+    use crate::responses::ResponsesProvider;
+
+    fn spawn_single_response_server(
+        response_body: &'static str,
+    ) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("read listener addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = Vec::new();
+            let mut temp = [0_u8; 1024];
+            let mut header_end = None;
+            let mut content_length = 0_usize;
+
+            loop {
+                let read = stream.read(&mut temp).expect("read request");
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&temp[..read]);
+                if header_end.is_none()
+                    && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let end = index + 4;
+                    header_end = Some(end);
+                    let headers = String::from_utf8_lossy(&buffer[..end]);
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then(|| {
+                                value.trim().parse::<usize>().expect("parse content-length")
+                            })
+                        })
+                        .unwrap_or_default();
+                }
+                if let Some(end) = header_end
+                    && buffer.len() >= end + content_length
+                {
+                    break;
+                }
+            }
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            String::from_utf8(buffer).expect("request should be utf8")
+        });
+
+        (format!("http://{addr}/"), handle)
+    }
+
+    #[tokio::test]
+    async fn stream_response_honors_session_request_options_on_http_path() {
+        let sse_body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n";
+        let (base_url, handle) = spawn_single_response_server(sse_body);
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+        session.set_turn_state("sticky-turn-state");
+
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: Some(Cow::Borrowed("system")),
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                session: SessionRequestOptions {
+                    sticky_turn_state: None,
+                    turn_metadata: Some("{\"turn_id\":\"turn-123\"}".to_string()),
+                    prefer_connection_reuse: Some(true),
+                    session_affinity: Some("session-affinity-123".to_string()),
+                },
+                ..ProviderRequestOptions::default()
+            },
+        };
+
+        let _stream = session
+            .stream_response(request)
+            .await
+            .expect("stream response should succeed");
+
+        let captured = handle.join().expect("server should capture request");
+        assert!(captured.contains("x-codex-turn-state: sticky-turn-state\r\n"));
+        assert!(captured.contains("x-codex-turn-metadata: {\"turn_id\":\"turn-123\"}\r\n"));
+        assert!(captured.contains("x-mentra-turn-metadata: {\"turn_id\":\"turn-123\"}\r\n"));
+        assert!(captured.contains("x-mentra-session-affinity: session-affinity-123\r\n"));
+        assert!(captured.contains("x-mentra-connection-reuse: prefer-reuse\r\n"));
     }
 }
