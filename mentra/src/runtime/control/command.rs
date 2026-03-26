@@ -301,7 +301,7 @@ mod tests {
 
     #[cfg(windows)]
     fn stdout_and_stderr_command() -> String {
-        "powershell -NoProfile -Command \"$stdout='a' * 32; $stderr='b' * 32; [Console]::Out.Write($stdout); [Console]::Error.Write($stderr)\"".to_string()
+        "powershell.exe -NoProfile -Command \"$stdout='a' * 32; $stderr='b' * 32; [Console]::Out.Write($stdout); [Console]::Error.Write($stderr)\"".to_string()
     }
 
     #[cfg(unix)]
@@ -322,7 +322,27 @@ mod tests {
 
     #[cfg(windows)]
     fn timeout_command() -> String {
-        "powershell -NoProfile -Command \"Start-Sleep -Seconds 1\"".to_string()
+        "powershell.exe -NoProfile -Command \"Start-Sleep -Seconds 1\"".to_string()
+    }
+
+    #[cfg(unix)]
+    fn minimal_shell_env() -> Vec<(String, String)> {
+        vec![(
+            "PATH".to_string(),
+            std::env::var("PATH").expect("path available"),
+        )]
+    }
+
+    #[cfg(windows)]
+    fn minimal_shell_env() -> Vec<(String, String)> {
+        ["PATH", "PATHEXT", "SystemRoot", "COMSPEC", "TEMP", "TMP"]
+            .into_iter()
+            .filter_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| (name.to_string(), value))
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -334,10 +354,7 @@ mod tests {
                 },
                 cwd: std::env::temp_dir(),
                 timeout: Duration::from_secs(5),
-                env: vec![(
-                    "PATH".to_string(),
-                    std::env::var("PATH").expect("path available"),
-                )],
+                env: minimal_shell_env(),
                 max_output_bytes_per_stream: 8,
             })
             .await
@@ -358,10 +375,7 @@ mod tests {
                 },
                 cwd: std::env::temp_dir(),
                 timeout: Duration::from_secs(5),
-                env: vec![(
-                    "PATH".to_string(),
-                    std::env::var("PATH").expect("path available"),
-                )],
+                env: minimal_shell_env(),
                 max_output_bytes_per_stream: 1024,
             })
             .await
@@ -379,10 +393,7 @@ mod tests {
                 },
                 cwd: std::env::temp_dir(),
                 timeout: Duration::from_millis(50),
-                env: vec![(
-                    "PATH".to_string(),
-                    std::env::var("PATH").expect("path available"),
-                )],
+                env: minimal_shell_env(),
                 max_output_bytes_per_stream: 1024,
             })
             .await

@@ -27,12 +27,32 @@ impl Default for RuntimePolicy {
             allowed_working_roots: Vec::new(),
             allowed_read_roots: Vec::new(),
             allowed_write_roots: Vec::new(),
-            allowed_env_vars: vec!["PATH".to_string()],
+            allowed_env_vars: default_allowed_env_vars(),
             background_task_limit: Some(8),
             default_command_timeout: Duration::from_secs(30),
             max_command_timeout: Duration::from_secs(30),
             max_output_bytes_per_stream: 64 * 1024,
         }
+    }
+}
+
+fn default_allowed_env_vars() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let mut vars = vec!["PATH".to_string()];
+        vars.extend([
+            "PATHEXT".to_string(),
+            "SystemRoot".to_string(),
+            "COMSPEC".to_string(),
+            "TEMP".to_string(),
+            "TMP".to_string(),
+        ]);
+        vars
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec!["PATH".to_string()]
     }
 }
 

@@ -753,10 +753,10 @@ impl WorkspaceEditor {
             if rendered.is_empty() {
                 ".".to_string()
             } else {
-                rendered
+                normalize_display_path(rendered)
             }
         } else {
-            path.display().to_string()
+            normalize_display_path(path.display().to_string())
         }
     }
 
@@ -767,10 +767,14 @@ impl WorkspaceEditor {
                 .unwrap_or_else(|| ".".to_string())
         } else {
             path.strip_prefix(root)
-                .map(|relative| relative.display().to_string())
+                .map(|relative| normalize_display_path(relative.display().to_string()))
                 .unwrap_or_else(|_| self.display_path(path))
         }
     }
+}
+
+fn normalize_display_path(path: String) -> String {
+    path.replace('\\', "/")
 }
 
 fn normalize_path(path: PathBuf) -> Result<PathBuf, String> {

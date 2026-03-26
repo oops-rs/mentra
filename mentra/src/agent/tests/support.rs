@@ -131,7 +131,7 @@ pub(super) fn background_success_command(output: &str, delay_ms: u64) -> String 
     #[cfg(windows)]
     {
         format!(
-            "powershell -NoProfile -Command \"Start-Sleep -Milliseconds {delay_ms}; [Console]::Out.Write('{}')\"",
+            "powershell.exe -NoProfile -Command \"Start-Sleep -Milliseconds {delay_ms}; [Console]::Out.Write('{}')\"",
             powershell_single_quoted(output)
         )
     }
@@ -150,7 +150,7 @@ pub(super) fn background_failure_command(stderr: &str, exit_code: i32, delay_ms:
     #[cfg(windows)]
     {
         format!(
-            "powershell -NoProfile -Command \"Start-Sleep -Milliseconds {delay_ms}; [Console]::Error.Write('{}'); exit {exit_code}\"",
+            "powershell.exe -NoProfile -Command \"Start-Sleep -Milliseconds {delay_ms}; [Console]::Error.Write('{}'); exit {exit_code}\"",
             powershell_single_quoted(stderr)
         )
     }
