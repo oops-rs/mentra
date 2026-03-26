@@ -17,7 +17,7 @@ pub(super) async fn execute_team_spawn(agent: &mut Agent, call: ToolCall) -> Con
         Err(error) => {
             return ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Invalid team_spawn input: {error}"),
+                content: format!("Invalid team_spawn input: {error}").into(),
                 is_error: true,
             };
         }
@@ -32,12 +32,13 @@ pub(super) async fn execute_team_spawn(agent: &mut Agent, call: ToolCall) -> Con
             content: format!(
                 "Spawned persistent teammate '{}' (role: {}, status: {})",
                 teammate.name, teammate.role, teammate.status
-            ),
+            )
+            .into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to spawn teammate: {error}"),
+            content: format!("Failed to spawn teammate: {error}").into(),
             is_error: true,
         },
     }
@@ -49,7 +50,7 @@ pub(super) fn execute_team_send(agent: &mut Agent, call: ToolCall) -> ContentBlo
         Err(error) => {
             return ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Invalid team_send input: {error}"),
+                content: format!("Invalid team_send input: {error}").into(),
                 is_error: true,
             };
         }
@@ -58,12 +59,12 @@ pub(super) fn execute_team_send(agent: &mut Agent, call: ToolCall) -> ContentBlo
     match agent.send_team_message(&input.to, input.content) {
         Ok(dispatch) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Sent message to '{}'", dispatch.teammate),
+            content: format!("Sent message to '{}'", dispatch.teammate).into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to send team message: {error}"),
+            content: format!("Failed to send team message: {error}").into(),
             is_error: true,
         },
     }
@@ -75,12 +76,12 @@ pub(super) fn execute_team_read_inbox(agent: &mut Agent, call: ToolCall) -> Cont
     }) {
         Ok(content) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content,
+            content: content.into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to read team inbox: {error}"),
+            content: format!("Failed to read team inbox: {error}").into(),
             is_error: true,
         },
     }
@@ -92,7 +93,7 @@ pub(super) fn execute_team_broadcast(agent: &mut Agent, call: ToolCall) -> Conte
         Err(error) => {
             return ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Invalid broadcast input: {error}"),
+                content: format!("Invalid broadcast input: {error}").into(),
                 is_error: true,
             };
         }
@@ -109,12 +110,13 @@ pub(super) fn execute_team_broadcast(agent: &mut Agent, call: ToolCall) -> Conte
                     .map(|dispatch| dispatch.teammate)
                     .collect::<Vec<_>>()
                     .join(", ")
-            ),
+            )
+            .into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to broadcast team message: {error}"),
+            content: format!("Failed to broadcast team message: {error}").into(),
             is_error: true,
         },
     }
@@ -126,7 +128,7 @@ pub(super) fn execute_team_request(agent: &mut Agent, call: ToolCall) -> Content
         Err(error) => {
             return ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Invalid team_request input: {error}"),
+                content: format!("Invalid team_request input: {error}").into(),
                 is_error: true,
             };
         }
@@ -138,12 +140,13 @@ pub(super) fn execute_team_request(agent: &mut Agent, call: ToolCall) -> Content
             content: format!(
                 "Created team request '{}' for '{}' using protocol '{}'",
                 request.request_id, request.to, request.protocol
-            ),
+            )
+            .into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to create team request: {error}"),
+            content: format!("Failed to create team request: {error}").into(),
             is_error: true,
         },
     }
@@ -155,7 +158,7 @@ pub(super) fn execute_team_respond(agent: &mut Agent, call: ToolCall) -> Content
         Err(error) => {
             return ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Invalid team_respond input: {error}"),
+                content: format!("Invalid team_respond input: {error}").into(),
                 is_error: true,
             };
         }
@@ -173,12 +176,13 @@ pub(super) fn execute_team_respond(agent: &mut Agent, call: ToolCall) -> Content
                 },
                 request.request_id,
                 request.protocol
-            ),
+            )
+            .into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to respond to team request: {error}"),
+            content: format!("Failed to respond to team request: {error}").into(),
             is_error: true,
         },
     }
@@ -190,7 +194,7 @@ pub(super) fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> C
         Err(error) => {
             return ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Invalid team_list_requests input: {error}"),
+                content: format!("Invalid team_list_requests input: {error}").into(),
                 is_error: true,
             };
         }
@@ -203,7 +207,7 @@ pub(super) fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> C
         Some(value) => {
             return ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Invalid team_list_requests status '{value}'"),
+                content: format!("Invalid team_list_requests status '{value}'").into(),
                 is_error: true,
             };
         }
@@ -217,7 +221,7 @@ pub(super) fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> C
         Some(value) => {
             return ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Invalid team_list_requests direction '{value}'"),
+                content: format!("Invalid team_list_requests direction '{value}'").into(),
                 is_error: true,
             };
         }
@@ -227,18 +231,18 @@ pub(super) fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> C
         Ok(requests) => match serde_json::to_string_pretty(&requests) {
             Ok(content) => ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content,
+                content: content.into(),
                 is_error: false,
             },
             Err(error) => ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Failed to serialize team requests: {error}"),
+                content: format!("Failed to serialize team requests: {error}").into(),
                 is_error: true,
             },
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to list team requests: {error}"),
+            content: format!("Failed to list team requests: {error}").into(),
             is_error: true,
         },
     }

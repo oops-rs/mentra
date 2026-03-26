@@ -80,12 +80,21 @@ impl PendingAssistantTurn {
                     (
                         PendingContentBlock::ToolResult { content, .. },
                         ContentBlockDelta::ToolResultContent(delta),
-                    ) => content.push_str(&delta),
+                    ) => match (content, delta) {
+                        (mentra_provider::ToolResultContent::Text(content), mentra_provider::ToolResultContent::Text(delta)) => {
+                            content.push_str(&delta);
+                        }
+                        (content, delta) => {
+                            *content = delta;
+                        }
+                    },
                     (block, delta) => {
-                        return Err(RuntimeError::MalformedProviderEvent(format!(
-                            "delta {delta:?} is not valid for block {}",
-                            block.kind_name()
-                        )));
+                        if !block.apply_hosted_delta(&delta) {
+                            return Err(RuntimeError::MalformedProviderEvent(format!(
+                                "delta {delta:?} is not valid for block {}",
+                                block.kind_name()
+                            )));
+                        }
                     }
                 }
             }

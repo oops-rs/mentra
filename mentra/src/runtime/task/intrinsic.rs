@@ -181,18 +181,18 @@ pub(crate) fn execute_intrinsic(agent: &mut Agent, call: ToolCall) -> Option<Con
         Ok(content) => match agent.refresh_tasks_from_disk() {
             Ok(()) => ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content,
+                content: content.into(),
                 is_error: false,
             },
             Err(error) => ContentBlock::ToolResult {
                 tool_use_id: call.id,
-                content: format!("Task refresh failed: {error}"),
+                content: format!("Task refresh failed: {error}").into(),
                 is_error: true,
             },
         },
         Err(content) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content,
+            content: content.into(),
             is_error: true,
         },
     })
@@ -204,9 +204,9 @@ fn content_block_to_result(block: ContentBlock) -> ToolResult {
             content, is_error, ..
         } => {
             if is_error {
-                Err(content)
+                Err(content.to_display_string())
             } else {
-                Ok(content)
+                Ok(content.to_display_string())
             }
         }
         _ => Err("Task intrinsic returned an unexpected content block".to_string()),

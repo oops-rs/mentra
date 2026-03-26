@@ -510,7 +510,10 @@ fn message_to_lines(message: &Message) -> Vec<String> {
             ContentBlock::Text { text } => Some(text.trim().to_string()),
             ContentBlock::ToolUse { name, input, .. } => Some(format!("tool use {name} {input}")),
             ContentBlock::ToolResult { content, .. } => Some(format!("tool result {content}")),
-            ContentBlock::Image { .. } => None,
+            ContentBlock::Image { .. }
+            | ContentBlock::HostedToolSearch { .. }
+            | ContentBlock::HostedWebSearch { .. }
+            | ContentBlock::ImageGeneration { .. } => None,
         })
         .filter(|text| !text.is_empty())
         .collect()

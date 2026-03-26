@@ -219,6 +219,14 @@ pub mod openai {
                 supports_tool_calls: true,
                 supports_images: true,
                 supports_history_compaction: false,
+                supports_deferred_tools: false,
+                supports_hosted_tool_search: false,
+                supports_hosted_web_search: false,
+                supports_image_generation: false,
+                supports_reasoning_effort: false,
+                reports_reasoning_tokens: false,
+                reports_thoughts_tokens: false,
+                supports_structured_tool_results: false,
             };
             definition.base_url = Some(base_url.to_string());
             definition.headers = Some(HashMap::new());

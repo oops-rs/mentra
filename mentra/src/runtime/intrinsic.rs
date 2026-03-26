@@ -174,9 +174,9 @@ fn content_block_to_result(block: ContentBlock) -> ToolResult {
             content, is_error, ..
         } => {
             if is_error {
-                Err(content)
+                Err(content.to_display_string())
             } else {
-                Ok(content)
+                Ok(content.to_display_string())
             }
         }
         _ => Err("Runtime intrinsic returned an unexpected content block".to_string()),
@@ -187,7 +187,7 @@ fn execute_idle(agent: &mut Agent, call: ToolCall) -> ContentBlock {
     agent.request_idle();
     ContentBlock::ToolResult {
         tool_use_id: call.id,
-        content: "Yielding to the teammate idle loop.".to_string(),
+        content: "Yielding to the teammate idle loop.".into(),
         is_error: false,
     }
 }
@@ -196,7 +196,7 @@ fn execute_memory_pin(ctx: ToolContext<'_>, call: ToolCall) -> ContentBlock {
     if !ctx.agent.config().memory.write_tools_enabled {
         return ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: "Memory write tools are disabled for this agent.".to_string(),
+            content: "Memory write tools are disabled for this agent.".into(),
             is_error: true,
         };
     }
@@ -210,7 +210,7 @@ fn execute_memory_pin(ctx: ToolContext<'_>, call: ToolCall) -> ContentBlock {
     else {
         return ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: "Invalid memory_pin input: content is required.".to_string(),
+            content: "Invalid memory_pin input: content is required.".into(),
             is_error: true,
         };
     };
@@ -222,12 +222,12 @@ fn execute_memory_pin(ctx: ToolContext<'_>, call: ToolCall) -> ContentBlock {
     {
         Ok(record) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Pinned memory {}.", record.record_id),
+            content: format!("Pinned memory {}.", record.record_id).into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to pin memory: {error}"),
+            content: format!("Failed to pin memory: {error}").into(),
             is_error: true,
         },
     }
@@ -237,7 +237,7 @@ fn execute_memory_forget(ctx: ToolContext<'_>, call: ToolCall) -> ContentBlock {
     if !ctx.agent.config().memory.write_tools_enabled {
         return ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: "Memory write tools are disabled for this agent.".to_string(),
+            content: "Memory write tools are disabled for this agent.".into(),
             is_error: true,
         };
     }
@@ -251,7 +251,7 @@ fn execute_memory_forget(ctx: ToolContext<'_>, call: ToolCall) -> ContentBlock {
     else {
         return ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: "Invalid memory_forget input: record_id is required.".to_string(),
+            content: "Invalid memory_forget input: record_id is required.".into(),
             is_error: true,
         };
     };
@@ -259,17 +259,17 @@ fn execute_memory_forget(ctx: ToolContext<'_>, call: ToolCall) -> ContentBlock {
     match ctx.agent.memory_engine().forget(ctx.agent.id(), record_id) {
         Ok(true) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Forgot memory {record_id}."),
+            content: format!("Forgot memory {record_id}.").into(),
             is_error: false,
         },
         Ok(false) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Memory record {record_id} was not found for this agent."),
+            content: format!("Memory record {record_id} was not found for this agent.").into(),
             is_error: true,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Failed to forget memory: {error}"),
+            content: format!("Failed to forget memory: {error}").into(),
             is_error: true,
         },
     }
@@ -285,7 +285,7 @@ async fn execute_memory_search(ctx: ToolContext<'_>, call: ToolCall) -> ContentB
     else {
         return ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: "Invalid memory_search input: query is required.".to_string(),
+            content: "Invalid memory_search input: query is required.".into(),
             is_error: true,
         };
     };
@@ -328,13 +328,14 @@ async fn execute_memory_search(ctx: ToolContext<'_>, call: ToolCall) -> ContentB
             ContentBlock::ToolResult {
                 tool_use_id: call.id,
                 content: serde_json::to_string_pretty(&results)
-                    .unwrap_or_else(|_| "[]".to_string()),
+                    .unwrap_or_else(|_| "[]".to_string())
+                    .into(),
                 is_error: false,
             }
         }
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Memory search failed: {error}"),
+            content: format!("Memory search failed: {error}").into(),
             is_error: true,
         },
     }
@@ -353,18 +354,19 @@ async fn execute_compact(agent: &mut Agent, call: ToolCall) -> ContentBlock {
             content: format!(
                 "Context compacted. Transcript saved to {}",
                 details.transcript_path.display()
-            ),
+            )
+            .into(),
             is_error: false,
         },
         Ok(None) => ContentBlock::ToolResult {
             tool_use_id: call.id,
             content: "Context compaction skipped because there was no older history to summarize."
-                .to_string(),
+                .into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Context compaction failed: {error}"),
+            content: format!("Context compaction failed: {error}").into(),
             is_error: true,
         },
     }
@@ -379,7 +381,7 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
                 Err(error) => {
                     return ContentBlock::ToolResult {
                         tool_use_id: call.id,
-                        content: format!("Failed to spawn subagent: {error}"),
+                        content: format!("Failed to spawn subagent: {error}").into(),
                         is_error: true,
                     };
                 }
@@ -444,14 +446,14 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
                     if let Err(error) = agent.refresh_tasks_from_disk() {
                         return ContentBlock::ToolResult {
                             tool_use_id: call.id,
-                            content: format!("Task refresh failed: {error}"),
+                            content: format!("Task refresh failed: {error}").into(),
                             is_error: true,
                         };
                     }
 
                     ContentBlock::ToolResult {
                         tool_use_id: call.id,
-                        content: result_summary,
+                        content: result_summary.into(),
                         is_error: false,
                     }
                 }
@@ -483,7 +485,7 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
 
                     ContentBlock::ToolResult {
                         tool_use_id: call.id,
-                        content: format!("Subagent failed: {error_text}"),
+                        content: format!("Subagent failed: {error_text}").into(),
                         is_error: true,
                     }
                 }
@@ -491,7 +493,7 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
         }
         Err(content) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content,
+            content: content.into(),
             is_error: true,
         },
     }

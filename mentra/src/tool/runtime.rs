@@ -133,7 +133,7 @@ impl ToolRuntime {
     fn emit_tool_runtime_finished(&self, call: &ToolCall, result: &ContentBlock) {
         let is_error = matches!(result, ContentBlock::ToolResult { is_error: true, .. });
         let output_preview = match result {
-            ContentBlock::ToolResult { content, .. } => content.clone(),
+            ContentBlock::ToolResult { content, .. } => content.to_display_string(),
             _ => String::new(),
         };
         let error = is_error.then_some(output_preview.clone());
@@ -198,7 +198,7 @@ impl ToolRuntime {
     fn unavailable_tool_result(&self, call: ToolCall) -> ContentBlock {
         ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Tool '{}' is not available for this agent", call.name),
+            content: format!("Tool '{}' is not available for this agent", call.name).into(),
             is_error: true,
         }
     }
@@ -206,7 +206,7 @@ impl ToolRuntime {
     fn blocked_tool_result(&self, call: &ToolCall, error: RuntimeError) -> ContentBlock {
         ContentBlock::ToolResult {
             tool_use_id: call.id.clone(),
-            content: format!("Tool execution blocked: {error}"),
+            content: format!("Tool execution blocked: {error}").into(),
             is_error: true,
         }
     }
@@ -229,7 +229,7 @@ impl ToolRuntime {
 
         ContentBlock::ToolResult {
             tool_use_id: call.id.clone(),
-            content,
+            content: content.into(),
             is_error: true,
         }
     }
@@ -238,12 +238,12 @@ impl ToolRuntime {
         match result {
             Ok(content) => ContentBlock::ToolResult {
                 tool_use_id: call.id.clone(),
-                content,
+                content: content.into(),
                 is_error: false,
             },
             Err(content) => ContentBlock::ToolResult {
                 tool_use_id: call.id.clone(),
-                content,
+                content: content.into(),
                 is_error: true,
             },
         }
@@ -433,7 +433,7 @@ impl ToolRuntime {
             let Some((tool, spec)) = self.registered_tool(&call.name) else {
                 let result = ContentBlock::ToolResult {
                     tool_use_id: call.id.clone(),
-                    content: "Tool not found".to_string(),
+                    content: "Tool not found".into(),
                     is_error: true,
                 };
                 agent.emit_event(AgentEvent::ToolExecutionFinished {
@@ -517,7 +517,7 @@ impl ToolRuntime {
         let Some((tool, spec)) = self.registered_tool(&call.name) else {
             let result = ContentBlock::ToolResult {
                 tool_use_id: call.id.clone(),
-                content: "Tool not found".to_string(),
+                content: "Tool not found".into(),
                 is_error: true,
             };
             agent.emit_event(AgentEvent::ToolExecutionFinished {

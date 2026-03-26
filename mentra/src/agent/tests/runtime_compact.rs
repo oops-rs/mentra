@@ -62,7 +62,7 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "tool-1".to_string(),
-            content: long_output.clone(),
+            content: long_output.clone().into(),
             is_error: false,
         })
     );
@@ -301,7 +301,7 @@ fn tool_result_contents(request: &Request<'_>) -> Vec<String> {
         .iter()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
-            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            ContentBlock::ToolResult { content, .. } => Some(content.to_display_string()),
             _ => None,
         })
         .collect()

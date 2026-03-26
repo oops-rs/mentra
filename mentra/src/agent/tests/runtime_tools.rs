@@ -103,7 +103,7 @@ async fn send_tool_use_turn_executes_tool_and_commits_follow_up_response() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "tool-1".to_string(),
-            content: "tool output".to_string(),
+            content: "tool output".into(),
             is_error: false,
         })
     );
@@ -195,7 +195,7 @@ async fn tool_execution_error_is_wrapped_and_loop_continues() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "tool-1".to_string(),
-            content: "tool failed".to_string(),
+            content: "tool failed".into(),
             is_error: true,
         })
     );
@@ -212,7 +212,7 @@ async fn tool_execution_error_is_wrapped_and_loop_continues() {
             tool_use_id,
             content,
             is_error: true,
-        } if tool_use_id == "tool-1" && content == "tool failed"
+        } if tool_use_id == "tool-1" && content.to_display_string() == "tool failed"
     ));
 }
 
@@ -333,7 +333,8 @@ async fn background_run_tool_starts_task_and_continues_the_turn() {
             tool_use_id: "tool-bg".to_string(),
             content: format!(
                 "Started background task bg-1 in {cwd} for `sleep 0.2; printf bg-done`"
-            ),
+            )
+            .into(),
             is_error: false,
         })
     );
@@ -524,12 +525,14 @@ async fn check_background_reports_single_task_and_lists_all_tasks() {
             content: vec![
                 ContentBlock::ToolResult {
                     tool_use_id: "check-one".to_string(),
-                    content: format!("[finished] cwd={cwd}\nsleep 0.05; printf bg-done\nbg-done"),
+                    content: format!("[finished] cwd={cwd}\nsleep 0.05; printf bg-done\nbg-done")
+                        .into(),
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "check-all".to_string(),
-                    content: format!("bg-1: [finished] cwd={cwd} sleep 0.05; printf bg-done"),
+                    content: format!("bg-1: [finished] cwd={cwd} sleep 0.05; printf bg-done")
+                        .into(),
                     is_error: false,
                 },
             ],
@@ -801,7 +804,7 @@ async fn files_tool_reads_numbered_lines() {
         agent.history()[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "files-read".to_string(),
-            content: "read note.txt\nL2: beta".to_string(),
+            content: "read note.txt\nL2: beta".into(),
             is_error: false,
         })
     );
@@ -2193,7 +2196,7 @@ async fn registered_skills_are_exposed_and_load_skill_returns_wrapped_content() 
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "tool-skill".to_string(),
             content: "<skill name=\"git\">\nUse feature branches.\nRun tests first.\n</skill>"
-                .to_string(),
+                .into(),
             is_error: false,
         })
     );
@@ -2299,7 +2302,7 @@ async fn task_tool_runs_child_with_isolated_history_and_filtered_tools() {
         *message
             == Message::user(ContentBlock::ToolResult {
                 tool_use_id: "tool-parent".to_string(),
-                content: "child summary".to_string(),
+                content: "child summary".into(),
                 is_error: false,
             })
     }));
@@ -2494,7 +2497,7 @@ async fn task_tool_wraps_child_failure_and_parent_continues() {
             == Message::user(ContentBlock::ToolResult {
                 tool_use_id: "tool-parent".to_string(),
                 content: "Subagent failed: failed to stream provider response: malformed provider stream: boom"
-                    .to_string(),
+                    .into(),
                 is_error: true,
             })
     }));
@@ -2544,7 +2547,7 @@ async fn child_rejects_nested_task_requests_without_recursing() {
         *message
             == Message::user(ContentBlock::ToolResult {
                 tool_use_id: "parent-task".to_string(),
-                content: "child recovered".to_string(),
+                content: "child recovered".into(),
                 is_error: false,
             })
     }));
@@ -2557,7 +2560,7 @@ async fn child_rejects_nested_task_requests_without_recursing() {
         requests[2].messages[2],
         Message::user(ContentBlock::ToolResult {
             tool_use_id: "child-task".to_string(),
-            content: "Tool 'task' is not available for this agent".to_string(),
+            content: "Tool 'task' is not available for this agent".into(),
             is_error: true,
         })
     );
@@ -2603,7 +2606,7 @@ async fn task_tool_returns_error_when_child_hits_round_limit() {
         *message
             == Message::user(ContentBlock::ToolResult {
                 tool_use_id: "parent-task".to_string(),
-                content: "Subagent failed: max rounds exceeded at 30".to_string(),
+                content: "Subagent failed: max rounds exceeded at 30".into(),
                 is_error: true,
             })
     }));
@@ -3288,11 +3291,12 @@ async fn team_list_requests_tool_filters_visible_requests() {
         .iter()
         .flat_map(|message| message.content.iter())
         .find_map(|block| match block {
-            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            ContentBlock::ToolResult { content, .. } => Some(content.to_display_string()),
             _ => None,
         })
         .expect("team_list_requests tool result");
-    let listed: serde_json::Value = serde_json::from_str(&tool_result).expect("parse tool output");
+    let listed: serde_json::Value =
+        serde_json::from_str(&tool_result).expect("parse tool output");
     let listed = listed.as_array().expect("array");
     assert_eq!(listed.len(), 1);
     assert_eq!(

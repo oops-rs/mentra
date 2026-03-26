@@ -1,4 +1,10 @@
-use crate::{ContentBlock, ImageSource, error::RuntimeError, provider::ContentBlockStart};
+use crate::{
+    ContentBlock, ImageSource, error::RuntimeError, provider::ContentBlockStart,
+};
+use mentra_provider::{
+    ImageGenerationCall, ImageGenerationResult, HostedToolSearchCall, HostedWebSearchCall,
+    ToolResultContent, WebSearchAction,
+};
 
 use super::PendingToolUseSummary;
 
@@ -20,8 +26,20 @@ pub(super) enum PendingContentBlock {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ToolResultContent,
         is_error: bool,
+        complete: bool,
+    },
+    HostedToolSearch {
+        call: HostedToolSearchCall,
+        complete: bool,
+    },
+    HostedWebSearch {
+        call: HostedWebSearchCall,
+        complete: bool,
+    },
+    ImageGeneration {
+        call: ImageGenerationCall,
         complete: bool,
     },
 }
@@ -32,7 +50,10 @@ impl PendingContentBlock {
             PendingContentBlock::Text { complete, .. }
             | PendingContentBlock::Image { complete, .. }
             | PendingContentBlock::ToolUse { complete, .. }
-            | PendingContentBlock::ToolResult { complete, .. } => *complete,
+            | PendingContentBlock::ToolResult { complete, .. }
+            | PendingContentBlock::HostedToolSearch { complete, .. }
+            | PendingContentBlock::HostedWebSearch { complete, .. }
+            | PendingContentBlock::ImageGeneration { complete, .. } => *complete,
         }
     }
 
@@ -41,7 +62,10 @@ impl PendingContentBlock {
             PendingContentBlock::Text { complete, .. }
             | PendingContentBlock::Image { complete, .. }
             | PendingContentBlock::ToolUse { complete, .. }
-            | PendingContentBlock::ToolResult { complete, .. } => *complete = true,
+            | PendingContentBlock::ToolResult { complete, .. }
+            | PendingContentBlock::HostedToolSearch { complete, .. }
+            | PendingContentBlock::HostedWebSearch { complete, .. }
+            | PendingContentBlock::ImageGeneration { complete, .. } => *complete = true,
         }
     }
 
@@ -77,6 +101,15 @@ impl PendingContentBlock {
                 content: content.clone(),
                 is_error: *is_error,
             }),
+            PendingContentBlock::HostedToolSearch { call, .. } => {
+                Ok(ContentBlock::HostedToolSearch { call: call.clone() })
+            }
+            PendingContentBlock::HostedWebSearch { call, .. } => {
+                Ok(ContentBlock::HostedWebSearch { call: call.clone() })
+            }
+            PendingContentBlock::ImageGeneration { call, .. } => {
+                Ok(ContentBlock::ImageGeneration { call: call.clone() })
+            }
         }
     }
 
@@ -86,6 +119,9 @@ impl PendingContentBlock {
             PendingContentBlock::Image { .. } => "image",
             PendingContentBlock::ToolUse { .. } => "tool_use",
             PendingContentBlock::ToolResult { .. } => "tool_result",
+            PendingContentBlock::HostedToolSearch { .. } => "hosted_tool_search",
+            PendingContentBlock::HostedWebSearch { .. } => "hosted_web_search",
+            PendingContentBlock::ImageGeneration { .. } => "image_generation",
         }
     }
 
@@ -127,12 +163,107 @@ impl From<ContentBlockStart> for PendingContentBlock {
             ContentBlockStart::ToolResult {
                 tool_use_id,
                 is_error,
+                content,
+                ..
             } => PendingContentBlock::ToolResult {
                 tool_use_id,
-                content: String::new(),
+                content: content.unwrap_or_default(),
                 is_error,
                 complete: false,
             },
+            ContentBlockStart::HostedToolSearch { call } => PendingContentBlock::HostedToolSearch {
+                call,
+                complete: false,
+            },
+            ContentBlockStart::HostedWebSearch { call } => PendingContentBlock::HostedWebSearch {
+                call,
+                complete: false,
+            },
+            ContentBlockStart::ImageGeneration { call } => PendingContentBlock::ImageGeneration {
+                call,
+                complete: false,
+            },
+        }
+    }
+}
+
+impl PendingContentBlock {
+    pub(super) fn apply_hosted_delta(
+        &mut self,
+        delta: &crate::provider::ContentBlockDelta,
+    ) -> bool {
+        match (self, delta) {
+            (
+                PendingContentBlock::HostedToolSearch { call, .. },
+                crate::provider::ContentBlockDelta::HostedToolSearchQuery(query),
+            ) => {
+                call.query = Some(query.clone());
+                true
+            }
+            (
+                PendingContentBlock::HostedToolSearch { call, .. },
+                crate::provider::ContentBlockDelta::HostedToolSearchStatus(status),
+            ) => {
+                call.status = Some(status.clone());
+                true
+            }
+            (
+                PendingContentBlock::HostedWebSearch { call, .. },
+                crate::provider::ContentBlockDelta::HostedWebSearchAction(action),
+            ) => {
+                call.action = Some(match action {
+                    WebSearchAction::Search { query, queries } => WebSearchAction::Search {
+                        query: query.clone(),
+                        queries: queries.clone(),
+                    },
+                    WebSearchAction::OpenPage { url } => WebSearchAction::OpenPage {
+                        url: url.clone(),
+                    },
+                    WebSearchAction::FindInPage { url, pattern } => WebSearchAction::FindInPage {
+                        url: url.clone(),
+                        pattern: pattern.clone(),
+                    },
+                });
+                true
+            }
+            (
+                PendingContentBlock::HostedWebSearch { call, .. },
+                crate::provider::ContentBlockDelta::HostedWebSearchStatus(status),
+            ) => {
+                call.status = Some(status.clone());
+                true
+            }
+            (
+                PendingContentBlock::ImageGeneration { call, .. },
+                crate::provider::ContentBlockDelta::ImageGenerationStatus(status),
+            ) => {
+                call.status = status.clone();
+                true
+            }
+            (
+                PendingContentBlock::ImageGeneration { call, .. },
+                crate::provider::ContentBlockDelta::ImageGenerationRevisedPrompt(prompt),
+            ) => {
+                call.revised_prompt = Some(prompt.clone());
+                true
+            }
+            (
+                PendingContentBlock::ImageGeneration { call, .. },
+                crate::provider::ContentBlockDelta::ImageGenerationResult(result),
+            ) => {
+                call.result = Some(match result {
+                    ImageGenerationResult::Image { source } => ImageGenerationResult::Image {
+                        source: source.clone(),
+                    },
+                    ImageGenerationResult::ArtifactRef { artifact_id } => {
+                        ImageGenerationResult::ArtifactRef {
+                            artifact_id: artifact_id.clone(),
+                        }
+                    }
+                });
+                true
+            }
+            _ => false,
         }
     }
 }

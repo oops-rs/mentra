@@ -129,7 +129,8 @@ async fn tool_authorizer_allows_tool_execution_and_captures_preview() {
 
     assert!(matches!(
         &agent.history()[2].content[0],
-        ContentBlock::ToolResult { content, is_error: false, .. } if content == "ok"
+        ContentBlock::ToolResult { content, is_error: false, .. }
+            if content.to_display_string() == "ok"
     ));
 
     let requests = requests.lock().expect("requests poisoned");
@@ -488,7 +489,7 @@ async fn tools_can_read_registered_app_context() {
     assert!(matches!(
         &agent.history()[2].content[0],
         ContentBlock::ToolResult { content, is_error: false, .. }
-            if content == "configured"
+            if content.to_display_string() == "configured"
     ));
 }
 

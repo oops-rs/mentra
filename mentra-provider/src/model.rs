@@ -111,11 +111,106 @@ impl ToolResultContent {
         Self::Text(value.into())
     }
 
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Text(text) => text.len(),
+            Self::Structured(value) => value.to_string().len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::Text(String::new());
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text(text) => text.as_str(),
+            Self::Structured(_) => panic!("ToolResultContent::as_str requires text content"),
+        }
+    }
+
+    pub fn contains(&self, pattern: &str) -> bool {
+        match self {
+            Self::Text(text) => text.contains(pattern),
+            Self::Structured(value) => value.to_string().contains(pattern),
+        }
+    }
+
+    pub fn starts_with(&self, pattern: &str) -> bool {
+        match self {
+            Self::Text(text) => text.starts_with(pattern),
+            Self::Structured(value) => value.to_string().starts_with(pattern),
+        }
+    }
+
+    pub fn push_str(&mut self, value: &str) {
+        match self {
+            Self::Text(text) => text.push_str(value),
+            Self::Structured(existing) => {
+                let mut text = existing.to_string();
+                text.push_str(value);
+                *self = Self::Text(text);
+            }
+        }
+    }
+
     pub fn to_display_string(&self) -> String {
         match self {
             Self::Text(text) => text.clone(),
             Self::Structured(value) => value.to_string(),
         }
+    }
+}
+
+impl Default for ToolResultContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl From<String> for ToolResultContent {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl Display for ToolResultContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_display_string())
+    }
+}
+
+impl PartialEq<&str> for ToolResultContent {
+    fn eq(&self, other: &&str) -> bool {
+        self.to_display_string() == *other
+    }
+}
+
+impl PartialEq<str> for ToolResultContent {
+    fn eq(&self, other: &str) -> bool {
+        self.to_display_string() == other
+    }
+}
+
+impl PartialEq<ToolResultContent> for &str {
+    fn eq(&self, other: &ToolResultContent) -> bool {
+        *self == other.to_display_string()
+    }
+}
+
+impl PartialEq<ToolResultContent> for str {
+    fn eq(&self, other: &ToolResultContent) -> bool {
+        self == other.to_display_string()
+    }
+}
+
+impl From<&str> for ToolResultContent {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
     }
 }
 
