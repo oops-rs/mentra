@@ -1,7 +1,13 @@
-use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::BTreeMap};
+use serde::Deserialize;
+use serde::Serialize;
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 
-use crate::{model::Message, model::ToolChoice, tool::ToolSpec};
+use crate::ContentBlock;
+use crate::Message;
+use crate::ProviderError;
+use crate::model::ToolChoice;
+use crate::tool::ToolSpec;
 
 /// Provider-neutral reasoning controls supported across multiple providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,4 +157,89 @@ pub struct CompactionRequest<'a> {
     pub input: Cow<'a, [CompactionInputItem]>,
     pub metadata: Cow<'a, BTreeMap<String, String>>,
     pub provider_request_options: ProviderRequestOptions,
+}
+
+impl CompactionRequest<'_> {
+    /// Converts a compaction request into an ordinary model request.
+    pub fn into_model_request(self) -> Result<Request<'static>, ProviderError> {
+        let input_json =
+            serde_json::to_string(self.input.as_ref()).map_err(ProviderError::Serialize)?;
+
+        Ok(Request {
+            model: Cow::Owned(self.model.into_owned()),
+            system: Some(Cow::Owned(self.instructions.into_owned())),
+            messages: Cow::Owned(vec![Message::user(ContentBlock::text(format!(
+                "Compaction input JSON:\n{input_json}"
+            )))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(self.metadata.into_owned()),
+            provider_request_options: self.provider_request_options,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn compaction_request_into_model_request_serializes_input_as_prompt_text() {
+        let request = CompactionRequest {
+            model: Cow::Borrowed("gpt-5"),
+            instructions: Cow::Borrowed("Summarize the transcript."),
+            input: Cow::Owned(vec![
+                CompactionInputItem::UserTurn {
+                    content: "hello".to_string(),
+                },
+                CompactionInputItem::AssistantTurn {
+                    content: "world".to_string(),
+                },
+            ]),
+            metadata: Cow::Owned(BTreeMap::from([("scope".to_string(), "test".to_string())])),
+            provider_request_options: ProviderRequestOptions {
+                session: SessionRequestOptions {
+                    sticky_turn_state: Some("sticky".to_string()),
+                    turn_metadata: None,
+                    prefer_connection_reuse: Some(true),
+                    session_affinity: None,
+                },
+                ..ProviderRequestOptions::default()
+            },
+        };
+
+        let model_request = request
+            .into_model_request()
+            .expect("compaction request should convert");
+
+        assert_eq!(model_request.model.as_ref(), "gpt-5");
+        assert_eq!(
+            model_request.system.as_deref(),
+            Some("Summarize the transcript.")
+        );
+        assert_eq!(model_request.metadata["scope"], "test");
+        assert_eq!(
+            model_request
+                .provider_request_options
+                .session
+                .sticky_turn_state
+                .as_deref(),
+            Some("sticky")
+        );
+        assert_eq!(model_request.messages.len(), 1);
+
+        let prompt = model_request.messages[0].text();
+        assert!(prompt.starts_with("Compaction input JSON:\n"));
+        let payload = prompt
+            .strip_prefix("Compaction input JSON:\n")
+            .expect("prompt should contain the compaction prefix");
+        let input: Vec<Value> = serde_json::from_str(payload).expect("prompt should be json");
+        assert_eq!(input[0]["type"], "user_turn");
+        assert_eq!(input[0]["content"], "hello");
+        assert_eq!(input[1]["type"], "assistant_turn");
+        assert_eq!(input[1]["content"], "world");
+    }
 }

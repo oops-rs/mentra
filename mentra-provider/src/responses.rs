@@ -2,17 +2,27 @@ pub mod model;
 pub mod session;
 pub mod sse;
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::{
-    AuthScheme, BuiltinProvider, CredentialSource, ModelCatalog, ModelInfo, ProviderCapabilities,
-    ProviderDefinition, ProviderError, ProviderSessionFactory, RegisteredProvider, RetryPolicy,
-    StaticCredentialSource, WireApi,
-};
+use crate::AuthScheme;
+use crate::BuiltinProvider;
+use crate::CredentialSource;
+use crate::ModelCatalog;
+use crate::ModelInfo;
+use crate::ProviderCapabilities;
+use crate::ProviderDefinition;
+use crate::ProviderError;
+use crate::ProviderSessionFactory;
+use crate::RegisteredProvider;
+use crate::RetryPolicy;
+use crate::StaticCredentialSource;
+use crate::WireApi;
 
-use self::session::{ResponsesSession, ResponsesSessionState};
+use self::session::ResponsesSession;
+use self::session::ResponsesSessionState;
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
 const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/";
@@ -141,7 +151,7 @@ fn build_definition(
         supports_websockets: true,
         supports_tool_calls: true,
         supports_images: true,
-        supports_history_compaction: false,
+        supports_history_compaction: true,
         supports_deferred_tools: true,
         supports_hosted_tool_search: true,
         supports_hosted_web_search: true,
@@ -230,6 +240,7 @@ mod tests {
         );
         assert_eq!(definition.wire_api, WireApi::Responses);
         assert!(definition.capabilities.supports_websockets);
+        assert!(definition.capabilities.supports_history_compaction);
         assert_eq!(
             definition.base_url.as_deref(),
             Some(DEFAULT_OPENAI_BASE_URL)
@@ -250,6 +261,7 @@ mod tests {
             Some("OpenRouter")
         );
         assert_eq!(definition.wire_api, WireApi::Responses);
+        assert!(definition.capabilities.supports_history_compaction);
         assert_eq!(
             definition.base_url.as_deref(),
             Some(DEFAULT_OPENROUTER_BASE_URL)

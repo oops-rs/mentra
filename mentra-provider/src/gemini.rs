@@ -6,6 +6,8 @@ pub(crate) mod sse;
 
 use crate::AuthScheme;
 use crate::BuiltinProvider;
+use crate::CompactionRequest;
+use crate::CompactionResponse;
 use crate::CredentialSource;
 use crate::ModelCatalog;
 use crate::ModelInfo;
@@ -93,7 +95,7 @@ where
             supports_websockets: false,
             supports_tool_calls: true,
             supports_images: true,
-            supports_history_compaction: false,
+            supports_history_compaction: true,
             supports_deferred_tools: false,
             supports_hosted_tool_search: false,
             supports_hosted_web_search: false,
@@ -105,6 +107,24 @@ where
         };
         definition.base_url = Some(DEFAULT_BASE_URL.to_string());
         definition
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RegisteredProvider;
+
+    #[test]
+    fn definition_advertises_history_compaction_support() {
+        let provider = GeminiProvider::new("test-key");
+
+        assert!(
+            provider
+                .definition()
+                .capabilities
+                .supports_history_compaction
+        );
     }
 }
 
@@ -210,6 +230,15 @@ where
         }
 
         Ok(sse::spawn_event_stream(response, model_name))
+    }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        let request = request.into_model_request()?;
+        let response = ProviderSession::send(self, request).await?;
+        Ok(response.into_compaction_response())
     }
 }
 

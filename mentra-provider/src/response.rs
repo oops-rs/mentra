@@ -1,14 +1,19 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::{
-    error::ProviderError,
-    model::{
-        ContentBlock, HostedToolSearchCall, HostedWebSearchCall, ImageGenerationCall, Role,
-        TokenUsage, ToolResultContent,
-    },
-    request::CompactionInputItem,
-    stream::{ContentBlockDelta, ContentBlockStart, ProviderEvent, ProviderEventStream},
-};
+use crate::error::ProviderError;
+use crate::model::ContentBlock;
+use crate::model::HostedToolSearchCall;
+use crate::model::HostedWebSearchCall;
+use crate::model::ImageGenerationCall;
+use crate::model::Role;
+use crate::model::TokenUsage;
+use crate::model::ToolResultContent;
+use crate::request::CompactionInputItem;
+use crate::stream::ContentBlockDelta;
+use crate::stream::ContentBlockStart;
+use crate::stream::ProviderEvent;
+use crate::stream::ProviderEventStream;
 
 /// A complete response collected from a provider stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,6 +77,34 @@ impl Response {
         });
         events.push(ProviderEvent::MessageStopped);
         events
+    }
+
+    /// Converts a normal response into a compaction response by collecting its text output.
+    pub fn into_compaction_response(self) -> CompactionResponse {
+        let text = self
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+
+        CompactionResponse::from_text(text)
+    }
+}
+
+impl CompactionResponse {
+    /// Wraps a text summary into a single compaction-summary item.
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self {
+            output: vec![CompactionInputItem::CompactionSummary {
+                content: text.into(),
+            }],
+        }
     }
 }
 
@@ -584,5 +617,34 @@ mod tests {
                 .expect("response should rebuild");
 
         assert_eq!(rebuilt, response);
+    }
+
+    #[test]
+    fn response_into_compaction_response_collects_text_blocks() {
+        let response = Response {
+            id: "resp-3".to_string(),
+            model: "model".to_string(),
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::text("first"),
+                ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: ToolResultContent::text("ignored"),
+                    is_error: false,
+                },
+                ContentBlock::text("second"),
+            ],
+            stop_reason: None,
+            usage: None,
+        };
+
+        let compaction = response.into_compaction_response();
+
+        assert_eq!(
+            compaction.output,
+            vec![CompactionInputItem::CompactionSummary {
+                content: "first\nsecond".to_string(),
+            }]
+        );
     }
 }

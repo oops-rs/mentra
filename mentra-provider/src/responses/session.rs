@@ -10,6 +10,8 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use url::Url;
 
+use crate::CompactionRequest;
+use crate::CompactionResponse;
 use crate::CredentialSource;
 use crate::ModelInfo;
 use crate::ProviderCredentials;
@@ -264,6 +266,15 @@ where
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
         self.stream_response(request).await
     }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        let request = request.into_model_request()?;
+        let response = self.send_response(request).await?;
+        Ok(response.into_compaction_response())
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +346,72 @@ mod tests {
         (format!("http://{addr}/"), handle)
     }
 
+    fn spawn_compaction_response_server(
+        response_body: &'static str,
+    ) -> (String, thread::JoinHandle<(String, String)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("read listener addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = Vec::new();
+            let mut temp = [0_u8; 1024];
+            let mut header_end = None;
+            let mut content_length = 0_usize;
+
+            loop {
+                let read = stream.read(&mut temp).expect("read request");
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&temp[..read]);
+                if header_end.is_none()
+                    && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let end = index + 4;
+                    header_end = Some(end);
+                    let headers = String::from_utf8_lossy(&buffer[..end]);
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then(|| {
+                                value.trim().parse::<usize>().expect("parse content-length")
+                            })
+                        })
+                        .unwrap_or_default();
+                }
+                if let Some(end) = header_end
+                    && buffer.len() >= end + content_length
+                {
+                    break;
+                }
+            }
+
+            let response = format!(
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "content-type: text/event-stream\r\n",
+                    "content-length: {}\r\n\r\n",
+                    "{}"
+                ),
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            let captured = String::from_utf8(buffer).expect("request should be utf8");
+            let body = captured
+                .split("\r\n\r\n")
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            (captured, body)
+        });
+
+        (format!("http://{addr}/"), handle)
+    }
+
     #[tokio::test]
     async fn stream_response_honors_session_request_options_on_http_path() {
         let sse_body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n";
@@ -382,5 +459,58 @@ mod tests {
         assert!(captured.contains("x-mentra-turn-metadata: {\"turn_id\":\"turn-123\"}\r\n"));
         assert!(captured.contains("x-mentra-session-affinity: session-affinity-123\r\n"));
         assert!(captured.contains("x-mentra-connection-reuse: prefer-reuse\r\n"));
+    }
+
+    #[tokio::test]
+    async fn compact_sends_normal_model_request_and_wraps_summary_text() {
+        let sse_body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"goal\\\":\\\"keep going\\\"}\"}]}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n"
+        );
+        let (base_url, handle) = spawn_compaction_response_server(sse_body);
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+
+        let request = crate::CompactionRequest {
+            model: Cow::Borrowed("gpt-5"),
+            instructions: Cow::Borrowed("Summarize the transcript."),
+            input: Cow::Owned(vec![crate::CompactionInputItem::UserTurn {
+                content: "hello".to_string(),
+            }]),
+            metadata: Cow::Owned(BTreeMap::from([("scope".to_string(), "test".to_string())])),
+            provider_request_options: crate::ProviderRequestOptions::default(),
+        };
+
+        let response = session.compact(request).await.expect("compaction succeeds");
+        let captured = handle.join().expect("server should capture request");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&captured.1).expect("request body should be json");
+        assert_eq!(payload["model"], "gpt-5");
+        assert_eq!(payload["instructions"], "Summarize the transcript.");
+        assert_eq!(payload["metadata"]["scope"], "test");
+        assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
+        assert!(
+            payload["input"][0]["content"][0]["text"]
+                .as_str()
+                .expect("prompt text should be a string")
+                .starts_with("Compaction input JSON:\n")
+        );
+
+        assert_eq!(response.output.len(), 1);
+        assert_eq!(
+            response.output[0],
+            crate::CompactionInputItem::CompactionSummary {
+                content: "{\"goal\":\"keep going\"}".to_string()
+            }
+        );
     }
 }
