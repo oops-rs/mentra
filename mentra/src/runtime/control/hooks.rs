@@ -253,7 +253,9 @@ impl RuntimeHooks {
 /// Returns whether a provider error is likely transient and worth retrying.
 pub fn is_transient_provider_error(error: &ProviderError) -> bool {
     match error {
-        ProviderError::Transport(_) | ProviderError::Decode(_) => true,
+        ProviderError::Transport(_)
+        | ProviderError::Decode(_)
+        | ProviderError::Retryable { .. } => true,
         ProviderError::Http { status, .. } => {
             status.is_server_error()
                 || *status == reqwest::StatusCode::TOO_MANY_REQUESTS

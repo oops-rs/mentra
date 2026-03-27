@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use thiserror::Error;
 
 /// Errors returned by provider implementations and stream adapters.
@@ -5,6 +7,11 @@ use thiserror::Error;
 pub enum ProviderError {
     #[error("provider transport error: {0}")]
     Transport(#[source] reqwest::Error),
+    #[error("retryable provider error: {message}")]
+    Retryable {
+        message: String,
+        delay: Option<Duration>,
+    },
     #[error("provider does not support capability: {0}")]
     UnsupportedCapability(String),
     #[error("{message}", message = provider_http_error(.status, .body))]

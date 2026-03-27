@@ -62,7 +62,7 @@ async fn forward_events(
     Ok(())
 }
 
-fn response_headers_event(headers: &http::HeaderMap) -> Option<ProviderEvent> {
+pub(crate) fn response_headers_event(headers: &http::HeaderMap) -> Option<ProviderEvent> {
     let values = headers
         .iter()
         .filter_map(|(name, value)| {
@@ -77,7 +77,7 @@ fn response_headers_event(headers: &http::HeaderMap) -> Option<ProviderEvent> {
 }
 
 #[derive(Default)]
-struct StreamState {
+pub(crate) struct StreamState {
     ignored_output_indices: HashSet<usize>,
     text_delta_seen: HashSet<usize>,
     function_delta_seen: HashSet<usize>,
@@ -105,12 +105,19 @@ fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEven
     }
 
     let data = data_lines.join("\n");
+    parse_json_event(&data, state)
+}
+
+pub(crate) fn parse_json_event(
+    data: &str,
+    state: &mut StreamState,
+) -> Result<Vec<ProviderEvent>, ProviderError> {
     if data == "[DONE]" {
         return Ok(Vec::new());
     }
 
     let event: ResponsesStreamEvent =
-        serde_json::from_str(&data).map_err(ProviderError::Deserialize)?;
+        serde_json::from_str(data).map_err(ProviderError::Deserialize)?;
 
     match event {
         ResponsesStreamEvent::ResponseCreated { response } => Ok(vec![

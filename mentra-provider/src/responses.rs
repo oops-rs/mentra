@@ -1,6 +1,7 @@
 pub mod model;
 pub mod session;
 pub mod sse;
+pub mod websocket;
 
 use std::collections::HashMap;
 use std::sync::Arc;

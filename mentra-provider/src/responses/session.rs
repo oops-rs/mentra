@@ -29,6 +29,9 @@ use crate::request::ResponsesRequestCompression;
 use super::model::ResponsesModelsPage;
 use super::model::ResponsesRequest;
 use super::sse::spawn_event_stream;
+use super::websocket::ResponsesWebsocketConnection;
+use super::websocket::ResponsesWebsocketTelemetry;
+use super::websocket::merge_request_headers;
 
 /// Session-scoped Responses transport state.
 ///
@@ -176,6 +179,29 @@ where
 
     pub fn turn_state(&self) -> Option<String> {
         self.state.turn_state.get().cloned()
+    }
+
+    pub async fn connect_websocket(
+        &self,
+        extra_headers: HeaderMap,
+        default_headers: HeaderMap,
+        turn_state: Option<Arc<OnceLock<String>>>,
+        telemetry: Option<Arc<dyn ResponsesWebsocketTelemetry>>,
+    ) -> Result<ResponsesWebsocketConnection, ProviderError> {
+        let credentials = self.credential_source.credentials().await?;
+        let provider_headers = self.definition.build_headers(&credentials)?;
+        let headers = merge_request_headers(&provider_headers, extra_headers, default_headers);
+        let url = self
+            .definition
+            .websocket_url_with_auth_for_path("responses", &credentials)?;
+        ResponsesWebsocketConnection::connect(
+            url,
+            headers,
+            turn_state.or_else(|| Some(Arc::clone(&self.state.turn_state))),
+            self.stream_idle_timeout(),
+            telemetry,
+        )
+        .await
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
