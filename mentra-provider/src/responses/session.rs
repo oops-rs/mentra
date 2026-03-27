@@ -47,6 +47,7 @@ pub struct ResponsesSession<C> {
 #[derive(Default)]
 struct WebsocketSession {
     connection_reused: StdMutex<bool>,
+    connection: Option<ResponsesWebsocketConnection>,
     _last_request: Option<ResponsesRequest>,
     last_response_rx: Option<oneshot::Receiver<Response>>,
 }
@@ -64,6 +65,18 @@ impl WebsocketSession {
             .connection_reused
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn connection(&self) -> Option<ResponsesWebsocketConnection> {
+        self.connection.clone()
+    }
+
+    fn store_connection(&mut self, connection: ResponsesWebsocketConnection) {
+        self.connection = Some(connection);
+    }
+
+    fn clear_connection(&mut self) {
+        self.connection = None;
     }
 }
 
@@ -181,27 +194,79 @@ where
         self.state.turn_state.get().cloned()
     }
 
+    pub async fn websocket_connection_is_closed(&self) -> bool {
+        let connection = self
+            .state
+            .websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection();
+        match connection {
+            Some(connection) => connection.is_closed().await,
+            None => true,
+        }
+    }
+
     pub async fn connect_websocket(
         &self,
         extra_headers: HeaderMap,
         default_headers: HeaderMap,
         turn_state: Option<Arc<OnceLock<String>>>,
         telemetry: Option<Arc<dyn ResponsesWebsocketTelemetry>>,
-    ) -> Result<ResponsesWebsocketConnection, ProviderError> {
+    ) -> Result<(), ProviderError> {
         let credentials = self.credential_source.credentials().await?;
         let provider_headers = self.definition.build_headers(&credentials)?;
         let headers = merge_request_headers(&provider_headers, extra_headers, default_headers);
         let url = self
             .definition
             .websocket_url_with_auth_for_path("responses", &credentials)?;
-        ResponsesWebsocketConnection::connect(
+        let connection = ResponsesWebsocketConnection::connect(
             url,
             headers,
             turn_state.or_else(|| Some(Arc::clone(&self.state.turn_state))),
             self.stream_idle_timeout(),
             telemetry,
         )
-        .await
+        .await?;
+        self.state
+            .websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store_connection(connection);
+        Ok(())
+    }
+
+    pub async fn stream_websocket_request(
+        &self,
+        request_body: serde_json::Value,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let (connection, connection_reused) = {
+            let websocket_session = self
+                .state
+                .websocket_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                websocket_session.connection(),
+                websocket_session.connection_reused(),
+            )
+        };
+        let Some(connection) = connection else {
+            return Err(ProviderError::MalformedStream(
+                "websocket connection is unavailable".to_string(),
+            ));
+        };
+        connection
+            .stream_request(request_body, connection_reused)
+            .await
+    }
+
+    pub fn clear_websocket_connection(&self) {
+        self.state
+            .websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_connection();
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -743,5 +808,18 @@ mod tests {
         );
         assert!(captured.0.contains("session_id: session-affinity-321\r\n"));
         assert!(captured.0.contains("x-openai-subagent: compact\r\n"));
+    }
+
+    #[tokio::test]
+    async fn websocket_connection_is_closed_without_cached_connection() {
+        let session = ResponsesProvider::with_shared_credential_source(
+            super::super::openai_definition(),
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+
+        assert!(session.websocket_connection_is_closed().await);
+        session.clear_websocket_connection();
+        assert!(session.websocket_connection_is_closed().await);
     }
 }

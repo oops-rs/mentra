@@ -151,6 +151,7 @@ impl Drop for WsStream {
     }
 }
 
+#[derive(Clone)]
 pub struct ResponsesWebsocketConnection {
     stream: Arc<Mutex<Option<WsStream>>>,
     idle_timeout: Duration,
