@@ -36,6 +36,11 @@ impl PendingAssistantTurn {
         let mut derived_events = Vec::new();
 
         match event {
+            ProviderEvent::ResponseHeaders(_)
+            | ProviderEvent::ResponseCreated
+            | ProviderEvent::ReasoningSummaryDelta { .. }
+            | ProviderEvent::ReasoningContentDelta { .. }
+            | ProviderEvent::ReasoningSummaryPartAdded { .. } => {}
             ProviderEvent::MessageStarted { id, model, role } => {
                 self.id = Some(id);
                 self.model = Some(model);

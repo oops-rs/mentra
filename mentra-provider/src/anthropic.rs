@@ -118,24 +118,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::RegisteredProvider;
-
-    #[test]
-    fn definition_advertises_history_compaction_support() {
-        let provider = AnthropicProvider::new("test-key");
-
-        assert!(
-            provider
-                .definition()
-                .capabilities
-                .supports_history_compaction
-        );
-    }
-}
-
 #[async_trait]
 impl<C> ModelCatalog for AnthropicProvider<C>
 where
@@ -274,5 +256,23 @@ where
         }
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RegisteredProvider;
+
+    #[test]
+    fn definition_advertises_history_compaction_support() {
+        let provider = AnthropicProvider::new("test-key");
+
+        assert!(
+            provider
+                .definition()
+                .capabilities
+                .supports_history_compaction
+        );
     }
 }

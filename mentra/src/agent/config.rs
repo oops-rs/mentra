@@ -419,7 +419,8 @@ mod tests {
         assert_eq!(
             config.provider_request_options.reasoning,
             Some(ReasoningOptions {
-                effort: ReasoningEffort::High,
+                effort: Some(ReasoningEffort::High),
+                summary: None,
             })
         );
     }

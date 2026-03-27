@@ -111,24 +111,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::RegisteredProvider;
-
-    #[test]
-    fn definition_advertises_history_compaction_support() {
-        let provider = GeminiProvider::new("test-key");
-
-        assert!(
-            provider
-                .definition()
-                .capabilities
-                .supports_history_compaction
-        );
-    }
-}
-
 #[async_trait]
 impl<C> ModelCatalog for GeminiProvider<C>
 where
@@ -267,5 +249,23 @@ fn normalize_model_name(model: &str) -> String {
         model.to_string()
     } else {
         format!("models/{model}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RegisteredProvider;
+
+    #[test]
+    fn definition_advertises_history_compaction_support() {
+        let provider = GeminiProvider::new("test-key");
+
+        assert!(
+            provider
+                .definition()
+                .capabilities
+                .supports_history_compaction
+        );
     }
 }

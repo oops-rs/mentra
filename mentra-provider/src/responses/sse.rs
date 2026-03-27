@@ -27,10 +27,10 @@ async fn forward_events(
     response: reqwest::Response,
     tx: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
 ) -> Result<(), ProviderError> {
-    if let Some(headers) = response_headers_event(response.headers()) {
-        if tx.send(Ok(headers)).is_err() {
-            return Ok(());
-        }
+    if let Some(headers) = response_headers_event(response.headers())
+        && tx.send(Ok(headers)).is_err()
+    {
+        return Ok(());
     }
 
     let mut bytes_stream = response.bytes_stream();

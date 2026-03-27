@@ -356,7 +356,8 @@ let config = AgentConfig {
     provider_request_options: ProviderRequestOptions {
         tool_search_mode: ToolSearchMode::Hosted,
         reasoning: Some(ReasoningOptions {
-            effort: ReasoningEffort::Medium,
+            effort: Some(ReasoningEffort::Medium),
+            summary: None,
         }),
         ..Default::default()
     },
