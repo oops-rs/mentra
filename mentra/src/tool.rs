@@ -4,6 +4,7 @@ mod context;
 mod descriptor;
 mod files;
 mod model;
+mod orchestrator;
 mod runtime;
 
 use std::{collections::HashMap, sync::Arc};
