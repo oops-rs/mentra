@@ -7,7 +7,10 @@ use serde_json::Value;
 
 use crate::{
     runtime::RuntimeError,
-    tool::{ToolCapability, ToolDurability, ToolSideEffectLevel},
+    tool::{
+        ToolApprovalCategory, ToolCapability, ToolDurability, ToolExecutionCategory,
+        ToolSideEffectLevel,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +27,8 @@ pub struct ToolAuthorizationPreview {
     pub capabilities: Vec<ToolCapability>,
     pub side_effect_level: ToolSideEffectLevel,
     pub durability: ToolDurability,
+    pub execution_category: ToolExecutionCategory,
+    pub approval_category: ToolApprovalCategory,
     pub raw_input: Value,
     pub structured_input: Value,
 }

@@ -6,8 +6,9 @@ use crate::{
     ContentBlock,
     runtime::Agent,
     tool::{
-        ExecutableTool, ToolCall, ToolCapability, ToolContext, ToolDurability, ToolResult,
-        ToolSideEffectLevel, ToolSpec,
+        ToolCall, ToolCapability, ToolContext, ToolDefinition, ToolDurability,
+        ToolExecutionCategory, ToolExecutor, ToolResult, ToolSideEffectLevel,
+        RuntimeToolDescriptor, ToolApprovalCategory,
     },
 };
 
@@ -23,20 +24,21 @@ pub enum TaskIntrinsicTool {
 }
 
 impl TaskIntrinsicTool {
-    fn task_spec(&self, description: &str, input_schema: serde_json::Value) -> ToolSpec {
-        ToolSpec::builder(self.to_string())
+    fn task_spec(&self, description: &str, input_schema: serde_json::Value) -> RuntimeToolDescriptor {
+        RuntimeToolDescriptor::builder(self.to_string())
             .description(description)
             .input_schema(input_schema)
             .capability(ToolCapability::TaskMutation)
             .side_effect_level(ToolSideEffectLevel::LocalState)
             .durability(ToolDurability::Persistent)
+            .execution_category(ToolExecutionCategory::ExclusivePersistentMutation)
+            .approval_category(ToolApprovalCategory::Default)
             .build()
     }
 }
 
-#[async_trait]
-impl ExecutableTool for TaskIntrinsicTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for TaskIntrinsicTool {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
         match self {
             Self::Create => self.task_spec(
                 "Lead-oriented project planning tool. Create a persisted task.",
@@ -156,11 +158,14 @@ impl ExecutableTool for TaskIntrinsicTool {
             ),
         }
     }
+}
 
+#[async_trait]
+impl ToolExecutor for TaskIntrinsicTool {
     async fn execute_mut(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
         let call = ToolCall {
             id: ctx.tool_call_id.clone(),
-            name: self.spec().name,
+            name: self.descriptor().provider.name,
             input,
         };
         let Some(result) = execute_intrinsic(ctx.agent, call) else {
@@ -173,7 +178,7 @@ impl ExecutableTool for TaskIntrinsicTool {
 pub(crate) fn execute_intrinsic(agent: &mut Agent, call: ToolCall) -> Option<ContentBlock> {
     let tool = TaskIntrinsicTool::VARIANTS
         .iter()
-        .find(|tool| tool.spec().name == call.name)?;
+        .find(|tool| tool.descriptor().provider.name == call.name)?;
 
     let output = agent.execute_task_mutation(tool, call.input);
 

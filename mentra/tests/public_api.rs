@@ -13,7 +13,7 @@ use mentra::{
         Response, Role, provider_event_stream_from_response,
     },
     runtime::SqliteRuntimeStore,
-    tool::{ExecutableTool, ParallelToolContext, ToolContext, ToolResult, ToolSpec},
+    tool::{ParallelToolContext, ToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec},
 };
 use serde_json::{Value, json};
 
@@ -169,8 +169,8 @@ struct EndTurnTool;
 struct SubagentSummaryTool;
 
 #[async_trait]
-impl ExecutableTool for EchoTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for EchoTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("echo_tool")
             .description("Echo a canned result")
             .input_schema(json!({
@@ -179,15 +179,18 @@ impl ExecutableTool for EchoTool {
             }))
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for EchoTool {
     async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
         Ok("echoed".to_string())
     }
 }
 
 #[async_trait]
-impl ExecutableTool for EndTurnTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for EndTurnTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("stop_here")
             .description("End the current turn without a follow-up assistant message")
             .input_schema(json!({
@@ -196,7 +199,10 @@ impl ExecutableTool for EndTurnTool {
             }))
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for EndTurnTool {
     async fn execute_mut(&self, mut ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         ctx.request_idle();
         Ok("stopping now".to_string())
@@ -204,8 +210,8 @@ impl ExecutableTool for EndTurnTool {
 }
 
 #[async_trait]
-impl ExecutableTool for SubagentSummaryTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for SubagentSummaryTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("subagent_summary")
             .description("Spawn a disposable subagent and return its summary")
             .input_schema(json!({
@@ -217,7 +223,10 @@ impl ExecutableTool for SubagentSummaryTool {
             }))
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for SubagentSummaryTool {
     async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
         let prompt = input
             .get("prompt")

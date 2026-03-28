@@ -13,7 +13,7 @@ use crate::{
     ToolSearchMode, WebSearchAction,
 };
 
-use crate::tool::{ToolLoadingPolicy, ToolSpec};
+use crate::tool::{ProviderToolKind, ToolLoadingPolicy, ToolSpec};
 
 /// Page returned by the Responses-compatible models endpoint.
 #[derive(Debug, Deserialize)]
@@ -476,6 +476,40 @@ pub enum ResponsesTool {
         defer_loading: bool,
     },
     ToolSearch {},
+    WebSearch {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        external_web_access: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filters: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_location: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        search_context_size: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        search_content_types: Option<Vec<String>>,
+    },
+    ImageGeneration {
+        output_format: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesWebSearchToolOptions {
+    #[serde(default)]
+    external_web_access: Option<bool>,
+    #[serde(default)]
+    filters: Option<serde_json::Value>,
+    #[serde(default)]
+    user_location: Option<serde_json::Value>,
+    #[serde(default)]
+    search_context_size: Option<serde_json::Value>,
+    #[serde(default)]
+    search_content_types: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesImageGenerationToolOptions {
+    output_format: String,
 }
 
 impl ResponsesTool {
@@ -491,6 +525,40 @@ impl ResponsesTool {
     fn tool_search() -> Self {
         Self::ToolSearch {}
     }
+
+    fn web_search(tool: &ToolSpec) -> Result<Self, ProviderError> {
+        let options = tool.options.clone().ok_or_else(|| {
+            ProviderError::InvalidRequest("web_search tools require provider options".to_string())
+        })?;
+        let options: ResponsesWebSearchToolOptions =
+            serde_json::from_value(options).map_err(|error| {
+                ProviderError::InvalidRequest(format!("invalid web_search tool options: {error}"))
+            })?;
+        Ok(Self::WebSearch {
+            external_web_access: options.external_web_access,
+            filters: options.filters,
+            user_location: options.user_location,
+            search_context_size: options.search_context_size,
+            search_content_types: options.search_content_types,
+        })
+    }
+
+    fn image_generation(tool: &ToolSpec) -> Result<Self, ProviderError> {
+        let options = tool.options.clone().ok_or_else(|| {
+            ProviderError::InvalidRequest(
+                "image_generation tools require provider options".to_string(),
+            )
+        })?;
+        let options: ResponsesImageGenerationToolOptions =
+            serde_json::from_value(options).map_err(|error| {
+                ProviderError::InvalidRequest(format!(
+                    "invalid image_generation tool options: {error}"
+                ))
+            })?;
+        Ok(Self::ImageGeneration {
+            output_format: options.output_format,
+        })
+    }
 }
 
 fn build_responses_tools(
@@ -505,7 +573,8 @@ fn build_responses_tools(
     };
 
     let has_deferred_tools = tools.iter().any(|tool| {
-        tool.loading_policy == ToolLoadingPolicy::Deferred
+        tool.kind == ProviderToolKind::Function
+            && tool.loading_policy == ToolLoadingPolicy::Deferred
             && forced_tool_name != Some(tool.name.as_str())
     });
 
@@ -515,10 +584,17 @@ fn build_responses_tools(
         )));
     }
 
-    let mut provider_tools = tools
-        .iter()
-        .map(|tool| ResponsesTool::function(tool, forced_tool_name == Some(tool.name.as_str())))
-        .collect::<Vec<_>>();
+    let mut provider_tools = Vec::with_capacity(tools.len() + usize::from(has_deferred_tools));
+    for tool in tools {
+        let provider_tool = match tool.kind {
+            ProviderToolKind::Function => {
+                ResponsesTool::function(tool, forced_tool_name == Some(tool.name.as_str()))
+            }
+            ProviderToolKind::HostedWebSearch => ResponsesTool::web_search(tool)?,
+            ProviderToolKind::ImageGeneration => ResponsesTool::image_generation(tool)?,
+        };
+        provider_tools.push(provider_tool);
+    }
 
     if has_deferred_tools {
         provider_tools.push(ResponsesTool::tool_search());
@@ -609,11 +685,10 @@ mod tests {
                         "operations": { "type": "array" }
                     }
                 }),
-                capabilities: vec![],
-                side_effect_level: crate::tool::ToolSideEffectLevel::None,
-                durability: crate::tool::ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: crate::tool::ToolLoadingPolicy::Immediate,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Tool {
                 name: "files".to_string(),
@@ -968,11 +1043,10 @@ mod tests {
                 name: "lookup_order".to_string(),
                 description: Some("Look up an order".to_string()),
                 input_schema: json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: crate::tool::ToolSideEffectLevel::None,
-                durability: crate::tool::ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
             temperature: None,
@@ -1003,11 +1077,10 @@ mod tests {
                 name: "lookup_order".to_string(),
                 description: None,
                 input_schema: json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: crate::tool::ToolSideEffectLevel::None,
-                durability: crate::tool::ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
             temperature: None,

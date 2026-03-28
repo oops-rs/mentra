@@ -20,7 +20,8 @@ use crate::{
         ProviderId, Request,
     },
     tool::{
-        ExecutableTool, ParallelToolContext, ToolContext, ToolExecutionMode, ToolResult, ToolSpec,
+        ParallelToolContext, ToolContext, ToolDefinition, ToolExecutionCategory, ToolExecutor,
+        ToolResult, ToolSpec,
     },
 };
 
@@ -225,25 +226,25 @@ impl StaticTool {
 }
 
 #[async_trait]
-impl ExecutableTool for StaticTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: self.name.to_string(),
-            description: Some("test tool".to_string()),
-            input_schema: json!({
+impl ToolDefinition for StaticTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder(self.name)
+            .description("test tool")
+            .input_schema(json!({
                 "type": "object",
                 "properties": {
                     "value": { "type": "string" }
                 }
-            }),
-            capabilities: vec![],
-            side_effect_level: crate::tool::ToolSideEffectLevel::None,
-            durability: crate::tool::ToolDurability::ReplaySafe,
-            loading_policy: self.loading_policy,
-            execution_timeout: None,
-        }
+            }))
+            .side_effect_level(crate::tool::ToolSideEffectLevel::None)
+            .durability(crate::tool::ToolDurability::ReplaySafe)
+            .loading_policy(self.loading_policy)
+            .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for StaticTool {
     async fn execute_mut(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         self.result.clone()
     }
@@ -294,28 +295,27 @@ impl ProbeTool {
 }
 
 #[async_trait]
-impl ExecutableTool for ProbeTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: self.name.to_string(),
-            description: Some("probe tool".to_string()),
-            input_schema: json!({
+impl ToolDefinition for ProbeTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder(self.name)
+            .description("probe tool")
+            .input_schema(json!({
                 "type": "object",
                 "properties": {}
-            }),
-            capabilities: vec![],
-            side_effect_level: crate::tool::ToolSideEffectLevel::None,
-            durability: crate::tool::ToolDurability::ReplaySafe,
-            loading_policy: crate::tool::ToolLoadingPolicy::Immediate,
-            execution_timeout: None,
-        }
+            }))
+            .side_effect_level(crate::tool::ToolSideEffectLevel::None)
+            .durability(crate::tool::ToolDurability::ReplaySafe)
+            .build()
     }
+}
 
-    fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
+#[async_trait]
+impl ToolExecutor for ProbeTool {
+    fn execution_category(&self, _input: &Value) -> ToolExecutionCategory {
         if self.parallel {
-            ToolExecutionMode::Parallel
+            ToolExecutionCategory::ReadOnlyParallel
         } else {
-            ToolExecutionMode::Exclusive
+            ToolExecutionCategory::ExclusiveLocalMutation
         }
     }
 

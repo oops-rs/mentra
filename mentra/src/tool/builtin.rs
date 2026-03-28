@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::tool::{
-    ExecutableTool, ParallelToolContext, ToolAuthorizationPreview, ToolCapability, ToolDurability,
-    ToolExecutionMode, ToolResult, ToolSideEffectLevel, ToolSpec, context::RuntimeContext,
+    ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory, ToolAuthorizationPreview,
+    ToolCapability, ToolDefinition, ToolDurability, ToolExecutionCategory, ToolExecutor,
+    ToolResult, ToolSideEffectLevel, context::RuntimeContext,
 };
 
 pub struct ShellTool;
@@ -11,14 +12,14 @@ pub struct BackgroundRunTool;
 pub struct CheckBackgroundTool;
 pub struct LoadSkillTool;
 
-struct ShellCommandOutput<'a> {
+struct ShellCommandInput<'a> {
     command: String,
     working_directory: Option<&'a str>,
     justification: Option<String>,
     requested_timeout: Option<std::time::Duration>,
 }
 
-fn parse_command_input<'a>(input: &'a Value) -> Result<ShellCommandOutput<'a>, String> {
+fn parse_shell_command_input<'a>(input: &'a Value) -> Result<ShellCommandInput<'a>, String> {
     let command = input
         .get("command")
         .and_then(|value| value.as_str())
@@ -36,7 +37,7 @@ fn parse_command_input<'a>(input: &'a Value) -> Result<ShellCommandOutput<'a>, S
         .and_then(|value| value.as_u64())
         .map(std::time::Duration::from_millis);
 
-    Ok(ShellCommandOutput {
+    Ok(ShellCommandInput {
         command,
         working_directory,
         justification,
@@ -44,16 +45,122 @@ fn parse_command_input<'a>(input: &'a Value) -> Result<ShellCommandOutput<'a>, S
     })
 }
 
-async fn execute_shell<C>(ctx: &C, input: Value) -> ToolResult
-where
-    C: RuntimeContext + Sync,
-{
-    let ShellCommandOutput {
+fn shell_input_schema(include_timeout: bool) -> Value {
+    let mut properties = serde_json::Map::from_iter([
+        (
+            "command".to_string(),
+            json!({
+                "type": "string",
+                "description": "Shell command to execute"
+            }),
+        ),
+        (
+            "workingDirectory".to_string(),
+            json!({
+                "type": "string",
+                "description": "Optional directory to run inside"
+            }),
+        ),
+        (
+            "justification".to_string(),
+            json!({
+                "type": "string",
+                "description": "Optional explanation surfaced when approval is required"
+            }),
+        ),
+    ]);
+    if include_timeout {
+        properties.insert(
+            "timeoutMs".to_string(),
+            json!({
+                "type": "integer",
+                "description": "Optional timeout override in milliseconds"
+            }),
+        );
+    }
+    Value::Object(serde_json::Map::from_iter([
+        ("type".to_string(), json!("object")),
+        ("properties".to_string(), Value::Object(properties)),
+        ("required".to_string(), json!(["command"])),
+    ]))
+}
+
+fn shell_descriptor(background: bool) -> RuntimeToolDescriptor {
+    let (name, description, capabilities, durability, execution_category, approval_category) =
+        if background {
+            (
+                "background_run",
+                "Start a shell command in the background and return a task ID immediately.",
+                vec![ToolCapability::BackgroundExec, ToolCapability::FilesystemWrite],
+                ToolDurability::Persistent,
+                ToolExecutionCategory::BackgroundJob,
+                ToolApprovalCategory::Background,
+            )
+        } else {
+            (
+                "shell",
+                "Execute a single local shell command.",
+                vec![ToolCapability::ProcessExec, ToolCapability::FilesystemWrite],
+                ToolDurability::Ephemeral,
+                ToolExecutionCategory::ExclusiveLocalMutation,
+                ToolApprovalCategory::Process,
+            )
+        };
+
+    RuntimeToolDescriptor::builder(name)
+        .description(description)
+        .input_schema(shell_input_schema(!background))
+        .capabilities(capabilities)
+        .side_effect_level(ToolSideEffectLevel::Process)
+        .durability(durability)
+        .execution_category(execution_category)
+        .approval_category(approval_category)
+        .build()
+}
+
+fn shell_authorization_preview(
+    ctx: &ParallelToolContext,
+    input: &Value,
+    background: bool,
+    descriptor: RuntimeToolDescriptor,
+) -> Result<ToolAuthorizationPreview, String> {
+    let ShellCommandInput {
         command,
         working_directory,
         justification,
         requested_timeout,
-    } = parse_command_input(&input)?;
+    } = parse_shell_command_input(input)?;
+    let working_directory = ctx.resolve_working_directory(working_directory)?;
+
+    Ok(ToolAuthorizationPreview {
+        working_directory: working_directory.clone(),
+        capabilities: descriptor.capabilities,
+        side_effect_level: descriptor.side_effect_level,
+        durability: descriptor.durability,
+        execution_category: descriptor.execution_category,
+        approval_category: descriptor.approval_category,
+        raw_input: input.clone(),
+        structured_input: json!({
+            "kind": if background { "background_run" } else { "shell" },
+            "command": command,
+            "working_directory": working_directory,
+            "timeout_ms": requested_timeout.map(|timeout| timeout.as_millis()),
+            "justification": justification,
+            "background": background,
+        }),
+    })
+}
+
+async fn execute_shell_command<C>(ctx: &C, input: Value) -> ToolResult
+where
+    C: RuntimeContext + Sync,
+{
+    let ShellCommandInput {
+        command,
+        working_directory,
+        justification,
+        requested_timeout,
+    } = parse_shell_command_input(&input)?;
     let working_directory = ctx.resolve_working_directory(working_directory)?;
     let output = ctx
         .execute_shell_command(command, justification, requested_timeout, working_directory)
@@ -85,16 +192,16 @@ where
     }
 }
 
-async fn execute_background_run<C>(ctx: &C, input: Value) -> ToolResult
+async fn execute_background_command<C>(ctx: &C, input: Value) -> ToolResult
 where
     C: RuntimeContext + Sync,
 {
-    let ShellCommandOutput {
+    let ShellCommandInput {
         command,
         working_directory,
         justification,
         ..
-    } = parse_command_input(&input)?;
+    } = parse_shell_command_input(&input)?;
     let working_directory = ctx.resolve_working_directory(working_directory)?;
     let task = ctx.start_background_task(command, justification, None, working_directory)?;
     Ok(format!(
@@ -105,145 +212,52 @@ where
     ))
 }
 
-fn shell_authorization_preview(
-    ctx: &ParallelToolContext,
-    input: &Value,
-    background: bool,
-    spec: ToolSpec,
-) -> Result<ToolAuthorizationPreview, String> {
-    let ShellCommandOutput {
-        command,
-        working_directory,
-        justification,
-        requested_timeout,
-    } = parse_command_input(input)?;
-    let working_directory = ctx.resolve_working_directory(working_directory)?;
-
-    Ok(ToolAuthorizationPreview {
-        working_directory: working_directory.clone(),
-        capabilities: spec.capabilities,
-        side_effect_level: spec.side_effect_level,
-        durability: spec.durability,
-        raw_input: input.clone(),
-        structured_input: json!({
-            "kind": if background { "background_run" } else { "shell" },
-            "command": command,
-            "working_directory": working_directory,
-            "timeout_ms": requested_timeout.map(|timeout| timeout.as_millis()),
-            "justification": justification,
-            "background": background,
-        }),
-    })
+impl ToolDefinition for ShellTool {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
+        shell_descriptor(false)
+    }
 }
 
 #[async_trait]
-impl ExecutableTool for ShellTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::builder("shell")
-            .description("Execute a single local shell command.")
-            .input_schema(json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute"
-                    },
-                    "workingDirectory": {
-                        "type": "string",
-                        "description": "Optional directory to run inside"
-                    },
-                    "timeoutMs": {
-                        "type": "integer",
-                        "description": "Optional timeout override in milliseconds"
-                    },
-                    "justification": {
-                        "type": "string",
-                        "description": "Optional explanation surfaced when approval is required"
-                    }
-                },
-                "required": ["command"]
-            }))
-            .capabilities([ToolCapability::ProcessExec, ToolCapability::FilesystemWrite])
-            .side_effect_level(ToolSideEffectLevel::Process)
-            .durability(ToolDurability::Ephemeral)
-            .build()
-    }
-
-    fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
-        ToolExecutionMode::Parallel
-    }
-
+impl ToolExecutor for ShellTool {
     fn authorization_preview(
         &self,
         ctx: &ParallelToolContext,
         input: &Value,
     ) -> Result<ToolAuthorizationPreview, String> {
-        shell_authorization_preview(ctx, input, false, self.spec())
+        shell_authorization_preview(ctx, input, false, self.descriptor())
     }
 
-    async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
-        execute_shell(&ctx, input).await
+    async fn execute_mut(&self, ctx: crate::tool::ToolContext<'_>, input: Value) -> ToolResult {
+        execute_shell_command(&ctx, input).await
+    }
+}
+
+impl ToolDefinition for BackgroundRunTool {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
+        shell_descriptor(true)
     }
 }
 
 #[async_trait]
-impl ExecutableTool for BackgroundRunTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::builder("background_run")
-            .description(
-                "Start a shell command in the background and return a task ID immediately.",
-            )
-            .input_schema(json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute in the background"
-                    },
-                    "workingDirectory": {
-                        "type": "string",
-                        "description": "Optional directory to run inside"
-                    },
-                    "justification": {
-                        "type": "string",
-                        "description": "Optional explanation surfaced when approval is required"
-                    }
-                },
-                "required": ["command"]
-            }))
-            .capabilities([
-                ToolCapability::BackgroundExec,
-                ToolCapability::FilesystemWrite,
-            ])
-            .side_effect_level(ToolSideEffectLevel::Process)
-            .durability(ToolDurability::Persistent)
-            .build()
-    }
-
-    fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
-        ToolExecutionMode::Parallel
-    }
-
+impl ToolExecutor for BackgroundRunTool {
     fn authorization_preview(
         &self,
         ctx: &ParallelToolContext,
         input: &Value,
     ) -> Result<ToolAuthorizationPreview, String> {
-        shell_authorization_preview(ctx, input, true, self.spec())
+        shell_authorization_preview(ctx, input, true, self.descriptor())
     }
 
-    async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
-        execute_background_run(&ctx, input).await
+    async fn execute_mut(&self, ctx: crate::tool::ToolContext<'_>, input: Value) -> ToolResult {
+        execute_background_command(&ctx, input).await
     }
 }
 
-#[async_trait]
-impl ExecutableTool for CheckBackgroundTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::builder("check_background")
-            .description(
-                "Check one background task by ID, or list all background tasks when omitted.",
-            )
+impl ToolDefinition for CheckBackgroundTool {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
+        RuntimeToolDescriptor::builder("check_background")
+            .description("Check one background task by ID, or list all background tasks when omitted.")
             .input_schema(json!({
                 "type": "object",
                 "properties": {
@@ -256,23 +270,23 @@ impl ExecutableTool for CheckBackgroundTool {
             .capability(ToolCapability::ReadOnly)
             .side_effect_level(ToolSideEffectLevel::None)
             .durability(ToolDurability::ReplaySafe)
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .approval_category(ToolApprovalCategory::ReadOnly)
             .build()
     }
+}
 
-    fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
-        ToolExecutionMode::Parallel
-    }
-
+#[async_trait]
+impl ToolExecutor for CheckBackgroundTool {
     async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
         let task_id = input.get("task_id").and_then(|value| value.as_str());
         ctx.check_background_task(task_id)
     }
 }
 
-#[async_trait]
-impl ExecutableTool for LoadSkillTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::builder("load_skill")
+impl ToolDefinition for LoadSkillTool {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
+        RuntimeToolDescriptor::builder("load_skill")
             .description("Load the full body of a named skill when it is relevant.")
             .input_schema(json!({
                 "type": "object",
@@ -287,19 +301,19 @@ impl ExecutableTool for LoadSkillTool {
             .capabilities([ToolCapability::SkillLoad, ToolCapability::ReadOnly])
             .side_effect_level(ToolSideEffectLevel::None)
             .durability(ToolDurability::ReplaySafe)
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .approval_category(ToolApprovalCategory::ReadOnly)
             .build()
     }
+}
 
-    fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
-        ToolExecutionMode::Parallel
-    }
-
+#[async_trait]
+impl ToolExecutor for LoadSkillTool {
     async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
         let name = input
             .get("name")
             .and_then(|value| value.as_str())
             .ok_or_else(|| "Skill name is required".to_string())?;
-
         ctx.load_skill(name)
     }
 }

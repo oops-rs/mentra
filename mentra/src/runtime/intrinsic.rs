@@ -7,8 +7,9 @@ use crate::{
     agent::{Agent, AgentEvent, CompactionTrigger, SpawnedAgentStatus},
     memory::{MemorySearchMode, MemorySearchRequest},
     tool::{
-        ExecutableTool, ToolCall, ToolCapability, ToolContext, ToolDurability, ToolResult,
-        ToolSideEffectLevel, ToolSpec,
+        ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory, ToolCall,
+        ToolCapability, ToolContext, ToolDefinition, ToolDurability, ToolExecutionCategory,
+        ToolExecutor, ToolResult, ToolSideEffectLevel,
     },
     transcript::{DelegationArtifact, DelegationEdge, DelegationKind, DelegationStatus},
 };
@@ -44,20 +45,23 @@ impl RuntimeIntrinsicTool {
         capabilities: Vec<ToolCapability>,
         side_effect_level: ToolSideEffectLevel,
         durability: ToolDurability,
-    ) -> ToolSpec {
-        ToolSpec::builder(self.to_string())
+        execution_category: ToolExecutionCategory,
+        approval_category: ToolApprovalCategory,
+    ) -> RuntimeToolDescriptor {
+        RuntimeToolDescriptor::builder(self.to_string())
             .description(description)
             .input_schema(input_schema)
             .capabilities(capabilities)
             .side_effect_level(side_effect_level)
             .durability(durability)
+            .execution_category(execution_category)
+            .approval_category(approval_category)
             .build()
     }
 }
 
-#[async_trait]
-impl ExecutableTool for RuntimeIntrinsicTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for RuntimeIntrinsicTool {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
         match self {
             Self::Compact => self.intrinsic_spec(
                 "Compress older conversation context into a summary.",
@@ -68,6 +72,8 @@ impl ExecutableTool for RuntimeIntrinsicTool {
                 vec![ToolCapability::ContextCompaction],
                 ToolSideEffectLevel::LocalState,
                 ToolDurability::Persistent,
+                ToolExecutionCategory::ExclusivePersistentMutation,
+                ToolApprovalCategory::Default,
             ),
             Self::Idle => self.intrinsic_spec(
                 "Yield the current turn and return to the teammate idle loop.",
@@ -78,6 +84,8 @@ impl ExecutableTool for RuntimeIntrinsicTool {
                 vec![ToolCapability::Delegation],
                 ToolSideEffectLevel::LocalState,
                 ToolDurability::Persistent,
+                ToolExecutionCategory::Delegation,
+                ToolApprovalCategory::Delegation,
             ),
             Self::MemorySearch => self.intrinsic_spec(
                 "Search the current agent's long-term memory for additional recall.",
@@ -98,6 +106,8 @@ impl ExecutableTool for RuntimeIntrinsicTool {
                 vec![ToolCapability::ReadOnly],
                 ToolSideEffectLevel::None,
                 ToolDurability::ReplaySafe,
+                ToolExecutionCategory::ReadOnlyParallel,
+                ToolApprovalCategory::ReadOnly,
             ),
             Self::MemoryPin => self.intrinsic_spec(
                 "Persist a fact in long-term memory for the current agent.",
@@ -114,6 +124,8 @@ impl ExecutableTool for RuntimeIntrinsicTool {
                 vec![ToolCapability::Custom("memory_write".to_string())],
                 ToolSideEffectLevel::LocalState,
                 ToolDurability::Persistent,
+                ToolExecutionCategory::ExclusivePersistentMutation,
+                ToolApprovalCategory::Default,
             ),
             Self::MemoryForget => self.intrinsic_spec(
                 "Forget a specific long-term memory record by id.",
@@ -130,6 +142,8 @@ impl ExecutableTool for RuntimeIntrinsicTool {
                 vec![ToolCapability::Custom("memory_write".to_string())],
                 ToolSideEffectLevel::LocalState,
                 ToolDurability::Persistent,
+                ToolExecutionCategory::ExclusivePersistentMutation,
+                ToolApprovalCategory::Default,
             ),
             Self::Task => self.intrinsic_spec(
                 "Spawn a fresh subagent to work a subtask and return a concise summary.",
@@ -146,25 +160,45 @@ impl ExecutableTool for RuntimeIntrinsicTool {
                 vec![ToolCapability::Delegation],
                 ToolSideEffectLevel::LocalState,
                 ToolDurability::Ephemeral,
+                ToolExecutionCategory::Delegation,
+                ToolApprovalCategory::Delegation,
             ),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for RuntimeIntrinsicTool {
+    async fn execute(&self, ctx: ParallelToolContext, input: serde_json::Value) -> ToolResult {
+        match self {
+            Self::MemorySearch => execute_memory_search(ctx, input).await,
+            _ => Err(format!(
+                "Tool '{}' does not support parallel execution",
+                self.descriptor().provider.name
+            )),
         }
     }
 
     async fn execute_mut(&self, ctx: ToolContext<'_>, input: serde_json::Value) -> ToolResult {
-        let call = ToolCall {
-            id: ctx.tool_call_id.clone(),
-            name: self.spec().name,
-            input,
-        };
-        let block = match self {
-            Self::Compact => execute_compact(ctx.agent, call).await,
-            Self::Idle => execute_idle(ctx.agent, call),
-            Self::MemorySearch => execute_memory_search(ctx, call).await,
-            Self::MemoryPin => execute_memory_pin(ctx, call),
-            Self::MemoryForget => execute_memory_forget(ctx, call),
-            Self::Task => execute_task(ctx.agent, call).await,
-        };
-        content_block_to_result(block)
+        match self {
+            Self::MemorySearch => execute_memory_search(ctx.into(), input).await,
+            _ => {
+                let call = ToolCall {
+                    id: ctx.tool_call_id.clone(),
+                    name: self.descriptor().provider.name,
+                    input,
+                };
+                let block = match self {
+                    Self::Compact => execute_compact(ctx.agent, call).await,
+                    Self::Idle => execute_idle(ctx.agent, call),
+                    Self::MemorySearch => unreachable!("handled above"),
+                    Self::MemoryPin => execute_memory_pin(ctx, call),
+                    Self::MemoryForget => execute_memory_forget(ctx, call),
+                    Self::Task => execute_task(ctx.agent, call).await,
+                };
+                content_block_to_result(block)
+            }
+        }
     }
 }
 
@@ -275,34 +309,31 @@ fn execute_memory_forget(ctx: ToolContext<'_>, call: ToolCall) -> ContentBlock {
     }
 }
 
-async fn execute_memory_search(ctx: ToolContext<'_>, call: ToolCall) -> ContentBlock {
-    let Some(query) = call
-        .input
+async fn execute_memory_search(ctx: ParallelToolContext, input: serde_json::Value) -> ToolResult {
+    let Some(query) = input
         .get("query")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return ContentBlock::ToolResult {
-            tool_use_id: call.id,
-            content: "Invalid memory_search input: query is required.".into(),
-            is_error: true,
-        };
+        return Err("Invalid memory_search input: query is required.".to_string());
     };
 
-    let configured_limit = ctx.agent.config().memory.tool_search_limit;
-    let requested_limit = call
-        .input
+    let configured_limit = ctx
+        .runtime
+        .agent_config(&ctx.agent_id)?
+        .memory_tool_search_limit;
+    let requested_limit = input
         .get("limit")
         .and_then(|value| value.as_u64())
         .unwrap_or(configured_limit as u64) as usize;
     let limit = requested_limit.min(configured_limit).min(10);
 
     match ctx
-        .agent
+        .runtime
         .memory_engine()
         .search(MemorySearchRequest {
-            agent_id: ctx.agent.id().to_string(),
+            agent_id: ctx.agent_id.clone(),
             query: query.to_string(),
             limit,
             char_budget: None,
@@ -325,19 +356,9 @@ async fn execute_memory_search(ctx: ToolContext<'_>, call: ToolCall) -> ContentB
                     })
                 })
                 .collect::<Vec<_>>();
-            ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: serde_json::to_string_pretty(&results)
-                    .unwrap_or_else(|_| "[]".to_string())
-                    .into(),
-                is_error: false,
-            }
+            Ok(serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string()))
         }
-        Err(error) => ContentBlock::ToolResult {
-            tool_use_id: call.id,
-            content: format!("Memory search failed: {error}").into(),
-            is_error: true,
-        },
+        Err(error) => Err(format!("Memory search failed: {error}")),
     }
 }
 

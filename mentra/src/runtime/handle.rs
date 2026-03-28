@@ -31,7 +31,7 @@ use crate::{
         TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
         TeamRequestFilter, TeammateHost,
     },
-    tool::{ExecutableTool, ToolAuthorizer, ToolRegistry, ToolSpec},
+    tool::{ExecutableTool, ToolAuthorizer, ToolRegistry},
 };
 
 use super::skill::SkillLoader;
@@ -91,6 +91,7 @@ pub(crate) struct AgentExecutionConfig {
     pub(crate) team_dir: PathBuf,
     pub(crate) tasks_dir: PathBuf,
     pub(crate) base_dir: PathBuf,
+    pub(crate) memory_tool_search_limit: usize,
     pub(crate) auto_route_shell: bool,
     pub(crate) is_teammate: bool,
 }

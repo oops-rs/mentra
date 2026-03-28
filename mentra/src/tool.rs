@@ -1,6 +1,7 @@
 mod authorization;
 mod builtin;
 mod context;
+mod descriptor;
 mod files;
 mod model;
 mod runtime;
@@ -11,9 +12,14 @@ pub use authorization::{
     ToolAuthorizationDecision, ToolAuthorizationOutcome, ToolAuthorizationPreview,
     ToolAuthorizationRequest, ToolAuthorizer,
 };
+pub use descriptor::{
+    ProviderToolSpec, RuntimeToolDescriptor, RuntimeToolDescriptorBuilder, ToolApprovalCategory,
+    ToolCapability, ToolDurability, ToolExecutionCategory, ToolExecutionMode, ToolLoadingPolicy,
+    ToolSideEffectLevel,
+};
 pub use model::{
-    ExecutableTool, ParallelToolContext, ToolCall, ToolCapability, ToolContext, ToolDurability,
-    ToolExecutionMode, ToolLoadingPolicy, ToolResult, ToolSideEffectLevel, ToolSpec,
+    ExecutableTool, ParallelToolContext, ToolCall, ToolContext, ToolDefinition, ToolExecutor,
+    ToolResult, ToolSpec,
 };
 pub(crate) use runtime::ToolRuntime;
 
@@ -22,7 +28,7 @@ use files::FilesTool;
 
 #[derive(Clone)]
 struct RegisteredTool {
-    spec: ToolSpec,
+    descriptor: RuntimeToolDescriptor,
     handler: Arc<dyn ExecutableTool>,
 }
 
@@ -30,7 +36,7 @@ struct RegisteredTool {
 /// Registry of tools available to a runtime instance.
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
-    tool_specs: Arc<[ToolSpec]>,
+    provider_specs: Arc<[ProviderToolSpec]>,
 }
 
 impl ToolRegistry {
@@ -40,15 +46,21 @@ impl ToolRegistry {
         T: ExecutableTool + 'static,
     {
         let handler: Arc<dyn ExecutableTool> = Arc::new(tool);
-        let spec = handler.spec();
+        let descriptor = handler.descriptor();
         self.tools
-            .insert(spec.name.clone(), RegisteredTool { spec, handler });
-        self.refresh_tool_specs();
+            .insert(
+                descriptor.provider.name.clone(),
+                RegisteredTool {
+                    descriptor,
+                    handler,
+                },
+            );
+        self.refresh_provider_specs();
     }
 
     /// Returns the provider-facing tool specifications.
-    pub fn tools(&self) -> Arc<[ToolSpec]> {
-        Arc::clone(&self.tool_specs)
+    pub fn tools(&self) -> Arc<[ProviderToolSpec]> {
+        Arc::clone(&self.provider_specs)
     }
 
     /// Returns a tool handler by name.
@@ -56,11 +68,15 @@ impl ToolRegistry {
         self.tools.get(name).map(|tool| Arc::clone(&tool.handler))
     }
 
-    fn refresh_tool_specs(&mut self) {
-        self.tool_specs = self
+    pub fn get_tool_descriptor(&self, name: &str) -> Option<RuntimeToolDescriptor> {
+        self.tools.get(name).map(|tool| tool.descriptor.clone())
+    }
+
+    fn refresh_provider_specs(&mut self) {
+        self.provider_specs = self
             .tools
             .values()
-            .map(|tool| tool.spec.clone())
+            .map(|tool| tool.descriptor.provider.clone())
             .collect::<Vec<_>>()
             .into();
     }

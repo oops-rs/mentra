@@ -2,8 +2,8 @@ use crate::{
     ContentBlock,
     agent::Agent,
     error::RuntimeError,
-    team::{TeamProtocolStatus, TeamRequestDirection},
-    tool::ToolCall,
+    team::{TeamProtocolStatus, TeamRequestDirection, TeamRequestFilter},
+    tool::{ParallelToolContext, ToolCall, ToolResult},
 };
 
 use super::schema::{
@@ -188,29 +188,30 @@ pub(super) fn execute_team_respond(agent: &mut Agent, call: ToolCall) -> Content
     }
 }
 
-pub(super) fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> ContentBlock {
-    let input = match serde_json::from_value::<TeamListRequestsInput>(call.input) {
-        Ok(input) => input,
-        Err(error) => {
-            return ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: format!("Invalid team_list_requests input: {error}").into(),
-                is_error: true,
-            };
-        }
-    };
+pub(super) fn execute_team_list_requests_parallel(
+    ctx: ParallelToolContext,
+    input: serde_json::Value,
+) -> ToolResult {
+    let filter = parse_team_request_filter(input)?;
+    let config = ctx.runtime.agent_config(&ctx.agent_id)?;
+    let requests = ctx
+        .runtime
+        .list_team_requests(&config.team_dir, &config.name, filter)
+        .map_err(|error| format!("Failed to list team requests: {error}"))?;
+
+    serde_json::to_string_pretty(&requests)
+        .map_err(|error| format!("Failed to serialize team requests: {error}"))
+}
+
+fn parse_team_request_filter(input: serde_json::Value) -> Result<TeamRequestFilter, String> {
+    let input = serde_json::from_value::<TeamListRequestsInput>(input)
+        .map_err(|error| format!("Invalid team_list_requests input: {error}"))?;
 
     let status = match input.status.as_deref() {
         Some("pending") => Some(TeamProtocolStatus::Pending),
         Some("approved") => Some(TeamProtocolStatus::Approved),
         Some("rejected") => Some(TeamProtocolStatus::Rejected),
-        Some(value) => {
-            return ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: format!("Invalid team_list_requests status '{value}'").into(),
-                is_error: true,
-            };
-        }
+        Some(value) => return Err(format!("Invalid team_list_requests status '{value}'")),
         None => None,
     };
 
@@ -218,32 +219,13 @@ pub(super) fn execute_team_list_requests(agent: &mut Agent, call: ToolCall) -> C
         Some("inbound") => TeamRequestDirection::Inbound,
         Some("outbound") => TeamRequestDirection::Outbound,
         Some("any") | None => TeamRequestDirection::Any,
-        Some(value) => {
-            return ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: format!("Invalid team_list_requests direction '{value}'").into(),
-                is_error: true,
-            };
-        }
+        Some(value) => return Err(format!("Invalid team_list_requests direction '{value}'")),
     };
 
-    match agent.list_team_protocol_requests(status, input.protocol, input.counterparty, direction) {
-        Ok(requests) => match serde_json::to_string_pretty(&requests) {
-            Ok(content) => ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: content.into(),
-                is_error: false,
-            },
-            Err(error) => ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: format!("Failed to serialize team requests: {error}").into(),
-                is_error: true,
-            },
-        },
-        Err(error) => ContentBlock::ToolResult {
-            tool_use_id: call.id,
-            content: format!("Failed to list team requests: {error}").into(),
-            is_error: true,
-        },
-    }
+    Ok(TeamRequestFilter {
+        status,
+        protocol: input.protocol,
+        counterparty: input.counterparty,
+        direction,
+    })
 }

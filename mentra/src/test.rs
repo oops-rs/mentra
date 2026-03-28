@@ -300,14 +300,14 @@ mod tests {
         Agent,
         agent::{AgentConfig, ToolProfile},
         provider::Message,
-        tool::{ExecutableTool, ParallelToolContext, ToolResult, ToolSpec},
+        tool::{ParallelToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec},
     };
 
     struct EchoTool;
 
     #[async_trait]
-    impl ExecutableTool for EchoTool {
-        fn spec(&self) -> ToolSpec {
+    impl ToolDefinition for EchoTool {
+        fn descriptor(&self) -> ToolSpec {
             ToolSpec::builder("echo_tool")
                 .description("Echo a canned result")
                 .input_schema(json!({
@@ -316,7 +316,10 @@ mod tests {
                 }))
                 .build()
         }
+    }
 
+    #[async_trait]
+    impl ToolExecutor for EchoTool {
         async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
             Ok("echoed".to_string())
         }

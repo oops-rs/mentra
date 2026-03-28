@@ -8,8 +8,8 @@ use crate::{
     error::RuntimeError,
     runtime::{RunOptions, RuntimeHookEvent},
     tool::{
-        ExecutableTool, ParallelToolContext, ToolAuthorizationOutcome, ToolAuthorizationRequest,
-        ToolCall, ToolCapability, ToolContext, ToolExecutionMode, ToolSpec,
+        ExecutableTool, ParallelToolContext, RuntimeToolDescriptor, ToolAuthorizationOutcome,
+        ToolAuthorizationRequest, ToolCall, ToolCapability, ToolContext, ToolExecutionCategory,
     },
 };
 
@@ -93,19 +93,19 @@ impl ToolRuntime {
         })
     }
 
-    fn call_execution_mode_for_agent(
+    fn call_execution_category_for_agent(
         &self,
         call: &ToolCall,
         agent: Option<&Agent>,
-    ) -> ToolExecutionMode {
+    ) -> ToolExecutionCategory {
         if agent.is_some_and(|agent| !agent.can_use_tool(&call.name)) {
-            return ToolExecutionMode::Exclusive;
+            return ToolExecutionCategory::ExclusiveLocalMutation;
         }
 
         self.runtime
             .get_tool(&call.name)
-            .map(|tool| tool.execution_mode(&call.input))
-            .unwrap_or(ToolExecutionMode::Exclusive)
+            .map(|tool| tool.execution_category(&call.input))
+            .unwrap_or(ToolExecutionCategory::ExclusiveLocalMutation)
     }
 
     fn note_tool_started(
@@ -253,7 +253,7 @@ impl ToolRuntime {
         &self,
         agent: &Agent,
         call: &ToolCall,
-        spec: &ToolSpec,
+        descriptor: &RuntimeToolDescriptor,
         result: ContentBlock,
         should_end_turn: bool,
     ) -> CompletedToolExecution {
@@ -267,7 +267,7 @@ impl ToolRuntime {
                 is_error: false,
                 ..
             }
-        ) && spec
+        ) && descriptor
             .capabilities
             .iter()
             .any(|capability| matches!(capability, ToolCapability::TaskMutation));
@@ -307,10 +307,13 @@ impl ToolRuntime {
         }
     }
 
-    fn registered_tool(&self, name: &str) -> Option<(Arc<dyn ExecutableTool>, ToolSpec)> {
+    fn registered_tool(
+        &self,
+        name: &str,
+    ) -> Option<(Arc<dyn ExecutableTool>, RuntimeToolDescriptor)> {
         let tool = self.runtime.get_tool(name)?;
-        let spec = tool.spec();
-        Some((tool, spec))
+        let descriptor = self.runtime.get_tool_descriptor(name)?;
+        Some((tool, descriptor))
     }
 
     async fn authorize_tool_call(
@@ -430,7 +433,7 @@ impl ToolRuntime {
                 return Err(error);
             }
 
-            let Some((tool, spec)) = self.registered_tool(&call.name) else {
+            let Some((tool, descriptor)) = self.registered_tool(&call.name) else {
                 let result = ContentBlock::ToolResult {
                     tool_use_id: call.id.clone(),
                     content: "Tool not found".into(),
@@ -449,14 +452,15 @@ impl ToolRuntime {
 
             let ctx = self.parallel_tool_context(agent, &call);
             if let Some(result) = self.authorize_tool_call(&call, &tool, &ctx).await? {
-                let execution = self.completed_execution(agent, &call, &spec, result, false);
+                let execution = self.completed_execution(agent, &call, &descriptor, result, false);
                 results[index] = Some(execution);
                 continue;
             }
 
             if let Err(error) = self.emit_tool_runtime_started(&call) {
                 let result = self.blocked_tool_result(&call, error);
-                let execution = self.completed_execution(agent, &call, &spec, result, false);
+                let execution =
+                    self.completed_execution(agent, &call, &descriptor, result, false);
                 results[index] = Some(execution);
                 continue;
             }
@@ -464,11 +468,11 @@ impl ToolRuntime {
             join_set.spawn(async move {
                 let result = execute_tool_future(
                     &call.name,
-                    spec.execution_timeout,
+                    descriptor.execution_timeout,
                     tool.execute(ctx, call.input.clone()),
                 )
                 .await;
-                (index, call, spec, result)
+                (index, call, descriptor, result)
             });
         }
 
@@ -478,10 +482,10 @@ impl ToolRuntime {
                 return Err(error);
             }
             match tokio::time::timeout(PARALLEL_JOIN_POLL_INTERVAL, join_set.join_next()).await {
-                Ok(Some(Ok((index, call, spec, result)))) => {
+                Ok(Some(Ok((index, call, descriptor, result)))) => {
                     let result = Self::tool_result_block(&call, result);
                     results[index] =
-                        Some(self.completed_execution(agent, &call, &spec, result, false));
+                        Some(self.completed_execution(agent, &call, &descriptor, result, false));
                 }
                 Ok(Some(Err(error))) => {
                     join_set.abort_all();
@@ -514,7 +518,7 @@ impl ToolRuntime {
         agent: &mut Agent,
         call: ToolCall,
     ) -> CompletedToolExecution {
-        let Some((tool, spec)) = self.registered_tool(&call.name) else {
+        let Some((tool, descriptor)) = self.registered_tool(&call.name) else {
             let result = ContentBlock::ToolResult {
                 tool_use_id: call.id.clone(),
                 content: "Tool not found".into(),
@@ -536,18 +540,18 @@ impl ToolRuntime {
             .await
         {
             Ok(Some(result)) => {
-                return self.completed_execution(agent, &call, &spec, result, false);
+                return self.completed_execution(agent, &call, &descriptor, result, false);
             }
             Ok(None) => {}
             Err(error) => {
                 let result = self.blocked_tool_result(&call, error);
-                return self.completed_execution(agent, &call, &spec, result, false);
+                return self.completed_execution(agent, &call, &descriptor, result, false);
             }
         }
 
         if let Err(error) = self.emit_tool_runtime_started(&call) {
             let result = self.blocked_tool_result(&call, error);
-            return self.completed_execution(agent, &call, &spec, result, false);
+            return self.completed_execution(agent, &call, &descriptor, result, false);
         }
 
         let working_directory = authorization_ctx.working_directory.clone();
@@ -556,7 +560,7 @@ impl ToolRuntime {
             &call,
             execute_tool_future(
                 &call.name,
-                spec.execution_timeout,
+                descriptor.execution_timeout,
                 tool.execute_mut(
                     ToolContext {
                         agent_id: self.agent_id.clone(),
@@ -572,7 +576,7 @@ impl ToolRuntime {
             .await,
         );
         let should_end_turn = agent.take_idle_requested();
-        self.completed_execution(agent, &call, &spec, result, should_end_turn)
+        self.completed_execution(agent, &call, &descriptor, result, should_end_turn)
     }
 }
 
@@ -582,9 +586,12 @@ impl ToolCallSchedule {
         let mut pending_parallel = Vec::new();
 
         for call in calls {
-            match runtime.call_execution_mode_for_agent(&call, Some(agent)) {
-                ToolExecutionMode::Parallel => pending_parallel.push(call),
-                ToolExecutionMode::Exclusive => {
+            match runtime.call_execution_category_for_agent(&call, Some(agent)) {
+                ToolExecutionCategory::ReadOnlyParallel => pending_parallel.push(call),
+                ToolExecutionCategory::ExclusiveLocalMutation
+                | ToolExecutionCategory::ExclusivePersistentMutation
+                | ToolExecutionCategory::BackgroundJob
+                | ToolExecutionCategory::Delegation => {
                     if !pending_parallel.is_empty() {
                         batches.push(ToolCallBatch::Parallel(std::mem::take(
                             &mut pending_parallel,

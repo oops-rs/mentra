@@ -220,7 +220,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mentra::{
     BuiltinProvider, Runtime,
-    tool::{ExecutableTool, ToolContext, ToolResult, ToolSpec},
+    tool::{ToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec},
 };
 use serde_json::{Value, json};
 
@@ -230,9 +230,8 @@ struct AppState {
 
 struct InspectStateTool;
 
-#[async_trait]
-impl ExecutableTool for InspectStateTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for InspectStateTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("inspect_state")
             .description("Return the configured API base URL.")
             .input_schema(json!({
@@ -241,7 +240,10 @@ impl ExecutableTool for InspectStateTool {
             }))
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for InspectStateTool {
     async fn execute_mut(&self, ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         let state = ctx.app_context::<AppState>()?;
         Ok(state.api_base.clone())
@@ -269,16 +271,15 @@ Use `ToolSpec::builder(...)` to define custom tools without hand-assembling the 
 ```rust,no_run
 use async_trait::async_trait;
 use mentra::tool::{
-    ExecutableTool, ParallelToolContext, ToolCapability, ToolDurability, ToolResult,
-    ToolSideEffectLevel, ToolSpec,
+    ParallelToolContext, ToolCapability, ToolDefinition, ToolDurability, ToolExecutor,
+    ToolResult, ToolSideEffectLevel, ToolSpec,
 };
 use serde_json::{Value, json};
 
 struct UppercaseTool;
 
-#[async_trait]
-impl ExecutableTool for UppercaseTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for UppercaseTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("uppercase_text")
             .description("Uppercase the provided text")
             .input_schema(json!({
@@ -294,7 +295,10 @@ impl ExecutableTool for UppercaseTool {
             .execution_timeout(std::time::Duration::from_secs(5))
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for UppercaseTool {
     async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
         let text = input
             .get("text")
@@ -309,7 +313,7 @@ impl ExecutableTool for UppercaseTool {
 
 When a tool needs disposable delegated work, `ParallelToolContext::spawn_subagent()` can create a child agent that inherits the current runtime and model defaults. See the `subagent_tool` example in the workspace examples crate for a complete usage pattern.
 
-Override `ExecutableTool::authorization_preview(...)` when your custom tool needs to expose structured metadata to the installed `ToolAuthorizer`. The default preview includes the resolved working directory, tool capabilities, side-effect level, durability, the raw JSON input, and the same JSON as `structured_input`.
+Override `ToolExecutor::authorization_preview(...)` when your custom tool needs to expose structured metadata to the installed `ToolAuthorizer`. The default preview includes the resolved working directory, tool capabilities, side-effect level, durability, the raw JSON input, and the same JSON as `structured_input`.
 
 ## Hosted Tool Search
 
@@ -319,14 +323,13 @@ Mark a tool as deferred in its `ToolSpec`:
 
 ```rust,no_run
 use async_trait::async_trait;
-use mentra::tool::{ExecutableTool, ParallelToolContext, ToolResult, ToolSpec};
+use mentra::tool::{ParallelToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec};
 use serde_json::{Value, json};
 
 struct LookupOrderTool;
 
-#[async_trait]
-impl ExecutableTool for LookupOrderTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for LookupOrderTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("lookup_order")
             .description("Look up an order by id.")
             .input_schema(json!({
@@ -339,7 +342,10 @@ impl ExecutableTool for LookupOrderTool {
             .defer_loading(true)
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for LookupOrderTool {
     async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
         Ok("order loaded".to_string())
     }

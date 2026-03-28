@@ -74,11 +74,8 @@ pub use stream::ContentBlockStart;
 pub use stream::ProviderEvent;
 pub use stream::ProviderEventStream;
 pub use stream::ResponseHeaders;
-pub use tool::ToolCapability;
-pub use tool::ToolDurability;
-pub use tool::ToolExecutionMode;
+pub use tool::ProviderToolKind;
 pub use tool::ToolLoadingPolicy;
-pub use tool::ToolSideEffectLevel;
 pub use tool::ToolSpec;
 pub use tool::ToolSpecBuilder;
 

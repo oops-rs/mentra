@@ -1,49 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::Duration;
-
-/// High-level capability labels used for tool metadata and policy decisions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ToolCapability {
-    ReadOnly,
-    FilesystemRead,
-    FilesystemWrite,
-    ProcessExec,
-    BackgroundExec,
-    TaskMutation,
-    TeamCoordination,
-    Delegation,
-    ContextCompaction,
-    SkillLoad,
-    Custom(String),
-}
-
-/// Declares how much side effect a tool may have when executed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ToolSideEffectLevel {
-    #[default]
-    None,
-    LocalState,
-    Process,
-    External,
-}
-
-/// Declares whether a tool call is safe to replay or persist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ToolDurability {
-    #[default]
-    Ephemeral,
-    Persistent,
-    ReplaySafe,
-}
-
-/// Declares whether a tool call may execute concurrently with other calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ToolExecutionMode {
-    #[default]
-    Exclusive,
-    Parallel,
-}
 
 /// Declares whether a tool is loaded eagerly or deferred for provider-native tool search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -53,18 +9,30 @@ pub enum ToolLoadingPolicy {
     Deferred,
 }
 
-/// Provider-facing description of a tool and its input schema.
+/// Provider-visible tool kinds supported by Mentra-backed providers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderToolKind {
+    #[default]
+    Function,
+    HostedWebSearch,
+    ImageGeneration,
+}
+
+/// Provider-facing description of a tool and its schemas.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: Value,
-    pub capabilities: Vec<ToolCapability>,
-    pub side_effect_level: ToolSideEffectLevel,
-    pub durability: ToolDurability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+    #[serde(default)]
+    pub kind: ProviderToolKind,
     #[serde(default)]
     pub loading_policy: ToolLoadingPolicy,
-    pub execution_timeout: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Value>,
 }
 
 impl ToolSpec {
@@ -76,11 +44,10 @@ impl ToolSpec {
                 "type": "object",
                 "properties": {}
             }),
-            capabilities: Vec::new(),
-            side_effect_level: ToolSideEffectLevel::None,
-            durability: ToolDurability::Ephemeral,
+            output_schema: None,
+            kind: ProviderToolKind::Function,
             loading_policy: ToolLoadingPolicy::Immediate,
-            execution_timeout: None,
+            options: None,
         }
     }
 }
@@ -90,11 +57,10 @@ pub struct ToolSpecBuilder {
     name: String,
     description: Option<String>,
     input_schema: Value,
-    capabilities: Vec<ToolCapability>,
-    side_effect_level: ToolSideEffectLevel,
-    durability: ToolDurability,
+    output_schema: Option<Value>,
+    kind: ProviderToolKind,
     loading_policy: ToolLoadingPolicy,
-    execution_timeout: Option<Duration>,
+    options: Option<Value>,
 }
 
 impl ToolSpecBuilder {
@@ -108,23 +74,18 @@ impl ToolSpecBuilder {
         self
     }
 
-    pub fn capability(mut self, capability: ToolCapability) -> Self {
-        self.capabilities.push(capability);
+    pub fn output_schema(mut self, output_schema: Value) -> Self {
+        self.output_schema = Some(output_schema);
         self
     }
 
-    pub fn capabilities(mut self, capabilities: impl IntoIterator<Item = ToolCapability>) -> Self {
-        self.capabilities = capabilities.into_iter().collect();
+    pub fn kind(mut self, kind: ProviderToolKind) -> Self {
+        self.kind = kind;
         self
     }
 
-    pub fn side_effect_level(mut self, side_effect_level: ToolSideEffectLevel) -> Self {
-        self.side_effect_level = side_effect_level;
-        self
-    }
-
-    pub fn durability(mut self, durability: ToolDurability) -> Self {
-        self.durability = durability;
+    pub fn options(mut self, options: Value) -> Self {
+        self.options = Some(options);
         self
     }
 
@@ -141,21 +102,15 @@ impl ToolSpecBuilder {
         })
     }
 
-    pub fn execution_timeout(mut self, execution_timeout: Duration) -> Self {
-        self.execution_timeout = Some(execution_timeout);
-        self
-    }
-
     pub fn build(self) -> ToolSpec {
         ToolSpec {
             name: self.name,
             description: self.description,
             input_schema: self.input_schema,
-            capabilities: self.capabilities,
-            side_effect_level: self.side_effect_level,
-            durability: self.durability,
+            output_schema: self.output_schema,
+            kind: self.kind,
             loading_policy: self.loading_policy,
-            execution_timeout: self.execution_timeout,
+            options: self.options,
         }
     }
 }

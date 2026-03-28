@@ -8,8 +8,7 @@ use crate::error::RuntimeError;
 use crate::runtime::task::TaskIntrinsicTool;
 use crate::team::{
     TEAMMATE_MAX_ROUNDS, TeamDispatch, TeamIntrinsicTool, TeamMemberStatus, TeamMemberSummary,
-    TeamMessage, TeamProtocolRequestSummary, TeamProtocolStatus, TeamRequestDirection,
-    TeamRequestFilter, build_teammate_system_prompt,
+    TeamMessage, TeamProtocolRequestSummary, build_teammate_system_prompt,
 };
 
 use super::{Agent, AgentSpawnOptions, TeammateIdentity};
@@ -169,25 +168,6 @@ impl Agent {
             request_id,
             approve,
             reason,
-        )
-    }
-
-    pub(crate) fn list_team_protocol_requests(
-        &self,
-        status: Option<TeamProtocolStatus>,
-        protocol: Option<String>,
-        counterparty: Option<String>,
-        direction: TeamRequestDirection,
-    ) -> Result<Vec<TeamProtocolRequestSummary>, RuntimeError> {
-        self.runtime.list_team_requests(
-            self.config.team.team_dir.as_path(),
-            &self.name,
-            TeamRequestFilter {
-                status,
-                protocol,
-                counterparty,
-                direction,
-            },
         )
     }
 }

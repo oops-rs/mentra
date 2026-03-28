@@ -2045,11 +2045,18 @@ async fn memory_search_tool_returns_provenance_fields() {
         .expect("run");
 
     let result = match &agent.history()[2].content[0] {
-        ContentBlock::ToolResult { content, .. } => content.as_str(),
+        ContentBlock::ToolResult { content, .. } => {
+            let raw = content.as_str();
+            serde_json::from_str::<serde_json::Value>(raw).unwrap_or_else(|error| {
+                panic!("memory_search tool should return JSON, got {raw:?}: {error}")
+            })
+        }
         other => panic!("expected tool result, got {other:?}"),
     };
-    assert!(result.contains("\"source\": \"manual_pin\""));
-    assert!(result.contains("\"why_retrieved\":"));
+    let result = result.as_array().expect("memory_search results array");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["source"].as_str(), Some("manual_pin"));
+    assert!(result[0]["why_retrieved"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -3278,11 +3285,17 @@ async fn team_list_requests_tool_filters_visible_requests() {
         .iter()
         .flat_map(|message| message.content.iter())
         .find_map(|block| match block {
-            ContentBlock::ToolResult { content, .. } => Some(content.to_display_string()),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == "team-list" => Some(content.to_display_string()),
             _ => None,
         })
         .expect("team_list_requests tool result");
-    let listed: serde_json::Value = serde_json::from_str(&tool_result).expect("parse tool output");
+    let listed: serde_json::Value = serde_json::from_str(&tool_result).unwrap_or_else(|error| {
+        panic!("team_list_requests should return JSON, got {tool_result:?}: {error}")
+    });
     let listed = listed.as_array().expect("array");
     assert_eq!(listed.len(), 1);
     assert_eq!(

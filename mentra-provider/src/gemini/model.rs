@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{
     BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ReasoningEffort,
-    Request, Role, ToolChoice, ToolLoadingPolicy, ToolSearchMode, ToolSpec,
+    ProviderToolKind, Request, Role, ToolChoice, ToolLoadingPolicy, ToolSearchMode, ToolSpec,
 };
 
 #[derive(Deserialize)]
@@ -128,6 +128,13 @@ fn validate_gemini_tools(
     tool_choice: Option<&ToolChoice>,
     tool_search_mode: ToolSearchMode,
 ) -> Result<(), ProviderError> {
+    if let Some(tool) = tools.iter().find(|tool| tool.kind != ProviderToolKind::Function) {
+        return Err(ProviderError::InvalidRequest(format!(
+            "Gemini does not support provider tool kind {:?} for '{}'",
+            tool.kind, tool.name
+        )));
+    }
+
     let forced_tool_name = match tool_choice {
         Some(ToolChoice::Tool { name }) => Some(name.as_str()),
         _ => None,
@@ -477,8 +484,8 @@ mod tests {
 
     use crate::{
         BuiltinProvider, ContentBlock, Message, ModelInfo, ProviderError, ProviderRequestOptions,
-        ReasoningEffort, ReasoningOptions, Request, Role, ToolChoice, ToolDurability,
-        ToolLoadingPolicy, ToolResultContent, ToolSearchMode, ToolSideEffectLevel, ToolSpec,
+        ReasoningEffort, ReasoningOptions, Request, Role, ToolChoice, ToolLoadingPolicy,
+        ToolResultContent, ToolSearchMode, ToolSpec,
     };
 
     use super::{GeminiGenerateContentRequest, GeminiModel};
@@ -527,11 +534,10 @@ mod tests {
                         "operations": { "type": "array" }
                     }
                 }),
-                capabilities: vec![],
-                side_effect_level: ToolSideEffectLevel::None,
-                durability: ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Immediate,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Tool {
                 name: "files".to_string(),
@@ -662,11 +668,10 @@ mod tests {
                 name: "echo".to_string(),
                 description: None,
                 input_schema: json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: ToolSideEffectLevel::None,
-                durability: ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Immediate,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Any),
             temperature: None,
@@ -690,11 +695,10 @@ mod tests {
                 name: "echo".to_string(),
                 description: None,
                 input_schema: json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: ToolSideEffectLevel::None,
-                durability: ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Immediate,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
             temperature: None,
@@ -721,11 +725,10 @@ mod tests {
                 name: "echo".to_string(),
                 description: None,
                 input_schema: json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: ToolSideEffectLevel::None,
-                durability: ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Immediate,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: None,
             temperature: None,
@@ -812,11 +815,10 @@ mod tests {
                 name: "echo".to_string(),
                 description: None,
                 input_schema: json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: ToolSideEffectLevel::None,
-                durability: ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
             temperature: None,
@@ -849,11 +851,10 @@ mod tests {
                 name: "echo".to_string(),
                 description: None,
                 input_schema: json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: ToolSideEffectLevel::None,
-                durability: ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Tool {
                 name: "echo".to_string(),

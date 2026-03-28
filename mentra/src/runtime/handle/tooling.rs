@@ -59,7 +59,7 @@ impl RuntimeHandle {
             .register_skill_tool();
     }
 
-    pub fn tools(&self) -> Arc<[ToolSpec]> {
+    pub fn tools(&self) -> Arc<[crate::tool::ProviderToolSpec]> {
         self.tooling
             .tool_registry
             .read()
@@ -104,5 +104,13 @@ impl RuntimeHandle {
             .read()
             .expect("tool registry poisoned")
             .get_tool(name)
+    }
+
+    pub fn get_tool_descriptor(&self, name: &str) -> Option<crate::tool::RuntimeToolDescriptor> {
+        self.tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned")
+            .get_tool_descriptor(name)
     }
 }

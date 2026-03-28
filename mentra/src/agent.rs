@@ -157,6 +157,7 @@ impl Agent {
             team_dir: agent.config.team.team_dir.clone(),
             tasks_dir: agent.config.task.tasks_dir.clone(),
             base_dir: agent.config.workspace.base_dir.clone(),
+            memory_tool_search_limit: agent.config.memory.tool_search_limit,
             auto_route_shell: agent.config.workspace.auto_route_shell,
             is_teammate: agent.teammate_identity.is_some(),
         };
@@ -232,6 +233,7 @@ impl Agent {
             team_dir: agent.config.team.team_dir.clone(),
             tasks_dir: agent.config.task.tasks_dir.clone(),
             base_dir: agent.config.workspace.base_dir.clone(),
+            memory_tool_search_limit: agent.config.memory.tool_search_limit,
             auto_route_shell: agent.config.workspace.auto_route_shell,
             is_teammate: agent.teammate_identity.is_some(),
         };
@@ -348,7 +350,7 @@ impl Agent {
         self.snapshot_tx.subscribe()
     }
 
-    pub(crate) fn tools(&self) -> Arc<[crate::tool::ToolSpec]> {
+    pub(crate) fn tools(&self) -> Arc<[crate::tool::ProviderToolSpec]> {
         self.runtime
             .tools()
             .iter()

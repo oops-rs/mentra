@@ -15,8 +15,8 @@ use crate::{
         is_transient_runtime_error,
     },
     tool::{
-        ExecutableTool, ToolAuthorizationDecision, ToolAuthorizationOutcome,
-        ToolAuthorizationRequest, ToolAuthorizer, ToolContext, ToolResult, ToolSpec,
+        ToolAuthorizationDecision, ToolAuthorizationOutcome, ToolAuthorizationRequest,
+        ToolAuthorizer, ToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec,
     },
 };
 
@@ -678,8 +678,8 @@ struct TestAppState {
 struct AppContextTool;
 
 #[async_trait]
-impl ExecutableTool for AppContextTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for AppContextTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("app_context_tool")
             .description("Return a value from the runtime app context.")
             .input_schema(json!({
@@ -688,7 +688,10 @@ impl ExecutableTool for AppContextTool {
             }))
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for AppContextTool {
     async fn execute_mut(&self, ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         Ok(ctx.app_context::<TestAppState>()?.label.to_string())
     }
@@ -697,8 +700,8 @@ impl ExecutableTool for AppContextTool {
 struct SlowTool;
 
 #[async_trait]
-impl ExecutableTool for SlowTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for SlowTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("slow_tool")
             .description("Sleep long enough to trigger a timeout.")
             .input_schema(json!({
@@ -708,7 +711,10 @@ impl ExecutableTool for SlowTool {
             .execution_timeout(Duration::from_millis(20))
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for SlowTool {
     async fn execute_mut(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         sleep(Duration::from_millis(60)).await;
         Ok("finished".to_string())

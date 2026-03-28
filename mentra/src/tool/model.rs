@@ -12,25 +12,24 @@ use crate::agent::{
     CompactionDetails, CompactionTrigger, DisposableSubagentTemplate, SpawnedAgentStatus,
     SpawnedAgentSummary,
 };
-
 use crate::runtime::{RuntimeError, TaskIntrinsicTool, TaskItem};
 use crate::team::{TeamDispatch, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary};
 use crate::tool::ToolAuthorizationPreview;
 
+use super::descriptor::{RuntimeToolDescriptor, ToolExecutionMode};
+
 #[allow(unused_imports)]
-pub use mentra_provider::{
-    ToolCapability, ToolDurability, ToolExecutionMode, ToolLoadingPolicy, ToolSideEffectLevel,
-    ToolSpec, ToolSpecBuilder,
-};
+pub use mentra_provider::ToolLoadingPolicy;
+pub type ToolSpec = RuntimeToolDescriptor;
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolLoadingPolicy, ToolSpec};
+    use crate::tool::{ProviderToolSpec, ToolLoadingPolicy};
     use serde_json::json;
 
     #[test]
     fn tool_spec_builder_defaults_to_immediate_loading() {
-        let spec = ToolSpec::builder("echo_tool")
+        let spec = ProviderToolSpec::builder("echo_tool")
             .description("Echo a value.")
             .input_schema(json!({
                 "type": "object",
@@ -45,24 +44,22 @@ mod tests {
 
     #[test]
     fn tool_spec_builder_supports_deferred_loading() {
-        let spec = ToolSpec::builder("echo_tool").defer_loading(true).build();
+        let spec = ProviderToolSpec::builder("echo_tool")
+            .defer_loading(true)
+            .build();
 
         assert_eq!(spec.loading_policy, ToolLoadingPolicy::Deferred);
     }
 
     #[test]
     fn tool_spec_deserialization_defaults_loading_policy() {
-        let spec: ToolSpec = serde_json::from_value(json!({
+        let spec: ProviderToolSpec = serde_json::from_value(json!({
             "name": "echo_tool",
             "description": "Echo a value.",
             "input_schema": {
                 "type": "object",
                 "properties": {}
-            },
-            "capabilities": [],
-            "side_effect_level": "None",
-            "durability": "Ephemeral",
-            "execution_timeout": null
+            }
         }))
         .expect("deserialize tool spec");
 
@@ -89,32 +86,26 @@ pub struct ToolContext<'a> {
 }
 
 impl ToolContext<'_> {
-    /// Returns the resolved working directory for the current tool execution.
     pub fn working_directory(&self) -> &Path {
         self.working_directory.as_path()
     }
 
-    /// Returns the current agent's display name.
     pub fn agent_name(&self) -> &str {
         self.agent.name()
     }
 
-    /// Returns the current model identifier.
     pub fn model(&self) -> &str {
         self.agent.model()
     }
 
-    /// Returns the number of messages currently stored in history.
     pub fn history_len(&self) -> usize {
         self.agent.history().len()
     }
 
-    /// Returns the current agent's task snapshot.
     pub fn tasks(&self) -> &[TaskItem] {
         self.agent.tasks()
     }
 
-    /// Resolves an optional working-directory override.
     pub fn resolve_working_directory(
         &self,
         working_directory: Option<&str>,
@@ -123,17 +114,14 @@ impl ToolContext<'_> {
             .resolve_working_directory(&self.agent_id, working_directory)
     }
 
-    /// Loads a named skill body from the registered skills directory.
     pub fn load_skill(&self, name: &str) -> Result<String, String> {
         self.runtime.load_skill(name)
     }
 
-    /// Returns skill descriptions exposed to the model, when available.
     pub fn skill_descriptions(&self) -> Option<String> {
         self.runtime.skill_descriptions()
     }
 
-    /// Returns typed application state registered on the runtime.
     pub fn app_context<T>(&self) -> Result<Arc<T>, String>
     where
         T: Any + Send + Sync + 'static,
@@ -141,7 +129,6 @@ impl ToolContext<'_> {
         self.runtime.app_context::<T>()
     }
 
-    /// Executes a foreground shell command through the runtime policy and executor.
     pub async fn execute_shell_command(
         &self,
         command: String,
@@ -160,7 +147,6 @@ impl ToolContext<'_> {
             .await
     }
 
-    /// Starts a background shell command through the runtime policy and executor.
     pub fn start_background_task(
         &self,
         command: String,
@@ -177,17 +163,14 @@ impl ToolContext<'_> {
         )
     }
 
-    /// Reads the status of one or more background tasks.
     pub fn check_background_task(&self, task_id: Option<&str>) -> Result<String, String> {
         self.runtime.check_background_task(&self.agent_id, task_id)
     }
 
-    /// Requests that the current agent yield back to its idle loop.
     pub fn request_idle(&mut self) {
         self.agent.request_idle();
     }
 
-    /// Runs the builtin context-compaction flow immediately.
     pub async fn compact_history(&mut self) -> Result<Option<CompactionDetails>, RuntimeError> {
         self.agent
             .compact_history(
@@ -197,7 +180,6 @@ impl ToolContext<'_> {
             .await
     }
 
-    /// Executes one of the persisted task tools directly.
     pub fn execute_task_tool(
         &self,
         tool: &TaskIntrinsicTool,
@@ -206,29 +188,24 @@ impl ToolContext<'_> {
         self.agent.execute_task_mutation(tool, input)
     }
 
-    /// Reloads persisted task state into the current agent snapshot.
     pub fn refresh_tasks(&mut self) -> Result<(), RuntimeError> {
         self.agent.refresh_tasks_from_disk()
     }
 
-    /// Reads a file through the runtime's read policy.
     pub async fn read_file(&self, path: &str, max_lines: Option<usize>) -> Result<String, String> {
         self.runtime
             .read_file(&self.agent_id, path, max_lines)
             .await
     }
 
-    /// Spawns a disposable subagent that inherits the current runtime.
     pub fn spawn_subagent(&self) -> Result<crate::agent::Agent, RuntimeError> {
         self.agent.spawn_subagent()
     }
 
-    /// Records a subagent in the current agent snapshot.
     pub fn register_subagent(&mut self, agent: &crate::agent::Agent) -> SpawnedAgentSummary {
         self.agent.register_subagent(agent)
     }
 
-    /// Marks a tracked subagent as finished.
     pub fn finish_subagent(
         &mut self,
         id: &str,
@@ -237,7 +214,6 @@ impl ToolContext<'_> {
         self.agent.finish_subagent(id, status)
     }
 
-    /// Spawns a persistent teammate in the current team namespace.
     pub async fn spawn_teammate(
         &mut self,
         name: impl Into<String>,
@@ -247,7 +223,6 @@ impl ToolContext<'_> {
         self.agent.spawn_teammate(name, role, prompt).await
     }
 
-    /// Sends a direct message to a teammate.
     pub fn send_team_message(
         &self,
         to: &str,
@@ -256,7 +231,6 @@ impl ToolContext<'_> {
         self.agent.send_team_message(to, content)
     }
 
-    /// Broadcasts a message to every known teammate except the sender.
     pub fn broadcast_team_message(
         &self,
         content: impl Into<String>,
@@ -264,12 +238,10 @@ impl ToolContext<'_> {
         self.agent.broadcast_team_message(content)
     }
 
-    /// Reads and acknowledges the current team inbox.
     pub fn read_team_inbox(&self) -> Result<Vec<TeamMessage>, RuntimeError> {
         self.agent.read_team_inbox()
     }
 
-    /// Creates a team protocol request addressed to a teammate.
     pub fn request_team_protocol(
         &self,
         to: &str,
@@ -279,7 +251,6 @@ impl ToolContext<'_> {
         self.agent.request_team_protocol(to, protocol, content)
     }
 
-    /// Resolves a team protocol request.
     pub fn respond_team_protocol(
         &self,
         request_id: &str,
@@ -324,32 +295,26 @@ impl From<ToolContext<'_>> for ParallelToolContext {
 }
 
 impl ParallelToolContext {
-    /// Returns the resolved working directory for the current tool execution.
     pub fn working_directory(&self) -> &Path {
         self.working_directory.as_path()
     }
 
-    /// Returns the current agent's display name.
     pub fn agent_name(&self) -> &str {
         &self.agent_name
     }
 
-    /// Returns the current model identifier.
     pub fn model(&self) -> &str {
         &self.model
     }
 
-    /// Returns the number of messages currently stored in history.
     pub fn history_len(&self) -> usize {
         self.history_len
     }
 
-    /// Returns the current agent's task snapshot.
     pub fn tasks(&self) -> &[TaskItem] {
         &self.tasks
     }
 
-    /// Resolves an optional working-directory override.
     pub fn resolve_working_directory(
         &self,
         working_directory: Option<&str>,
@@ -358,17 +323,14 @@ impl ParallelToolContext {
             .resolve_working_directory(&self.agent_id, working_directory)
     }
 
-    /// Loads a named skill body from the registered skills directory.
     pub fn load_skill(&self, name: &str) -> Result<String, String> {
         self.runtime.load_skill(name)
     }
 
-    /// Returns skill descriptions exposed to the model, when available.
     pub fn skill_descriptions(&self) -> Option<String> {
         self.runtime.skill_descriptions()
     }
 
-    /// Returns typed application state registered on the runtime.
     pub fn app_context<T>(&self) -> Result<Arc<T>, String>
     where
         T: Any + Send + Sync + 'static,
@@ -376,7 +338,6 @@ impl ParallelToolContext {
         self.runtime.app_context::<T>()
     }
 
-    /// Executes a foreground shell command through the runtime policy and executor.
     pub async fn execute_shell_command(
         &self,
         command: String,
@@ -395,7 +356,6 @@ impl ParallelToolContext {
             .await
     }
 
-    /// Starts a background shell command through the runtime policy and executor.
     pub fn start_background_task(
         &self,
         command: String,
@@ -412,83 +372,71 @@ impl ParallelToolContext {
         )
     }
 
-    /// Reads the status of one or more background tasks.
     pub fn check_background_task(&self, task_id: Option<&str>) -> Result<String, String> {
         self.runtime.check_background_task(&self.agent_id, task_id)
     }
 
-    /// Reads a file through the runtime's read policy.
     pub async fn read_file(&self, path: &str, max_lines: Option<usize>) -> Result<String, String> {
         self.runtime
             .read_file(&self.agent_id, path, max_lines)
             .await
     }
 
-    /// Spawns a disposable subagent that inherits the current runtime.
     pub fn spawn_subagent(&self) -> Result<crate::agent::Agent, RuntimeError> {
         self.subagent_template.spawn()
     }
 }
 
 /// String result returned by Mentra tools.
-///
-/// `Ok(content)` is sent back to the model as a `tool_result` block with
-/// `is_error = false`.
-///
-/// `Err(content)` is also sent back to the model as a `tool_result` block, but
-/// with `is_error = true`. Returning `Err(...)` from a tool does not by itself
-/// abort the run; it lets the model inspect the failure and decide what to do
-/// next.
-///
-/// Runs fail only when execution cannot continue at the runtime level, such as
-/// when a tool panics or the runtime itself returns an execution error.
 pub type ToolResult = Result<String, String>;
 
-/// Trait implemented by custom tools exposed to models.
-#[async_trait]
-pub trait ExecutableTool: Send + Sync {
-    /// Returns the static tool metadata used in model requests.
-    fn spec(&self) -> ToolSpec;
+/// Definition contract for custom tools exposed to models.
+pub trait ToolDefinition: Send + Sync {
+    fn descriptor(&self) -> RuntimeToolDescriptor;
+}
 
-    /// Returns structured metadata for pre-execution authorization.
+/// Execution contract for custom tools exposed to models.
+#[async_trait]
+pub trait ToolExecutor: ToolDefinition + Send + Sync {
     fn authorization_preview(
         &self,
         ctx: &ParallelToolContext,
         input: &Value,
     ) -> Result<ToolAuthorizationPreview, String> {
-        let spec = self.spec();
+        let descriptor = self.descriptor();
         Ok(ToolAuthorizationPreview {
             working_directory: ctx.working_directory().to_path_buf(),
-            capabilities: spec.capabilities,
-            side_effect_level: spec.side_effect_level,
-            durability: spec.durability,
+            capabilities: descriptor.capabilities,
+            side_effect_level: descriptor.side_effect_level,
+            durability: descriptor.durability,
+            execution_category: descriptor.execution_category,
+            approval_category: descriptor.approval_category,
             raw_input: input.clone(),
             structured_input: input.clone(),
         })
     }
 
-    /// Declares whether this tool call may execute in parallel for the given payload.
-    fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
-        ToolExecutionMode::Exclusive
+    fn execution_category(&self, _input: &Value) -> super::descriptor::ToolExecutionCategory {
+        self.descriptor().execution_category
     }
 
-    /// Executes the tool with a context that does not permit agent mutation.
-    ///
-    /// Return `Ok(content)` for successful tool output and `Err(content)` for
-    /// tool-level failures you still want surfaced back to the model as an
-    /// error `tool_result`.
+    fn execution_mode(&self, input: &Value) -> ToolExecutionMode {
+        self.execution_category(input).into()
+    }
+
     async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
         Err(format!(
             "Tool '{}' does not support parallel execution",
-            self.spec().name
+            self.descriptor().provider.name
         ))
     }
 
-    /// Executes the tool with mutable access to the current agent.
-    ///
-    /// As with [`ExecutableTool::execute`], `Err(content)` produces an error
-    /// `tool_result` visible to the model rather than aborting the run.
     async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         self.execute(ctx.into(), input).await
     }
 }
+
+/// Runtime tool contract used by Mentra registries and execution.
+pub trait ExecutableTool: ToolDefinition + ToolExecutor {}
+
+impl<T> ExecutableTool for T where T: ToolDefinition + ToolExecutor {}

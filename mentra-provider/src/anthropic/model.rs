@@ -7,8 +7,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ReasoningEffort,
-    Request, Response, Role, TokenUsage, ToolChoice, ToolLoadingPolicy, ToolResultContent,
-    ToolSearchMode, ToolSpec,
+    ProviderToolKind, Request, Response, Role, TokenUsage, ToolChoice, ToolLoadingPolicy,
+    ToolResultContent, ToolSearchMode, ToolSpec,
 };
 
 #[derive(Deserialize)]
@@ -432,6 +432,13 @@ fn build_anthropic_tools(
     tool_choice: Option<&ToolChoice>,
     tool_search_mode: ToolSearchMode,
 ) -> Result<Vec<AnthropicTool>, ProviderError> {
+    if let Some(tool) = tools.iter().find(|tool| tool.kind != ProviderToolKind::Function) {
+        return Err(ProviderError::InvalidRequest(format!(
+            "Anthropic does not support provider tool kind {:?} for '{}'",
+            tool.kind, tool.name
+        )));
+    }
+
     let forced_tool_name = match tool_choice {
         Some(ToolChoice::Tool { name }) => Some(name.as_str()),
         _ => None,
@@ -687,11 +694,10 @@ mod tests {
                 name: "lookup_order".to_string(),
                 description: Some("Look up an order".to_string()),
                 input_schema: serde_json::json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: crate::ToolSideEffectLevel::None,
-                durability: crate::ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
             temperature: None,
@@ -725,11 +731,10 @@ mod tests {
                 name: "lookup_order".to_string(),
                 description: None,
                 input_schema: serde_json::json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: crate::ToolSideEffectLevel::None,
-                durability: crate::ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
             temperature: None,
@@ -759,11 +764,10 @@ mod tests {
                 name: "lookup_order".to_string(),
                 description: Some("Look up an order".to_string()),
                 input_schema: serde_json::json!({"type":"object"}),
-                capabilities: vec![],
-                side_effect_level: crate::ToolSideEffectLevel::None,
-                durability: crate::ToolDurability::ReplaySafe,
+                output_schema: None,
+                kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
-                execution_timeout: None,
+                options: None,
             }]),
             tool_choice: Some(ToolChoice::Tool {
                 name: "lookup_order".to_string(),

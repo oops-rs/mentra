@@ -18,7 +18,8 @@ use crate::{
     runtime::{AgentStore, Runtime, SqliteRuntimeStore},
     team::{TeamMemberStatus, TeamMessage, TeamStore},
     tool::{
-        ExecutableTool, ToolContext, ToolDurability, ToolResult, ToolSideEffectLevel, ToolSpec,
+        ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolResult,
+        ToolSideEffectLevel, ToolSpec,
     },
 };
 
@@ -565,25 +566,24 @@ struct BlockingTool {
 }
 
 #[async_trait]
-impl ExecutableTool for BlockingTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "blocking_tool".to_string(),
-            description: Some("blocks until released".to_string()),
-            input_schema: json!({
+impl ToolDefinition for BlockingTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("blocking_tool")
+            .description("blocks until released")
+            .input_schema(json!({
                 "type": "object",
                 "properties": {
                     "value": { "type": "string" }
                 }
-            }),
-            capabilities: vec![],
-            side_effect_level: ToolSideEffectLevel::None,
-            durability: ToolDurability::ReplaySafe,
-            loading_policy: crate::tool::ToolLoadingPolicy::Immediate,
-            execution_timeout: None,
-        }
+            }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for BlockingTool {
     async fn execute_mut(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         self.started.notify_one();
         self.release.notified().await;

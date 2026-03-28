@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 use std::path::{Component, PathBuf};
 
 use crate::tool::{
-    ExecutableTool, ParallelToolContext, ToolAuthorizationPreview, ToolCapability, ToolContext,
-    ToolDurability, ToolExecutionMode, ToolResult, ToolSideEffectLevel, ToolSpec,
+    ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory, ToolAuthorizationPreview,
+    ToolCapability, ToolContext, ToolDefinition, ToolDurability, ToolExecutionCategory,
+    ToolExecutor, ToolResult, ToolSideEffectLevel,
 };
 
 use self::{
@@ -19,10 +20,9 @@ use self::{
 
 pub struct FilesTool;
 
-#[async_trait]
-impl ExecutableTool for FilesTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::builder("files")
+impl ToolDefinition for FilesTool {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
+        RuntimeToolDescriptor::builder("files")
             .description("Read, search, list, create, update, move, and delete files within the workspace.")
             .input_schema(json!({
                 "type": "object",
@@ -140,18 +140,24 @@ impl ExecutableTool for FilesTool {
             ])
             .side_effect_level(ToolSideEffectLevel::LocalState)
             .durability(ToolDurability::Ephemeral)
+            .execution_category(ToolExecutionCategory::ExclusiveLocalMutation)
+            .approval_category(ToolApprovalCategory::Filesystem)
             .build()
     }
 
-    fn execution_mode(&self, input: &Value) -> ToolExecutionMode {
+}
+
+#[async_trait]
+impl ToolExecutor for FilesTool {
+    fn execution_category(&self, input: &Value) -> ToolExecutionCategory {
         let Ok(input) = serde_json::from_value::<FilesInput>(input.clone()) else {
-            return ToolExecutionMode::Exclusive;
+            return ToolExecutionCategory::ExclusiveLocalMutation;
         };
 
         if input.operations.iter().all(FileOperation::is_read_only) {
-            ToolExecutionMode::Parallel
+            ToolExecutionCategory::ReadOnlyParallel
         } else {
-            ToolExecutionMode::Exclusive
+            ToolExecutionCategory::ExclusiveLocalMutation
         }
     }
 
@@ -160,7 +166,7 @@ impl ExecutableTool for FilesTool {
         ctx: &ParallelToolContext,
         input: &Value,
     ) -> Result<ToolAuthorizationPreview, String> {
-        build_files_authorization_preview(self.spec(), ctx, input)
+        build_files_authorization_preview(self.descriptor(), ctx, input)
     }
 
     async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
@@ -221,7 +227,7 @@ async fn execute_files_tool(
 }
 
 fn build_files_authorization_preview(
-    spec: ToolSpec,
+    descriptor: RuntimeToolDescriptor,
     ctx: &ParallelToolContext,
     input: &Value,
 ) -> Result<ToolAuthorizationPreview, String> {
@@ -248,9 +254,11 @@ fn build_files_authorization_preview(
 
     Ok(ToolAuthorizationPreview {
         working_directory: working_directory.clone(),
-        capabilities: spec.capabilities,
-        side_effect_level: spec.side_effect_level,
-        durability: spec.durability,
+        capabilities: descriptor.capabilities,
+        side_effect_level: descriptor.side_effect_level,
+        durability: descriptor.durability,
+        execution_category: descriptor.execution_category,
+        approval_category: descriptor.approval_category,
         raw_input,
         structured_input: json!({
             "kind": "files",
@@ -389,34 +397,38 @@ mod tests {
 
     #[test]
     fn files_tool_metadata_marks_local_mutation() {
-        let spec = FilesTool.spec();
+        let spec = FilesTool.descriptor();
         assert!(!spec.capabilities.contains(&ToolCapability::ReadOnly));
         assert_eq!(spec.durability, ToolDurability::Ephemeral);
         assert!(spec.capabilities.contains(&ToolCapability::FilesystemRead));
         assert!(spec.capabilities.contains(&ToolCapability::FilesystemWrite));
+        assert_eq!(
+            spec.execution_category,
+            ToolExecutionCategory::ExclusiveLocalMutation
+        );
     }
 
     #[test]
     fn read_only_operations_opt_into_parallel_execution() {
-        let mode = FilesTool.execution_mode(&json!({
+        let category = FilesTool.execution_category(&json!({
             "operations": [
                 { "op": "read", "path": "README.md" },
                 { "op": "search", "path": ".", "pattern": "mentra" }
             ]
         }));
 
-        assert_eq!(mode, ToolExecutionMode::Parallel);
+        assert_eq!(category, ToolExecutionCategory::ReadOnlyParallel);
     }
 
     #[test]
     fn mutating_operations_stay_exclusive() {
-        let mode = FilesTool.execution_mode(&json!({
+        let category = FilesTool.execution_category(&json!({
             "operations": [
                 { "op": "read", "path": "README.md" },
                 { "op": "set", "path": "README.md", "content": "updated" }
             ]
         }));
 
-        assert_eq!(mode, ToolExecutionMode::Exclusive);
+        assert_eq!(category, ToolExecutionCategory::ExclusiveLocalMutation);
     }
 }
