@@ -8,7 +8,7 @@ use crate::{
     ContentBlock,
     tool::{
         ParallelToolContext, RuntimeToolDescriptor, ToolCall, ToolContext, ToolDefinition,
-        ToolExecutor, ToolResult,
+        ToolExecutor, ToolResult, internal::content_block_to_tool_result,
     },
 };
 
@@ -68,16 +68,5 @@ impl ToolExecutor for TeamIntrinsicTool {
 }
 
 fn content_block_to_result(block: ContentBlock) -> ToolResult {
-    match block {
-        ContentBlock::ToolResult {
-            content, is_error, ..
-        } => {
-            if is_error {
-                Err(content.to_display_string())
-            } else {
-                Ok(content.to_display_string())
-            }
-        }
-        _ => Err("Team intrinsic returned an unexpected content block".to_string()),
-    }
+    content_block_to_tool_result("Team intrinsic", block)
 }

@@ -4,17 +4,16 @@ use async_trait::async_trait;
 use mentra::{
     ContentBlock,
     tool::{
-        ExecutableTool, ParallelToolContext, ToolCapability, ToolDurability, ToolResult,
-        ToolSideEffectLevel, ToolSpec,
+        ParallelToolContext, ToolCapability, ToolDefinition, ToolDurability, ToolExecutor,
+        ToolResult, ToolSideEffectLevel, ToolSpec,
     },
 };
 use serde_json::{Value, json};
 
 struct DelegateSummaryTool;
 
-#[async_trait]
-impl ExecutableTool for DelegateSummaryTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for DelegateSummaryTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("delegate_summary")
             .description("Ask a disposable subagent to solve the prompt and return its summary.")
             .input_schema(json!({
@@ -32,7 +31,10 @@ impl ExecutableTool for DelegateSummaryTool {
             .durability(ToolDurability::Ephemeral)
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for DelegateSummaryTool {
     async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
         let prompt = input
             .get("prompt")

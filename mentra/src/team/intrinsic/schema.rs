@@ -4,6 +4,7 @@ use serde_json::json;
 use crate::tool::{
     RuntimeToolDescriptor, ToolApprovalCategory, ToolCapability, ToolDurability,
     ToolExecutionCategory, ToolSideEffectLevel,
+    internal::{RuntimeDescriptorParts, build_runtime_descriptor},
 };
 
 use super::TeamIntrinsicTool;
@@ -55,15 +56,16 @@ impl TeamIntrinsicTool {
         input_schema: serde_json::Value,
         execution_category: ToolExecutionCategory,
     ) -> RuntimeToolDescriptor {
-        RuntimeToolDescriptor::builder(self.to_string())
-            .description(description)
-            .input_schema(input_schema)
-            .capability(ToolCapability::TeamCoordination)
-            .side_effect_level(ToolSideEffectLevel::LocalState)
-            .durability(ToolDurability::Persistent)
-            .execution_category(execution_category)
-            .approval_category(ToolApprovalCategory::Delegation)
-            .build()
+        build_runtime_descriptor(RuntimeDescriptorParts {
+            name: self.to_string(),
+            description: description.to_string(),
+            input_schema,
+            capabilities: vec![ToolCapability::TeamCoordination],
+            side_effect_level: ToolSideEffectLevel::LocalState,
+            durability: ToolDurability::Persistent,
+            execution_category,
+            approval_category: ToolApprovalCategory::Delegation,
+        })
     }
 
     pub(super) fn tool_spec(&self) -> RuntimeToolDescriptor {

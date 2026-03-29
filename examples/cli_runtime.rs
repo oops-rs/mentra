@@ -12,8 +12,8 @@ use mentra::{
     ContentBlock, Runtime, RuntimePolicy,
     agent::{AgentConfig, ToolProfile, WorkspaceConfig},
     tool::{
-        ExecutableTool, ToolCapability, ToolContext, ToolDurability, ToolResult,
-        ToolSideEffectLevel, ToolSpec,
+        ParallelToolContext, ToolCapability, ToolContext, ToolDefinition, ToolDurability,
+        ToolExecutor, ToolResult, ToolSideEffectLevel, ToolSpec,
     },
 };
 use serde_json::{Value, json};
@@ -40,9 +40,8 @@ struct WorkspaceSummaryTool;
 
 struct SaveArtifactTool;
 
-#[async_trait]
-impl ExecutableTool for WorkspaceSummaryTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for WorkspaceSummaryTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("workspace_summary")
             .description("Return the configured workspace and output roots.")
             .input_schema(json!({
@@ -54,8 +53,11 @@ impl ExecutableTool for WorkspaceSummaryTool {
             .durability(ToolDurability::ReplaySafe)
             .build()
     }
+}
 
-    async fn execute_mut(&self, ctx: ToolContext<'_>, _input: Value) -> ToolResult {
+#[async_trait]
+impl ToolExecutor for WorkspaceSummaryTool {
+    async fn execute(&self, ctx: ParallelToolContext, _input: Value) -> ToolResult {
         let state = ctx.app_context::<ExampleState>()?;
         Ok(json!({
             "workspaceRoot": state.workspace_root,
@@ -65,9 +67,8 @@ impl ExecutableTool for WorkspaceSummaryTool {
     }
 }
 
-#[async_trait]
-impl ExecutableTool for SaveArtifactTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for SaveArtifactTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("save_artifact")
             .description("Write a generated artifact into the example output directory.")
             .input_schema(json!({
@@ -89,7 +90,10 @@ impl ExecutableTool for SaveArtifactTool {
             .durability(ToolDurability::ReplaySafe)
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for SaveArtifactTool {
     async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         let state = ctx.app_context::<ExampleState>()?;
         let filename = input

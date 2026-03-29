@@ -51,8 +51,11 @@ major pieces:
 This repository is a small workspace:
 
 * [`mentra/`](./mentra): the publishable runtime crate.
+* [`mentra-provider/`](./mentra-provider): the publishable provider-core crate.
 * [`examples/`](./examples): runnable examples built on top of the runtime.
 * [`docs/`](./docs): design notes and feature-specific documentation.
+
+Publish `mentra-provider` first, then `mentra`.
 
 ## Example
 
@@ -60,7 +63,7 @@ Add Mentra and Tokio to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mentra = "0.3.0"
+mentra = "0.5.0"
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -97,8 +100,8 @@ including:
 * [`quickstart`](./examples/quickstart.rs): minimal single-agent setup.
 * [`chat`](./examples/chat.rs): interactive, persisted runtime with skills,
   policies, and multiple providers.
-* [`custom_tool`](./examples/custom_tool.rs): registering a custom
-  `ExecutableTool`.
+* [`custom_tool`](./examples/custom_tool.rs): registering a custom tool with
+  `ToolSpec::builder(...)` and `ToolExecutor`.
 * [`subagent_tool`](./examples/subagent_tool.rs): disposable subagent
   delegation inside a tool.
 * [`team_collaboration`](./examples/team_collaboration.rs): persistent teammate
@@ -140,6 +143,9 @@ First, check the [crate README](./mentra/README.md) and the
 [API documentation][docs-url]. If you want more implementation detail, the
 [`docs/`](./docs) directory includes notes on file operations, memory, shell
 safety, and parallel tool calls.
+
+For release notes and migration guidance for the current tooling architecture,
+see [CHANGELOG.md](./CHANGELOG.md).
 
 If the answer is not there, please open an issue on the
 [issue tracker](https://github.com/WendellXY/mentra/issues).

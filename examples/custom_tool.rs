@@ -4,17 +4,16 @@ use async_trait::async_trait;
 use mentra::{
     ContentBlock,
     tool::{
-        ExecutableTool, ParallelToolContext, ToolCapability, ToolDurability, ToolResult,
-        ToolSideEffectLevel, ToolSpec,
+        ParallelToolContext, ToolCapability, ToolDefinition, ToolDurability, ToolExecutor,
+        ToolResult, ToolSideEffectLevel, ToolSpec,
     },
 };
 use serde_json::{Value, json};
 
 struct UppercaseTool;
 
-#[async_trait]
-impl ExecutableTool for UppercaseTool {
-    fn spec(&self) -> ToolSpec {
+impl ToolDefinition for UppercaseTool {
+    fn descriptor(&self) -> ToolSpec {
         ToolSpec::builder("uppercase_text")
             .description("Uppercase the provided text and return the transformed value.")
             .input_schema(json!({
@@ -32,7 +31,10 @@ impl ExecutableTool for UppercaseTool {
             .durability(ToolDurability::ReplaySafe)
             .build()
     }
+}
 
+#[async_trait]
+impl ToolExecutor for UppercaseTool {
     async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
         let text = input
             .get("text")

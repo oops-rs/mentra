@@ -10,7 +10,7 @@ MSRV: Rust 1.85.
 - provider-neutral token usage reporting across OpenAI, OpenRouter, Anthropic, Gemini, Ollama, and LM Studio
 - optional tool authorization with structured previews and fail-closed execution blocking
 - recoverable malformed tool-call input handling that feeds retry guidance back to the model
-- custom tool execution through the async `ExecutableTool` trait
+- custom tool execution through `ToolDefinition + ToolExecutor`, with `ToolSpec::builder(...)` as the convenience metadata API
 - builtin `shell`, `background_run`, `check_background`, and `files` tools
 - builtin `task` subagents with isolated child context and parent-side tracking
 - persistent agent teams with `team_spawn`, `team_send`, `broadcast`, `team_read_inbox`, and generic request-response protocols via `team_request`, `team_respond`, and `team_list_requests`
@@ -311,9 +311,21 @@ impl ToolExecutor for UppercaseTool {
 
 `ToolSpec::execution_timeout(...)` is enforced by Mentra around the tool future itself, which is useful for network-backed tools that need a tighter budget than the overall agent run.
 
+Internally, Mentra translates `ToolSpec` into a runtime-only `RuntimeToolDescriptor`, but custom runtime integrations should continue to treat `ToolSpec::builder(...)` as the supported public metadata surface. `ExecutableTool` remains available in this release as a compatibility trait alias over `ToolDefinition + ToolExecutor`.
+
 When a tool needs disposable delegated work, `ParallelToolContext::spawn_subagent()` can create a child agent that inherits the current runtime and model defaults. See the `subagent_tool` example in the workspace examples crate for a complete usage pattern.
 
 Override `ToolExecutor::authorization_preview(...)` when your custom tool needs to expose structured metadata to the installed `ToolAuthorizer`. The default preview includes the resolved working directory, tool capabilities, side-effect level, durability, the raw JSON input, and the same JSON as `structured_input`.
+
+## Tooling Layers
+
+Mentra now separates tool contracts into explicit layers:
+
+- `ProviderToolSpec` in `mentra-provider` for provider-facing serialization
+- `RuntimeToolDescriptor` in Mentra for scheduling, approval, and durability metadata
+- `ToolDefinition + ToolExecutor` for executable runtime tools
+
+Provider adapters should serialize provider-facing tool specs only. Runtime integrations should continue to implement custom tools with `ToolSpec::builder(...)`, `ToolDefinition`, and `ToolExecutor`.
 
 ## Hosted Tool Search
 

@@ -11,6 +11,8 @@ Mentra now separates tooling into three explicit layers:
 3. `RuntimeTool`
    In code this is expressed as `ToolDefinition + ToolExecutor`. `ToolDefinition::descriptor()` returns the `RuntimeToolDescriptor`. `ToolExecutor` owns execution and authorization preview behavior.
 
+For external custom tools, `ToolSpec::builder(...)` remains the supported convenience API in this release. Mentra translates that public metadata surface into `RuntimeToolDescriptor` internally.
+
 ## Orchestration
 
 The runtime scheduler resolves a model-emitted tool call into a `RuntimeToolDescriptor`, builds an authorization preview, runs the authorizer, selects an execution lane, executes the tool, and normalizes the result back into transcript content.
@@ -32,6 +34,7 @@ Only `ReadOnlyParallel` tools are allowed onto the concurrent lane. Everything e
 ## Implementation Notes
 
 - Builtin and intrinsic tools should declare the narrowest correct `ToolExecutionCategory`.
+- Builtin tools, files tooling, and intrinsic surfaces now follow the same "thin facade + focused internal modules" layout.
 - Read-only tools must implement `ToolExecutor::execute(...)` so the scheduler can run them in parallel safely.
 - Mutable-only tools should use `execute_mut(...)`.
 - Tests should assert structured payload semantics instead of JSON whitespace formatting when tool results are machine-readable.

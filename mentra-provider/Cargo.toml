@@ -1,9 +1,13 @@
 [package]
 name = "mentra-provider"
-version = "0.1.0"
-edition = "2024"
+version = "0.2.0"
+edition.workspace = true
 description = "Shared provider core for Mentra"
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/mentra-provider"
+readme = "README.md"
 
 [dependencies]
 async-trait = "0.1.89"

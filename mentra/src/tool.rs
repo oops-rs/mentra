@@ -3,6 +3,7 @@ mod builtin;
 mod context;
 mod descriptor;
 mod files;
+pub(crate) mod internal;
 mod model;
 mod orchestrator;
 mod runtime;
@@ -48,14 +49,13 @@ impl ToolRegistry {
     {
         let handler: Arc<dyn ExecutableTool> = Arc::new(tool);
         let descriptor = handler.descriptor();
-        self.tools
-            .insert(
-                descriptor.provider.name.clone(),
-                RegisteredTool {
-                    descriptor,
-                    handler,
-                },
-            );
+        self.tools.insert(
+            descriptor.provider.name.clone(),
+            RegisteredTool {
+                descriptor,
+                handler,
+            },
+        );
         self.refresh_provider_specs();
     }
 
