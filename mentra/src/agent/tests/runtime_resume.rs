@@ -18,8 +18,8 @@ use crate::{
     runtime::{AgentStore, Runtime, SqliteRuntimeStore},
     team::{TeamMemberStatus, TeamMessage, TeamStore},
     tool::{
-        ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolResult,
-        ToolSideEffectLevel, ToolSpec,
+        ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolResult, ToolSideEffectLevel,
+        ToolSpec,
     },
 };
 

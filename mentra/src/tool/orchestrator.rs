@@ -461,8 +461,7 @@ impl ToolRuntime {
 
             if let Err(error) = self.emit_tool_runtime_started(&call) {
                 let result = self.blocked_tool_result(&call, error);
-                let execution =
-                    self.completed_execution(agent, &call, &descriptor, result, false);
+                let execution = self.completed_execution(agent, &call, &descriptor, result, false);
                 results[index] = Some(execution);
                 continue;
             }

@@ -6,9 +6,9 @@ use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ReasoningEffort,
-    ProviderToolKind, Request, Response, Role, TokenUsage, ToolChoice, ToolLoadingPolicy,
-    ToolResultContent, ToolSearchMode, ToolSpec,
+    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError,
+    ProviderToolKind, ReasoningEffort, Request, Response, Role, TokenUsage, ToolChoice,
+    ToolLoadingPolicy, ToolResultContent, ToolSearchMode, ToolSpec,
 };
 
 #[derive(Deserialize)]
@@ -432,7 +432,10 @@ fn build_anthropic_tools(
     tool_choice: Option<&ToolChoice>,
     tool_search_mode: ToolSearchMode,
 ) -> Result<Vec<AnthropicTool>, ProviderError> {
-    if let Some(tool) = tools.iter().find(|tool| tool.kind != ProviderToolKind::Function) {
+    if let Some(tool) = tools
+        .iter()
+        .find(|tool| tool.kind != ProviderToolKind::Function)
+    {
         return Err(ProviderError::InvalidRequest(format!(
             "Anthropic does not support provider tool kind {:?} for '{}'",
             tool.kind, tool.name

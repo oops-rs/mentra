@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::tool::{
     ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory, ToolAuthorizationPreview,
@@ -89,7 +89,10 @@ fn shell_descriptor(background: bool) -> RuntimeToolDescriptor {
             (
                 "background_run",
                 "Start a shell command in the background and return a task ID immediately.",
-                vec![ToolCapability::BackgroundExec, ToolCapability::FilesystemWrite],
+                vec![
+                    ToolCapability::BackgroundExec,
+                    ToolCapability::FilesystemWrite,
+                ],
                 ToolDurability::Persistent,
                 ToolExecutionCategory::BackgroundJob,
                 ToolApprovalCategory::Background,

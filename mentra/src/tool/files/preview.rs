@@ -1,11 +1,7 @@
-use serde_json::{json, Value};
-use std::{
-    path::{Component, Path, PathBuf},
-};
+use serde_json::{Value, json};
+use std::path::{Component, Path, PathBuf};
 
-use crate::tool::{
-    ParallelToolContext, RuntimeToolDescriptor, ToolAuthorizationPreview,
-};
+use crate::tool::{ParallelToolContext, RuntimeToolDescriptor, ToolAuthorizationPreview};
 
 use super::{
     input::{ensure_files_have_operations, parse_files_input},

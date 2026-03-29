@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ReasoningEffort,
-    ProviderToolKind, Request, Role, ToolChoice, ToolLoadingPolicy, ToolSearchMode, ToolSpec,
+    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError,
+    ProviderToolKind, ReasoningEffort, Request, Role, ToolChoice, ToolLoadingPolicy,
+    ToolSearchMode, ToolSpec,
 };
 
 #[derive(Deserialize)]
@@ -128,7 +129,10 @@ fn validate_gemini_tools(
     tool_choice: Option<&ToolChoice>,
     tool_search_mode: ToolSearchMode,
 ) -> Result<(), ProviderError> {
-    if let Some(tool) = tools.iter().find(|tool| tool.kind != ProviderToolKind::Function) {
+    if let Some(tool) = tools
+        .iter()
+        .find(|tool| tool.kind != ProviderToolKind::Function)
+    {
         return Err(ProviderError::InvalidRequest(format!(
             "Gemini does not support provider tool kind {:?} for '{}'",
             tool.kind, tool.name

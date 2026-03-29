@@ -1,11 +1,11 @@
-#[path = "files/schema.rs"]
-mod schema;
+#[path = "files/execution.rs"]
+mod execution;
 #[path = "files/input.rs"]
 mod input;
 #[path = "files/preview.rs"]
 mod preview;
-#[path = "files/execution.rs"]
-mod execution;
+#[path = "files/schema.rs"]
+mod schema;
 #[path = "files/workspace.rs"]
 mod workspace;
 
@@ -19,9 +19,8 @@ use crate::tool::{
 };
 
 use self::{
-    input::file_execution_category,
+    execution::execute_files_tool, input::file_execution_category,
     preview::build_files_authorization_preview,
-    execution::execute_files_tool,
 };
 
 pub struct FilesTool;
@@ -150,7 +149,6 @@ impl ToolDefinition for FilesTool {
             .approval_category(ToolApprovalCategory::Filesystem)
             .build()
     }
-
 }
 
 #[async_trait]

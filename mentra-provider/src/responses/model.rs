@@ -549,8 +549,8 @@ impl ResponsesTool {
                 "image_generation tools require provider options".to_string(),
             )
         })?;
-        let options: ResponsesImageGenerationToolOptions =
-            serde_json::from_value(options).map_err(|error| {
+        let options: ResponsesImageGenerationToolOptions = serde_json::from_value(options)
+            .map_err(|error| {
                 ProviderError::InvalidRequest(format!(
                     "invalid image_generation tool options: {error}"
                 ))
