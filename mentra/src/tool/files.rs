@@ -168,9 +168,12 @@ impl ToolExecutor for FilesTool {
     async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
         execute_files_tool(
             ctx.agent_id.clone(),
+            ctx.tool_call_id.clone(),
+            ctx.tool_name.clone(),
             ctx.runtime.clone(),
             ctx.resolve_working_directory(None)
                 .unwrap_or_else(|_| ctx.working_directory().to_path_buf()),
+            ctx.event_tx.clone(),
             input,
         )
         .await
@@ -179,9 +182,12 @@ impl ToolExecutor for FilesTool {
     async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         execute_files_tool(
             ctx.agent_id.clone(),
+            ctx.tool_call_id.clone(),
+            ctx.tool_name.clone(),
             ctx.runtime.clone(),
             ctx.resolve_working_directory(None)
                 .unwrap_or_else(|_| ctx.working_directory().to_path_buf()),
+            ctx.event_tx.clone(),
             input,
         )
         .await

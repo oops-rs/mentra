@@ -826,3 +826,227 @@ async fn all_session_events_from_turn_are_serializable_to_json() {
         );
     }
 }
+
+// ---- Task 2A.2: File-edit event metadata ----
+
+// The MockRuntime builder registers builtin tools (including `files`) automatically
+// via Runtime::builder() -> RuntimeBuilder::new(true).
+
+use crate::agent::{AgentConfig, WorkspaceConfig};
+
+/// Creates a unique temp directory and returns (base_dir, unique_suffix).
+fn unique_test_base_dir(label: &str) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let base_dir = std::env::temp_dir().join(format!("mentra-{label}-{unique}"));
+    std::fs::create_dir_all(&base_dir).unwrap();
+    base_dir
+}
+
+#[tokio::test]
+async fn files_tool_create_emits_tool_progress_with_file_op_metadata() {
+    let base_dir = unique_test_base_dir("file-op-test");
+    let target_path = base_dir.join("hello.txt");
+
+    let mock = MockRuntime::builder()
+        .tool_calls([MockToolCall::new(
+            "files",
+            json!({
+                "operations": [
+                    {
+                        "op": "create",
+                        "path": target_path.to_str().unwrap(),
+                        "content": "hello world\n"
+                    }
+                ]
+            }),
+        )])
+        .text("file created")
+        .build()
+        .unwrap();
+
+    // Use create_session_with_config so the agent's base_dir covers the temp dir,
+    // satisfying the runtime policy write-root check.
+    let agent_config = AgentConfig {
+        workspace: WorkspaceConfig {
+            base_dir: base_dir.clone(),
+            auto_route_shell: false,
+        },
+        ..AgentConfig::default()
+    };
+    let mut session = mock
+        .runtime()
+        .create_session_with_config("file-op-test", mock.model(), agent_config)
+        .unwrap();
+
+    let mut rx = session.subscribe();
+
+    let message = session
+        .append_turn(vec![ContentBlock::text("create a file")])
+        .await
+        .unwrap();
+
+    assert_eq!(message.text(), "file created");
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    // Verify that at least one ToolProgress event was emitted with a
+    // "file_op:" prefix indicating the create operation.
+    let file_op_progress = events.iter().find(|e| {
+        matches!(
+            e,
+            SessionEvent::ToolProgress { progress, .. }
+            if progress.starts_with("file_op: create ")
+        )
+    });
+
+    assert!(
+        file_op_progress.is_some(),
+        "Expected ToolProgress event with 'file_op: create ...' metadata, got: {events:?}"
+    );
+
+    // Confirm the created file actually exists on disk.
+    assert!(
+        target_path.exists(),
+        "Expected file to exist at {target_path:?}"
+    );
+
+    // Clean up.
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[tokio::test]
+async fn files_tool_set_emits_tool_progress_with_file_op_metadata() {
+    let base_dir = unique_test_base_dir("file-set-test");
+    let target_path = base_dir.join("target.txt");
+    std::fs::write(&target_path, "original content\n").unwrap();
+
+    let mock = MockRuntime::builder()
+        .tool_calls([MockToolCall::new(
+            "files",
+            json!({
+                "operations": [
+                    {
+                        "op": "set",
+                        "path": target_path.to_str().unwrap(),
+                        "content": "updated content\n"
+                    }
+                ]
+            }),
+        )])
+        .text("file updated")
+        .build()
+        .unwrap();
+
+    let agent_config = AgentConfig {
+        workspace: WorkspaceConfig {
+            base_dir: base_dir.clone(),
+            auto_route_shell: false,
+        },
+        ..AgentConfig::default()
+    };
+    let mut session = mock
+        .runtime()
+        .create_session_with_config("file-set-test", mock.model(), agent_config)
+        .unwrap();
+
+    let mut rx = session.subscribe();
+
+    let message = session
+        .append_turn(vec![ContentBlock::text("update the file")])
+        .await
+        .unwrap();
+
+    assert_eq!(message.text(), "file updated");
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    let file_op_progress = events.iter().find(|e| {
+        matches!(
+            e,
+            SessionEvent::ToolProgress { progress, .. }
+            if progress.starts_with("file_op: set ")
+        )
+    });
+
+    assert!(
+        file_op_progress.is_some(),
+        "Expected ToolProgress event with 'file_op: set ...' metadata, got: {events:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[tokio::test]
+async fn files_tool_read_does_not_emit_file_op_progress() {
+    let base_dir = unique_test_base_dir("file-read-test");
+    let target_path = base_dir.join("read_me.txt");
+    std::fs::write(&target_path, "some content\n").unwrap();
+
+    let mock = MockRuntime::builder()
+        .tool_calls([MockToolCall::new(
+            "files",
+            json!({
+                "operations": [
+                    {
+                        "op": "read",
+                        "path": target_path.to_str().unwrap()
+                    }
+                ]
+            }),
+        )])
+        .text("read done")
+        .build()
+        .unwrap();
+
+    let agent_config = AgentConfig {
+        workspace: WorkspaceConfig {
+            base_dir: base_dir.clone(),
+            auto_route_shell: false,
+        },
+        ..AgentConfig::default()
+    };
+    let mut session = mock
+        .runtime()
+        .create_session_with_config("file-read-test", mock.model(), agent_config)
+        .unwrap();
+
+    let mut rx = session.subscribe();
+
+    let message = session
+        .append_turn(vec![ContentBlock::text("read the file")])
+        .await
+        .unwrap();
+
+    assert_eq!(message.text(), "read done");
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    // Read operations must NOT emit file_op: progress events.
+    let file_op_progress = events.iter().find(|e| {
+        matches!(
+            e,
+            SessionEvent::ToolProgress { progress, .. }
+            if progress.starts_with("file_op:")
+        )
+    });
+
+    assert!(
+        file_op_progress.is_none(),
+        "Read operation should not emit file_op progress, but got: {file_op_progress:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
