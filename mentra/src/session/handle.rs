@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
@@ -6,7 +7,7 @@ use crate::{
     AgentTranscript, ContentBlock, Message,
     agent::{Agent, AgentEvent},
     error::RuntimeError,
-    runtime::is_transient_runtime_error,
+    runtime::{PermissionRuleStore, is_transient_runtime_error},
     session::{
         event::{EventSeq, PermissionOutcome, SessionEvent},
         mapping::map_agent_event,
@@ -29,6 +30,7 @@ pub struct Session {
     event_tx: broadcast::Sender<SessionEvent>,
     next_seq: EventSeq,
     rule_store: RuleStore,
+    permission_store: Option<Arc<dyn PermissionRuleStore>>,
     pub(crate) pending_permissions: HashMap<String, PendingPermissionEntry>,
 }
 
@@ -47,8 +49,34 @@ impl Session {
             event_tx,
             next_seq: 0,
             rule_store: RuleStore::new(),
+            permission_store: None,
             pending_permissions: HashMap::new(),
         }
+    }
+
+    /// Attaches a persistent permission rule store to this session.
+    ///
+    /// When set, remembered rules are saved to the store on each decision and
+    /// can be loaded on session resume via [`load_persisted_rules`](Self::load_persisted_rules).
+    pub fn set_permission_store(&mut self, store: Arc<dyn PermissionRuleStore>) {
+        self.permission_store = Some(store);
+    }
+
+    /// Loads persisted permission rules from the attached store into the
+    /// in-memory [`RuleStore`].
+    ///
+    /// This is typically called during session resume to restore rules that were
+    /// persisted in a prior session run. Returns the number of rules loaded.
+    pub fn load_persisted_rules(&mut self) -> Result<usize, RuntimeError> {
+        let Some(store) = &self.permission_store else {
+            return Ok(0);
+        };
+        let rules = store.load_rules(self.id.as_str())?;
+        let count = rules.len();
+        for rule in rules {
+            self.rule_store.add_rule(rule);
+        }
+        Ok(count)
     }
 
     /// Returns the session identifier.
@@ -199,6 +227,12 @@ impl Session {
                 allow: decision.allow,
                 scope,
             });
+
+            // Persist the updated rules to the backing store if one is attached.
+            if let Some(store) = &self.permission_store {
+                let all_rules = self.rule_store.rules();
+                store.save_rules(self.id.as_str(), &all_rules)?;
+            }
         }
 
         self.emit(SessionEvent::PermissionResolved {

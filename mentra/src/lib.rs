@@ -47,8 +47,8 @@ pub use agent::{Agent, AgentConfig};
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
 pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
 pub use runtime::{
-    AgentStore, AuditStore, HybridRuntimeStore, LeaseStore, RunStore, Runtime, RuntimePolicy,
-    TaskStore,
+    AgentStore, AuditStore, HybridRuntimeStore, LeaseStore, PermissionRuleStore, RunStore, Runtime,
+    RuntimePolicy, TaskStore,
 };
 pub use session::{
     PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore, Session,

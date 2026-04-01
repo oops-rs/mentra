@@ -29,7 +29,8 @@ pub(crate) use handle::RuntimeHandle;
 pub use hybrid_store::HybridRuntimeStore;
 pub(crate) use intrinsic::RuntimeIntrinsicTool;
 pub use store::{
-    AgentStore, AuditStore, LeaseStore, RunStore, RuntimeStore, SqliteRuntimeStore, TaskStore,
+    AgentStore, AuditStore, LeaseStore, PermissionRuleStore, RunStore, RuntimeStore,
+    SqliteRuntimeStore, TaskStore,
 };
 pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot};
 pub(crate) use task::TaskIntrinsicTool;
