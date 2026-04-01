@@ -11,6 +11,6 @@ pub use event::{
     EventSeq, NoticeSeverity, PermissionOutcome, PermissionRuleScope, SessionEvent, TaskKind,
     TaskLifecycleStatus, ToolMutability,
 };
-pub use handle::{Session, SessionEventReceiver};
+pub use handle::{Session, SessionEventReceiver, SessionPermissionHandle};
 pub use permission::{PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore};
 pub use types::{SessionId, SessionMetadata, SessionStatus};

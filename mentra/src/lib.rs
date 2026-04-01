@@ -52,7 +52,8 @@ pub use runtime::{
 };
 pub use session::{
     PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore, Session,
-    SessionEvent, SessionEventReceiver, SessionId, SessionMetadata, SessionStatus,
+    SessionEvent, SessionEventReceiver, SessionId, SessionMetadata, SessionPermissionHandle,
+    SessionStatus,
 };
 pub use team::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,

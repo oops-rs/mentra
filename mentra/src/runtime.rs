@@ -10,11 +10,16 @@ pub(crate) mod task;
 
 use std::{any::Any, path::Path, sync::Arc};
 
+use tokio::sync::broadcast;
+
 use crate::{
     agent::{Agent, AgentConfig, AgentSpawnOptions, AgentStatus},
     provider::{Provider, ProviderRegistry},
     runtime::{builder::RuntimeBuilder, skill::SkillLoadError},
-    session::{Session, SessionEvent, SessionId, SessionMetadata},
+    session::{
+        Session, SessionEvent, SessionId, SessionMetadata,
+        permission::{PendingPermissionStore, SessionToolAuthorizer},
+    },
     tool::ExecutableTool,
 };
 use mentra_provider::{BuiltinProvider, ModelInfo, ModelSelector, ProviderDescriptor, ProviderId};
@@ -341,10 +346,39 @@ impl Runtime {
         config: AgentConfig,
     ) -> Result<Session, RuntimeError> {
         let name = name.into();
-        let agent = self.spawn_with_config(&name, model.clone(), config)?;
         let session_id = SessionId::new();
         let metadata = SessionMetadata::new(session_id.clone(), &name, &model.id);
-        let mut session = Session::new(session_id.clone(), metadata, agent);
+        let (event_tx, _) = broadcast::channel(512);
+        let rule_store = crate::session::RuleStore::new();
+        let pending_permissions = PendingPermissionStore::new();
+        let session_handle =
+            self.handle
+                .with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
+                    self.handle.execution.tool_authorizer.clone(),
+                    event_tx.clone(),
+                    pending_permissions.clone(),
+                    rule_store.clone(),
+                )));
+        let provider = self
+            .provider_registry
+            .get_provider(Some(&model.provider))
+            .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?;
+        let agent = Agent::new(
+            session_handle,
+            model.id.clone(),
+            name.clone(),
+            config,
+            provider,
+            AgentSpawnOptions::default(),
+        )?;
+        let mut session = Session::new_with_parts(
+            session_id.clone(),
+            metadata,
+            agent,
+            event_tx,
+            rule_store,
+            pending_permissions,
+        );
 
         // Emit the initial SessionStarted event.
         let started = SessionEvent::SessionStarted { session_id };
@@ -358,10 +392,39 @@ impl Runtime {
 
     /// Resumes a previously persisted agent and wraps it in a session.
     pub fn resume_session(&self, agent_id: &str) -> Result<Session, RuntimeError> {
-        let agent = self.resume_agent(agent_id)?;
         let session_id = SessionId::new();
+        let (event_tx, _) = broadcast::channel(512);
+        let rule_store = crate::session::RuleStore::new();
+        let pending_permissions = PendingPermissionStore::new();
+        let session_handle =
+            self.handle
+                .with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
+                    self.handle.execution.tool_authorizer.clone(),
+                    event_tx.clone(),
+                    pending_permissions.clone(),
+                    rule_store.clone(),
+                )));
+        let Some(state) = self.handle.store().load_agent(agent_id)? else {
+            return Err(RuntimeError::Store(format!(
+                "No persisted agent with id '{agent_id}'"
+            )));
+        };
+        let provider = self
+            .provider_registry
+            .get_provider(Some(&state.record.provider_id))
+            .ok_or_else(|| {
+                RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))
+            })?;
+        let agent = Agent::from_loaded(session_handle, state, provider)?;
         let metadata = SessionMetadata::new(session_id.clone(), agent.name(), agent.model());
-        let session = Session::new(session_id, metadata, agent);
+        let session = Session::new_with_parts(
+            session_id,
+            metadata,
+            agent,
+            event_tx,
+            rule_store,
+            pending_permissions,
+        );
         Ok(session)
     }
 }

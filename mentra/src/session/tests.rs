@@ -497,7 +497,7 @@ fn rule_store_rules_returns_all_entries() {
 #[tokio::test]
 async fn resolve_permission_emits_event_and_sends_decision() {
     let mock = MockRuntime::builder().text("hi").build().unwrap();
-    let mut session = mock
+    let session = mock
         .runtime()
         .create_session("perm-test", mock.model())
         .unwrap();
@@ -552,13 +552,177 @@ async fn resolve_permission_emits_event_and_sends_decision() {
 #[tokio::test]
 async fn resolve_permission_unknown_id_returns_error() {
     let mock = MockRuntime::builder().text("hi").build().unwrap();
-    let mut session = mock
+    let session = mock
         .runtime()
         .create_session("perm-test", mock.model())
         .unwrap();
 
     let result = session.resolve_permission("nonexistent", PermissionDecision::deny());
     assert!(result.is_err());
+}
+
+#[derive(Clone)]
+struct PromptingAuthorizer;
+
+#[async_trait]
+impl crate::tool::ToolAuthorizer for PromptingAuthorizer {
+    async fn authorize(
+        &self,
+        _request: &crate::tool::ToolAuthorizationRequest,
+    ) -> Result<crate::tool::ToolAuthorizationDecision, crate::error::RuntimeError> {
+        Ok(crate::tool::ToolAuthorizationDecision::prompt(
+            "integration test prompt",
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct InFlightProvider {
+    model: crate::ModelInfo,
+    turn: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl crate::Provider for InFlightProvider {
+    fn descriptor(&self) -> crate::ProviderDescriptor {
+        crate::ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<crate::ModelInfo>, crate::ProviderError> {
+        Ok(vec![self.model.clone()])
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::Request<'_>,
+    ) -> Result<crate::ProviderEventStream, crate::ProviderError> {
+        let turn = self
+            .turn
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let response = match turn {
+            0 => crate::provider::Response {
+                id: unique_turn_id(),
+                model: self.model.id.clone(),
+                role: crate::Role::Assistant,
+                content: vec![crate::provider::ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "permission-test-tool".to_string(),
+                    input: serde_json::json!({"input": "test"}),
+                }],
+                stop_reason: Some("tool_use".to_string()),
+                usage: None,
+            },
+            _ => crate::provider::Response {
+                id: unique_turn_id(),
+                model: self.model.id.clone(),
+                role: crate::Role::Assistant,
+                content: vec![crate::provider::ContentBlock::text("final response")],
+                stop_reason: None,
+                usage: None,
+            },
+        };
+        Ok(crate::provider_event_stream_from_response(response))
+    }
+}
+
+#[derive(Clone)]
+struct PromptTestTool;
+
+#[async_trait]
+impl crate::tool::ToolDefinition for PromptTestTool {
+    fn descriptor(&self) -> crate::tool::ToolSpec {
+        crate::tool::ToolSpec::builder("permission-test-tool")
+            .description("Simple tool used for permission handle in-flight test")
+            .input_schema(serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }))
+            .build()
+    }
+}
+
+#[async_trait]
+impl crate::tool::ToolExecutor for PromptTestTool {
+    async fn execute(
+        &self,
+        _ctx: crate::tool::ParallelToolContext,
+        _input: serde_json::Value,
+    ) -> crate::tool::ToolResult {
+        Ok("tool-result".to_string())
+    }
+}
+
+fn unique_turn_id() -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let _ = write!(&mut out, "perm-flight-{nanos}");
+    out
+}
+
+#[tokio::test]
+async fn resolve_permission_via_session_handle_while_append_turn_is_in_flight() {
+    use tokio::time::timeout;
+
+    let model = crate::ModelInfo::new("mock-model", crate::BuiltinProvider::OpenAI);
+    let runtime = crate::Runtime::builder()
+        .with_tool_authorizer(PromptingAuthorizer)
+        .with_provider_instance(InFlightProvider {
+            model: model.clone(),
+            turn: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+        .with_policy(crate::RuntimePolicy::permissive())
+        .build()
+        .unwrap();
+    runtime.register_tool(PromptTestTool);
+
+    let mut session = runtime
+        .create_session("permission-handle-flight", model.clone())
+        .unwrap();
+    let permission_handle = session.permission_handle();
+    let mut events = session.subscribe();
+
+    let append = tokio::spawn(async move {
+        session
+            .append_turn(vec![ContentBlock::text("run permission test tool")])
+            .await
+    });
+
+    let mut request_id = None;
+    for _ in 0..10 {
+        let event = timeout(std::time::Duration::from_millis(200), events.recv())
+            .await
+            .expect("permission request should arrive")
+            .expect("session event stream should still be active");
+        if let SessionEvent::PermissionRequested {
+            request_id: pending_id,
+            ..
+        } = event
+        {
+            request_id = Some(pending_id);
+            break;
+        }
+    }
+
+    let request_id = request_id.expect("expected a PermissionRequested event");
+    assert!(!append.is_finished());
+
+    permission_handle
+        .resolve_permission(
+            &request_id,
+            PermissionDecision::allow_and_remember(PermissionRuleScope::Session),
+        )
+        .unwrap();
+
+    let result = append
+        .await
+        .expect("append turn task should complete")
+        .expect("append turn should succeed");
+    assert_eq!(result.text(), "final response");
 }
 
 // ---- Task 8: Contract conformance integration tests ----
@@ -1186,6 +1350,7 @@ async fn resume_session_with_permission_rules_restores_rules() {
         agent_id = session.agent_id().to_owned();
 
         // Simulate a permission decision that gets remembered.
+        let permission_handle = session.permission_handle();
         let (tx, _rx) = tokio::sync::oneshot::channel();
         session.pending_permissions.insert(
             "perm-r1".to_owned(),
@@ -1195,7 +1360,7 @@ async fn resume_session_with_permission_rules_restores_rules() {
                 sender: tx,
             },
         );
-        session
+        permission_handle
             .resolve_permission(
                 "perm-r1",
                 PermissionDecision::allow_and_remember(PermissionRuleScope::Session),
@@ -1237,6 +1402,10 @@ async fn resume_session_with_permission_rules_restores_rules() {
     );
     assert!(loaded_rules[0].allow);
     assert_eq!(loaded_rules[0].key.tool_name, "shell");
+    assert!(
+        store.load_rules("perm-r1").unwrap().is_empty(),
+        "Expected rules to be saved under session id, not permission request id"
+    );
 
     // Verify resumed session has intact transcript.
     assert!(

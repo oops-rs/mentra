@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use tokio::sync::broadcast;
 
@@ -12,7 +12,7 @@ use crate::{
         event::{EventSeq, PermissionOutcome, SessionEvent},
         mapping::map_agent_event,
         permission::{
-            PendingPermissionEntry, PermissionDecision, RememberedRule, RuleKey, RuleStore,
+            PendingPermissionStore, PermissionDecision, RememberedRule, RuleKey, RuleStore,
         },
         types::{SessionId, SessionMetadata, SessionStatus},
     },
@@ -20,6 +20,116 @@ use crate::{
 
 /// Type alias for the receiver end of the session event broadcast channel.
 pub type SessionEventReceiver = broadcast::Receiver<SessionEvent>;
+
+#[derive(Clone)]
+pub struct SessionPermissionHandle {
+    session_id: SessionId,
+    event_tx: broadcast::Sender<SessionEvent>,
+    rule_store: RuleStore,
+    permission_store: Arc<StdMutex<Option<Arc<dyn PermissionRuleStore>>>>,
+    pending_permissions: PendingPermissionStore,
+}
+
+impl SessionPermissionHandle {
+    fn new(
+        session_id: SessionId,
+        event_tx: broadcast::Sender<SessionEvent>,
+        rule_store: RuleStore,
+        permission_store: Arc<StdMutex<Option<Arc<dyn PermissionRuleStore>>>>,
+        pending_permissions: PendingPermissionStore,
+    ) -> Self {
+        Self {
+            session_id,
+            event_tx,
+            rule_store,
+            permission_store,
+            pending_permissions,
+        }
+    }
+
+    fn set_permission_store(&self, store: Arc<dyn PermissionRuleStore>) {
+        let mut slot = self
+            .permission_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *slot = Some(store);
+    }
+
+    fn load_persisted_rules(&self, session_id: &SessionId) -> Result<usize, RuntimeError> {
+        let store = self
+            .permission_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(store) = store else {
+            return Ok(0);
+        };
+        let rules = store.load_rules(session_id.as_str())?;
+        let count = rules.len();
+        for rule in rules {
+            self.rule_store.add_rule(rule);
+        }
+        Ok(count)
+    }
+
+    pub fn resolve_permission(
+        &self,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> Result<(), RuntimeError> {
+        let entry = self.pending_permissions.remove(request_id).ok_or_else(|| {
+            RuntimeError::OperationDenied(format!(
+                "no pending permission with request_id '{request_id}'"
+            ))
+        })?;
+
+        let outcome = if decision.allow {
+            PermissionOutcome::Allowed
+        } else {
+            PermissionOutcome::Denied
+        };
+
+        if let Some(scope) = decision.remember_as {
+            self.rule_store.add_rule(RememberedRule {
+                key: RuleKey {
+                    tool_name: entry.tool_name.clone(),
+                    pattern: None,
+                },
+                allow: decision.allow,
+                scope,
+            });
+
+            let store = self
+                .permission_store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(store) = store {
+                let all_rules = self.rule_store.rules();
+                store.save_rules(self.session_id.as_str(), &all_rules)?;
+            }
+        }
+
+        let _ = self.event_tx.send(SessionEvent::PermissionResolved {
+            request_id: request_id.to_owned(),
+            tool_call_id: entry.tool_call_id,
+            tool_name: entry.tool_name,
+            outcome,
+            rule_scope: decision.remember_as,
+        });
+
+        let _ = entry.sender.send(decision);
+        Ok(())
+    }
+
+    pub(crate) fn remembered_rules(&self) -> Vec<RememberedRule> {
+        self.rule_store.rules()
+    }
+
+    pub(crate) fn rule_store(&self) -> &RuleStore {
+        &self.rule_store
+    }
+}
 
 /// A `Session` wraps an [`Agent`] with session-level metadata and a broadcast
 /// event channel that emits [`SessionEvent`] values for UI consumption.
@@ -29,24 +139,50 @@ pub struct Session {
     agent: Agent,
     event_tx: broadcast::Sender<SessionEvent>,
     next_seq: EventSeq,
-    rule_store: RuleStore,
-    permission_store: Option<Arc<dyn PermissionRuleStore>>,
-    pub(crate) pending_permissions: HashMap<String, PendingPermissionEntry>,
+    #[allow(dead_code)]
+    pub(crate) pending_permissions: PendingPermissionStore,
+    permission_handle: SessionPermissionHandle,
 }
 
 impl Session {
     /// Creates a new session wrapping the given agent.
+    #[allow(dead_code)]
     pub(crate) fn new(id: SessionId, metadata: SessionMetadata, agent: Agent) -> Self {
         let (event_tx, _) = broadcast::channel(512);
+        Self::new_with_parts(
+            id,
+            metadata,
+            agent,
+            event_tx,
+            RuleStore::new(),
+            PendingPermissionStore::new(),
+        )
+    }
+
+    pub(crate) fn new_with_parts(
+        id: SessionId,
+        metadata: SessionMetadata,
+        agent: Agent,
+        event_tx: broadcast::Sender<SessionEvent>,
+        rule_store: RuleStore,
+        pending_permissions: PendingPermissionStore,
+    ) -> Self {
+        let permission_store = Arc::new(StdMutex::new(None));
+        let permission_handle = SessionPermissionHandle::new(
+            id.clone(),
+            event_tx.clone(),
+            rule_store.clone(),
+            permission_store.clone(),
+            pending_permissions.clone(),
+        );
         Self {
             id,
             metadata,
             agent,
             event_tx,
             next_seq: 0,
-            rule_store: RuleStore::new(),
-            permission_store: None,
-            pending_permissions: HashMap::new(),
+            pending_permissions,
+            permission_handle,
         }
     }
 
@@ -55,7 +191,7 @@ impl Session {
     /// When set, remembered rules are saved to the store on each decision and
     /// can be loaded on session resume via [`load_persisted_rules`](Self::load_persisted_rules).
     pub fn set_permission_store(&mut self, store: Arc<dyn PermissionRuleStore>) {
-        self.permission_store = Some(store);
+        self.permission_handle.set_permission_store(store);
     }
 
     /// Loads persisted permission rules from the attached store into the
@@ -64,15 +200,7 @@ impl Session {
     /// This is typically called during session resume to restore rules that were
     /// persisted in a prior session run. Returns the number of rules loaded.
     pub fn load_persisted_rules(&mut self) -> Result<usize, RuntimeError> {
-        let Some(store) = &self.permission_store else {
-            return Ok(0);
-        };
-        let rules = store.load_rules(self.id.as_str())?;
-        let count = rules.len();
-        for rule in rules {
-            self.rule_store.add_rule(rule);
-        }
-        Ok(count)
+        self.permission_handle.load_persisted_rules(&self.id)
     }
 
     /// Returns the session identifier.
@@ -98,6 +226,10 @@ impl Session {
     /// Subscribes to the session event stream.
     pub fn subscribe(&self) -> SessionEventReceiver {
         self.event_tx.subscribe()
+    }
+
+    pub fn permission_handle(&self) -> SessionPermissionHandle {
+        self.permission_handle.clone()
     }
 
     /// Submits a user turn, runs the agent, emits session events, and returns
@@ -195,62 +327,22 @@ impl Session {
     /// session's [`RuleStore`]. A [`SessionEvent::PermissionResolved`] event is
     /// emitted and the decision is sent back to the waiting caller via oneshot.
     pub fn resolve_permission(
-        &mut self,
+        &self,
         request_id: &str,
         decision: PermissionDecision,
     ) -> Result<(), RuntimeError> {
-        let entry = self.pending_permissions.remove(request_id).ok_or_else(|| {
-            RuntimeError::OperationDenied(format!(
-                "no pending permission with request_id '{request_id}'"
-            ))
-        })?;
-
-        let outcome = if decision.allow {
-            PermissionOutcome::Allowed
-        } else {
-            PermissionOutcome::Denied
-        };
-
-        if let Some(scope) = decision.remember_as {
-            self.rule_store.add_rule(RememberedRule {
-                key: RuleKey {
-                    tool_name: entry.tool_name.clone(),
-                    pattern: None,
-                },
-                allow: decision.allow,
-                scope,
-            });
-
-            // Persist the updated rules to the backing store if one is attached.
-            if let Some(store) = &self.permission_store {
-                let all_rules = self.rule_store.rules();
-                store.save_rules(self.id.as_str(), &all_rules)?;
-            }
-        }
-
-        self.emit(SessionEvent::PermissionResolved {
-            request_id: request_id.to_owned(),
-            tool_call_id: entry.tool_call_id,
-            tool_name: entry.tool_name,
-            outcome,
-            rule_scope: decision.remember_as,
-        });
-
-        // Send the decision to the waiting caller. If the receiver was dropped
-        // we silently ignore the error — the tool call was likely cancelled.
-        let _ = entry.sender.send(decision);
-
-        Ok(())
+        self.permission_handle
+            .resolve_permission(request_id, decision)
     }
 
     /// Returns all remembered permission rules for this session.
     pub fn remembered_rules(&self) -> Vec<RememberedRule> {
-        self.rule_store.rules()
+        self.permission_handle.remembered_rules()
     }
 
     /// Returns a reference to the session's rule store.
     pub fn rule_store(&self) -> &RuleStore {
-        &self.rule_store
+        self.permission_handle.rule_store()
     }
 
     // -- internal helpers --
