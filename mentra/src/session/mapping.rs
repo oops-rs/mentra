@@ -486,4 +486,245 @@ mod tests {
             panic!("expected ToolQueued");
         }
     }
+
+    // --- SubagentSpawned / SubagentFinished mapping tests ---
+
+    #[test]
+    fn subagent_spawned_maps_to_task_updated_spawned() {
+        let event = AgentEvent::SubagentSpawned {
+            agent: SpawnedAgentSummary {
+                id: "sub-1".to_string(),
+                name: "researcher".to_string(),
+                model: "mock-model".to_string(),
+                status: SpawnedAgentStatus::Running,
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                task_id,
+                kind: TaskKind::Subagent,
+                status: TaskLifecycleStatus::Spawned,
+                title,
+                detail: None,
+            }
+            if task_id == "sub-1" && title == "researcher"
+        ));
+        assert_eq!(seq, 1);
+    }
+
+    #[test]
+    fn subagent_finished_success_maps_to_task_updated_finished() {
+        let event = AgentEvent::SubagentFinished {
+            agent: SpawnedAgentSummary {
+                id: "sub-2".to_string(),
+                name: "analyst".to_string(),
+                model: "mock-model".to_string(),
+                status: SpawnedAgentStatus::Finished,
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                task_id,
+                kind: TaskKind::Subagent,
+                status: TaskLifecycleStatus::Finished,
+                title,
+                detail: None,
+            }
+            if task_id == "sub-2" && title == "analyst"
+        ));
+    }
+
+    #[test]
+    fn subagent_finished_failure_maps_to_task_updated_failed_with_detail() {
+        let event = AgentEvent::SubagentFinished {
+            agent: SpawnedAgentSummary {
+                id: "sub-3".to_string(),
+                name: "writer".to_string(),
+                model: "mock-model".to_string(),
+                status: SpawnedAgentStatus::Failed("provider timeout".to_string()),
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                task_id,
+                kind: TaskKind::Subagent,
+                status: TaskLifecycleStatus::Failed,
+                title,
+                detail: Some(msg),
+            }
+            if task_id == "sub-3" && title == "writer" && msg == "provider timeout"
+        ));
+    }
+
+    // --- BackgroundTaskStarted / BackgroundTaskFinished mapping tests ---
+
+    #[test]
+    fn background_task_started_maps_to_task_updated_running() {
+        let event = AgentEvent::BackgroundTaskStarted {
+            task: BackgroundTaskSummary {
+                id: "bg-1".to_string(),
+                command: "cargo test".to_string(),
+                cwd: std::path::PathBuf::from("/tmp"),
+                status: BackgroundTaskStatus::Running,
+                output_preview: None,
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                task_id,
+                kind: TaskKind::BackgroundTask,
+                status: TaskLifecycleStatus::Running,
+                title,
+                detail: None,
+            }
+            if task_id == "bg-1" && title == "cargo test"
+        ));
+    }
+
+    #[test]
+    fn background_task_finished_success_maps_to_task_updated_finished() {
+        let event = AgentEvent::BackgroundTaskFinished {
+            task: BackgroundTaskSummary {
+                id: "bg-2".to_string(),
+                command: "npm run build".to_string(),
+                cwd: std::path::PathBuf::from("/project"),
+                status: BackgroundTaskStatus::Finished,
+                output_preview: Some("Build complete".to_string()),
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                task_id,
+                kind: TaskKind::BackgroundTask,
+                status: TaskLifecycleStatus::Finished,
+                title,
+                detail: Some(preview),
+            }
+            if task_id == "bg-2" && title == "npm run build" && preview == "Build complete"
+        ));
+    }
+
+    #[test]
+    fn background_task_finished_failure_maps_to_task_updated_failed() {
+        let event = AgentEvent::BackgroundTaskFinished {
+            task: BackgroundTaskSummary {
+                id: "bg-3".to_string(),
+                command: "make".to_string(),
+                cwd: std::path::PathBuf::from("/build"),
+                status: BackgroundTaskStatus::Failed,
+                output_preview: Some("exit code 2".to_string()),
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                task_id,
+                kind: TaskKind::BackgroundTask,
+                status: TaskLifecycleStatus::Failed,
+                title,
+                detail: Some(preview),
+            }
+            if task_id == "bg-3" && title == "make" && preview == "exit code 2"
+        ));
+    }
+
+    // --- TeammateSpawned / TeammateUpdated mapping tests ---
+
+    #[test]
+    fn teammate_spawned_maps_to_task_updated_spawned() {
+        let event = AgentEvent::TeammateSpawned {
+            teammate: TeamMemberSummary {
+                id: "tm-1".to_string(),
+                name: "reviewer".to_string(),
+                role: "code review".to_string(),
+                model: "mock-model".to_string(),
+                status: TeamMemberStatus::Idle,
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                task_id,
+                kind: TaskKind::Teammate,
+                status: TaskLifecycleStatus::Spawned,
+                title,
+                detail: Some(role),
+            }
+            if task_id == "tm-1" && title == "reviewer" && role == "code review"
+        ));
+    }
+
+    #[test]
+    fn teammate_updated_shutdown_maps_to_finished() {
+        let event = AgentEvent::TeammateUpdated {
+            teammate: TeamMemberSummary {
+                id: "tm-2".to_string(),
+                name: "tester".to_string(),
+                role: "testing".to_string(),
+                model: "mock-model".to_string(),
+                status: TeamMemberStatus::Shutdown,
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                status: TaskLifecycleStatus::Finished,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn teammate_updated_failed_maps_to_failed_with_message() {
+        let event = AgentEvent::TeammateUpdated {
+            teammate: TeamMemberSummary {
+                id: "tm-3".to_string(),
+                name: "deployer".to_string(),
+                role: "deploy".to_string(),
+                model: "mock-model".to_string(),
+                status: TeamMemberStatus::Failed("connection refused".to_string()),
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::TaskUpdated {
+                status: TaskLifecycleStatus::Failed,
+                detail: Some(msg),
+                ..
+            }
+            if msg == "connection refused"
+        ));
+    }
 }

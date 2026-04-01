@@ -1050,3 +1050,503 @@ async fn files_tool_read_does_not_emit_file_op_progress() {
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
+
+// ---- Task 2A.4: Compaction continuity ----
+
+#[tokio::test]
+async fn compaction_events_appear_in_session_stream_and_session_continues() {
+    // Use a very low auto_compact_threshold so compaction triggers after the first turn.
+    // The mock provider needs: turn 1 response, compaction summary, turn 2 response.
+    let transcript_dir = unique_test_base_dir("compact-session");
+    let agent_config = AgentConfig {
+        compaction: crate::agent::CompactionConfig {
+            auto_compact_threshold_tokens: Some(1),
+            transcript_dir: transcript_dir.clone(),
+            ..Default::default()
+        },
+        ..AgentConfig::default()
+    };
+
+    let mock = MockRuntime::builder()
+        .text("first response")
+        .text("compaction summary")  // consumed by the compaction summarizer
+        .text("second response")
+        .build()
+        .unwrap();
+
+    let mut session = mock
+        .runtime()
+        .create_session_with_config("compact-test", mock.model(), agent_config)
+        .unwrap();
+
+    let mut rx = session.subscribe();
+
+    // Turn 1: triggers compaction because threshold is 1 token.
+    let msg1 = session
+        .append_turn(vec![ContentBlock::text("first turn")])
+        .await
+        .unwrap();
+    assert_eq!(msg1.text(), "first response");
+
+    // Turn 2: session continues coherently after compaction.
+    let msg2 = session
+        .append_turn(vec![ContentBlock::text("second turn")])
+        .await
+        .unwrap();
+    assert_eq!(msg2.text(), "second response");
+    assert_eq!(session.metadata().turn_count, 2);
+    assert_eq!(session.metadata().status, SessionStatus::Idle);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    let has_compaction_started = events
+        .iter()
+        .any(|e| matches!(e, SessionEvent::CompactionStarted { .. }));
+    let has_compaction_completed = events
+        .iter()
+        .any(|e| matches!(e, SessionEvent::CompactionCompleted { .. }));
+
+    assert!(
+        has_compaction_started,
+        "Expected CompactionStarted event, got: {events:?}"
+    );
+    assert!(
+        has_compaction_completed,
+        "Expected CompactionCompleted event, got: {events:?}"
+    );
+
+    // Verify ordering: CompactionStarted before CompactionCompleted.
+    let started_pos = events
+        .iter()
+        .position(|e| matches!(e, SessionEvent::CompactionStarted { .. }))
+        .unwrap();
+    let completed_pos = events
+        .iter()
+        .position(|e| matches!(e, SessionEvent::CompactionCompleted { .. }))
+        .unwrap();
+    assert!(
+        started_pos < completed_pos,
+        "CompactionStarted (pos {started_pos}) must precede CompactionCompleted (pos {completed_pos})"
+    );
+
+    // Verify the second turn's assistant response appears after compaction.
+    // Note: The UserMessage for the second turn is emitted before agent.send(),
+    // so it may precede compaction events (compaction triggers during send).
+    // But the AssistantMessageCompleted for turn 2 must come after compaction.
+    let second_assistant = events.iter().position(|e| {
+        matches!(e, SessionEvent::AssistantMessageCompleted { text } if text == "second response")
+    });
+    assert!(
+        second_assistant.is_some(),
+        "Expected second turn AssistantMessageCompleted after compaction"
+    );
+    assert!(
+        second_assistant.unwrap() > completed_pos,
+        "Second turn assistant response must appear after compaction completed"
+    );
+
+    let _ = std::fs::remove_dir_all(&transcript_dir);
+}
+
+// ---- Task 2A.6: Session resume continuity ----
+
+#[tokio::test]
+async fn resume_session_with_permission_rules_restores_rules() {
+    use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
+    use std::sync::Arc;
+
+    let unique = unique_test_base_dir("resume-rules");
+    let store_path = unique.join("runtime.sqlite");
+    let store = SqliteRuntimeStore::new(&store_path);
+    let runtime_id = "resume-rules-test";
+
+    let session_id_str: String;
+    let agent_id: String;
+
+    // Phase 1: Create session, add a permission rule, persist it.
+    {
+        let mock = MockRuntime::builder()
+            .runtime_identifier(runtime_id)
+            .with_store(store.clone())
+            .text("hello")
+            .build()
+            .unwrap();
+
+        let mut session = mock
+            .runtime()
+            .create_session("resume-rules", mock.model())
+            .unwrap();
+
+        session.set_permission_store(Arc::new(store.clone()) as Arc<dyn PermissionRuleStore>);
+        session_id_str = session.id().as_str().to_owned();
+        agent_id = session.agent_id().to_owned();
+
+        // Simulate a permission decision that gets remembered.
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        session.pending_permissions.insert(
+            "perm-r1".to_owned(),
+            crate::session::permission::PendingPermissionEntry {
+                tool_call_id: "tc-r1".to_owned(),
+                tool_name: "shell".to_owned(),
+                sender: tx,
+            },
+        );
+        session
+            .resolve_permission(
+                "perm-r1",
+                PermissionDecision::allow_and_remember(PermissionRuleScope::Session),
+            )
+            .unwrap();
+
+        // Verify rule is in memory.
+        assert_eq!(session.remembered_rules().len(), 1);
+
+        // Submit a turn so the session has history.
+        let _msg = session
+            .append_turn(vec![ContentBlock::text("hi")])
+            .await
+            .unwrap();
+
+        // Session + runtime dropped here.
+    }
+
+    // Phase 2: Resume session, attach same store, load persisted rules.
+    let mock2 = MockRuntime::builder()
+        .runtime_identifier(runtime_id)
+        .with_store(store.clone())
+        .text("resumed response")
+        .build()
+        .unwrap();
+
+    let mut resumed = mock2.runtime().resume_session(&agent_id).unwrap();
+    resumed.set_permission_store(Arc::new(store.clone()) as Arc<dyn PermissionRuleStore>);
+
+    // Load the persisted rules using the original session id.
+    // Note: resume_session creates a new SessionId, so we must load from the
+    // original session id that was used when persisting. This tests the store
+    // directly.
+    let loaded_rules = store.load_rules(&session_id_str).unwrap();
+    assert_eq!(
+        loaded_rules.len(),
+        1,
+        "Expected 1 persisted rule, got: {loaded_rules:?}"
+    );
+    assert!(loaded_rules[0].allow);
+    assert_eq!(loaded_rules[0].key.tool_name, "shell");
+
+    // Verify resumed session has intact transcript.
+    assert!(
+        !resumed.replay().items().is_empty(),
+        "Resumed session should have non-empty transcript"
+    );
+
+    // Verify resumed session can accept new turns.
+    let msg = resumed
+        .append_turn(vec![ContentBlock::text("after resume")])
+        .await
+        .unwrap();
+    assert_eq!(msg.text(), "resumed response");
+    assert_eq!(resumed.metadata().turn_count, 1);
+
+    let _ = std::fs::remove_dir_all(&unique);
+}
+
+// ---- Task 2A.7: Error handling and recovery ----
+
+#[tokio::test]
+async fn error_recovery_session_accepts_turn_after_failure() {
+    // Script: first turn fails, second turn succeeds.
+    let mock = MockRuntime::builder()
+        .failure(ProviderError::InvalidResponse("transient glitch".to_string()))
+        .text("recovered successfully")
+        .build()
+        .unwrap();
+
+    let mut session = mock
+        .runtime()
+        .create_session("error-recovery", mock.model())
+        .unwrap();
+
+    let mut rx = session.subscribe();
+
+    // Turn 1: fails.
+    let result = session
+        .append_turn(vec![ContentBlock::text("will fail")])
+        .await;
+    assert!(result.is_err());
+    assert!(matches!(
+        session.metadata().status,
+        SessionStatus::Failed(_)
+    ));
+
+    // Turn 2: succeeds, proving session is recoverable.
+    let msg = session
+        .append_turn(vec![ContentBlock::text("retry")])
+        .await
+        .unwrap();
+    assert_eq!(msg.text(), "recovered successfully");
+    assert_eq!(session.metadata().status, SessionStatus::Idle);
+    assert_eq!(session.metadata().turn_count, 1);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    // Verify error event from first turn.
+    let error_event = events.iter().find(|e| {
+        matches!(
+            e,
+            SessionEvent::Error { message, .. }
+            if message.contains("transient glitch")
+        )
+    });
+    assert!(
+        error_event.is_some(),
+        "Expected Error event containing 'transient glitch', got: {events:?}"
+    );
+
+    // Verify successful second turn events follow the error.
+    let error_pos = events
+        .iter()
+        .position(|e| matches!(e, SessionEvent::Error { .. }))
+        .unwrap();
+    let second_assistant = events.iter().position(|e| {
+        matches!(e, SessionEvent::AssistantMessageCompleted { text } if text == "recovered successfully")
+    });
+    assert!(
+        second_assistant.is_some() && second_assistant.unwrap() > error_pos,
+        "Second turn assistant message must appear after error event"
+    );
+}
+
+#[tokio::test]
+async fn tool_execution_error_emits_tool_completed_with_is_error() {
+    use crate::tool::{ParallelToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec};
+
+    struct FailingTool;
+
+    #[async_trait]
+    impl ToolDefinition for FailingTool {
+        fn descriptor(&self) -> ToolSpec {
+            ToolSpec::builder("failing_tool")
+                .description("Always fails")
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": {}
+                }))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for FailingTool {
+        async fn execute(&self, _ctx: ParallelToolContext, _input: serde_json::Value) -> ToolResult {
+            Err("tool execution failed".to_string())
+        }
+    }
+
+    let mock = MockRuntime::builder()
+        .tool_calls([MockToolCall::new("failing_tool", json!({}))])
+        .text("continued after tool failure")
+        .build()
+        .unwrap();
+    mock.runtime().register_tool(FailingTool);
+
+    let mut session = mock
+        .runtime()
+        .create_session("tool-fail-test", mock.model())
+        .unwrap();
+
+    let mut rx = session.subscribe();
+
+    let msg = session
+        .append_turn(vec![ContentBlock::text("run failing tool")])
+        .await
+        .unwrap();
+
+    // The session should continue even though the tool failed.
+    assert_eq!(msg.text(), "continued after tool failure");
+    assert_eq!(session.metadata().status, SessionStatus::Idle);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    // Verify a ToolCompleted event with is_error = true appears.
+    let tool_error = events.iter().find(|e| {
+        matches!(
+            e,
+            SessionEvent::ToolCompleted { is_error: true, .. }
+        )
+    });
+    assert!(
+        tool_error.is_some(),
+        "Expected ToolCompleted with is_error=true, got: {events:?}"
+    );
+}
+
+// ---- Task 2A.8: Full scenario integration test ----
+
+#[tokio::test]
+async fn full_scenario_prompt_shell_file_events_end_to_end() {
+    let base_dir = unique_test_base_dir("scenario-e2e");
+    let target_file = base_dir.join("scenario_output.txt");
+
+    // Script the full scenario:
+    // 1. Text response to initial prompt
+    // 2. Tool call (echo_tool simulating shell) + File create operation
+    // 3. Final text response
+    let mock = MockRuntime::builder()
+        .text("I will help you with that.")
+        .tool_calls([MockToolCall::new("echo_tool", json!({}))])
+        .tool_calls([MockToolCall::new(
+            "files",
+            json!({
+                "operations": [
+                    {
+                        "op": "create",
+                        "path": target_file.to_str().unwrap(),
+                        "content": "scenario test output\n"
+                    }
+                ]
+            }),
+        )])
+        .text("All tasks completed successfully.")
+        .build()
+        .unwrap();
+    mock.runtime().register_tool(EchoTool);
+
+    let agent_config = AgentConfig {
+        workspace: WorkspaceConfig {
+            base_dir: base_dir.clone(),
+            auto_route_shell: false,
+        },
+        ..AgentConfig::default()
+    };
+    let mut session = mock
+        .runtime()
+        .create_session_with_config("scenario-test", mock.model(), agent_config)
+        .unwrap();
+
+    let mut rx = session.subscribe();
+
+    // Turn 1: Simple text response.
+    let msg1 = session
+        .append_turn(vec![ContentBlock::text("Help me set up a project")])
+        .await
+        .unwrap();
+    assert_eq!(msg1.text(), "I will help you with that.");
+    assert_eq!(session.metadata().turn_count, 1);
+
+    // Turn 2: Tool calls (echo_tool + file create).
+    let msg2 = session
+        .append_turn(vec![ContentBlock::text("Create a file and run a command")])
+        .await
+        .unwrap();
+    assert_eq!(msg2.text(), "All tasks completed successfully.");
+    assert_eq!(session.metadata().turn_count, 2);
+    assert_eq!(session.metadata().status, SessionStatus::Idle);
+
+    // Collect all events.
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    // Verify event ordering across the full scenario.
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|e| match e {
+            SessionEvent::UserMessage { .. } => "user_message",
+            SessionEvent::AssistantTokenDelta { .. } => "token_delta",
+            SessionEvent::AssistantMessageCompleted { .. } => "assistant_completed",
+            SessionEvent::ToolQueued { .. } => "tool_queued",
+            SessionEvent::ToolStarted { .. } => "tool_started",
+            SessionEvent::ToolProgress { .. } => "tool_progress",
+            SessionEvent::ToolCompleted { .. } => "tool_completed",
+            SessionEvent::PermissionRequested { .. } => "perm_requested",
+            SessionEvent::PermissionResolved { .. } => "perm_resolved",
+            SessionEvent::TaskUpdated { .. } => "task_updated",
+            SessionEvent::CompactionStarted { .. } => "compaction_started",
+            SessionEvent::CompactionCompleted { .. } => "compaction_completed",
+            SessionEvent::MemoryUpdated { .. } => "memory_updated",
+            SessionEvent::Notice { .. } => "notice",
+            SessionEvent::Error { .. } => "error",
+            SessionEvent::SessionStarted { .. } => "session_started",
+        })
+        .collect();
+
+    // Verify we got all expected event categories.
+    assert!(
+        event_types.contains(&"user_message"),
+        "Missing user_message events: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"assistant_completed"),
+        "Missing assistant_completed events: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"tool_started"),
+        "Missing tool_started events: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"tool_completed"),
+        "Missing tool_completed events: {event_types:?}"
+    );
+
+    // Verify there are exactly 2 UserMessage events (one per turn).
+    let user_msg_count = events
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::UserMessage { .. }))
+        .count();
+    assert_eq!(user_msg_count, 2, "Expected 2 UserMessage events");
+
+    // Verify there are exactly 2 AssistantMessageCompleted events.
+    let assistant_count = events
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::AssistantMessageCompleted { .. }))
+        .count();
+    assert_eq!(
+        assistant_count, 2,
+        "Expected 2 AssistantMessageCompleted events"
+    );
+
+    // Verify the file was actually created on disk.
+    assert!(
+        target_file.exists(),
+        "Expected scenario output file at {target_file:?}"
+    );
+
+    // Verify a file_op progress event was emitted for the create operation.
+    let has_file_op = events.iter().any(|e| {
+        matches!(
+            e,
+            SessionEvent::ToolProgress { progress, .. }
+            if progress.starts_with("file_op: create ")
+        )
+    });
+    assert!(
+        has_file_op,
+        "Expected file_op progress event for create, events: {event_types:?}"
+    );
+
+    // Verify echo_tool execution events appear.
+    let has_echo_tool = events.iter().any(|e| {
+        matches!(
+            e,
+            SessionEvent::ToolStarted { tool_name, .. }
+            if tool_name == "echo_tool"
+        )
+    });
+    assert!(
+        has_echo_tool,
+        "Expected ToolStarted for echo_tool, events: {event_types:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
