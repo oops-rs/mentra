@@ -4,6 +4,7 @@ use crate::{
     background::{BackgroundTaskStatus, BackgroundTaskSummary},
     session::event::{EventSeq, SessionEvent, TaskKind, TaskLifecycleStatus, ToolMutability},
     team::{TeamMemberStatus, TeamMemberSummary},
+    tool::{ToolExecutionCategory, ToolSideEffectLevel},
 };
 
 /// Maps an `AgentEvent` to zero or more `SessionEvent` values.
@@ -36,13 +37,14 @@ fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
         }
 
         AgentEvent::ToolUseReady { call, .. } => {
-            let summary = truncate_input_summary(&call.input.to_string(), 200);
+            let input_str = call.input.to_string();
+            let summary = derive_tool_summary(&call.name, &input_str);
             vec![SessionEvent::ToolQueued {
                 tool_call_id: call.id.clone(),
                 tool_name: call.name.clone(),
                 summary,
                 mutability: ToolMutability::Unknown,
-                input_json: call.input.to_string(),
+                input_json: input_str,
             }]
         }
 
@@ -54,6 +56,18 @@ fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
         }
 
         AgentEvent::ToolExecutionFinished { result } => map_tool_result(result),
+
+        AgentEvent::ToolExecutionProgress {
+            id,
+            name,
+            progress,
+        } => {
+            vec![SessionEvent::ToolProgress {
+                tool_call_id: id.clone(),
+                tool_name: name.clone(),
+                progress: progress.clone(),
+            }]
+        }
 
         AgentEvent::ContextCompacted { details } => map_compaction(details),
 
@@ -203,6 +217,36 @@ fn map_teammate_updated(teammate: &TeamMemberSummary) -> Vec<SessionEvent> {
     }]
 }
 
+#[allow(dead_code)] // exposed for session-handle enrichment in upcoming tasks
+pub(crate) fn classify_mutability(
+    side_effect_level: ToolSideEffectLevel,
+    execution_category: ToolExecutionCategory,
+) -> ToolMutability {
+    match (side_effect_level, execution_category) {
+        (ToolSideEffectLevel::None, _) => ToolMutability::ReadOnly,
+        (_, ToolExecutionCategory::ReadOnlyParallel) => ToolMutability::ReadOnly,
+        _ => ToolMutability::Mutating,
+    }
+}
+
+pub(crate) fn derive_tool_summary(tool_name: &str, input_json: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(input_json) {
+        if let Some(command) = value.get("command").and_then(|v| v.as_str()) {
+            return format!("{tool_name}: {}", truncate_input_summary(command, 100));
+        }
+        if let Some(path) = value.get("path").and_then(|v| v.as_str()) {
+            return format!("{tool_name}: {}", truncate_input_summary(path, 100));
+        }
+        if let Some(file_path) = value.get("file_path").and_then(|v| v.as_str()) {
+            return format!("{tool_name}: {}", truncate_input_summary(file_path, 100));
+        }
+    }
+    format!(
+        "{tool_name}({})",
+        truncate_input_summary(input_json, 60)
+    )
+}
+
 fn truncate_input_summary(input: &str, max_len: usize) -> String {
     if input.len() <= max_len {
         input.to_string()
@@ -311,5 +355,135 @@ mod tests {
         let mapped = map_agent_event(&event, &mut seq);
         assert!(mapped.is_empty());
         assert_eq!(seq, 0);
+    }
+
+    // --- classify_mutability tests ---
+
+    #[test]
+    fn classify_mutability_no_side_effects_is_read_only() {
+        let result = classify_mutability(
+            ToolSideEffectLevel::None,
+            ToolExecutionCategory::ExclusiveLocalMutation,
+        );
+        assert_eq!(result, ToolMutability::ReadOnly);
+    }
+
+    #[test]
+    fn classify_mutability_read_only_parallel_is_read_only() {
+        let result = classify_mutability(
+            ToolSideEffectLevel::Process,
+            ToolExecutionCategory::ReadOnlyParallel,
+        );
+        assert_eq!(result, ToolMutability::ReadOnly);
+    }
+
+    #[test]
+    fn classify_mutability_side_effects_exclusive_is_mutating() {
+        let result = classify_mutability(
+            ToolSideEffectLevel::LocalState,
+            ToolExecutionCategory::ExclusiveLocalMutation,
+        );
+        assert_eq!(result, ToolMutability::Mutating);
+    }
+
+    #[test]
+    fn classify_mutability_external_delegation_is_mutating() {
+        let result = classify_mutability(
+            ToolSideEffectLevel::External,
+            ToolExecutionCategory::Delegation,
+        );
+        assert_eq!(result, ToolMutability::Mutating);
+    }
+
+    #[test]
+    fn classify_mutability_none_with_read_only_parallel_is_read_only() {
+        let result = classify_mutability(
+            ToolSideEffectLevel::None,
+            ToolExecutionCategory::ReadOnlyParallel,
+        );
+        assert_eq!(result, ToolMutability::ReadOnly);
+    }
+
+    // --- derive_tool_summary tests ---
+
+    #[test]
+    fn derive_tool_summary_extracts_command() {
+        let summary = derive_tool_summary("shell", r#"{"command":"ls -la /tmp"}"#);
+        assert_eq!(summary, "shell: ls -la /tmp");
+    }
+
+    #[test]
+    fn derive_tool_summary_extracts_path() {
+        let summary = derive_tool_summary("read", r#"{"path":"/home/user/file.rs"}"#);
+        assert_eq!(summary, "read: /home/user/file.rs");
+    }
+
+    #[test]
+    fn derive_tool_summary_extracts_file_path() {
+        let summary = derive_tool_summary("write", r#"{"file_path":"/tmp/out.txt","content":"hi"}"#);
+        assert_eq!(summary, "write: /tmp/out.txt");
+    }
+
+    #[test]
+    fn derive_tool_summary_falls_back_to_raw_input() {
+        let summary = derive_tool_summary("custom", r#"{"foo":"bar"}"#);
+        assert_eq!(summary, r#"custom({"foo":"bar"})"#);
+    }
+
+    #[test]
+    fn derive_tool_summary_handles_invalid_json() {
+        let summary = derive_tool_summary("broken", "not json at all");
+        assert_eq!(summary, "broken(not json at all)");
+    }
+
+    #[test]
+    fn derive_tool_summary_truncates_long_command() {
+        let long_cmd = "x".repeat(200);
+        let input = format!(r#"{{"command":"{long_cmd}"}}"#);
+        let summary = derive_tool_summary("shell", &input);
+        assert!(summary.len() < 200);
+        assert!(summary.ends_with("..."));
+    }
+
+    // --- ToolExecutionProgress mapping test ---
+
+    #[test]
+    fn tool_execution_progress_maps_to_tool_progress() {
+        let event = AgentEvent::ToolExecutionProgress {
+            id: "tc-5".to_string(),
+            name: "shell".to_string(),
+            progress: "50% complete".to_string(),
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::ToolProgress { tool_call_id, tool_name, progress }
+            if tool_call_id == "tc-5" && tool_name == "shell" && progress == "50% complete"
+        ));
+        assert_eq!(seq, 1);
+    }
+
+    // --- tool_use_ready now uses derive_tool_summary ---
+
+    #[test]
+    fn tool_use_ready_summary_uses_path_field() {
+        let event = AgentEvent::ToolUseReady {
+            index: 0,
+            call: ToolCall {
+                id: "tc-10".to_string(),
+                name: "read".to_string(),
+                input: json!({"path": "/src/main.rs"}),
+            },
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        if let SessionEvent::ToolQueued { summary, .. } = &mapped[0].1 {
+            assert_eq!(summary, "read: /src/main.rs");
+        } else {
+            panic!("expected ToolQueued");
+        }
     }
 }

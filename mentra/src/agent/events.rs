@@ -138,6 +138,11 @@ pub enum AgentEvent {
         message: Message,
     },
     RunFinished,
+    ToolExecutionProgress {
+        id: String,
+        name: String,
+        progress: String,
+    },
     RunFailed {
         error: String,
     },
