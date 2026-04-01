@@ -265,9 +265,9 @@ async fn append_turn_emits_user_and_assistant_events() {
     let has_user = events
         .iter()
         .any(|e| matches!(e, SessionEvent::UserMessage { text } if text == "hello"));
-    let has_assistant = events
-        .iter()
-        .any(|e| matches!(e, SessionEvent::AssistantMessageCompleted { text } if text == "response"));
+    let has_assistant = events.iter().any(
+        |e| matches!(e, SessionEvent::AssistantMessageCompleted { text } if text == "response"),
+    );
 
     assert!(has_user, "Expected UserMessage event, got: {events:?}");
     assert!(
@@ -516,9 +516,7 @@ async fn resolve_permission_emits_event_and_sends_decision() {
     );
 
     let decision = PermissionDecision::allow_and_remember(PermissionRuleScope::Session);
-    session
-        .resolve_permission("perm-1", decision)
-        .unwrap();
+    session.resolve_permission("perm-1", decision).unwrap();
 
     // The oneshot should deliver the decision.
     let received = oneshot_rx.await.unwrap();
@@ -622,9 +620,9 @@ async fn full_session_lifecycle_produces_correct_event_stream() {
     }
 
     // Verify UserMessage appears before AssistantMessageCompleted.
-    let user_pos = events.iter().position(|e| {
-        matches!(e, SessionEvent::UserMessage { text } if text == "Hi there")
-    });
+    let user_pos = events
+        .iter()
+        .position(|e| matches!(e, SessionEvent::UserMessage { text } if text == "Hi there"));
     let assistant_pos = events.iter().position(|e| {
         matches!(e, SessionEvent::AssistantMessageCompleted { text } if text == "Hello, world!")
     });
@@ -673,9 +671,9 @@ async fn tool_call_session_produces_tool_lifecycle_events() {
         events.push(event);
     }
 
-    let has_tool_started = events.iter().any(|e| {
-        matches!(e, SessionEvent::ToolStarted { tool_name, .. } if tool_name == "echo_tool")
-    });
+    let has_tool_started = events.iter().any(
+        |e| matches!(e, SessionEvent::ToolStarted { tool_name, .. } if tool_name == "echo_tool"),
+    );
     let has_tool_completed = events.iter().any(|e| {
         matches!(e, SessionEvent::ToolCompleted { tool_call_id, .. } if tool_call_id == "tool-1")
     });
@@ -702,9 +700,8 @@ async fn resume_session_restores_state() {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let store_path = std::env::temp_dir().join(format!(
-        "mentra-session-resume-{timestamp}-{unique}.sqlite"
-    ));
+    let store_path =
+        std::env::temp_dir().join(format!("mentra-session-resume-{timestamp}-{unique}.sqlite"));
     let store = SqliteRuntimeStore::new(store_path);
     let runtime_id = "resume-session-test";
 
@@ -759,7 +756,9 @@ async fn resume_session_restores_state() {
 #[tokio::test]
 async fn failed_turn_emits_error_event() {
     let mock = MockRuntime::builder()
-        .failure(ProviderError::InvalidResponse("provider exploded".to_string()))
+        .failure(ProviderError::InvalidResponse(
+            "provider exploded".to_string(),
+        ))
         .build()
         .unwrap();
 
@@ -781,7 +780,9 @@ async fn failed_turn_emits_error_event() {
         events.push(event);
     }
 
-    let has_error = events.iter().any(|e| matches!(e, SessionEvent::Error { .. }));
+    let has_error = events
+        .iter()
+        .any(|e| matches!(e, SessionEvent::Error { .. }));
     assert!(
         has_error,
         "Expected Error event after failed turn, got: {events:?}"
@@ -1069,7 +1070,7 @@ async fn compaction_events_appear_in_session_stream_and_session_continues() {
 
     let mock = MockRuntime::builder()
         .text("first response")
-        .text("compaction summary")  // consumed by the compaction summarizer
+        .text("compaction summary") // consumed by the compaction summarizer
         .text("second response")
         .build()
         .unwrap();
@@ -1260,7 +1261,9 @@ async fn resume_session_with_permission_rules_restores_rules() {
 async fn error_recovery_session_accepts_turn_after_failure() {
     // Script: first turn fails, second turn succeeds.
     let mock = MockRuntime::builder()
-        .failure(ProviderError::InvalidResponse("transient glitch".to_string()))
+        .failure(ProviderError::InvalidResponse(
+            "transient glitch".to_string(),
+        ))
         .text("recovered successfully")
         .build()
         .unwrap();
@@ -1344,7 +1347,11 @@ async fn tool_execution_error_emits_tool_completed_with_is_error() {
 
     #[async_trait]
     impl ToolExecutor for FailingTool {
-        async fn execute(&self, _ctx: ParallelToolContext, _input: serde_json::Value) -> ToolResult {
+        async fn execute(
+            &self,
+            _ctx: ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> ToolResult {
             Err("tool execution failed".to_string())
         }
     }
@@ -1378,12 +1385,9 @@ async fn tool_execution_error_emits_tool_completed_with_is_error() {
     }
 
     // Verify a ToolCompleted event with is_error = true appears.
-    let tool_error = events.iter().find(|e| {
-        matches!(
-            e,
-            SessionEvent::ToolCompleted { is_error: true, .. }
-        )
-    });
+    let tool_error = events
+        .iter()
+        .find(|e| matches!(e, SessionEvent::ToolCompleted { is_error: true, .. }));
     assert!(
         tool_error.is_some(),
         "Expected ToolCompleted with is_error=true, got: {events:?}"

@@ -36,11 +36,7 @@ pub struct Session {
 
 impl Session {
     /// Creates a new session wrapping the given agent.
-    pub(crate) fn new(
-        id: SessionId,
-        metadata: SessionMetadata,
-        agent: Agent,
-    ) -> Self {
+    pub(crate) fn new(id: SessionId, metadata: SessionMetadata, agent: Agent) -> Self {
         let (event_tx, _) = broadcast::channel(512);
         Self {
             id,
@@ -203,14 +199,11 @@ impl Session {
         request_id: &str,
         decision: PermissionDecision,
     ) -> Result<(), RuntimeError> {
-        let entry = self
-            .pending_permissions
-            .remove(request_id)
-            .ok_or_else(|| {
-                RuntimeError::OperationDenied(format!(
-                    "no pending permission with request_id '{request_id}'"
-                ))
-            })?;
+        let entry = self.pending_permissions.remove(request_id).ok_or_else(|| {
+            RuntimeError::OperationDenied(format!(
+                "no pending permission with request_id '{request_id}'"
+            ))
+        })?;
 
         let outcome = if decision.allow {
             PermissionOutcome::Allowed

@@ -93,11 +93,13 @@ impl ToolContext<'_> {
 
     /// Emit a progress event for the currently executing tool.
     pub fn emit_progress(&self, progress: String) {
-        let _ = self.event_tx.send(crate::agent::AgentEvent::ToolExecutionProgress {
-            id: self.tool_call_id.clone(),
-            name: self.tool_name.clone(),
-            progress,
-        });
+        let _ = self
+            .event_tx
+            .send(crate::agent::AgentEvent::ToolExecutionProgress {
+                id: self.tool_call_id.clone(),
+                name: self.tool_name.clone(),
+                progress,
+            });
     }
 
     pub fn agent_name(&self) -> &str {
@@ -313,11 +315,13 @@ impl ParallelToolContext {
 
     /// Emit a progress event for the currently executing tool.
     pub fn emit_progress(&self, progress: String) {
-        let _ = self.event_tx.send(crate::agent::AgentEvent::ToolExecutionProgress {
-            id: self.tool_call_id.clone(),
-            name: self.tool_name.clone(),
-            progress,
-        });
+        let _ = self
+            .event_tx
+            .send(crate::agent::AgentEvent::ToolExecutionProgress {
+                id: self.tool_call_id.clone(),
+                name: self.tool_name.clone(),
+                progress,
+            });
     }
 
     pub fn agent_name(&self) -> &str {

@@ -9,8 +9,8 @@ use crate::{
         MemoryCursor, MemoryRecord, MemorySearchRequest, MemoryStore, SqliteHybridMemoryStore,
     },
     runtime::{
-        AgentStore, AuditStore, LeaseStore, LoadedAgentState, PersistedAgentRecord,
-        PermissionRuleStore, RunStore, SqliteRuntimeStore, TaskStateSnapshot, TaskStore,
+        AgentStore, AuditStore, LeaseStore, LoadedAgentState, PermissionRuleStore,
+        PersistedAgentRecord, RunStore, SqliteRuntimeStore, TaskStateSnapshot, TaskStore,
     },
     session::permission::RememberedRule,
     team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary, TeamStore},
@@ -335,11 +335,7 @@ impl LeaseStore for HybridRuntimeStore {
 }
 
 impl PermissionRuleStore for HybridRuntimeStore {
-    fn save_rules(
-        &self,
-        session_id: &str,
-        rules: &[RememberedRule],
-    ) -> Result<(), RuntimeError> {
+    fn save_rules(&self, session_id: &str, rules: &[RememberedRule]) -> Result<(), RuntimeError> {
         self.inner.save_rules(session_id, rules)
     }
 

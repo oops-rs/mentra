@@ -102,10 +102,7 @@ mod tests {
     #[test]
     fn file_op_progress_move() {
         let result = file_op_progress("move old.rs -> new.rs");
-        assert_eq!(
-            result,
-            Some("file_op: move old.rs -> new.rs".to_string())
-        );
+        assert_eq!(result, Some("file_op: move old.rs -> new.rs".to_string()));
     }
 
     #[test]

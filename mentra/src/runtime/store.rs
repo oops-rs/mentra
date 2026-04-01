@@ -17,8 +17,8 @@ use crate::{
     memory::{MemoryCursor, MemoryRecord, MemorySearchRequest, MemoryStore},
     provider::ProviderId,
     runtime::TaskItem,
-    session::permission::{RememberedRule, RuleKey},
     session::PermissionRuleScope,
+    session::permission::{RememberedRule, RuleKey},
     team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary, TeamStore},
 };
 
@@ -139,11 +139,7 @@ pub trait LeaseStore: Send + Sync {
 /// Permission rules survive session restarts when backed by a persistent store.
 pub trait PermissionRuleStore: Send + Sync {
     /// Persists the provided permission rules for a session, replacing any existing rules.
-    fn save_rules(
-        &self,
-        session_id: &str,
-        rules: &[RememberedRule],
-    ) -> Result<(), RuntimeError>;
+    fn save_rules(&self, session_id: &str, rules: &[RememberedRule]) -> Result<(), RuntimeError>;
 
     /// Loads all persisted permission rules for a session.
     fn load_rules(&self, session_id: &str) -> Result<Vec<RememberedRule>, RuntimeError>;
@@ -1184,11 +1180,7 @@ impl LeaseStore for SqliteRuntimeStore {
 }
 
 impl PermissionRuleStore for SqliteRuntimeStore {
-    fn save_rules(
-        &self,
-        session_id: &str,
-        rules: &[RememberedRule],
-    ) -> Result<(), RuntimeError> {
+    fn save_rules(&self, session_id: &str, rules: &[RememberedRule]) -> Result<(), RuntimeError> {
         let mut conn = self.open()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1246,10 +1238,7 @@ impl PermissionRuleStore for SqliteRuntimeStore {
             let (tool_name, pattern, allow, scope_str) = row.map_err(sqlite_error)?;
             let scope: PermissionRuleScope = from_json(&scope_str)?;
             rules.push(RememberedRule {
-                key: RuleKey {
-                    tool_name,
-                    pattern,
-                },
+                key: RuleKey { tool_name, pattern },
                 allow: allow != 0,
                 scope,
             });
@@ -1843,10 +1832,7 @@ mod tests {
 
     fn permission_store() -> SqliteRuntimeStore {
         SqliteRuntimeStore::new(
-            std::env::temp_dir().join(format!(
-                "mentra-store-perm-{}.sqlite",
-                now_nanos()
-            )),
+            std::env::temp_dir().join(format!("mentra-store-perm-{}.sqlite", now_nanos())),
         )
     }
 
@@ -1874,13 +1860,9 @@ mod tests {
             },
         ];
 
-        store
-            .save_rules("session-1", &rules)
-            .expect("save rules");
+        store.save_rules("session-1", &rules).expect("save rules");
 
-        let loaded = store
-            .load_rules("session-1")
-            .expect("load rules");
+        let loaded = store.load_rules("session-1").expect("load rules");
 
         assert_eq!(loaded.len(), 2);
 
@@ -1915,9 +1897,7 @@ mod tests {
             scope: PermissionRuleScope::Session,
         }];
 
-        store
-            .save_rules("session-1", &rules)
-            .expect("save rules");
+        store.save_rules("session-1", &rules).expect("save rules");
         store.clear_rules("session-1").expect("clear rules");
 
         let loaded = store
@@ -1955,12 +1935,8 @@ mod tests {
             .save_rules("session-b", &rules_b)
             .expect("save rules b");
 
-        let loaded_a = store
-            .load_rules("session-a")
-            .expect("load rules a");
-        let loaded_b = store
-            .load_rules("session-b")
-            .expect("load rules b");
+        let loaded_a = store.load_rules("session-a").expect("load rules a");
+        let loaded_b = store.load_rules("session-b").expect("load rules b");
 
         assert_eq!(loaded_a.len(), 1);
         assert_eq!(loaded_a[0].key.tool_name, "shell");
@@ -1999,9 +1975,7 @@ mod tests {
             .save_rules("session-1", &updated)
             .expect("save updated");
 
-        let loaded = store
-            .load_rules("session-1")
-            .expect("load after replace");
+        let loaded = store.load_rules("session-1").expect("load after replace");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].key.tool_name, "write");
         assert!(!loaded[0].allow);

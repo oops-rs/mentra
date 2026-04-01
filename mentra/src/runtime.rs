@@ -347,9 +347,7 @@ impl Runtime {
         let mut session = Session::new(session_id.clone(), metadata, agent);
 
         // Emit the initial SessionStarted event.
-        let started = SessionEvent::SessionStarted {
-            session_id,
-        };
+        let started = SessionEvent::SessionStarted { session_id };
         // Subscribe briefly just to ensure the event is broadcast.
         let _rx = session.subscribe();
         // Use the internal emit path via a helper on Session.

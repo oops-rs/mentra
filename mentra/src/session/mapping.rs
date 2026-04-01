@@ -57,11 +57,7 @@ fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
 
         AgentEvent::ToolExecutionFinished { result } => map_tool_result(result),
 
-        AgentEvent::ToolExecutionProgress {
-            id,
-            name,
-            progress,
-        } => {
+        AgentEvent::ToolExecutionProgress { id, name, progress } => {
             vec![SessionEvent::ToolProgress {
                 tool_call_id: id.clone(),
                 tool_name: name.clone(),
@@ -241,10 +237,7 @@ pub(crate) fn derive_tool_summary(tool_name: &str, input_json: &str) -> String {
             return format!("{tool_name}: {}", truncate_input_summary(file_path, 100));
         }
     }
-    format!(
-        "{tool_name}({})",
-        truncate_input_summary(input_json, 60)
-    )
+    format!("{tool_name}({})", truncate_input_summary(input_json, 60))
 }
 
 fn truncate_input_summary(input: &str, max_len: usize) -> String {
@@ -340,7 +333,10 @@ mod tests {
         let mut seq = 0;
         let mapped = map_agent_event(&event, &mut seq);
         assert_eq!(mapped.len(), 2);
-        assert!(matches!(&mapped[0].1, SessionEvent::CompactionStarted { .. }));
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::CompactionStarted { .. }
+        ));
         assert!(matches!(
             &mapped[1].1,
             SessionEvent::CompactionCompleted { .. }
@@ -420,7 +416,8 @@ mod tests {
 
     #[test]
     fn derive_tool_summary_extracts_file_path() {
-        let summary = derive_tool_summary("write", r#"{"file_path":"/tmp/out.txt","content":"hi"}"#);
+        let summary =
+            derive_tool_summary("write", r#"{"file_path":"/tmp/out.txt","content":"hi"}"#);
         assert_eq!(summary, "write: /tmp/out.txt");
     }
 
