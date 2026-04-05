@@ -80,6 +80,20 @@ fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
         }
         AgentEvent::TeammateUpdated { teammate } => map_teammate_updated(teammate),
 
+        AgentEvent::RetryAttempt {
+            agent_id,
+            error_message,
+            attempt,
+            max_attempts,
+            next_delay_ms,
+        } => vec![SessionEvent::RetryAttempt {
+            agent_id: agent_id.clone(),
+            error_message: error_message.clone(),
+            attempt: *attempt,
+            max_attempts: *max_attempts,
+            next_delay_ms: *next_delay_ms,
+        }],
+
         // Events handled at Session level or intentionally silent at session layer.
         AgentEvent::AssistantMessageCommitted { .. }
         | AgentEvent::RunStarted

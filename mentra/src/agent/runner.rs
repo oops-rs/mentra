@@ -183,7 +183,15 @@ impl<'a> TurnRunner<'a> {
                             self.options.model_budget(),
                         ));
                     }
-                    tokio::time::sleep(provider_retry_delay(attempt)).await;
+                    let delay = provider_retry_delay(attempt);
+                    self.agent.emit_event(AgentEvent::RetryAttempt {
+                        agent_id: self.agent.id().to_string(),
+                        error_message: error.to_string(),
+                        attempt: attempt as u32,
+                        max_attempts: self.options.retry_budget as u32,
+                        next_delay_ms: delay.as_millis() as u64,
+                    });
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 Err(error) => {

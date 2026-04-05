@@ -134,6 +134,13 @@ pub enum SessionEvent {
         severity: NoticeSeverity,
         message: String,
     },
+    RetryAttempt {
+        agent_id: String,
+        error_message: String,
+        attempt: u32,
+        max_attempts: u32,
+        next_delay_ms: u64,
+    },
     Error {
         message: String,
         recoverable: bool,

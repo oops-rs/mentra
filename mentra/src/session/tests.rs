@@ -185,6 +185,13 @@ fn all_session_event_variants_serialize_with_type_tag() {
             severity: NoticeSeverity::Info,
             message: "Context window 80% full".to_string(),
         },
+        SessionEvent::RetryAttempt {
+            agent_id: "a1".to_string(),
+            error_message: "transient error".to_string(),
+            attempt: 1,
+            max_attempts: 3,
+            next_delay_ms: 500,
+        },
         SessionEvent::Error {
             message: "Provider timeout".to_string(),
             recoverable: true,
@@ -1797,6 +1804,7 @@ async fn full_scenario_prompt_shell_file_events_end_to_end() {
             SessionEvent::CompactionCompleted { .. } => "compaction_completed",
             SessionEvent::MemoryUpdated { .. } => "memory_updated",
             SessionEvent::Notice { .. } => "notice",
+            SessionEvent::RetryAttempt { .. } => "retry_attempt",
             SessionEvent::Error { .. } => "error",
             SessionEvent::SessionStarted { .. } => "session_started",
         })
