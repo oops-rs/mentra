@@ -87,6 +87,8 @@ fn session_event_compaction_completed_roundtrip() {
         replaced_items: 42,
         preserved_items: 8,
         resulting_transcript_len: 10,
+        extracted_facts_count: 3,
+        summary_preview: "key facts extracted".to_string(),
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "compaction_completed");
@@ -176,6 +178,8 @@ fn all_session_event_variants_serialize_with_type_tag() {
             replaced_items: 10,
             preserved_items: 5,
             resulting_transcript_len: 7,
+            extracted_facts_count: 0,
+            summary_preview: String::new(),
         },
         SessionEvent::MemoryUpdated {
             agent_id: "a1".to_string(),

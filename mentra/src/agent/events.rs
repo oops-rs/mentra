@@ -62,6 +62,8 @@ pub struct CompactionDetails {
     pub preserved_user_turns: usize,
     pub preserved_delegation_results: usize,
     pub resulting_transcript_len: usize,
+    pub extracted_facts_count: usize,
+    pub summary_preview: String,
 }
 
 pub type ContextCompactionTrigger = CompactionTrigger;

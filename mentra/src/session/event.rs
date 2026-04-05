@@ -125,6 +125,8 @@ pub enum SessionEvent {
         replaced_items: usize,
         preserved_items: usize,
         resulting_transcript_len: usize,
+        extracted_facts_count: usize,
+        summary_preview: String,
     },
     MemoryUpdated {
         agent_id: String,

@@ -135,6 +135,8 @@ fn map_compaction(details: &CompactionDetails) -> Vec<SessionEvent> {
             replaced_items: details.replaced_items,
             preserved_items: details.preserved_items,
             resulting_transcript_len: details.resulting_transcript_len,
+            extracted_facts_count: details.extracted_facts_count,
+            summary_preview: details.summary_preview.clone(),
         },
     ]
 }
@@ -342,6 +344,8 @@ mod tests {
                 preserved_user_turns: 2,
                 preserved_delegation_results: 1,
                 resulting_transcript_len: 7,
+                extracted_facts_count: 0,
+                summary_preview: String::new(),
             },
         };
         let mut seq = 0;

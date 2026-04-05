@@ -122,6 +122,8 @@ impl Agent {
             preserved_user_turns: proposal.preserved_user_turns,
             preserved_delegation_results: proposal.preserved_delegation_results,
             resulting_transcript_len: self.transcript().len(),
+            extracted_facts_count: proposal.diagnostics.extracted_facts_count,
+            summary_preview: proposal.diagnostics.summary_preview.clone(),
         };
         self.emit_event(AgentEvent::ContextCompacted {
             details: details.clone(),
