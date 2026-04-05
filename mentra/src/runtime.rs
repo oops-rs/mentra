@@ -29,7 +29,7 @@ pub use control::{
     CommandSpec, ExecOutput, RunOptions, RuntimeExecutor, RuntimeHook, RuntimeHookEvent,
     RuntimeHooks, RuntimePolicy, is_transient_provider_error, is_transient_runtime_error,
 };
-pub use error::RuntimeError;
+pub use error::{ErrorCategory, RuntimeError};
 pub(crate) use handle::RuntimeHandle;
 pub use hybrid_store::HybridRuntimeStore;
 pub(crate) use intrinsic::RuntimeIntrinsicTool;

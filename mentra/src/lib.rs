@@ -66,5 +66,5 @@ pub use transcript::{
 
 pub mod error {
     pub use crate::provider::ProviderError;
-    pub use crate::runtime::RuntimeError;
+    pub use crate::runtime::{ErrorCategory, RuntimeError};
 }
