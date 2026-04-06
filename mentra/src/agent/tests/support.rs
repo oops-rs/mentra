@@ -16,8 +16,8 @@ use tokio::{
 
 use crate::{
     provider::{
-        ModelInfo, Provider, ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream,
-        ProviderId, Request,
+        CompactionRequest, CompactionResponse, ModelInfo, Provider, ProviderCapabilities,
+        ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderId, Request,
     },
     tool::{
         ParallelToolContext, ToolContext, ToolDefinition, ToolExecutionCategory, ToolExecutor,
@@ -36,6 +36,8 @@ pub(super) struct ScriptedProvider {
     models: Vec<ModelInfo>,
     scripts: Arc<Mutex<VecDeque<StreamScript>>>,
     requests: Arc<Mutex<Vec<Request<'static>>>>,
+    compact_scripts: Arc<Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>>,
+    capabilities: ProviderCapabilities,
 }
 
 impl ScriptedProvider {
@@ -49,11 +51,25 @@ impl ScriptedProvider {
             models,
             scripts: Arc::new(Mutex::new(VecDeque::from(scripts))),
             requests: Arc::new(Mutex::new(Vec::<Request<'static>>::new())),
+            compact_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            capabilities: ProviderCapabilities::default(),
         }
     }
 
     pub(super) async fn recorded_requests(&self) -> Vec<Request<'static>> {
         self.requests.lock().await.clone()
+    }
+
+    pub(super) async fn push_compact_response(
+        &self,
+        response: Result<CompactionResponse, ProviderError>,
+    ) {
+        self.compact_scripts.lock().await.push_back(response);
+    }
+
+    pub(super) fn with_capabilities(mut self, capabilities: ProviderCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 }
 
@@ -61,6 +77,10 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor::new(self.kind.clone())
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.capabilities
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -80,6 +100,18 @@ impl Provider for ScriptedProvider {
             }
             Some(StreamScript::Receiver(receiver)) => Ok(receiver),
             None => panic!("no scripted stream available"),
+        }
+    }
+
+    async fn compact(
+        &self,
+        _request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        match self.compact_scripts.lock().await.pop_front() {
+            Some(result) => result,
+            None => Err(ProviderError::UnsupportedCapability(
+                "history_compaction".to_string(),
+            )),
         }
     }
 }

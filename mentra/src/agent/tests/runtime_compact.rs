@@ -8,7 +8,11 @@ use std::{
 use crate::{
     BuiltinProvider, ContentBlock, Message, Role,
     agent::{AgentConfig, AgentEvent, CompactionConfig, CompactionTrigger},
-    provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent, Request},
+    compaction::{CompactionExecutionMode, CompactionMode},
+    provider::{
+        CompactionInputItem, CompactionResponse, ContentBlockDelta, ContentBlockStart,
+        ProviderCapabilities, ProviderEvent, Request,
+    },
     runtime::Runtime,
 };
 
@@ -340,6 +344,202 @@ async fn auto_compaction_degrades_gracefully_on_failure() {
         .iter()
         .any(|e| matches!(e, AgentEvent::ContextCompacted { .. }));
     assert!(!compacted, "expected no ContextCompacted event");
+}
+
+#[tokio::test]
+async fn remote_compaction_succeeds_when_provider_supports_it() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            text_stream(&model.id, "first done"),
+            text_stream(&model.id, "second done"),
+        ],
+    )
+    .with_capabilities(ProviderCapabilities {
+        supports_history_compaction: true,
+        ..Default::default()
+    });
+
+    provider
+        .push_compact_response(Ok(CompactionResponse {
+            output: vec![CompactionInputItem::CompactionSummary {
+                content: "Summary of previous work".to_string(),
+            }],
+        }))
+        .await;
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: Some(1),
+                    mode: CompactionMode::PreferRemote,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "first".to_string(),
+        }])
+        .await
+        .unwrap();
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "second".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    let compaction = collect_events(&mut events)
+        .into_iter()
+        .find_map(|event| match event {
+            AgentEvent::ContextCompacted { details } => Some(details),
+            _ => None,
+        })
+        .expect("expected compaction event");
+    assert_eq!(compaction.mode, CompactionExecutionMode::Remote);
+}
+
+#[tokio::test]
+async fn remote_compaction_falls_back_to_local_on_unsupported() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    // Provider advertises remote support but compact() returns UnsupportedCapability
+    // (no compact scripts pushed — default error).
+    // Local summarization calls provider.stream(), so we need an extra text stream for it.
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            text_stream(&model.id, "first done"),
+            text_stream(&model.id, "summary"),
+            text_stream(&model.id, "second done"),
+        ],
+    )
+    .with_capabilities(ProviderCapabilities {
+        supports_history_compaction: true,
+        ..Default::default()
+    });
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: Some(1),
+                    mode: CompactionMode::PreferRemote,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "first".to_string(),
+        }])
+        .await
+        .unwrap();
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "second".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    let compaction = collect_events(&mut events)
+        .into_iter()
+        .find_map(|event| match event {
+            AgentEvent::ContextCompacted { details } => Some(details),
+            _ => None,
+        })
+        .expect("expected compaction event");
+    assert_eq!(compaction.mode, CompactionExecutionMode::Local);
+}
+
+#[tokio::test]
+async fn remote_compaction_falls_back_to_local_on_empty_remote_response() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    // Provider advertises remote support but returns an empty response — compact_remotely
+    // returns Ok(None) which triggers a local fallback.
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            text_stream(&model.id, "first done"),
+            text_stream(&model.id, "summary"),
+            text_stream(&model.id, "second done"),
+        ],
+    )
+    .with_capabilities(ProviderCapabilities {
+        supports_history_compaction: true,
+        ..Default::default()
+    });
+
+    provider
+        .push_compact_response(Ok(CompactionResponse { output: vec![] }))
+        .await;
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: Some(1),
+                    mode: CompactionMode::PreferRemote,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "first".to_string(),
+        }])
+        .await
+        .unwrap();
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "second".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    let compaction = collect_events(&mut events)
+        .into_iter()
+        .find_map(|event| match event {
+            AgentEvent::ContextCompacted { details } => Some(details),
+            _ => None,
+        })
+        .expect("expected compaction event");
+    assert_eq!(compaction.mode, CompactionExecutionMode::Local);
 }
 
 fn text_stream(model: &str, text: &str) -> StreamScript {
