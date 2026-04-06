@@ -708,9 +708,6 @@ impl SqliteRuntimeStore {
                 allow INTEGER NOT NULL,
                 scope TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_perm_session ON permission_rules (session_id);
-            CREATE INDEX IF NOT EXISTS idx_perm_project ON permission_rules (project_id);
-            CREATE INDEX IF NOT EXISTS idx_perm_global ON permission_rules (scope);
             CREATE TABLE IF NOT EXISTS long_term_memory (
                 record_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
@@ -733,7 +730,41 @@ impl SqliteRuntimeStore {
             "#,
         )
         .map_err(sqlite_error)?;
-        self.migrate_background_jobs_schema(conn)
+        self.migrate_background_jobs_schema(conn)?;
+        self.migrate_permission_rules_schema(conn)
+    }
+
+    fn migrate_permission_rules_schema(&self, conn: &Connection) -> Result<(), RuntimeError> {
+        let Some(schema_sql) = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'permission_rules'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?
+        else {
+            return Ok(());
+        };
+
+        if !schema_sql.contains("project_id") {
+            conn.execute_batch(
+                "ALTER TABLE permission_rules ADD COLUMN project_id TEXT;",
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        // Ensure indexes exist (safe to run every time).
+        conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_perm_session ON permission_rules (session_id);
+            CREATE INDEX IF NOT EXISTS idx_perm_project ON permission_rules (project_id);
+            CREATE INDEX IF NOT EXISTS idx_perm_global ON permission_rules (scope);
+            "#,
+        )
+        .map_err(sqlite_error)?;
+
+        Ok(())
     }
 
     fn migrate_background_jobs_schema(&self, conn: &Connection) -> Result<(), RuntimeError> {
