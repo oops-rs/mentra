@@ -129,6 +129,12 @@ pub enum RuntimeHookEvent {
         agent_id: String,
         reason: String,
     },
+    ToolExecutionBlocked {
+        agent_id: String,
+        tool_name: String,
+        tool_call_id: String,
+        reason: String,
+    },
 }
 
 impl RuntimeHookEvent {
@@ -156,7 +162,8 @@ impl RuntimeHookEvent {
             | Self::MemoryCompactionProposed { agent_id, .. }
             | Self::MemoryCompactionApplied { agent_id, .. }
             | Self::MemoryCompactionSkipped { agent_id, .. }
-            | Self::RunAborted { agent_id, .. } => agent_id.clone(),
+            | Self::RunAborted { agent_id, .. }
+            | Self::ToolExecutionBlocked { agent_id, .. } => agent_id.clone(),
         }
     }
 
@@ -183,6 +190,7 @@ impl RuntimeHookEvent {
             Self::MemoryCompactionApplied { .. } => "memory_compaction_applied",
             Self::MemoryCompactionSkipped { .. } => "memory_compaction_skipped",
             Self::RunAborted { .. } => "run_aborted",
+            Self::ToolExecutionBlocked { .. } => "tool_execution_blocked",
         }
     }
 }
@@ -250,6 +258,64 @@ impl RuntimeHooks {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pre-execution hook types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct PreExecutionContext {
+    pub agent_id: String,
+    pub tool_name: String,
+    pub tool_call_id: String,
+    pub input_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookDecision {
+    Allow,
+    Deny(String),
+}
+
+pub trait PreExecutionHook: Send + Sync {
+    fn pre_tool_execution(
+        &self,
+        context: &PreExecutionContext,
+    ) -> Result<HookDecision, RuntimeError>;
+}
+
+#[derive(Clone, Default)]
+pub struct PreExecutionHooks {
+    hooks: Vec<Arc<dyn PreExecutionHook>>,
+}
+
+impl PreExecutionHooks {
+    pub fn new() -> Self {
+        Self { hooks: Vec::new() }
+    }
+
+    pub fn with_hook<H>(mut self, hook: H) -> Self
+    where
+        H: PreExecutionHook + 'static,
+    {
+        self.hooks.push(Arc::new(hook));
+        self
+    }
+
+    pub fn run(&self, context: &PreExecutionContext) -> Result<HookDecision, RuntimeError> {
+        for hook in &self.hooks {
+            match hook.pre_tool_execution(context)? {
+                HookDecision::Allow => continue,
+                deny @ HookDecision::Deny(_) => return Ok(deny),
+            }
+        }
+        Ok(HookDecision::Allow)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+}
+
 /// Returns whether a provider error is likely transient and worth retrying.
 pub fn is_transient_provider_error(error: &ProviderError) -> bool {
     match error {
@@ -276,4 +342,99 @@ pub fn is_transient_provider_error(error: &ProviderError) -> bool {
 /// truth for error classification.
 pub fn is_transient_runtime_error(error: &RuntimeError) -> bool {
     error.category() == crate::error::ErrorCategory::Retryable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_context(tool_name: &str) -> PreExecutionContext {
+        PreExecutionContext {
+            agent_id: "agent-1".to_string(),
+            tool_name: tool_name.to_string(),
+            tool_call_id: "call-1".to_string(),
+            input_json: "{}".to_string(),
+        }
+    }
+
+    struct AllowHook;
+    impl PreExecutionHook for AllowHook {
+        fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            Ok(HookDecision::Allow)
+        }
+    }
+
+    struct DenyHook;
+    impl PreExecutionHook for DenyHook {
+        fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            Ok(HookDecision::Deny("denied by DenyHook".to_string()))
+        }
+    }
+
+    struct ToolNameDenyHook {
+        blocked_tool: String,
+    }
+    impl PreExecutionHook for ToolNameDenyHook {
+        fn pre_tool_execution(
+            &self,
+            context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            if context.tool_name == self.blocked_tool {
+                Ok(HookDecision::Deny(format!(
+                    "tool '{}' is blocked",
+                    context.tool_name
+                )))
+            } else {
+                Ok(HookDecision::Allow)
+            }
+        }
+    }
+
+    #[test]
+    fn empty_pre_hooks_allows() {
+        let hooks = PreExecutionHooks::new();
+        let result = hooks.run(&make_context("shell")).unwrap();
+        assert_eq!(result, HookDecision::Allow);
+    }
+
+    #[test]
+    fn all_allow_hooks_allows() {
+        let hooks = PreExecutionHooks::new()
+            .with_hook(AllowHook)
+            .with_hook(AllowHook);
+        let result = hooks.run(&make_context("files")).unwrap();
+        assert_eq!(result, HookDecision::Allow);
+    }
+
+    #[test]
+    fn first_deny_wins() {
+        let hooks = PreExecutionHooks::new()
+            .with_hook(AllowHook)
+            .with_hook(DenyHook)
+            .with_hook(AllowHook);
+        let result = hooks.run(&make_context("any_tool")).unwrap();
+        assert_eq!(result, HookDecision::Deny("denied by DenyHook".to_string()));
+    }
+
+    #[test]
+    fn conditional_deny_by_tool_name() {
+        let hooks = PreExecutionHooks::new().with_hook(ToolNameDenyHook {
+            blocked_tool: "shell".to_string(),
+        });
+
+        let shell_result = hooks.run(&make_context("shell")).unwrap();
+        assert_eq!(
+            shell_result,
+            HookDecision::Deny("tool 'shell' is blocked".to_string())
+        );
+
+        let files_result = hooks.run(&make_context("files")).unwrap();
+        assert_eq!(files_result, HookDecision::Allow);
+    }
 }
