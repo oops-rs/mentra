@@ -10,15 +10,16 @@ use crate::{
     agent::{AgentConfig, AgentEvent, CompactionConfig, CompactionTrigger},
     compaction::{CompactionExecutionMode, CompactionMode},
     provider::{
-        CompactionInputItem, CompactionResponse, ContentBlockDelta, ContentBlockStart,
-        ProviderCapabilities, ProviderEvent, Request,
+        CompactionInputItem, CompactionResponse, ProviderCapabilities, Request,
     },
     runtime::Runtime,
 };
 
 use crate::provider::ProviderError;
 
-use super::support::{ScriptedProvider, StaticTool, StreamScript, erroring_stream, model_info, ok_stream};
+use super::support::{
+    ScriptedProvider, StaticTool, erroring_stream, model_info, text_stream, tool_use_stream,
+};
 
 #[tokio::test]
 async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
@@ -540,49 +541,6 @@ async fn remote_compaction_falls_back_to_local_on_empty_remote_response() {
         })
         .expect("expected compaction event");
     assert_eq!(compaction.mode, CompactionExecutionMode::Local);
-}
-
-fn text_stream(model: &str, text: &str) -> StreamScript {
-    ok_stream(vec![
-        ProviderEvent::MessageStarted {
-            id: format!("msg-{text}"),
-            model: model.to_string(),
-            role: Role::Assistant,
-        },
-        ProviderEvent::ContentBlockStarted {
-            index: 0,
-            kind: ContentBlockStart::Text,
-        },
-        ProviderEvent::ContentBlockDelta {
-            index: 0,
-            delta: ContentBlockDelta::Text(text.to_string()),
-        },
-        ProviderEvent::ContentBlockStopped { index: 0 },
-        ProviderEvent::MessageStopped,
-    ])
-}
-
-fn tool_use_stream(model: &str, id: &str, name: &str, input_json: &str) -> StreamScript {
-    ok_stream(vec![
-        ProviderEvent::MessageStarted {
-            id: format!("msg-{id}"),
-            model: model.to_string(),
-            role: Role::Assistant,
-        },
-        ProviderEvent::ContentBlockStarted {
-            index: 0,
-            kind: ContentBlockStart::ToolUse {
-                id: id.to_string(),
-                name: name.to_string(),
-            },
-        },
-        ProviderEvent::ContentBlockDelta {
-            index: 0,
-            delta: ContentBlockDelta::ToolUseInputJson(input_json.to_string()),
-        },
-        ProviderEvent::ContentBlockStopped { index: 0 },
-        ProviderEvent::MessageStopped,
-    ])
 }
 
 fn tool_result_contents(request: &Request<'_>) -> Vec<String> {

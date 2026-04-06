@@ -15,9 +15,11 @@ use tokio::{
 };
 
 use crate::{
+    Role,
     provider::{
-        CompactionRequest, CompactionResponse, ModelInfo, Provider, ProviderCapabilities,
-        ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderId, Request,
+        CompactionRequest, CompactionResponse, ContentBlockDelta, ContentBlockStart, ModelInfo,
+        Provider, ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEvent,
+        ProviderEventStream, ProviderId, Request,
     },
     tool::{
         ParallelToolContext, ToolContext, ToolDefinition, ToolExecutionCategory, ToolExecutor,
@@ -353,5 +355,101 @@ impl ToolExecutor for ProbeTool {
 
     async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
         self.run().await
+    }
+}
+
+/// Creates a buffered `StreamScript` representing a single text response.
+pub(super) fn text_stream(model: &str, text: &str) -> StreamScript {
+    ok_stream(vec![
+        ProviderEvent::MessageStarted {
+            id: format!("msg-{text}"),
+            model: model.to_string(),
+            role: Role::Assistant,
+        },
+        ProviderEvent::ContentBlockStarted {
+            index: 0,
+            kind: ContentBlockStart::Text,
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::Text(text.to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::MessageStopped,
+    ])
+}
+
+/// Creates a buffered `StreamScript` representing a single tool-use response.
+pub(super) fn tool_use_stream(model: &str, id: &str, name: &str, input_json: &str) -> StreamScript {
+    ok_stream(vec![
+        ProviderEvent::MessageStarted {
+            id: format!("msg-{id}"),
+            model: model.to_string(),
+            role: Role::Assistant,
+        },
+        ProviderEvent::ContentBlockStarted {
+            index: 0,
+            kind: ContentBlockStart::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::ToolUseInputJson(input_json.to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::MessageStopped,
+    ])
+}
+
+/// Builder for generating multi-turn scripted sessions for testing.
+pub(super) struct SessionGenerator {
+    scripts: Vec<StreamScript>,
+    response_size: usize,
+    model_id: String,
+}
+
+impl SessionGenerator {
+    pub(super) fn new(model_id: &str) -> Self {
+        Self {
+            scripts: Vec::new(),
+            response_size: 50,
+            model_id: model_id.to_string(),
+        }
+    }
+
+    pub(super) fn with_response_size(mut self, chars: usize) -> Self {
+        self.response_size = chars;
+        self
+    }
+
+    pub(super) fn add_text_turns(mut self, n: usize) -> Self {
+        for i in 0..n {
+            let text = format!(
+                "Response {i}: {}",
+                "x".repeat(self.response_size.saturating_sub(15))
+            );
+            self.scripts.push(text_stream(&self.model_id, &text));
+        }
+        self
+    }
+
+    pub(super) fn add_tool_turns(mut self, n: usize, tool_name: &str) -> Self {
+        for i in 0..n {
+            self.scripts.push(tool_use_stream(
+                &self.model_id,
+                &format!("tool-{i}"),
+                tool_name,
+                &format!(r#"{{"index":{i}}}"#),
+            ));
+        }
+        // Final text response after all tool calls
+        self.scripts.push(text_stream(&self.model_id, "tools done"));
+        self
+    }
+
+    pub(super) fn build(self) -> Vec<StreamScript> {
+        self.scripts
     }
 }
