@@ -42,5 +42,13 @@ regex = "1.12.2"
 rand = "0.9.2"
 ring = { version = "0.17.14", optional = true }
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[[bench]]
+name = "long_session"
+harness = false
+required-features = ["test-utils"]
