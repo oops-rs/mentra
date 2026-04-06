@@ -2007,3 +2007,154 @@ async fn load_rules_with_project_id_returns_all_applicable_scopes() {
 
     let _ = std::fs::remove_file(&store_path);
 }
+
+// ---- Task 3: Cross-session permission inheritance integration tests ----
+
+#[tokio::test]
+async fn project_scoped_rules_are_visible_across_sessions() {
+    use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
+    use crate::session::permission::{RememberedRule, RuleKey};
+    use crate::session::event::PermissionRuleScope;
+
+    let store_path = std::env::temp_dir().join(format!(
+        "mentra-cross-session-project-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let store = SqliteRuntimeStore::new(&store_path);
+
+    let project_id = "my-project";
+    let session_1 = "session-1";
+    let session_2 = "session-2";
+
+    let project_rule = RememberedRule {
+        key: RuleKey {
+            tool_name: "file_write".to_string(),
+            pattern: None,
+        },
+        allow: true,
+        scope: PermissionRuleScope::Project,
+    };
+
+    // Session-1 saves a project-scoped rule for "my-project".
+    store
+        .save_rules(session_1, Some(project_id), &[project_rule])
+        .expect("save project-scoped rule via session-1");
+
+    // Session-2 loads rules for the same project — project-scoped rule must be visible.
+    let loaded = store
+        .load_rules(session_2, Some(project_id))
+        .expect("load rules for session-2");
+
+    let has_project_rule = loaded
+        .iter()
+        .any(|r| r.key.tool_name == "file_write" && r.scope == PermissionRuleScope::Project);
+
+    assert!(
+        has_project_rule,
+        "Project-scoped rule saved by session-1 should be visible to session-2 under the same project_id, got: {loaded:?}"
+    );
+
+    let _ = std::fs::remove_file(&store_path);
+}
+
+#[tokio::test]
+async fn global_scoped_rules_are_visible_to_all_sessions() {
+    use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
+    use crate::session::permission::{RememberedRule, RuleKey};
+    use crate::session::event::PermissionRuleScope;
+
+    let store_path = std::env::temp_dir().join(format!(
+        "mentra-cross-session-global-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let store = SqliteRuntimeStore::new(&store_path);
+
+    let session_1 = "session-1";
+    let session_2 = "session-2";
+
+    let global_rule = RememberedRule {
+        key: RuleKey {
+            tool_name: "network".to_string(),
+            pattern: None,
+        },
+        allow: false,
+        scope: PermissionRuleScope::Global,
+    };
+
+    // Session-1 saves a global rule (no project_id).
+    store
+        .save_rules(session_1, None, &[global_rule])
+        .expect("save global-scoped rule via session-1");
+
+    // Session-2 loads rules for a completely different project — global rule must be visible.
+    let loaded = store
+        .load_rules(session_2, Some("other-project"))
+        .expect("load rules for session-2 with other-project");
+
+    let has_global_rule = loaded
+        .iter()
+        .any(|r| r.key.tool_name == "network" && r.scope == PermissionRuleScope::Global);
+
+    assert!(
+        has_global_rule,
+        "Global-scoped rule saved by session-1 should be visible to session-2 regardless of project, got: {loaded:?}"
+    );
+
+    let _ = std::fs::remove_file(&store_path);
+}
+
+#[tokio::test]
+async fn session_scoped_rules_are_not_visible_to_other_sessions() {
+    use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
+    use crate::session::permission::{RememberedRule, RuleKey};
+    use crate::session::event::PermissionRuleScope;
+
+    let store_path = std::env::temp_dir().join(format!(
+        "mentra-cross-session-isolation-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let store = SqliteRuntimeStore::new(&store_path);
+
+    let project_id = "shared-project";
+    let session_1 = "session-1";
+    let session_2 = "session-2";
+
+    let session_rule = RememberedRule {
+        key: RuleKey {
+            tool_name: "shell".to_string(),
+            pattern: None,
+        },
+        allow: true,
+        scope: PermissionRuleScope::Session,
+    };
+
+    // Session-1 saves a session-scoped rule.
+    store
+        .save_rules(session_1, Some(project_id), &[session_rule])
+        .expect("save session-scoped rule via session-1");
+
+    // Session-2 loads rules for the same project — session-1's session-scoped rule must NOT appear.
+    let loaded = store
+        .load_rules(session_2, Some(project_id))
+        .expect("load rules for session-2");
+
+    let has_session_1_rule = loaded
+        .iter()
+        .any(|r| r.key.tool_name == "shell" && r.scope == PermissionRuleScope::Session);
+
+    assert!(
+        !has_session_1_rule,
+        "Session-scoped rule from session-1 must NOT be visible to session-2 (session isolation), got: {loaded:?}"
+    );
+
+    let _ = std::fs::remove_file(&store_path);
+}
