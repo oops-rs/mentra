@@ -548,7 +548,10 @@ fn approx_token_count(text: &str) -> usize {
 }
 
 fn approx_token_count_items(items: &[TranscriptItem]) -> usize {
-    items.iter().map(|item| approx_token_count(&item.text())).sum()
+    items
+        .iter()
+        .map(|item| approx_token_count(&item.text()))
+        .sum()
 }
 
 async fn persist_transcript(
@@ -687,8 +690,7 @@ mod tests {
 
     #[test]
     fn extract_context_finds_verification_in_any_item_kind() {
-        let items =
-            vec![user_turn_item("cargo test result: 10 passed; 0 FAILED")];
+        let items = vec![user_turn_item("cargo test result: 10 passed; 0 FAILED")];
         let ctx = extract_context(&items);
         assert!(
             !ctx.verification_outcomes.is_empty(),
@@ -752,8 +754,7 @@ mod tests {
             tool_exchange_item("some tool output"),
         ];
         let total = approx_token_count_items(&items);
-        let expected =
-            approx_token_count("hello world") + approx_token_count("some tool output");
+        let expected = approx_token_count("hello world") + approx_token_count("some tool output");
         assert_eq!(total, expected);
     }
 }
