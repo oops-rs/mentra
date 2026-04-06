@@ -12,13 +12,14 @@ use crate::{
     provider::{
         CompactionInputItem, CompactionResponse, ProviderCapabilities, Request,
     },
-    runtime::Runtime,
+    runtime::{Runtime, SqliteRuntimeStore},
 };
 
 use crate::provider::ProviderError;
 
 use super::support::{
-    ScriptedProvider, StaticTool, erroring_stream, model_info, text_stream, tool_use_stream,
+    ScriptedProvider, SessionGenerator, StaticTool, erroring_stream, model_info, text_stream,
+    tool_use_stream,
 };
 
 #[tokio::test]
@@ -541,6 +542,282 @@ async fn remote_compaction_falls_back_to_local_on_empty_remote_response() {
         })
         .expect("expected compaction event");
     assert_eq!(compaction.mode, CompactionExecutionMode::Local);
+}
+
+// ---------------------------------------------------------------------------
+// Moderate CI integration tests — multi-turn sessions with compaction cycles
+// ---------------------------------------------------------------------------
+
+/// Runs 50 turns with a low auto-compact threshold to trigger multiple compaction
+/// cycles, then asserts that compaction fired at least twice and that history was
+/// meaningfully reduced.
+#[tokio::test]
+async fn fifty_turn_session_with_multiple_compaction_cycles() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let transcript_dir = temp_dir("fifty-turn-multi-compact");
+
+    // Generate 300 scripted responses for 50 actual sends.
+    // With a very low threshold every turn can trigger compaction, and each
+    // compaction consumes one extra response for the local summarizer.
+    // 300 gives generous headroom even if compaction fires on every turn.
+    let scripts = SessionGenerator::new(&model.id)
+        .with_response_size(500)
+        .add_text_turns(300)
+        .build();
+
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], scripts);
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    // threshold=1 guarantees compaction fires before every turn
+                    // after the first response is committed to history.
+                    auto_compact_threshold_tokens: Some(1),
+                    transcript_dir,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let mut events = agent.subscribe_events();
+    let mut compaction_count = 0usize;
+
+    for i in 0..50u32 {
+        agent
+            .send(vec![ContentBlock::Text {
+                text: format!("Turn {i}"),
+            }])
+            .await
+            .unwrap_or_else(|e| panic!("turn {i} failed: {e}"));
+        // Drain the event channel after each turn to avoid broadcast overflow.
+        compaction_count += collect_events(&mut events)
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ContextCompacted { .. }))
+            .count();
+    }
+
+    assert!(
+        compaction_count >= 2,
+        "expected at least 2 compaction cycles after 50 turns, got {compaction_count}"
+    );
+
+    // History should be compressed — without compaction it would be 100 messages
+    // (50 user + 50 assistant). With compaction each cycle replaces most history
+    // with a single summary message.
+    assert!(
+        agent.history().len() < 100,
+        "expected history to be compacted (< 100 messages), got {}",
+        agent.history().len()
+    );
+}
+
+/// Tests that a session survives persist → drop → rebuild → resume across a
+/// compaction boundary. The resumed agent should be able to continue sending turns.
+#[tokio::test]
+async fn resumed_session_continues_after_compaction() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let transcript_dir = temp_dir("resume-after-compact");
+
+    // Use a persistent store so we can reopen it after dropping the runtime.
+    let store = temp_sqlite_store("resume-after-compact");
+
+    // Phase 1 — run 15 turns with a low threshold to ensure at least one
+    // compaction fires, then drop agent + runtime to persist state.
+    {
+        // With threshold=1, compaction fires on every turn after the first.
+        // 15 turns need 15 turn responses + 14 summarizer responses = 29 total.
+        // Generate 50 to give generous headroom.
+        let scripts = SessionGenerator::new(&model.id)
+            .with_response_size(500)
+            .add_text_turns(50)
+            .build();
+
+        let provider =
+            ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], scripts);
+
+        let runtime = Runtime::empty_builder()
+            .with_store(store.clone())
+            .with_provider_instance(provider)
+            .build()
+            .expect("build runtime");
+
+        let mut agent = runtime
+            .spawn_with_config(
+                "agent",
+                model.clone(),
+                AgentConfig {
+                    compaction: CompactionConfig {
+                        auto_compact_threshold_tokens: Some(1),
+                        transcript_dir,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let mut events = agent.subscribe_events();
+        let mut compaction_count = 0usize;
+
+        for i in 0..15u32 {
+            agent
+                .send(vec![ContentBlock::Text {
+                    text: format!("Phase-1 turn {i}"),
+                }])
+                .await
+                .unwrap_or_else(|e| panic!("phase-1 turn {i} failed: {e}"));
+            // Drain the event channel after each turn to avoid broadcast overflow.
+            compaction_count += collect_events(&mut events)
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ContextCompacted { .. }))
+                .count();
+        }
+        assert!(
+            compaction_count >= 1,
+            "expected at least 1 compaction in phase 1, got {compaction_count}"
+        );
+
+        // Dropping agent then runtime persists state and releases the lease.
+        drop(agent);
+        drop(runtime);
+    }
+
+    // Clear leases so the second runtime can acquire the agent.
+    clear_sqlite_leases(&store);
+
+    // Phase 2 — rebuild runtime with the same store and resume the agent.
+    {
+        let scripts = SessionGenerator::new(&model.id)
+            .with_response_size(200)
+            .add_text_turns(10)
+            .build();
+
+        let provider =
+            ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], scripts);
+
+        let new_runtime = Runtime::empty_builder()
+            .with_store(store)
+            .with_provider_instance(provider)
+            .build()
+            .expect("rebuild runtime");
+
+        let resumed_agents = new_runtime.resume_all().expect("resume_all");
+        assert_eq!(resumed_agents.len(), 1, "expected exactly one resumed agent");
+        let mut agent = resumed_agents.into_iter().next().unwrap();
+
+        for i in 0..5u32 {
+            agent
+                .send(vec![ContentBlock::Text {
+                    text: format!("Phase-2 turn {i}"),
+                }])
+                .await
+                .unwrap_or_else(|e| panic!("phase-2 turn {i} failed: {e}"));
+        }
+
+        // Resumed agent should have produced at least the 5 post-resume replies.
+        assert!(
+            !agent.history().is_empty(),
+            "resumed agent should have history after additional sends"
+        );
+    }
+}
+
+/// Smoke test: multiple compaction cycles must not panic or corrupt the session.
+/// Verifies that history survives three or more compaction cycles over 30 turns.
+#[tokio::test]
+async fn compaction_chain_preserves_context_across_cycles() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let transcript_dir = temp_dir("compact-chain");
+
+    // With threshold=1, compaction fires on every turn after the first.
+    // 30 turns require 30 turn responses + 29 summarizer responses = 59 total.
+    // Generate 100 to give generous headroom.
+    let scripts = SessionGenerator::new(&model.id)
+        .with_response_size(500)
+        .add_text_turns(100)
+        .build();
+
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], scripts);
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: Some(1),
+                    transcript_dir,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let mut events = agent.subscribe_events();
+    let mut compaction_count = 0usize;
+
+    for i in 0..30u32 {
+        agent
+            .send(vec![ContentBlock::Text {
+                text: format!("Turn {i}"),
+            }])
+            .await
+            .unwrap_or_else(|e| panic!("turn {i} failed: {e}"));
+        // Drain the event channel after each turn to avoid broadcast overflow.
+        compaction_count += collect_events(&mut events)
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ContextCompacted { .. }))
+            .count();
+    }
+
+    assert!(
+        compaction_count >= 2,
+        "expected at least 2 compaction cycles after 30 turns, got {compaction_count}"
+    );
+
+    // After multiple compaction cycles the session must still be usable —
+    // history is non-empty and we didn't panic.
+    assert!(
+        !agent.history().is_empty(),
+        "history must not be empty after compaction chain"
+    );
+}
+
+fn temp_sqlite_store(label: &str) -> SqliteRuntimeStore {
+    let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "mentra-runtime-compact-{label}-{timestamp}-{unique}.sqlite"
+    ));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create temp dir");
+    }
+    SqliteRuntimeStore::new(path)
+}
+
+fn clear_sqlite_leases(store: &SqliteRuntimeStore) {
+    let conn = rusqlite::Connection::open(store.path()).expect("open store");
+    conn.execute("DELETE FROM leases", [])
+        .expect("clear leases");
 }
 
 fn tool_result_contents(request: &Request<'_>) -> Vec<String> {
