@@ -83,6 +83,27 @@ impl Runtime {
         self.handle.register_tool(tool);
     }
 
+    /// Returns descriptors for registered tools in a deterministic order.
+    pub fn tools(&self) -> Vec<crate::tool::RuntimeToolDescriptor> {
+        let tool_names = self
+            .handle
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let mut tools = tool_names
+            .into_iter()
+            .filter_map(|name| self.handle.get_tool_descriptor(&name))
+            .collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.provider.name.cmp(&right.provider.name));
+        tools
+    }
+
+    /// Returns the descriptor for a registered tool by name.
+    pub fn tool_descriptor(&self, name: &str) -> Option<crate::tool::RuntimeToolDescriptor> {
+        self.handle.get_tool_descriptor(name)
+    }
+
     /// Registers typed application state that tools can retrieve from their context.
     pub fn register_context(&self, context: Arc<dyn Any + Send + Sync>) {
         self.handle.register_app_context(context);

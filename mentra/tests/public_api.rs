@@ -164,6 +164,8 @@ impl Harness {
 
 struct EchoTool;
 
+struct AlphaTool;
+
 struct EndTurnTool;
 
 struct SubagentSummaryTool;
@@ -185,6 +187,26 @@ impl ToolDefinition for EchoTool {
 impl ToolExecutor for EchoTool {
     async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
         Ok("echoed".to_string())
+    }
+}
+
+#[async_trait]
+impl ToolDefinition for AlphaTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("alpha_tool")
+            .description("Return a canned alpha result")
+            .input_schema(json!({
+                "type": "object",
+                "properties": {}
+            }))
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for AlphaTool {
+    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+        Ok("alpha".to_string())
     }
 }
 
@@ -258,6 +280,37 @@ async fn send_returns_final_message_after_tool_execution() {
     assert_eq!(message.role, Role::Assistant);
     assert_eq!(message.text(), "done");
     assert_eq!(harness.recorded_requests().await.len(), 2);
+}
+
+#[tokio::test]
+async fn runtime_exposes_registered_tool_descriptors() {
+    let runtime_id = format!("public-api-{}", now_nanos());
+    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model.clone()]);
+
+    let runtime = Runtime::empty_builder()
+        .with_runtime_identifier(runtime_id)
+        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    runtime.register_tool(EchoTool);
+    runtime.register_tool(AlphaTool);
+
+    assert_eq!(
+        runtime.tools(),
+        vec![AlphaTool.descriptor(), EchoTool.descriptor()]
+    );
+    assert_eq!(
+        runtime.tool_descriptor("echo_tool"),
+        Some(EchoTool.descriptor())
+    );
+    assert_eq!(
+        runtime.tool_descriptor("alpha_tool"),
+        Some(AlphaTool.descriptor())
+    );
+    assert_eq!(runtime.tool_descriptor("missing_tool"), None);
 }
 
 #[tokio::test]
