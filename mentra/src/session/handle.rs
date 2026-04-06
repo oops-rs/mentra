@@ -64,7 +64,7 @@ impl SessionPermissionHandle {
         let Some(store) = store else {
             return Ok(0);
         };
-        let rules = store.load_rules(session_id.as_str())?;
+        let rules = store.load_rules(session_id.as_str(), None)?;
         let count = rules.len();
         for rule in rules {
             self.rule_store.add_rule(rule);
@@ -106,7 +106,7 @@ impl SessionPermissionHandle {
                 .clone();
             if let Some(store) = store {
                 let all_rules = self.rule_store.rules();
-                store.save_rules(self.session_id.as_str(), &all_rules)?;
+                store.save_rules(self.session_id.as_str(), None, &all_rules)?;
             }
         }
 

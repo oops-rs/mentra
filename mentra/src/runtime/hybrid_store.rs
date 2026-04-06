@@ -335,12 +335,21 @@ impl LeaseStore for HybridRuntimeStore {
 }
 
 impl PermissionRuleStore for HybridRuntimeStore {
-    fn save_rules(&self, session_id: &str, rules: &[RememberedRule]) -> Result<(), RuntimeError> {
-        self.inner.save_rules(session_id, rules)
+    fn save_rules(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+        rules: &[RememberedRule],
+    ) -> Result<(), RuntimeError> {
+        self.inner.save_rules(session_id, project_id, rules)
     }
 
-    fn load_rules(&self, session_id: &str) -> Result<Vec<RememberedRule>, RuntimeError> {
-        self.inner.load_rules(session_id)
+    fn load_rules(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<Vec<RememberedRule>, RuntimeError> {
+        self.inner.load_rules(session_id, project_id)
     }
 
     fn clear_rules(&self, session_id: &str) -> Result<(), RuntimeError> {

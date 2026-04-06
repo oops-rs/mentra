@@ -1553,7 +1553,7 @@ async fn resume_session_with_permission_rules_restores_rules() {
     // Note: resume_session creates a new SessionId, so we must load from the
     // original session id that was used when persisting. This tests the store
     // directly.
-    let loaded_rules = store.load_rules(&session_id_str).unwrap();
+    let loaded_rules = store.load_rules(&session_id_str, None).unwrap();
     assert_eq!(
         loaded_rules.len(),
         1,
@@ -1562,7 +1562,7 @@ async fn resume_session_with_permission_rules_restores_rules() {
     assert!(loaded_rules[0].allow);
     assert_eq!(loaded_rules[0].key.tool_name, "shell");
     assert!(
-        store.load_rules("perm-r1").unwrap().is_empty(),
+        store.load_rules("perm-r1", None).unwrap().is_empty(),
         "Expected rules to be saved under session id, not permission request id"
     );
 
@@ -1882,4 +1882,128 @@ async fn full_scenario_prompt_shell_file_events_end_to_end() {
     );
 
     let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+// ---- Task 1: project_id support in PermissionRuleStore ----
+
+#[tokio::test]
+async fn load_rules_with_project_id_returns_all_applicable_scopes() {
+    use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
+    use crate::session::permission::{RememberedRule, RuleKey};
+    use crate::session::event::PermissionRuleScope;
+
+    // Create an isolated temp store.
+    let store_path = std::env::temp_dir().join(format!(
+        "mentra-session-perm-scopes-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let store = SqliteRuntimeStore::new(&store_path);
+
+    let project_id = "test-project-42";
+    let session_id = "session-main";
+    let other_session_id = "session-other";
+
+    // Session-scoped rule: belongs to session-main only.
+    let session_rule = RememberedRule {
+        key: RuleKey {
+            tool_name: "shell".to_string(),
+            pattern: None,
+        },
+        allow: true,
+        scope: PermissionRuleScope::Session,
+    };
+
+    // Project-scoped rule: saved under a different session but same project_id.
+    let project_rule = RememberedRule {
+        key: RuleKey {
+            tool_name: "file_write".to_string(),
+            pattern: Some("/workspace/*".to_string()),
+        },
+        allow: true,
+        scope: PermissionRuleScope::Project,
+    };
+
+    // Global-scoped rule: saved under yet another session, no project.
+    let global_rule = RememberedRule {
+        key: RuleKey {
+            tool_name: "network".to_string(),
+            pattern: None,
+        },
+        allow: false,
+        scope: PermissionRuleScope::Global,
+    };
+
+    // Save session-scoped rule under session-main with project_id.
+    store
+        .save_rules(session_id, Some(project_id), &[session_rule])
+        .expect("save session rule");
+
+    // Save project-scoped rule under a different session but same project_id.
+    store
+        .save_rules(other_session_id, Some(project_id), &[project_rule])
+        .expect("save project rule");
+
+    // Save global-scoped rule under another unrelated session (no project).
+    store
+        .save_rules("session-global-only", None, &[global_rule])
+        .expect("save global rule");
+
+    // Load for session-main with project_id: should return all three scopes.
+    let loaded = store
+        .load_rules(session_id, Some(project_id))
+        .expect("load rules");
+
+    assert_eq!(
+        loaded.len(),
+        3,
+        "Expected session + project + global rules (3 total), got: {loaded:?}"
+    );
+
+    let has_session = loaded
+        .iter()
+        .any(|r| r.key.tool_name == "shell" && r.scope == PermissionRuleScope::Session);
+    let has_project = loaded
+        .iter()
+        .any(|r| r.key.tool_name == "file_write" && r.scope == PermissionRuleScope::Project);
+    let has_global = loaded
+        .iter()
+        .any(|r| r.key.tool_name == "network" && r.scope == PermissionRuleScope::Global);
+
+    assert!(has_session, "Session-scoped rule should be present");
+    assert!(has_project, "Project-scoped rule should be present");
+    assert!(has_global, "Global-scoped rule should be present");
+
+    // Loading without project_id should only return session + global scopes.
+    let loaded_no_project = store
+        .load_rules(session_id, None)
+        .expect("load rules without project_id");
+
+    assert_eq!(
+        loaded_no_project.len(),
+        2,
+        "Without project_id, expect only session + global rules, got: {loaded_no_project:?}"
+    );
+    assert!(
+        loaded_no_project
+            .iter()
+            .any(|r| r.scope == PermissionRuleScope::Session),
+        "Session rule should still be present"
+    );
+    assert!(
+        loaded_no_project
+            .iter()
+            .any(|r| r.scope == PermissionRuleScope::Global),
+        "Global rule should still be present"
+    );
+    assert!(
+        !loaded_no_project
+            .iter()
+            .any(|r| r.scope == PermissionRuleScope::Project),
+        "Project rule should NOT be present when no project_id given"
+    );
+
+    let _ = std::fs::remove_file(&store_path);
 }

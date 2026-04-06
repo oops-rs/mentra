@@ -137,12 +137,33 @@ pub trait LeaseStore: Send + Sync {
 /// Persistence backend for remembered permission rules.
 ///
 /// Permission rules survive session restarts when backed by a persistent store.
+///
+/// The `project_id` parameter is an opaque string supplied by the consumer and
+/// used to associate rules with a project for cross-session inheritance.
+/// Mentra does not interpret its value.
 pub trait PermissionRuleStore: Send + Sync {
-    /// Persists the provided permission rules for a session, replacing any existing rules.
-    fn save_rules(&self, session_id: &str, rules: &[RememberedRule]) -> Result<(), RuntimeError>;
+    /// Persists the provided permission rules for a session, replacing any
+    /// existing session-scoped rules. `project_id` is stored alongside each
+    /// rule so that project-scoped rules can later be retrieved by other
+    /// sessions that share the same project.
+    fn save_rules(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+        rules: &[RememberedRule],
+    ) -> Result<(), RuntimeError>;
 
-    /// Loads all persisted permission rules for a session.
-    fn load_rules(&self, session_id: &str) -> Result<Vec<RememberedRule>, RuntimeError>;
+    /// Loads all persisted permission rules that apply to the given session.
+    ///
+    /// The returned set is the union of:
+    /// - Session-scoped rules where `session_id` matches.
+    /// - Project-scoped rules where `project_id` matches (when provided).
+    /// - Global-scoped rules (always included).
+    fn load_rules(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<Vec<RememberedRule>, RuntimeError>;
 
     /// Removes all persisted permission rules for a session.
     fn clear_rules(&self, session_id: &str) -> Result<(), RuntimeError>;
@@ -681,12 +702,15 @@ impl SqliteRuntimeStore {
             );
             CREATE TABLE IF NOT EXISTS permission_rules (
                 session_id TEXT NOT NULL,
+                project_id TEXT,
                 tool_name TEXT NOT NULL,
                 pattern TEXT,
                 allow INTEGER NOT NULL,
-                scope TEXT NOT NULL,
-                PRIMARY KEY (session_id, tool_name, pattern)
+                scope TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_perm_session ON permission_rules (session_id);
+            CREATE INDEX IF NOT EXISTS idx_perm_project ON permission_rules (project_id);
+            CREATE INDEX IF NOT EXISTS idx_perm_global ON permission_rules (scope);
             CREATE TABLE IF NOT EXISTS long_term_memory (
                 record_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
@@ -1180,15 +1204,23 @@ impl LeaseStore for SqliteRuntimeStore {
 }
 
 impl PermissionRuleStore for SqliteRuntimeStore {
-    fn save_rules(&self, session_id: &str, rules: &[RememberedRule]) -> Result<(), RuntimeError> {
+    fn save_rules(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+        rules: &[RememberedRule],
+    ) -> Result<(), RuntimeError> {
         let mut conn = self.open()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
 
+        // Only delete session-scoped rules for this session; project and global
+        // rules are managed separately and must not be removed here.
+        let session_scope = to_json(&PermissionRuleScope::Session)?;
         tx.execute(
-            "DELETE FROM permission_rules WHERE session_id = ?1",
-            params![session_id],
+            "DELETE FROM permission_rules WHERE session_id = ?1 AND scope = ?2",
+            params![session_id, session_scope],
         )
         .map_err(sqlite_error)?;
 
@@ -1196,11 +1228,12 @@ impl PermissionRuleStore for SqliteRuntimeStore {
             let scope_str = to_json(&rule.scope)?;
             tx.execute(
                 r#"
-                INSERT INTO permission_rules (session_id, tool_name, pattern, allow, scope)
-                VALUES (?1, ?2, ?3, ?4, ?5)
+                INSERT INTO permission_rules (session_id, project_id, tool_name, pattern, allow, scope)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                 "#,
                 params![
                     session_id,
+                    project_id,
                     rule.key.tool_name,
                     rule.key.pattern,
                     rule.allow as i32,
@@ -1214,23 +1247,57 @@ impl PermissionRuleStore for SqliteRuntimeStore {
         Ok(())
     }
 
-    fn load_rules(&self, session_id: &str) -> Result<Vec<RememberedRule>, RuntimeError> {
+    fn load_rules(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<Vec<RememberedRule>, RuntimeError> {
         let conn = self.open()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT tool_name, pattern, allow, scope FROM permission_rules WHERE session_id = ?1",
-            )
-            .map_err(sqlite_error)?;
+
+        let session_scope = to_json(&PermissionRuleScope::Session)?;
+        let project_scope = to_json(&PermissionRuleScope::Project)?;
+        let global_scope = to_json(&PermissionRuleScope::Global)?;
+
+        // UNION of session-scoped, project-scoped (if project_id provided),
+        // and global-scoped rules.
+        let sql = r#"
+            SELECT tool_name, pattern, allow, scope
+            FROM permission_rules
+            WHERE session_id = ?1 AND scope = ?2
+            UNION
+            SELECT tool_name, pattern, allow, scope
+            FROM permission_rules
+            WHERE project_id IS NOT NULL AND project_id = ?3 AND scope = ?4
+            UNION
+            SELECT tool_name, pattern, allow, scope
+            FROM permission_rules
+            WHERE scope = ?5
+        "#;
+
+        let mut stmt = conn.prepare(sql).map_err(sqlite_error)?;
+
+        // When project_id is None we pass an empty string; the IS NOT NULL guard
+        // in the project clause prevents accidental matches.
+        let project_id_param = project_id.unwrap_or("");
 
         let rows = stmt
-            .query_map(params![session_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, i32>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
+            .query_map(
+                params![
+                    session_id,
+                    session_scope,
+                    project_id_param,
+                    project_scope,
+                    global_scope,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i32>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
             .map_err(sqlite_error)?;
 
         let mut rules = Vec::new();
@@ -1841,30 +1908,36 @@ mod tests {
         use crate::session::PermissionRuleScope;
 
         let store = permission_store();
-        let rules = vec![
-            RememberedRule {
-                key: RuleKey {
-                    tool_name: "shell".to_string(),
-                    pattern: None,
-                },
-                allow: true,
-                scope: PermissionRuleScope::Session,
+
+        // Session-scoped rule under session-1 (no project).
+        let session_rule = RememberedRule {
+            key: RuleKey {
+                tool_name: "shell".to_string(),
+                pattern: None,
             },
-            RememberedRule {
-                key: RuleKey {
-                    tool_name: "read".to_string(),
-                    pattern: Some("/tmp/*".to_string()),
-                },
-                allow: false,
-                scope: PermissionRuleScope::Project,
+            allow: true,
+            scope: PermissionRuleScope::Session,
+        };
+        // Project-scoped rule saved under session-1 with an explicit project_id.
+        let project_rule = RememberedRule {
+            key: RuleKey {
+                tool_name: "read".to_string(),
+                pattern: Some("/tmp/*".to_string()),
             },
-        ];
+            allow: false,
+            scope: PermissionRuleScope::Project,
+        };
 
-        store.save_rules("session-1", &rules).expect("save rules");
+        store
+            .save_rules("session-1", Some("proj-x"), &[session_rule, project_rule])
+            .expect("save rules");
 
-        let loaded = store.load_rules("session-1").expect("load rules");
+        // Load with matching project_id: both session + project rules come back.
+        let loaded = store
+            .load_rules("session-1", Some("proj-x"))
+            .expect("load rules");
 
-        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.len(), 2, "expected 2 rules, got {loaded:?}");
 
         let shell_rule = loaded
             .iter()
@@ -1897,11 +1970,13 @@ mod tests {
             scope: PermissionRuleScope::Session,
         }];
 
-        store.save_rules("session-1", &rules).expect("save rules");
+        store
+            .save_rules("session-1", None, &rules)
+            .expect("save rules");
         store.clear_rules("session-1").expect("clear rules");
 
         let loaded = store
-            .load_rules("session-1")
+            .load_rules("session-1", None)
             .expect("load rules after clear");
         assert!(loaded.is_empty());
     }
@@ -1910,6 +1985,8 @@ mod tests {
     fn permission_rules_are_scoped_per_session() {
         use crate::session::PermissionRuleScope;
 
+        // Use an isolated store so global rules from one session don't bleed
+        // into assertions about another session.
         let store = permission_store();
         let rules_a = vec![RememberedRule {
             key: RuleKey {
@@ -1919,33 +1996,41 @@ mod tests {
             allow: true,
             scope: PermissionRuleScope::Session,
         }];
+        // session-b uses a project-scoped rule (not global) so it doesn't show
+        // up when loading session-a without a matching project_id.
         let rules_b = vec![RememberedRule {
             key: RuleKey {
                 tool_name: "read".to_string(),
                 pattern: None,
             },
             allow: false,
-            scope: PermissionRuleScope::Global,
+            scope: PermissionRuleScope::Project,
         }];
 
         store
-            .save_rules("session-a", &rules_a)
+            .save_rules("session-a", None, &rules_a)
             .expect("save rules a");
         store
-            .save_rules("session-b", &rules_b)
+            .save_rules("session-b", Some("proj-b"), &rules_b)
             .expect("save rules b");
 
-        let loaded_a = store.load_rules("session-a").expect("load rules a");
-        let loaded_b = store.load_rules("session-b").expect("load rules b");
+        // Load session-a without project_id: only its own session-scoped rules.
+        let loaded_a = store
+            .load_rules("session-a", None)
+            .expect("load rules a");
+        // Load session-b with its project_id: project-scoped rules come back.
+        let loaded_b = store
+            .load_rules("session-b", Some("proj-b"))
+            .expect("load rules b");
 
-        assert_eq!(loaded_a.len(), 1);
+        assert_eq!(loaded_a.len(), 1, "session-a should have 1 rule");
         assert_eq!(loaded_a[0].key.tool_name, "shell");
-        assert_eq!(loaded_b.len(), 1);
+        assert_eq!(loaded_b.len(), 1, "session-b should have 1 rule");
         assert_eq!(loaded_b[0].key.tool_name, "read");
     }
 
     #[test]
-    fn permission_rules_save_replaces_existing() {
+    fn permission_rules_save_replaces_existing_session_rules() {
         use crate::session::PermissionRuleScope;
 
         let store = permission_store();
@@ -1959,24 +2044,27 @@ mod tests {
         }];
 
         store
-            .save_rules("session-1", &initial)
+            .save_rules("session-1", None, &initial)
             .expect("save initial");
 
+        // Replace with a different session-scoped rule.
         let updated = vec![RememberedRule {
             key: RuleKey {
                 tool_name: "write".to_string(),
                 pattern: None,
             },
             allow: false,
-            scope: PermissionRuleScope::Global,
+            scope: PermissionRuleScope::Session,
         }];
 
         store
-            .save_rules("session-1", &updated)
+            .save_rules("session-1", None, &updated)
             .expect("save updated");
 
-        let loaded = store.load_rules("session-1").expect("load after replace");
-        assert_eq!(loaded.len(), 1);
+        let loaded = store
+            .load_rules("session-1", None)
+            .expect("load after replace");
+        assert_eq!(loaded.len(), 1, "should have exactly 1 rule after replace");
         assert_eq!(loaded[0].key.tool_name, "write");
         assert!(!loaded[0].allow);
     }
@@ -1985,7 +2073,7 @@ mod tests {
     fn permission_rules_load_returns_empty_for_unknown_session() {
         let store = permission_store();
         let loaded = store
-            .load_rules("nonexistent")
+            .load_rules("nonexistent", None)
             .expect("load unknown session");
         assert!(loaded.is_empty());
     }
