@@ -164,6 +164,7 @@ pub struct CompactionRequest {
     pub preserve_recent_delegation_results: usize,
     pub provider_request_options: ProviderRequestOptions,
     pub mode: CompactionMode,
+    pub max_persisted_transcripts: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -220,6 +221,9 @@ impl CompactionEngine for StandardCompactionEngine {
 
         let transcript_path =
             persist_transcript(request.transcript.items(), &request.transcript_dir).await?;
+        if let Some(max) = request.max_persisted_transcripts {
+            let _ = cleanup_old_transcripts(&request.transcript_dir, max).await;
+        }
         let supports_remote = provider.capabilities().supports_history_compaction;
         let (mode, summary) = match request.mode {
             CompactionMode::LocalOnly => (
@@ -342,6 +346,7 @@ pub(crate) fn compaction_request_from_agent(
         preserve_recent_delegation_results: config.preserve_recent_delegation_results,
         provider_request_options,
         mode: config.mode,
+        max_persisted_transcripts: config.max_persisted_transcripts,
     }
 }
 
@@ -578,6 +583,44 @@ async fn persist_transcript(
         .await
         .map_err(RuntimeError::FailedToPersistTranscript)?;
     Ok(transcript_path)
+}
+
+/// Removes the oldest transcript files in `dir` when count exceeds `keep`.
+/// Files are sorted by filename (nanosecond timestamps → oldest first).
+/// Delete errors are ignored — this is best-effort cleanup.
+pub(crate) async fn cleanup_old_transcripts(dir: &Path, keep: usize) -> Result<(), RuntimeError> {
+    let mut read_dir = tokio::fs::read_dir(dir)
+        .await
+        .map_err(RuntimeError::FailedToPersistTranscript)?;
+
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(entry) = read_dir
+        .next_entry()
+        .await
+        .map_err(RuntimeError::FailedToPersistTranscript)?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            files.push(path);
+        }
+    }
+
+    if files.len() <= keep {
+        return Ok(());
+    }
+
+    // Sort ascending by filename — nanosecond timestamps put oldest first.
+    files.sort_by(|a, b| {
+        a.file_name()
+            .cmp(&b.file_name())
+    });
+
+    let to_delete = files.len() - keep;
+    for path in files.iter().take(to_delete) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    Ok(())
 }
 
 fn truncate_to_char_boundary(input: &str, max_chars: usize) -> &str {

@@ -420,6 +420,55 @@ fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -
     events
 }
 
+#[tokio::test]
+async fn transcript_cleanup_prunes_old_files() {
+    use crate::compaction::cleanup_old_transcripts;
+
+    let dir = temp_dir("cleanup-prune");
+
+    // Write 5 fake .jsonl files with increasing timestamps so sort order is deterministic.
+    let mut filenames = Vec::new();
+    for i in 0..5u64 {
+        let name = format!("{:020}.jsonl", i);
+        let path = dir.join(&name);
+        fs::write(&path, b"{}").expect("write fake transcript");
+        filenames.push(name);
+    }
+
+    // Keep only 3 (the 2 oldest should be removed).
+    cleanup_old_transcripts(&dir, 3)
+        .await
+        .expect("cleanup should succeed");
+
+    let remaining: std::collections::BTreeSet<String> = fs::read_dir(&dir)
+        .expect("read dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    assert_eq!(remaining.len(), 3, "expected 3 files, got {remaining:?}");
+    // The 3 newest files (indices 2, 3, 4) must survive.
+    for i in 2..5u64 {
+        let expected = format!("{:020}.jsonl", i);
+        assert!(
+            remaining.contains(&expected),
+            "expected {expected} to remain, got {remaining:?}"
+        );
+    }
+    // The 2 oldest files (indices 0, 1) must be gone.
+    for i in 0..2u64 {
+        let expected = format!("{:020}.jsonl", i);
+        assert!(
+            !remaining.contains(&expected),
+            "expected {expected} to be deleted, got {remaining:?}"
+        );
+    }
+}
+
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 fn temp_dir(label: &str) -> PathBuf {

@@ -75,6 +75,7 @@ pub struct CompactionConfig {
     pub mode: CompactionMode,
     pub preserve_recent_user_tokens: usize,
     pub preserve_recent_delegation_results: usize,
+    pub max_persisted_transcripts: Option<usize>,
 }
 
 impl Default for CompactionConfig {
@@ -88,6 +89,7 @@ impl Default for CompactionConfig {
             mode: CompactionMode::LocalOnly,
             preserve_recent_user_tokens: 20_000,
             preserve_recent_delegation_results: 8,
+            max_persisted_transcripts: Some(10),
         }
     }
 }
