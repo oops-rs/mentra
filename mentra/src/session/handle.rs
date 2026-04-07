@@ -21,6 +21,15 @@ use crate::{
 /// Type alias for the receiver end of the session event broadcast channel.
 pub type SessionEventReceiver = broadcast::Receiver<SessionEvent>;
 
+/// Handle returned from `Session::spawn_subagent` for tracking spawned work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentHandle {
+    /// Unique identifier for the spawned task.
+    pub task_id: String,
+    /// The subagent's internal agent identifier.
+    pub agent_id: String,
+}
+
 #[derive(Clone)]
 pub struct SessionPermissionHandle {
     session_id: SessionId,
@@ -346,6 +355,16 @@ impl Session {
     /// Returns a reference to the session's rule store.
     pub fn rule_store(&self) -> &RuleStore {
         self.permission_handle.rule_store()
+    }
+
+    /// Returns summaries of all teammates registered with this session's agent.
+    pub fn list_teammates(&self) -> Vec<crate::team::TeamMemberSummary> {
+        self.agent.watch_snapshot().borrow().teammates.clone()
+    }
+
+    /// Returns summaries of all active or recently completed subagents.
+    pub fn active_subagents(&self) -> Vec<crate::agent::SpawnedAgentSummary> {
+        self.agent.watch_snapshot().borrow().subagents.clone()
     }
 
     // -- internal helpers --

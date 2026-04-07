@@ -43,7 +43,7 @@ pub use mentra_provider::{
 
 pub use provider::{Provider, ProviderRegistry};
 
-pub use agent::{Agent, AgentConfig};
+pub use agent::{Agent, AgentConfig, SpawnedAgentStatus, SpawnedAgentSummary};
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
 pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
 pub use runtime::{
@@ -53,7 +53,7 @@ pub use runtime::{
 pub use session::{
     PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore, Session,
     SessionEvent, SessionEventReceiver, SessionId, SessionMetadata, SessionPermissionHandle,
-    SessionStatus,
+    SessionStatus, SubagentHandle,
 };
 pub use team::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
