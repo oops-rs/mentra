@@ -2,6 +2,7 @@ use std::{any::Any, path::Path, sync::Arc};
 
 use crate::{
     compaction::CompactionEngine,
+    mcp::{McpManager, McpServerConfig},
     provider::{Provider, ProviderRegistry},
     runtime::{
         RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks, RuntimePolicy, RuntimeStore,
@@ -20,6 +21,7 @@ use super::skill::SkillLoader;
 pub struct RuntimeBuilder {
     handle: RuntimeHandle,
     provider_registry: ProviderRegistry,
+    mcp_configs: Vec<McpServerConfig>,
 }
 
 impl RuntimeBuilder {
@@ -28,6 +30,7 @@ impl RuntimeBuilder {
         Self {
             handle: RuntimeHandle::new(runtime_intrinsics_enabled),
             provider_registry: ProviderRegistry::default(),
+            mcp_configs: Vec::new(),
         }
     }
 
@@ -59,6 +62,7 @@ impl RuntimeBuilder {
         Self {
             handle: self.handle.rebind_store(std::sync::Arc::new(store)),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -70,6 +74,7 @@ impl RuntimeBuilder {
         Self {
             handle: self.handle.with_executor(Arc::new(executor)),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -81,6 +86,7 @@ impl RuntimeBuilder {
         Self {
             handle: self.handle.with_compaction_engine(Arc::new(engine)),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -89,6 +95,7 @@ impl RuntimeBuilder {
         Self {
             handle: self.handle.with_policy(policy),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -100,6 +107,7 @@ impl RuntimeBuilder {
         Self {
             handle: self.handle.with_tool_authorizer(Arc::new(tool_authorizer)),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -108,6 +116,7 @@ impl RuntimeBuilder {
         Self {
             handle: self.handle.with_runtime_identifier(runtime_identifier),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -119,6 +128,7 @@ impl RuntimeBuilder {
         Self {
             handle: self.handle.with_hooks(RuntimeHooks::new().with_hook(hook)),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -132,6 +142,7 @@ impl RuntimeBuilder {
                 .handle
                 .with_pre_hooks(PreExecutionHooks::new().with_hook(hook)),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -143,6 +154,7 @@ impl RuntimeBuilder {
         Self {
             handle: self.handle.with_hooks(RuntimeHooks::new().extend(hooks)),
             provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
         }
     }
 
@@ -151,6 +163,18 @@ impl RuntimeBuilder {
         self.handle
             .register_skill_loader(SkillLoader::from_dir(path)?);
         Ok(self)
+    }
+
+    /// Registers an MCP server to connect to during build.
+    pub fn with_mcp_server(mut self, config: McpServerConfig) -> Self {
+        self.mcp_configs.push(config);
+        self
+    }
+
+    /// Registers multiple MCP servers to connect to during build.
+    pub fn with_mcp_servers(mut self, configs: impl IntoIterator<Item = McpServerConfig>) -> Self {
+        self.mcp_configs.extend(configs);
+        self
     }
 
     /// Registers a builtin provider when an API key is present.
@@ -233,14 +257,62 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Builds the runtime and validates that at least one provider is registered.
+    /// Builds the runtime, connects to MCP servers, and validates providers.
+    ///
+    /// This is an async method because MCP server connections require spawning
+    /// processes and performing the initialize handshake.
+    pub async fn build_async(self) -> Result<Runtime, RuntimeError> {
+        if self.provider_registry.is_empty() {
+            return Err(RuntimeError::ProviderNotFound(None));
+        }
+
+        // Connect to MCP servers and register their tools.
+        if !self.mcp_configs.is_empty() {
+            let mut manager = McpManager::new();
+            for config in &self.mcp_configs {
+                match manager.connect(config).await {
+                    Ok(bridged_tools) => {
+                        for tool in bridged_tools {
+                            self.handle.register_tool(tool);
+                        }
+                    }
+                    Err(e) => {
+                        // Log the error but don't fail the build — degraded mode.
+                        eprintln!(
+                            "Warning: MCP server '{}' failed to connect: {}",
+                            config.name, e
+                        );
+                    }
+                }
+            }
+            // Store the manager in the app context for later use.
+            self.handle
+                .register_app_context(Arc::new(tokio::sync::Mutex::new(manager)));
+        }
+
+        let provider_registry = Arc::new(std::sync::RwLock::new(self.provider_registry));
+        Ok(Runtime {
+            handle: self
+                .handle
+                .with_provider_registry(provider_registry.clone()),
+            provider_registry,
+        })
+    }
+
+    /// Builds the runtime synchronously (no MCP server connections).
+    ///
+    /// MCP server configs are ignored — use [`build_async`](Self::build_async)
+    /// when MCP servers are configured.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         if self.provider_registry.is_empty() {
             Err(RuntimeError::ProviderNotFound(None))
         } else {
+            let provider_registry = Arc::new(std::sync::RwLock::new(self.provider_registry));
             Ok(Runtime {
-                handle: self.handle,
-                provider_registry: self.provider_registry,
+                handle: self
+                    .handle
+                    .with_provider_registry(provider_registry.clone()),
+                provider_registry,
             })
         }
     }

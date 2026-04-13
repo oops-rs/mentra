@@ -13,6 +13,8 @@ pub mod auth;
 pub mod background;
 /// Transcript compaction engine and related types.
 pub mod compaction;
+/// Model Context Protocol (MCP) client and tool bridge.
+pub mod mcp;
 /// Working-memory journal and long-term memory services.
 pub mod memory;
 /// Provider integrations and transport-neutral request/response types.
@@ -46,6 +48,7 @@ pub use provider::{Provider, ProviderRegistry};
 pub use agent::{Agent, AgentConfig, SpawnedAgentStatus, SpawnedAgentSummary};
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
 pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
+pub use mcp::{McpClientError, McpManager, McpServerConfig, McpServerStatus, McpServerSummary};
 pub use runtime::{
     AgentStore, AuditStore, HybridRuntimeStore, LeaseStore, PermissionRuleStore, RunStore, Runtime,
     RuntimePolicy, TaskStore,
