@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -46,7 +44,7 @@ impl From<AnthropicModel> for ModelInfo {
 pub(crate) struct AnthropicRequest {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<AnthropicSystemBlock>>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
@@ -62,6 +60,39 @@ pub(crate) struct AnthropicRequest {
     thinking: Option<AnthropicThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<AnthropicReasoningEffort>,
+}
+
+/// A system prompt block with optional cache control.
+#[derive(Serialize)]
+pub(crate) struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
+}
+
+/// Cache control marker for Anthropic prompt caching.
+#[derive(Serialize)]
+pub(crate) struct AnthropicCacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl AnthropicCacheControl {
+    fn ephemeral() -> Self {
+        Self { kind: "ephemeral" }
+    }
+}
+
+/// Build system blocks from a system prompt string, with cache_control on
+/// the final block to enable prompt caching.
+fn build_system_blocks(system: String) -> Vec<AnthropicSystemBlock> {
+    vec![AnthropicSystemBlock {
+        kind: "text",
+        text: system,
+        cache_control: Some(AnthropicCacheControl::ephemeral()),
+    }]
 }
 
 #[derive(Deserialize)]
@@ -149,7 +180,7 @@ impl<'a> TryFrom<Request<'a>> for AnthropicRequest {
 
         Ok(AnthropicRequest {
             model: value.model.into_owned(),
-            system: value.system.map(Cow::into_owned),
+            system: value.system.map(|s| build_system_blocks(s.into_owned())),
             messages: value
                 .messages
                 .iter()
@@ -400,6 +431,8 @@ struct AnthropicCustomTool {
     input_schema: Value,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     defer_loading: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
 }
 
 #[derive(Serialize)]
@@ -410,12 +443,17 @@ struct AnthropicHostedSearchTool {
 }
 
 impl AnthropicTool {
-    fn custom(tool: &ToolSpec, force_immediate: bool) -> Self {
+    fn custom(tool: &ToolSpec, force_immediate: bool, is_last: bool) -> Self {
         Self::Custom(AnthropicCustomTool {
             name: tool.name.clone(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
             defer_loading: tool.loading_policy == ToolLoadingPolicy::Deferred && !force_immediate,
+            cache_control: if is_last {
+                Some(AnthropicCacheControl::ephemeral())
+            } else {
+                None
+            },
         })
     }
 
@@ -458,9 +496,18 @@ fn build_anthropic_tools(
         ));
     }
 
+    let tool_count = tools.len();
     let mut provider_tools = tools
         .iter()
-        .map(|tool| AnthropicTool::custom(tool, forced_tool_name == Some(tool.name.as_str())))
+        .enumerate()
+        .map(|(i, tool)| {
+            let is_last = i == tool_count - 1 && !has_deferred_tools;
+            AnthropicTool::custom(
+                tool,
+                forced_tool_name == Some(tool.name.as_str()),
+                is_last,
+            )
+        })
         .collect::<Vec<_>>();
 
     if has_deferred_tools {
