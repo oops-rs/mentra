@@ -66,6 +66,39 @@ impl RuntimePolicy {
         }
     }
 
+    /// Returns a workspace-bounded policy that restricts file access and
+    /// shell execution to the given workspace root.
+    ///
+    /// This is the recommended policy for production use — it allows shell
+    /// commands and file operations only within the workspace boundary.
+    pub fn workspace_bounded(workspace: impl Into<PathBuf>) -> Self {
+        let workspace = workspace.into();
+        Self {
+            allow_shell_commands: true,
+            allow_background_commands: true,
+            allowed_working_roots: vec![workspace.clone()],
+            allowed_read_roots: vec![workspace.clone()],
+            allowed_write_roots: vec![workspace],
+            default_command_timeout: Duration::from_secs(120),
+            max_command_timeout: Duration::from_secs(600),
+            ..Self::default()
+        }
+    }
+
+    /// Returns a read-only policy that allows file reads and shell commands
+    /// but blocks all file writes.
+    pub fn read_only(workspace: impl Into<PathBuf>) -> Self {
+        let workspace = workspace.into();
+        Self {
+            allow_shell_commands: true,
+            allow_background_commands: false,
+            allowed_working_roots: vec![workspace.clone()],
+            allowed_read_roots: vec![workspace],
+            allowed_write_roots: Vec::new(),
+            ..Self::default()
+        }
+    }
+
     /// Enables or disables foreground shell command execution.
     pub fn allow_shell_commands(mut self, allow: bool) -> Self {
         self.allow_shell_commands = allow;

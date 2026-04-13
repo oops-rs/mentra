@@ -2,6 +2,8 @@ mod command;
 mod hooks;
 mod policy;
 mod run;
+/// Container and sandbox environment detection.
+pub mod sandbox;
 
 pub use command::{
     CommandOutput, CommandRequest, CommandSpec, ExecOutput, LocalRuntimeExecutor, RuntimeExecutor,
@@ -14,3 +16,4 @@ pub use hooks::{
 };
 pub use policy::RuntimePolicy;
 pub use run::{CancellationFlag, CancellationToken, RunOptions};
+pub use sandbox::{ExecutionEnvironment, detect_environment};
