@@ -50,7 +50,7 @@ pub use task::{TaskItem, TaskStatus};
 /// - collaboration: persistent teams and background task coordination
 pub struct Runtime {
     handle: RuntimeHandle,
-    provider_registry: ProviderRegistry,
+    provider_registry: Arc<std::sync::RwLock<ProviderRegistry>>,
 }
 
 /// Read-only summary of a persisted agent record for a runtime identifier.
@@ -142,6 +142,8 @@ impl Runtime {
             name.into(),
             config,
             self.provider_registry
+                .read()
+                .expect("provider registry poisoned")
                 .get_provider(Some(&model.provider))
                 .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?,
             AgentSpawnOptions::default(),
@@ -157,6 +159,8 @@ impl Runtime {
         };
         let provider = self
             .provider_registry
+            .read()
+            .expect("provider registry poisoned")
             .get_provider(Some(&state.record.provider_id))
             .ok_or_else(|| {
                 RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))
@@ -174,6 +178,8 @@ impl Runtime {
         for state in states {
             let provider = self
                 .provider_registry
+                .read()
+                .expect("provider registry poisoned")
                 .get_provider(Some(&state.record.provider_id))
                 .ok_or_else(|| {
                     RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))
@@ -218,6 +224,8 @@ impl Runtime {
         for state in states {
             let provider = self
                 .provider_registry
+                .read()
+                .expect("provider registry poisoned")
                 .get_provider(Some(&state.record.provider_id))
                 .ok_or_else(|| {
                     RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))
@@ -231,7 +239,10 @@ impl Runtime {
 impl Runtime {
     /// Returns descriptors for registered providers.
     pub fn providers(&self) -> Vec<ProviderDescriptor> {
-        self.provider_registry.descriptors()
+        self.provider_registry
+            .read()
+            .expect("provider registry poisoned")
+            .descriptors()
     }
 
     /// Registers a builtin provider from an API key.
@@ -241,17 +252,25 @@ impl Runtime {
         api_key: impl Into<String>,
     ) -> Result<(), String> {
         self.provider_registry
+            .write()
+            .expect("provider registry poisoned")
             .register_builtin_provider(id, api_key)
     }
 
     /// Registers the local Ollama provider using its default OpenAI-compatible endpoint.
     pub fn register_ollama(&mut self) {
-        self.provider_registry.register_ollama();
+        self.provider_registry
+            .write()
+            .expect("provider registry poisoned")
+            .register_ollama();
     }
 
     /// Registers the local LM Studio provider using its default OpenAI-compatible endpoint.
     pub fn register_lmstudio(&mut self) {
-        self.provider_registry.register_lmstudio();
+        self.provider_registry
+            .write()
+            .expect("provider registry poisoned")
+            .register_lmstudio();
     }
 
     /// Registers a custom provider implementation.
@@ -297,7 +316,10 @@ impl Runtime {
     where
         P: Provider + 'static,
     {
-        self.provider_registry.register_provider_instance(provider);
+        self.provider_registry
+            .write()
+            .expect("provider registry poisoned")
+            .register_provider_instance(provider);
     }
 
     /// Lists models for a specific provider, or the default provider when omitted.
@@ -306,6 +328,8 @@ impl Runtime {
         provider: Option<&ProviderId>,
     ) -> Result<Vec<ModelInfo>, RuntimeError> {
         self.provider_registry
+            .read()
+            .expect("provider registry poisoned")
             .get_provider(provider)
             .ok_or_else(|| RuntimeError::ProviderNotFound(provider.cloned()))?
             .list_models()
@@ -322,6 +346,8 @@ impl Runtime {
         let provider = provider.into();
         if self
             .provider_registry
+            .read()
+            .expect("provider registry poisoned")
             .get_provider(Some(&provider))
             .is_none()
         {
@@ -401,6 +427,8 @@ impl Runtime {
                 )));
         let provider = self
             .provider_registry
+            .read()
+            .expect("provider registry poisoned")
             .get_provider(Some(&model.provider))
             .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?;
         let agent = Agent::new(
@@ -469,6 +497,8 @@ impl Runtime {
         };
         let provider = self
             .provider_registry
+            .read()
+            .expect("provider registry poisoned")
             .get_provider(Some(&state.record.provider_id))
             .ok_or_else(|| {
                 RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))

@@ -120,6 +120,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: Arc::<str>::from("default"),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: Arc::new(RwLock::new(ProviderRegistry::default())),
         };
         let _ = handle.emit_hook(RuntimeHookEvent::RecoveryPrepared {
             runtime_instance_id: handle.runtime_instance_id.clone(),
@@ -154,6 +155,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
         };
         let _ = handle.emit_hook(RuntimeHookEvent::RecoveryPrepared {
             runtime_instance_id: handle.runtime_instance_id.clone(),
@@ -196,6 +198,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
         }
     }
 
@@ -234,6 +237,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
         }
     }
 
@@ -269,6 +273,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
         }
     }
 
@@ -307,6 +312,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
         }
     }
 
@@ -339,6 +345,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: runtime_identifier.into(),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
         }
     }
 
@@ -377,6 +384,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
         }
     }
 
@@ -412,6 +420,7 @@ impl RuntimeHandle {
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
         }
     }
 }

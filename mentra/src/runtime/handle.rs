@@ -18,6 +18,7 @@ use crate::{
     background::{BackgroundNotification, BackgroundTaskManager, BackgroundTaskSummary},
     compaction::CompactionEngine,
     memory::MemoryEngine,
+    provider::{Provider, ProviderId, ProviderRegistry},
     runtime::{
         control::{
             AuditHook, CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor,
@@ -48,6 +49,7 @@ pub struct RuntimeHandle {
     persisted_runtime_identifier: Arc<str>,
     lease_keys: Arc<Mutex<BTreeSet<String>>>,
     agent_contexts: Arc<RwLock<HashMap<String, AgentExecutionConfig>>>,
+    provider_registry: Arc<RwLock<ProviderRegistry>>,
 }
 
 #[derive(Clone)]
@@ -119,6 +121,13 @@ impl Drop for RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    pub(crate) fn get_provider(&self, id: Option<&ProviderId>) -> Option<Arc<dyn Provider>> {
+        self.provider_registry
+            .read()
+            .expect("provider registry poisoned")
+            .get_provider(id)
+    }
+
     pub(crate) fn memory_engine(&self) -> Arc<MemoryEngine> {
         self.persistence.memory.clone()
     }
@@ -129,5 +138,23 @@ impl RuntimeHandle {
 
     pub(crate) fn pre_hooks(&self) -> &PreExecutionHooks {
         &self.execution.pre_hooks
+    }
+
+    pub(crate) fn with_provider_registry(
+        &self,
+        provider_registry: Arc<RwLock<ProviderRegistry>>,
+    ) -> Self {
+        Self {
+            execution: self.execution.clone(),
+            persistence: self.persistence.clone(),
+            collaboration: self.collaboration.clone(),
+            tooling: self.tooling.clone(),
+            runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
+            runtime_instance_id: self.runtime_instance_id.clone(),
+            persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
+            lease_keys: self.lease_keys.clone(),
+            agent_contexts: self.agent_contexts.clone(),
+            provider_registry,
+        }
     }
 }

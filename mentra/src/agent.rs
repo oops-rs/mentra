@@ -336,6 +336,19 @@ impl Agent {
         &self.model
     }
 
+    /// Updates the model and provider used for future turns, then persists the
+    /// new agent record so resumed sessions continue with the same setting.
+    pub fn set_model(&mut self, model: crate::ModelInfo) -> Result<(), RuntimeError> {
+        let provider = self
+            .runtime
+            .get_provider(Some(&model.provider))
+            .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?;
+        self.model = model.id;
+        self.provider_id = provider.descriptor().id;
+        self.provider = provider;
+        self.persist_agent_record()
+    }
+
     /// Returns the effective agent configuration.
     pub fn config(&self) -> &AgentConfig {
         &self.config

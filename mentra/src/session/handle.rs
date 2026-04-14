@@ -232,6 +232,18 @@ impl Session {
         &self.metadata
     }
 
+    /// Updates the live session model and persists the new setting so future
+    /// resumes observe the same model.
+    pub fn set_model(&mut self, model: crate::ModelInfo) -> Result<(), RuntimeError> {
+        self.agent.set_model(model.clone())?;
+        self.metadata.model = model.id;
+        self.metadata.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Ok(())
+    }
+
     /// Returns the underlying agent identifier.
     pub fn agent_id(&self) -> &str {
         self.agent.id()
