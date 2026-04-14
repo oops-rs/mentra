@@ -502,11 +502,7 @@ fn build_anthropic_tools(
         .enumerate()
         .map(|(i, tool)| {
             let is_last = i == tool_count - 1 && !has_deferred_tools;
-            AnthropicTool::custom(
-                tool,
-                forced_tool_name == Some(tool.name.as_str()),
-                is_last,
-            )
+            AnthropicTool::custom(tool, forced_tool_name == Some(tool.name.as_str()), is_last)
         })
         .collect::<Vec<_>>();
 

@@ -3,12 +3,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-pub use mentra_provider::EmbeddingData;
-pub use mentra_provider::EmbeddingModelInfo;
-pub use mentra_provider::EmbeddingProvider;
-pub use mentra_provider::EmbeddingRequest;
-pub use mentra_provider::EmbeddingResponse;
-pub use mentra_provider::EmbeddingUsage;
 pub use mentra_provider::AnthropicRequestOptions;
 pub use mentra_provider::AuthScheme;
 pub use mentra_provider::BuiltinProvider;
@@ -18,6 +12,12 @@ pub use mentra_provider::CompactionResponse;
 pub use mentra_provider::ContentBlock;
 pub use mentra_provider::ContentBlockDelta;
 pub use mentra_provider::ContentBlockStart;
+pub use mentra_provider::EmbeddingData;
+pub use mentra_provider::EmbeddingModelInfo;
+pub use mentra_provider::EmbeddingProvider;
+pub use mentra_provider::EmbeddingRequest;
+pub use mentra_provider::EmbeddingResponse;
+pub use mentra_provider::EmbeddingUsage;
 pub use mentra_provider::GeminiRequestOptions;
 pub use mentra_provider::ImageSource;
 pub use mentra_provider::MemorySummarizeOutput;
@@ -142,10 +142,14 @@ impl ProviderRegistry {
     ) -> Result<(), String> {
         let api_key = api_key.into();
         let provider: Arc<dyn Provider> = match id {
-            BuiltinProvider::Anthropic => Arc::new(anthropic::AnthropicProvider::new(api_key.clone())),
+            BuiltinProvider::Anthropic => {
+                Arc::new(anthropic::AnthropicProvider::new(api_key.clone()))
+            }
             BuiltinProvider::Gemini => Arc::new(gemini::GeminiProvider::new(api_key.clone())),
             BuiltinProvider::OpenAI => Arc::new(openai::OpenAIProvider::new(api_key.clone())),
-            BuiltinProvider::OpenRouter => Arc::new(openrouter::OpenRouterProvider::new(api_key.clone())),
+            BuiltinProvider::OpenRouter => {
+                Arc::new(openrouter::OpenRouterProvider::new(api_key.clone()))
+            }
             BuiltinProvider::Ollama => Arc::new(ollama::OllamaProvider::new()),
             BuiltinProvider::LmStudio => Arc::new(lmstudio::LmStudioProvider::new()),
         };

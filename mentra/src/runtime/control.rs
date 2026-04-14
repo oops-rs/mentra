@@ -16,4 +16,3 @@ pub use hooks::{
 };
 pub use policy::RuntimePolicy;
 pub use run::{CancellationFlag, CancellationToken, RunOptions};
-pub use sandbox::{ExecutionEnvironment, detect_environment};

@@ -66,9 +66,8 @@ impl McpManager {
         // Disconnect existing connection if any.
         self.disconnect(&config.name).await;
 
-        let client = McpStdioClient::connect(config).await.map_err(|e| {
+        let client = McpStdioClient::connect(config).await.inspect_err(|e| {
             self.errors.insert(config.name.clone(), e.to_string());
-            e
         })?;
 
         let client = Arc::new(client);
@@ -116,10 +115,7 @@ impl McpManager {
             .map(|(name, server)| McpServerSummary {
                 name: name.clone(),
                 status: McpServerStatus::Connected,
-                server_version: server
-                    .client
-                    .server_info()
-                    .map(|info| info.version.clone()),
+                server_version: server.client.server_info().map(|info| info.version.clone()),
                 tool_count: server.tools.len(),
                 error: None,
             })
@@ -162,12 +158,9 @@ impl McpManager {
         tool_name: &str,
         arguments: Option<serde_json::Value>,
     ) -> Result<super::protocol::McpToolCallResult, McpClientError> {
-        let server = self
-            .servers
-            .get(server_name)
-            .ok_or_else(|| {
-                McpClientError::ParseError(format!("MCP server '{}' not connected", server_name))
-            })?;
+        let server = self.servers.get(server_name).ok_or_else(|| {
+            McpClientError::ParseError(format!("MCP server '{}' not connected", server_name))
+        })?;
 
         server.client.call_tool(tool_name, arguments).await
     }

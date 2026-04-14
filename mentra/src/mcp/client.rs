@@ -1,8 +1,8 @@
 //! MCP stdio client — spawns a child process and communicates via JSON-RPC over stdin/stdout.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;

@@ -56,11 +56,7 @@ impl McpBridgedTool {
 
 impl ToolDefinition for McpBridgedTool {
     fn descriptor(&self) -> RuntimeToolDescriptor {
-        let description = self
-            .tool_def
-            .description
-            .clone()
-            .unwrap_or_default();
+        let description = self.tool_def.description.clone().unwrap_or_default();
 
         let input_schema = self
             .tool_def
@@ -71,10 +67,7 @@ impl ToolDefinition for McpBridgedTool {
         RuntimeToolDescriptor::builder(self.full_name())
             .description(description)
             .input_schema(input_schema)
-            .capability(ToolCapability::Custom(format!(
-                "mcp:{}",
-                self.server_name
-            )))
+            .capability(ToolCapability::Custom(format!("mcp:{}", self.server_name)))
             .side_effect_level(ToolSideEffectLevel::External)
             .durability(ToolDurability::Ephemeral)
             .execution_category(ToolExecutionCategory::ExclusiveLocalMutation)
@@ -86,7 +79,9 @@ impl ToolDefinition for McpBridgedTool {
 #[async_trait]
 impl ToolExecutor for McpBridgedTool {
     async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
-        let arguments = if input.is_null() || (input.is_object() && input.as_object().map_or(true, |o| o.is_empty())) {
+        let arguments = if input.is_null()
+            || (input.is_object() && input.as_object().is_none_or(|o| o.is_empty()))
+        {
             None
         } else {
             Some(input)

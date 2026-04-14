@@ -24,6 +24,7 @@ use crate::{
 };
 use mentra_provider::{BuiltinProvider, ModelInfo, ModelSelector, ProviderDescriptor, ProviderId};
 
+pub use control::sandbox::{ExecutionEnvironment, detect_environment};
 pub use control::{
     AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
     CommandSpec, ExecOutput, RunOptions, RuntimeExecutor, RuntimeHook, RuntimeHookEvent,
@@ -327,11 +328,14 @@ impl Runtime {
         &self,
         provider: Option<&ProviderId>,
     ) -> Result<Vec<ModelInfo>, RuntimeError> {
-        self.provider_registry
+        let provider = self
+            .provider_registry
             .read()
             .expect("provider registry poisoned")
             .get_provider(provider)
-            .ok_or_else(|| RuntimeError::ProviderNotFound(provider.cloned()))?
+            .ok_or_else(|| RuntimeError::ProviderNotFound(provider.cloned()))?;
+
+        provider
             .list_models()
             .await
             .map_err(RuntimeError::FailedToListModels)
