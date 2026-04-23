@@ -211,11 +211,10 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Registers a custom provider implementation.
+    /// Registers a custom runtime provider implementation.
     ///
-    /// This is the supported seam for test-time provider injection, custom
-    /// transports, and provider-core adapters such as
-    /// `mentra::provider_core::responses::ResponsesProvider`.
+    /// This is the supported seam for test-time provider injection when you
+    /// want to script model responses without live API calls.
     ///
     /// ```rust,no_run
     /// use async_trait::async_trait;
@@ -255,6 +254,20 @@ impl RuntimeBuilder {
         P: Provider + 'static,
     {
         self.provider_registry.register_provider_instance(provider);
+        self
+    }
+
+    /// Registers a provider-core instance built from `mentra::provider_core`.
+    ///
+    /// Use this when you want Mentra's runtime with a customized provider
+    /// definition, such as a custom OpenAI-compatible or Anthropic-compatible
+    /// base URL.
+    pub fn with_registered_provider<P>(mut self, provider: P) -> Self
+    where
+        P: mentra_provider::Provider + 'static,
+    {
+        self.provider_registry
+            .register_registered_provider(provider);
         self
     }
 

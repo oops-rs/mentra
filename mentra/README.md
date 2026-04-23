@@ -81,7 +81,7 @@ definition.descriptor.display_name = Some("Custom OpenAI-Compatible".to_string()
 definition.base_url = Some("https://llm.example.com/".to_string());
 
 let runtime = Runtime::builder()
-    .with_provider_instance(mentra::provider_core::responses::ResponsesProvider::new(
+    .with_registered_provider(mentra::provider_core::responses::ResponsesProvider::new(
         definition,
         mentra::provider_core::StaticCredentialSource::new(std::env::var("CUSTOM_API_KEY")?),
     ))
@@ -110,7 +110,7 @@ definition.descriptor.display_name = Some("Custom Anthropic-Compatible".to_strin
 definition.base_url = Some("https://claude.example.com/".to_string());
 
 let runtime = Runtime::builder()
-    .with_provider_instance(
+    .with_registered_provider(
         mentra::provider_core::anthropic::AnthropicProvider::with_definition_and_credential_source(
             definition,
             mentra::provider_core::StaticCredentialSource::new(std::env::var("CUSTOM_API_KEY")?),

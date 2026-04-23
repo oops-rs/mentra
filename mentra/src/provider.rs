@@ -126,42 +126,6 @@ pub trait Provider: Send + Sync {
     }
 }
 
-#[async_trait]
-impl<P> Provider for P
-where
-    P: mentra_provider::Provider + Send + Sync,
-{
-    fn descriptor(&self) -> ProviderDescriptor {
-        <P as mentra_provider::Provider>::descriptor(self)
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        <P as mentra_provider::Provider>::definition(self).capabilities
-    }
-
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        <P as mentra_provider::ModelCatalog>::list_models(self).await
-    }
-
-    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-        <P as mentra_provider::Provider>::stream(self, request).await
-    }
-
-    async fn compact(
-        &self,
-        request: CompactionRequest<'_>,
-    ) -> Result<CompactionResponse, ProviderError> {
-        <P as mentra_provider::Provider>::compact(self, request).await
-    }
-
-    async fn summarize_memories(
-        &self,
-        request: MemorySummarizeRequest<'_>,
-    ) -> Result<MemorySummarizeResponse, ProviderError> {
-        <P as mentra_provider::Provider>::summarize_memories(self, request).await
-    }
-}
-
 #[derive(Default)]
 pub struct ProviderRegistry {
     default_provider: Option<ProviderId>,
@@ -237,6 +201,20 @@ impl ProviderRegistry {
         self.providers.insert(id, Arc::new(provider));
     }
 
+    pub(crate) fn register_registered_provider<P>(&mut self, provider: P)
+    where
+        P: mentra_provider::Provider + 'static,
+    {
+        let descriptor = provider.descriptor();
+        let id = descriptor.id;
+
+        if self.default_provider.is_none() {
+            self.default_provider = Some(id.clone());
+        }
+
+        self.providers.insert(id, shared_provider(provider));
+    }
+
     pub(crate) fn register_ollama(&mut self) {
         self.register_provider_instance(ollama::OllamaProvider::new());
     }
@@ -287,9 +265,9 @@ impl ProviderRegistry {
 
 fn shared_provider<P>(provider: P) -> Arc<dyn Provider>
 where
-    P: Provider + 'static,
+    P: mentra_provider::Provider + 'static,
 {
-    Arc::new(provider)
+    Arc::new(SharedProviderProxy { inner: provider })
 }
 
 /// Builds a `ResponsesProvider` (with no credentials) for OpenAI-compatible
@@ -340,6 +318,46 @@ impl mentra_provider::CredentialSource for NoCredentialsSource {
         &self,
     ) -> Result<mentra_provider::ProviderCredentials, mentra_provider::ProviderError> {
         Ok(mentra_provider::ProviderCredentials::default())
+    }
+}
+
+struct SharedProviderProxy<P> {
+    inner: P,
+}
+
+#[async_trait]
+impl<P> Provider for SharedProviderProxy<P>
+where
+    P: mentra_provider::Provider + 'static,
+{
+    fn descriptor(&self) -> ProviderDescriptor {
+        self.inner.descriptor()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.inner.definition().capabilities
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        self.inner.list_models().await
+    }
+
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        self.inner.stream(request).await
+    }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.inner.compact(request).await
+    }
+
+    async fn summarize_memories(
+        &self,
+        request: MemorySummarizeRequest<'_>,
+    ) -> Result<MemorySummarizeResponse, ProviderError> {
+        self.inner.summarize_memories(request).await
     }
 }
 

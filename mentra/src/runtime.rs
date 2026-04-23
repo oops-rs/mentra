@@ -274,11 +274,10 @@ impl Runtime {
             .register_lmstudio();
     }
 
-    /// Registers a custom provider implementation.
+    /// Registers a custom runtime provider implementation.
     ///
-    /// This is the supported seam for injecting a scripted provider in tests,
-    /// embedding Mentra on top of a custom transport, or registering a
-    /// `mentra::provider_core` provider with a customized definition.
+    /// This is the supported seam for injecting a scripted provider in tests or
+    /// embedding Mentra on top of a custom transport.
     ///
     /// ```rust,no_run
     /// use async_trait::async_trait;
@@ -322,6 +321,21 @@ impl Runtime {
             .write()
             .expect("provider registry poisoned")
             .register_provider_instance(provider);
+    }
+
+    /// Registers a provider-core instance built from `mentra::provider_core`.
+    ///
+    /// Use this when you want Mentra's runtime with a customized provider
+    /// definition, such as a custom OpenAI-compatible or Anthropic-compatible
+    /// base URL.
+    pub fn register_registered_provider<P>(&mut self, provider: P)
+    where
+        P: mentra_provider::Provider + 'static,
+    {
+        self.provider_registry
+            .write()
+            .expect("provider registry poisoned")
+            .register_registered_provider(provider);
     }
 
     /// Lists models for a specific provider, or the default provider when omitted.

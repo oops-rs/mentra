@@ -567,7 +567,7 @@ async fn runtime_accepts_provider_core_openai_compatible_instances() {
     definition.base_url = Some(base_url);
 
     let runtime = Runtime::empty_builder()
-        .with_provider_instance(mentra::provider_core::responses::ResponsesProvider::new(
+        .with_registered_provider(mentra::provider_core::responses::ResponsesProvider::new(
             definition,
             mentra::provider_core::StaticCredentialSource::new("test-key"),
         ))
