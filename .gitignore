@@ -3,3 +3,8 @@ Cargo.lock
 
 .env
 .worktrees/
+
+.mcp.json
+nodus.lock
+nodus.toml
+
