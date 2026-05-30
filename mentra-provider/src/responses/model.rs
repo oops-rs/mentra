@@ -487,6 +487,7 @@ pub enum ResponsesTool {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
         parameters: serde_json::Value,
+        strict: bool,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         defer_loading: bool,
     },
@@ -533,6 +534,7 @@ impl ResponsesTool {
             name: tool.name.clone(),
             description: tool.description.clone(),
             parameters: tool.input_schema.clone(),
+            strict: tool.strict.unwrap_or(false),
             defer_loading: tool.loading_policy == ToolLoadingPolicy::Deferred && !force_immediate,
         }
     }
@@ -703,6 +705,7 @@ mod tests {
                 output_schema: None,
                 kind: crate::ProviderToolKind::Function,
                 loading_policy: crate::tool::ToolLoadingPolicy::Immediate,
+                strict: None,
                 options: None,
             }]),
             tool_choice: Some(ToolChoice::Tool {
@@ -740,6 +743,7 @@ mod tests {
         assert_eq!(payload["input"][3]["type"], "function_call_output");
         assert_eq!(payload["input"][3]["output"], "README contents");
         assert_eq!(payload["tools"][0]["type"], "function");
+        assert_eq!(payload["tools"][0]["strict"], false);
         assert!(payload["tools"][0].get("defer_loading").is_none());
         assert_eq!(payload["tool_choice"]["type"], "function");
         assert_eq!(payload["tool_choice"]["name"], "files");
@@ -749,6 +753,39 @@ mod tests {
         assert!((temperature - 0.2).abs() < 1e-6);
         assert_eq!(payload["max_output_tokens"], 256);
         assert_eq!(payload["metadata"]["agent"], "mentra");
+    }
+
+    #[test]
+    fn serializes_explicit_strict_function_tool() {
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![
+                ToolSpec::builder("strict_tool")
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" }
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }))
+                    .strict(true)
+                    .build(),
+            ]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        let payload = serde_json::to_value(ResponsesRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["tools"][0]["type"], "function");
+        assert_eq!(payload["tools"][0]["strict"], true);
     }
 
     #[test]
@@ -1091,6 +1128,7 @@ mod tests {
                 output_schema: None,
                 kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
+                strict: None,
                 options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
@@ -1125,6 +1163,7 @@ mod tests {
                 output_schema: None,
                 kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
+                strict: None,
                 options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),

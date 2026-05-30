@@ -32,6 +32,8 @@ pub struct ToolSpec {
     #[serde(default)]
     pub loading_policy: ToolLoadingPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Value>,
 }
 
@@ -47,6 +49,7 @@ impl ToolSpec {
             output_schema: None,
             kind: ProviderToolKind::Function,
             loading_policy: ToolLoadingPolicy::Immediate,
+            strict: None,
             options: None,
         }
     }
@@ -60,6 +63,7 @@ pub struct ToolSpecBuilder {
     output_schema: Option<Value>,
     kind: ProviderToolKind,
     loading_policy: ToolLoadingPolicy,
+    strict: Option<bool>,
     options: Option<Value>,
 }
 
@@ -94,6 +98,15 @@ impl ToolSpecBuilder {
         self
     }
 
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.strict = Some(strict);
+        self
+    }
+
+    pub fn non_strict(self) -> Self {
+        self.strict(false)
+    }
+
     pub fn defer_loading(self, defer_loading: bool) -> Self {
         self.loading_policy(if defer_loading {
             ToolLoadingPolicy::Deferred
@@ -110,7 +123,29 @@ impl ToolSpecBuilder {
             output_schema: self.output_schema,
             kind: self.kind,
             loading_policy: self.loading_policy,
+            strict: self.strict,
             options: self.options,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_leaves_function_tool_strictness_unset_by_default() {
+        let spec = ToolSpec::builder("echo").build();
+
+        assert_eq!(spec.strict, None);
+    }
+
+    #[test]
+    fn builder_sets_explicit_strictness() {
+        let strict = ToolSpec::builder("strict").strict(true).build();
+        let non_strict = ToolSpec::builder("loose").non_strict().build();
+
+        assert_eq!(strict.strict, Some(true));
+        assert_eq!(non_strict.strict, Some(false));
     }
 }

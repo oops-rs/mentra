@@ -170,6 +170,16 @@ impl RuntimeToolDescriptorBuilder {
         self
     }
 
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.provider = self.provider.strict(strict);
+        self
+    }
+
+    pub fn non_strict(mut self) -> Self {
+        self.provider = self.provider.non_strict();
+        self
+    }
+
     pub fn defer_loading(mut self, defer_loading: bool) -> Self {
         self.provider = self.provider.defer_loading(defer_loading);
         self

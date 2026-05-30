@@ -85,6 +85,51 @@ impl ToolRegistry {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::{borrow::Cow, collections::BTreeMap};
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn builtin_shell_and_files_tools_serialize_as_non_strict_responses_functions() {
+        let mut registry = ToolRegistry::default();
+        registry.register_builtin_tools();
+
+        let request = mentra_provider::Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(Vec::new()),
+            tools: Cow::Owned(registry.tools().to_vec()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: mentra_provider::ProviderRequestOptions::default(),
+        };
+
+        let payload = serde_json::to_value(
+            mentra_provider::responses::model::ResponsesRequest::try_from(request)
+                .expect("built-in tools should serialize for Responses"),
+        )
+        .expect("responses request should serialize");
+        let tools = payload["tools"]
+            .as_array()
+            .expect("tools should be a json array");
+
+        for name in ["shell", "background_run", "files"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == json!(name))
+                .unwrap_or_else(|| panic!("{name} tool should be serialized"));
+            assert_eq!(tool["type"], "function");
+            assert_eq!(tool["strict"], false);
+        }
+    }
+}
+
 impl ToolRegistry {
     pub(crate) fn register_skill_tool(&mut self) {
         self.register_tool(LoadSkillTool);

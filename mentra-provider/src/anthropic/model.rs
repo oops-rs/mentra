@@ -743,6 +743,7 @@ mod tests {
                 output_schema: None,
                 kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
+                strict: None,
                 options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
@@ -780,6 +781,7 @@ mod tests {
                 output_schema: None,
                 kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
+                strict: None,
                 options: None,
             }]),
             tool_choice: Some(ToolChoice::Auto),
@@ -813,6 +815,7 @@ mod tests {
                 output_schema: None,
                 kind: crate::ProviderToolKind::Function,
                 loading_policy: ToolLoadingPolicy::Deferred,
+                strict: None,
                 options: None,
             }]),
             tool_choice: Some(ToolChoice::Tool {
