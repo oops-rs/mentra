@@ -64,6 +64,25 @@ pub enum ResponsesRequestCompression {
     Zstd,
 }
 
+/// Provider-side conversation state strategy for Responses-family providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesStateMode {
+    /// Send the complete local transcript and do not attach provider-side state.
+    ReplayOnly,
+    /// Keep local replay as the source of truth while opportunistically chaining provider state.
+    #[default]
+    Hybrid,
+    /// Require provider-side state chaining once a previous response id is available.
+    Stateful,
+}
+
+impl ResponsesStateMode {
+    pub fn uses_provider_state(self) -> bool {
+        matches!(self, Self::Hybrid | Self::Stateful)
+    }
+}
+
 /// Responses-compatible format discriminator for structured text output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -97,6 +116,10 @@ pub struct ResponsesTextControls {
 pub struct ResponsesRequestOptions {
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_response_id: Option<String>,
+    #[serde(default)]
+    pub state_mode: ResponsesStateMode,
     #[serde(default)]
     pub store: Option<bool>,
     #[serde(default)]
@@ -117,6 +140,8 @@ impl Default for ResponsesRequestOptions {
     fn default() -> Self {
         Self {
             parallel_tool_calls: None,
+            previous_response_id: None,
+            state_mode: ResponsesStateMode::Hybrid,
             store: None,
             stream: Some(true),
             include: Vec::new(),

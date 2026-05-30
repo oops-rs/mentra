@@ -38,9 +38,9 @@ pub use mentra_provider::{
     GeminiRequestOptions, ImageSource, Message, ModelInfo, ModelSelector, OpenAIRequestOptions,
     ProviderCapabilities, ProviderCredentials, ProviderDefinition, ProviderDescriptor,
     ProviderError, ProviderEvent, ProviderEventStream, ProviderId, ProviderRequestOptions,
-    ReasoningEffort, ReasoningOptions, Request, ResponsesRequestOptions, RetryPolicy, Role,
-    TokenUsage, ToolChoice, ToolSearchMode, WireApi, collect_response_from_stream,
-    provider_event_stream_from_response,
+    ReasoningEffort, ReasoningOptions, Request, ResponsesRequestOptions, ResponsesStateMode,
+    RetryPolicy, Role, TokenUsage, ToolChoice, ToolSearchMode, WireApi,
+    collect_response_from_stream, provider_event_stream_from_response,
 };
 
 pub use provider::{Provider, ProviderRegistry};

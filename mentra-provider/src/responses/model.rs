@@ -74,6 +74,8 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    previous_response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     store: Option<bool>,
@@ -125,6 +127,11 @@ impl ResponsesRequest {
             tool_choice: value.tool_choice.map(Into::into),
             temperature: value.temperature,
             max_output_tokens: value.max_output_tokens,
+            previous_response_id: value
+                .provider_request_options
+                .responses
+                .previous_response_id
+                .clone(),
             parallel_tool_calls: value.provider_request_options.responses.parallel_tool_calls,
             store: value.provider_request_options.responses.store,
             stream: value.provider_request_options.responses.stream,
@@ -146,6 +153,14 @@ impl ResponsesRequest {
                 .map(ResponsesReasoning::from),
             metadata: value.metadata.into_owned(),
         })
+    }
+
+    pub(crate) fn previous_response_id(&self) -> Option<&str> {
+        self.previous_response_id.as_deref()
+    }
+
+    pub(crate) fn clear_previous_response_id(&mut self) {
+        self.previous_response_id = None;
     }
 }
 
@@ -650,9 +665,9 @@ mod tests {
         ContentBlock, HostedToolSearchCall, HostedWebSearchCall, ImageGenerationCall,
         ImageGenerationResult, Message, ProviderError, ProviderRequestOptions, ReasoningEffort,
         ReasoningOptions, ReasoningSummary, Request, ResponsesRequestCompression,
-        ResponsesRequestOptions, ResponsesTextControls, ResponsesTextFormat, ResponsesVerbosity,
-        Role, ToolChoice, ToolLoadingPolicy, ToolResultContent, ToolSearchMode, ToolSpec,
-        WebSearchAction,
+        ResponsesRequestOptions, ResponsesStateMode, ResponsesTextControls, ResponsesTextFormat,
+        ResponsesVerbosity, Role, ToolChoice, ToolLoadingPolicy, ToolResultContent, ToolSearchMode,
+        ToolSpec, WebSearchAction,
     };
 
     use super::{ResponsesModel, ResponsesModelsPage, ResponsesRequest};
@@ -957,6 +972,33 @@ mod tests {
     }
 
     #[test]
+    fn serializes_previous_response_id_option() {
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                responses: ResponsesRequestOptions {
+                    previous_response_id: Some("resp_previous".to_string()),
+                    state_mode: ResponsesStateMode::Stateful,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+
+        let payload = serde_json::to_value(ResponsesRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["previous_response_id"], "resp_previous");
+    }
+
+    #[test]
     fn serializes_reasoning_effort_option() {
         let request = Request {
             model: Cow::Borrowed("gpt-5"),
@@ -1000,6 +1042,8 @@ mod tests {
                 }),
                 responses: ResponsesRequestOptions {
                     parallel_tool_calls: Some(true),
+                    previous_response_id: None,
+                    state_mode: ResponsesStateMode::Hybrid,
                     store: Some(false),
                     stream: Some(true),
                     include: vec!["reasoning.encrypted_content".to_string()],

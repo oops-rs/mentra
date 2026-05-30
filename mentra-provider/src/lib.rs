@@ -64,6 +64,7 @@ pub use request::ReasoningSummary;
 pub use request::Request;
 pub use request::ResponsesRequestCompression;
 pub use request::ResponsesRequestOptions;
+pub use request::ResponsesStateMode;
 pub use request::ResponsesTextControls;
 pub use request::ResponsesTextFormat;
 pub use request::ResponsesTextFormatType;

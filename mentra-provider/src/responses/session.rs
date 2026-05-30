@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use http::HeaderMap;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use url::Url;
@@ -19,6 +20,7 @@ use crate::ModelInfo;
 use crate::ProviderCredentials;
 use crate::ProviderDefinition;
 use crate::ProviderError;
+use crate::ProviderEvent;
 use crate::ProviderEventStream;
 use crate::ProviderSession;
 use crate::Request;
@@ -84,6 +86,7 @@ pub(crate) struct ResponsesSessionState {
     disable_websockets: AtomicBool,
     websocket_session: StdMutex<WebsocketSession>,
     turn_state: Arc<OnceLock<String>>,
+    latest_response_id: StdMutex<Option<String>>,
 }
 
 impl Default for ResponsesSessionState {
@@ -92,7 +95,31 @@ impl Default for ResponsesSessionState {
             disable_websockets: AtomicBool::new(false),
             websocket_session: StdMutex::new(WebsocketSession::default()),
             turn_state: Arc::new(OnceLock::new()),
+            latest_response_id: StdMutex::new(None),
         }
+    }
+}
+
+impl ResponsesSessionState {
+    fn latest_response_id(&self) -> Option<String> {
+        self.latest_response_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_latest_response_id(&self, response_id: impl Into<String>) {
+        *self
+            .latest_response_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response_id.into());
+    }
+
+    fn clear_latest_response_id(&self) {
+        *self
+            .latest_response_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -192,6 +219,14 @@ where
 
     pub fn turn_state(&self) -> Option<String> {
         self.state.turn_state.get().cloned()
+    }
+
+    pub fn latest_response_id(&self) -> Option<String> {
+        self.state.latest_response_id()
+    }
+
+    pub fn clear_latest_response_id(&self) {
+        self.state.clear_latest_response_id();
     }
 
     pub async fn websocket_connection_is_closed(&self) -> bool {
@@ -299,7 +334,7 @@ where
 
     pub async fn stream_response<'a>(
         &self,
-        request: Request<'a>,
+        mut request: Request<'a>,
     ) -> Result<ProviderEventStream, ProviderError> {
         let provider_name = self
             .definition
@@ -308,25 +343,90 @@ where
             .as_deref()
             .unwrap_or(self.definition.descriptor.id.as_str());
         let session = request.provider_request_options.session.clone();
+        let state_mode = request.provider_request_options.responses.state_mode;
+        if request
+            .provider_request_options
+            .responses
+            .previous_response_id
+            .is_none()
+            && state_mode.uses_provider_state()
+        {
+            request
+                .provider_request_options
+                .responses
+                .previous_response_id = self.state.latest_response_id();
+        }
         let compression = request.provider_request_options.responses.compression;
-        let request = ResponsesRequest::try_from_request(request, provider_name)?;
+        let mut request = ResponsesRequest::try_from_request(request, provider_name)?;
         let credentials = self.credential_source.credentials().await?;
+        let response = self
+            .send_http_responses_request(&request, compression, &credentials, &session)
+            .await?;
+
+        if !response.status().is_success() {
+            let error = ProviderError::Http {
+                status: response.status(),
+                body: response.text().await.unwrap_or_default(),
+            };
+            if state_mode == crate::ResponsesStateMode::Hybrid
+                && request.previous_response_id().is_some()
+                && previous_response_state_rejected(&error)
+            {
+                self.state.clear_latest_response_id();
+                request.clear_previous_response_id();
+                let response = self
+                    .send_http_responses_request(&request, compression, &credentials, &session)
+                    .await?;
+                if !response.status().is_success() {
+                    return Err(ProviderError::Http {
+                        status: response.status(),
+                        body: response.text().await.unwrap_or_default(),
+                    });
+                }
+                return Ok(self.track_response_state(spawn_event_stream(response)));
+            }
+            return Err(error);
+        }
+
+        if let Some(turn_state) = response
+            .headers()
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok())
+        {
+            let _ = self.state.turn_state.set(turn_state.to_string());
+        }
+
+        Ok(self.track_response_state(spawn_event_stream(response)))
+    }
+
+    pub async fn send_response<'a>(&self, request: Request<'a>) -> Result<Response, ProviderError> {
+        crate::collect_response_from_stream(self.stream_response(request).await?).await
+    }
+
+    async fn send_http_responses_request(
+        &self,
+        request: &ResponsesRequest,
+        compression: ResponsesRequestCompression,
+        credentials: &ProviderCredentials,
+        session: &SessionRequestOptions,
+    ) -> Result<reqwest::Response, ProviderError> {
         let request_builder = self
             .client
             .post(
                 self.definition
-                    .request_url_with_auth_for_path("v1/responses", &credentials)?,
+                    .request_url_with_auth_for_path("v1/responses", credentials)?,
             )
-            .headers(self.build_http_headers_for_session(&credentials, Some(&session))?)
+            .headers(self.build_http_headers_for_session(credentials, Some(session))?)
             .header(reqwest::header::ACCEPT, "text/event-stream");
-        let response = match compression {
+
+        match compression {
             ResponsesRequestCompression::None => request_builder
-                .json(&request)
+                .json(request)
                 .send()
                 .await
-                .map_err(ProviderError::Transport)?,
+                .map_err(ProviderError::Transport),
             ResponsesRequestCompression::Zstd => {
-                let body = serde_json::to_vec(&request).map_err(ProviderError::Serialize)?;
+                let body = serde_json::to_vec(request).map_err(ProviderError::Serialize)?;
                 let compressed =
                     zstd::stream::encode_all(std::io::Cursor::new(body), 3).map_err(|error| {
                         ProviderError::InvalidRequest(format!(
@@ -339,30 +439,28 @@ where
                     .body(compressed)
                     .send()
                     .await
-                    .map_err(ProviderError::Transport)?
+                    .map_err(ProviderError::Transport)
             }
-        };
-
-        if !response.status().is_success() {
-            return Err(ProviderError::Http {
-                status: response.status(),
-                body: response.text().await.unwrap_or_default(),
-            });
         }
-
-        if let Some(turn_state) = response
-            .headers()
-            .get("x-codex-turn-state")
-            .and_then(|value| value.to_str().ok())
-        {
-            let _ = self.state.turn_state.set(turn_state.to_string());
-        }
-
-        Ok(spawn_event_stream(response))
     }
 
-    pub async fn send_response<'a>(&self, request: Request<'a>) -> Result<Response, ProviderError> {
-        crate::collect_response_from_stream(self.stream_response(request).await?).await
+    fn track_response_state(&self, mut stream: ProviderEventStream) -> ProviderEventStream {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let state = Arc::clone(&self.state);
+
+        tokio::spawn(async move {
+            while let Some(event) = stream.recv().await {
+                if let Ok(ProviderEvent::MessageStarted { id, .. }) = &event {
+                    state.set_latest_response_id(id.clone());
+                }
+
+                if tx.send(event).is_err() {
+                    break;
+                }
+            }
+        });
+
+        rx
     }
 
     pub fn take_turn_state(&self) -> Arc<OnceLock<String>> {
@@ -400,6 +498,21 @@ where
         }
         Ok(headers)
     }
+}
+
+fn previous_response_state_rejected(error: &ProviderError) -> bool {
+    let ProviderError::Http { status, body } = error else {
+        return false;
+    };
+    if !(*status == reqwest::StatusCode::BAD_REQUEST || *status == reqwest::StatusCode::NOT_FOUND) {
+        return false;
+    }
+
+    let body = body.to_ascii_lowercase();
+    body.contains("previous_response_id")
+        || body.contains("previous response")
+        || (body.contains("response") && body.contains("not found"))
+        || (body.contains("response") && body.contains("expired"))
 }
 
 #[async_trait::async_trait]
@@ -508,6 +621,97 @@ mod tests {
                 .write_all(response.as_bytes())
                 .expect("write response");
             String::from_utf8(buffer).expect("request should be utf8")
+        });
+
+        (format!("http://{addr}/"), handle)
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut temp = [0_u8; 1024];
+        let mut header_end = None;
+        let mut content_length = 0_usize;
+
+        loop {
+            let read = stream.read(&mut temp).expect("read request");
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&temp[..read]);
+            if header_end.is_none()
+                && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let end = index + 4;
+                header_end = Some(end);
+                let headers = String::from_utf8_lossy(&buffer[..end]);
+                content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("parse content-length"))
+                    })
+                    .unwrap_or_default();
+            }
+            if let Some(end) = header_end
+                && buffer.len() >= end + content_length
+            {
+                break;
+            }
+        }
+
+        String::from_utf8(buffer).expect("request should be utf8")
+    }
+
+    fn request_body(captured: &str) -> &str {
+        captured.split("\r\n\r\n").nth(1).unwrap_or_default()
+    }
+
+    fn spawn_hybrid_fallback_server() -> (String, thread::JoinHandle<(String, String)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("read listener addr");
+        let handle = thread::spawn(move || {
+            let (mut first_stream, _) = listener.accept().expect("accept first request");
+            let first = read_http_request(&mut first_stream);
+            let first_body = r#"{"error":{"message":"previous_response_id not found"}}"#;
+            let first_response = format!(
+                concat!(
+                    "HTTP/1.1 400 Bad Request\r\n",
+                    "connection: close\r\n",
+                    "content-type: application/json\r\n",
+                    "content-length: {}\r\n\r\n",
+                    "{}"
+                ),
+                first_body.len(),
+                first_body
+            );
+            first_stream
+                .write_all(first_response.as_bytes())
+                .expect("write first response");
+            drop(first_stream);
+
+            let (mut second_stream, _) = listener.accept().expect("accept second request");
+            let second = read_http_request(&mut second_stream);
+            let second_body = concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fresh\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fresh\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n"
+            );
+            let second_response = format!(
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "connection: close\r\n",
+                    "content-type: text/event-stream\r\n",
+                    "content-length: {}\r\n\r\n",
+                    "{}"
+                ),
+                second_body.len(),
+                second_body
+            );
+            second_stream
+                .write_all(second_response.as_bytes())
+                .expect("write second response");
+
+            (first, second)
         });
 
         (format!("http://{addr}/"), handle)
@@ -669,6 +873,90 @@ mod tests {
             .expect("stream response should succeed");
 
         assert_eq!(session.turn_state().as_deref(), Some("next-turn-state"));
+    }
+
+    #[tokio::test]
+    async fn stream_response_tracks_latest_response_id_from_http_events() {
+        let sse_body = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n";
+        let (base_url, _handle) = spawn_single_response_server(sse_body);
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        let mut stream = session
+            .stream_response(request)
+            .await
+            .expect("stream response should succeed");
+        while let Some(event) = stream.recv().await {
+            event.expect("stream event should decode");
+        }
+
+        assert_eq!(session.latest_response_id().as_deref(), Some("resp_1"));
+    }
+
+    #[tokio::test]
+    async fn hybrid_state_falls_back_to_replay_when_previous_response_id_is_rejected() {
+        let (base_url, handle) = spawn_hybrid_fallback_server();
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+        session.state.set_latest_response_id("resp_stale");
+
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        let mut stream = session
+            .stream_response(request)
+            .await
+            .expect("hybrid fallback should retry without provider state");
+        while let Some(event) = stream.recv().await {
+            event.expect("stream event should decode");
+        }
+
+        let (first, second) = handle.join().expect("server should capture requests");
+        let first_payload: serde_json::Value =
+            serde_json::from_str(request_body(&first)).expect("first body should be json");
+        let second_payload: serde_json::Value =
+            serde_json::from_str(request_body(&second)).expect("second body should be json");
+        assert_eq!(first_payload["previous_response_id"], "resp_stale");
+        assert!(second_payload.get("previous_response_id").is_none());
+        assert_eq!(session.latest_response_id().as_deref(), Some("resp_fresh"));
     }
 
     #[tokio::test]
