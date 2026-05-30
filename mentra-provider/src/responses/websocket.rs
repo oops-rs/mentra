@@ -8,6 +8,7 @@ use http::HeaderMap;
 use http::HeaderValue;
 use serde::Deserialize;
 use serde_json::Value;
+use serde_json::json;
 use serde_json::map::Map as JsonMap;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -291,6 +292,13 @@ pub fn merge_request_headers(
     headers
 }
 
+pub(crate) fn response_create_frame(response: Value) -> Value {
+    json!({
+        "type": "response.create",
+        "response": response,
+    })
+}
+
 async fn run_websocket_response_stream(
     ws_stream: &mut WsStream,
     tx_event: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
@@ -513,6 +521,18 @@ mod tests {
             merged.get("x-default-only"),
             Some(&HeaderValue::from_static("default-only"))
         );
+    }
+
+    #[test]
+    fn response_create_frame_wraps_responses_request_payload() {
+        let frame = response_create_frame(json!({
+            "model": "gpt-5",
+            "input": []
+        }));
+
+        assert_eq!(frame["type"], "response.create");
+        assert_eq!(frame["response"]["model"], "gpt-5");
+        assert_eq!(frame["response"]["input"], json!([]));
     }
 
     #[test]

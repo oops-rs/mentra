@@ -666,8 +666,8 @@ mod tests {
         ImageGenerationResult, Message, ProviderError, ProviderRequestOptions, ReasoningEffort,
         ReasoningOptions, ReasoningSummary, Request, ResponsesRequestCompression,
         ResponsesRequestOptions, ResponsesStateMode, ResponsesTextControls, ResponsesTextFormat,
-        ResponsesVerbosity, Role, ToolChoice, ToolLoadingPolicy, ToolResultContent, ToolSearchMode,
-        ToolSpec, WebSearchAction,
+        ResponsesTransport, ResponsesVerbosity, Role, ToolChoice, ToolLoadingPolicy,
+        ToolResultContent, ToolSearchMode, ToolSpec, WebSearchAction,
     };
 
     use super::{ResponsesModel, ResponsesModelsPage, ResponsesRequest};
@@ -1044,6 +1044,7 @@ mod tests {
                     parallel_tool_calls: Some(true),
                     previous_response_id: None,
                     state_mode: ResponsesStateMode::Hybrid,
+                    transport: ResponsesTransport::HttpSse,
                     store: Some(false),
                     stream: Some(true),
                     include: vec!["reasoning.encrypted_content".to_string()],

@@ -44,6 +44,7 @@ pub use mentra_provider::Request;
 pub use mentra_provider::Response;
 pub use mentra_provider::ResponsesRequestOptions;
 pub use mentra_provider::ResponsesStateMode;
+pub use mentra_provider::ResponsesTransport;
 pub use mentra_provider::RetryPolicy;
 pub use mentra_provider::Role;
 pub use mentra_provider::TokenUsage;
@@ -77,6 +78,7 @@ pub mod model {
     pub use mentra_provider::Request;
     pub use mentra_provider::Response;
     pub use mentra_provider::ResponsesStateMode;
+    pub use mentra_provider::ResponsesTransport;
     pub use mentra_provider::Role;
     pub use mentra_provider::TokenUsage;
     pub use mentra_provider::ToolChoice;

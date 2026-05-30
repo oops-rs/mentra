@@ -25,6 +25,7 @@ use crate::ProviderEventStream;
 use crate::ProviderSession;
 use crate::Request;
 use crate::Response;
+use crate::ResponsesTransport;
 use crate::SessionRequestOptions;
 use crate::request::ResponsesRequestCompression;
 
@@ -34,6 +35,7 @@ use super::sse::spawn_event_stream;
 use super::websocket::ResponsesWebsocketConnection;
 use super::websocket::ResponsesWebsocketTelemetry;
 use super::websocket::merge_request_headers;
+use super::websocket::response_create_frame;
 
 /// Session-scoped Responses transport state.
 ///
@@ -160,6 +162,10 @@ where
             .map_err(|error| ProviderError::InvalidRequest(error.to_string()))
     }
 
+    fn responses_endpoint_path(&self) -> &'static str {
+        responses_endpoint_path_for_base(self.definition.base_url.as_deref())
+    }
+
     pub fn disable_websockets(&self) {
         self.state.disable_websockets.store(true, Ordering::Relaxed);
     }
@@ -254,7 +260,7 @@ where
         let headers = merge_request_headers(&provider_headers, extra_headers, default_headers);
         let url = self
             .definition
-            .websocket_url_with_auth_for_path("responses", &credentials)?;
+            .websocket_url_with_auth_for_path(self.responses_endpoint_path(), &credentials)?;
         let connection = ResponsesWebsocketConnection::connect(
             url,
             headers,
@@ -344,6 +350,7 @@ where
             .unwrap_or(self.definition.descriptor.id.as_str());
         let session = request.provider_request_options.session.clone();
         let state_mode = request.provider_request_options.responses.state_mode;
+        let transport = request.provider_request_options.responses.transport;
         if request
             .provider_request_options
             .responses
@@ -357,10 +364,31 @@ where
                 .previous_response_id = self.state.latest_response_id();
         }
         let compression = request.provider_request_options.responses.compression;
-        let mut request = ResponsesRequest::try_from_request(request, provider_name)?;
+        let request = ResponsesRequest::try_from_request(request, provider_name)?;
         let credentials = self.credential_source.credentials().await?;
+
+        match transport {
+            ResponsesTransport::HttpSse => {
+                self.stream_http_response(request, compression, &credentials, &session, state_mode)
+                    .await
+            }
+            ResponsesTransport::WebSocket => {
+                self.stream_websocket_response(request, &credentials, &session)
+                    .await
+            }
+        }
+    }
+
+    async fn stream_http_response(
+        &self,
+        mut request: ResponsesRequest,
+        compression: ResponsesRequestCompression,
+        credentials: &ProviderCredentials,
+        session: &SessionRequestOptions,
+        state_mode: crate::ResponsesStateMode,
+    ) -> Result<ProviderEventStream, ProviderError> {
         let response = self
-            .send_http_responses_request(&request, compression, &credentials, &session)
+            .send_http_responses_request(&request, compression, credentials, session)
             .await?;
 
         if !response.status().is_success() {
@@ -375,7 +403,7 @@ where
                 self.state.clear_latest_response_id();
                 request.clear_previous_response_id();
                 let response = self
-                    .send_http_responses_request(&request, compression, &credentials, &session)
+                    .send_http_responses_request(&request, compression, credentials, session)
                     .await?;
                 if !response.status().is_success() {
                     return Err(ProviderError::Http {
@@ -399,6 +427,45 @@ where
         Ok(self.track_response_state(spawn_event_stream(response)))
     }
 
+    async fn stream_websocket_response(
+        &self,
+        request: ResponsesRequest,
+        credentials: &ProviderCredentials,
+        session: &SessionRequestOptions,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        if !self.websockets_enabled() {
+            return Err(ProviderError::UnsupportedCapability(
+                "responses_websocket".to_string(),
+            ));
+        }
+
+        if self.websocket_connection_is_closed().await {
+            let headers = self.build_websocket_headers_for_session(credentials, Some(session))?;
+            let url = self
+                .definition
+                .websocket_url_with_auth_for_path(self.responses_endpoint_path(), credentials)?;
+            let connection = ResponsesWebsocketConnection::connect(
+                url,
+                headers,
+                Some(Arc::clone(&self.state.turn_state)),
+                self.stream_idle_timeout(),
+                None,
+            )
+            .await?;
+            self.state
+                .websocket_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .store_connection(connection);
+        }
+
+        let response = serde_json::to_value(request).map_err(ProviderError::Serialize)?;
+        let stream = self
+            .stream_websocket_request(response_create_frame(response))
+            .await?;
+        Ok(self.track_response_state(stream))
+    }
+
     pub async fn send_response<'a>(&self, request: Request<'a>) -> Result<Response, ProviderError> {
         crate::collect_response_from_stream(self.stream_response(request).await?).await
     }
@@ -414,7 +481,7 @@ where
             .client
             .post(
                 self.definition
-                    .request_url_with_auth_for_path("v1/responses", credentials)?,
+                    .request_url_with_auth_for_path(self.responses_endpoint_path(), credentials)?,
             )
             .headers(self.build_http_headers_for_session(credentials, Some(session))?)
             .header(reqwest::header::ACCEPT, "text/event-stream");
@@ -497,6 +564,20 @@ where
             headers.insert("x-openai-subagent", value);
         }
         Ok(headers)
+    }
+}
+
+fn responses_endpoint_path_for_base(base_url: Option<&str>) -> &'static str {
+    let Some(base_url) = base_url else {
+        return "v1/responses";
+    };
+    let Ok(url) = Url::parse(base_url) else {
+        return "v1/responses";
+    };
+
+    match url.path().trim_end_matches('/') {
+        "/v1" | "/backend-api/codex" => "responses",
+        _ => "v1/responses",
     }
 }
 
@@ -912,6 +993,122 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         }
 
         assert_eq!(session.latest_response_id().as_deref(), Some("resp_1"));
+    }
+
+    #[test]
+    fn responses_endpoint_path_supports_openai_and_xipe_base_urls() {
+        assert_eq!(
+            responses_endpoint_path_for_base(Some("https://api.openai.com/")),
+            "v1/responses"
+        );
+        assert_eq!(
+            responses_endpoint_path_for_base(Some("https://api.openai.com/v1")),
+            "responses"
+        );
+        assert_eq!(
+            responses_endpoint_path_for_base(Some("https://chatgpt.com/backend-api/codex")),
+            "responses"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_transport_sends_response_create_frame() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind websocket test server");
+        let addr = listener.local_addr().expect("read websocket server addr");
+        let (tx_frame, rx_frame) = tokio::sync::oneshot::channel::<String>();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket");
+            let mut ws = accept_async(stream).await.expect("upgrade websocket");
+            let frame = ws
+                .next()
+                .await
+                .expect("client should send a frame")
+                .expect("websocket frame should be valid")
+                .into_text()
+                .expect("request frame should be text")
+                .to_string();
+            tx_frame.send(frame).expect("send captured frame");
+
+            ws.send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_ws",
+                        "model": "gpt-5",
+                        "status": "in_progress"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send response.created");
+            ws.send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws",
+                        "model": "gpt-5",
+                        "status": "completed"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send response.completed");
+        });
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(format!("http://{addr}/v1"));
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                responses: crate::ResponsesRequestOptions {
+                    transport: crate::ResponsesTransport::WebSocket,
+                    ..Default::default()
+                },
+                ..ProviderRequestOptions::default()
+            },
+        };
+
+        let mut stream = session
+            .stream_response(request)
+            .await
+            .expect("websocket transport should stream");
+        while let Some(event) = stream.recv().await {
+            event.expect("websocket event should parse");
+        }
+
+        let frame: serde_json::Value =
+            serde_json::from_str(&rx_frame.await.expect("server should capture frame"))
+                .expect("frame should be json");
+        assert_eq!(frame["type"], "response.create");
+        assert_eq!(frame["response"]["model"], "gpt-5");
+        assert_eq!(frame["response"]["input"][0]["role"], "user");
+        assert_eq!(session.latest_response_id().as_deref(), Some("resp_ws"));
     }
 
     #[tokio::test]

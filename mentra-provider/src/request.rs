@@ -83,6 +83,17 @@ impl ResponsesStateMode {
     }
 }
 
+/// Streaming transport used by Responses-family providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesTransport {
+    /// Standard HTTP request with Server-Sent Events response streaming.
+    #[default]
+    HttpSse,
+    /// Long-lived WebSocket connection driven by `response.create` frames.
+    WebSocket,
+}
+
 /// Responses-compatible format discriminator for structured text output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +132,8 @@ pub struct ResponsesRequestOptions {
     #[serde(default)]
     pub state_mode: ResponsesStateMode,
     #[serde(default)]
+    pub transport: ResponsesTransport,
+    #[serde(default)]
     pub store: Option<bool>,
     #[serde(default)]
     pub stream: Option<bool>,
@@ -142,6 +155,7 @@ impl Default for ResponsesRequestOptions {
             parallel_tool_calls: None,
             previous_response_id: None,
             state_mode: ResponsesStateMode::Hybrid,
+            transport: ResponsesTransport::HttpSse,
             store: None,
             stream: Some(true),
             include: Vec::new(),

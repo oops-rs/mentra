@@ -68,6 +68,7 @@ pub use request::ResponsesStateMode;
 pub use request::ResponsesTextControls;
 pub use request::ResponsesTextFormat;
 pub use request::ResponsesTextFormatType;
+pub use request::ResponsesTransport;
 pub use request::ResponsesVerbosity;
 pub use request::SessionRequestOptions;
 pub use request::ToolSearchMode;

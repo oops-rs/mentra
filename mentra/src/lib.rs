@@ -39,7 +39,7 @@ pub use mentra_provider::{
     ProviderCapabilities, ProviderCredentials, ProviderDefinition, ProviderDescriptor,
     ProviderError, ProviderEvent, ProviderEventStream, ProviderId, ProviderRequestOptions,
     ReasoningEffort, ReasoningOptions, Request, ResponsesRequestOptions, ResponsesStateMode,
-    RetryPolicy, Role, TokenUsage, ToolChoice, ToolSearchMode, WireApi,
+    ResponsesTransport, RetryPolicy, Role, TokenUsage, ToolChoice, ToolSearchMode, WireApi,
     collect_response_from_stream, provider_event_stream_from_response,
 };
 
