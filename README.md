@@ -26,6 +26,7 @@ An agent runtime for building tool-using LLM applications with Rust. It is:
 [actions-url]: https://github.com/WendellXY/mentra/actions/workflows/rust-ci.yml
 
 [Crate README](./mentra/README.md) |
+[Responses Coding Agent Guide](./docs/responses-coding-agent.md) |
 [API Docs](https://docs.rs/mentra) |
 [Examples](./examples) |
 [Issues](https://github.com/WendellXY/mentra/issues)

@@ -166,6 +166,10 @@ let _ = model;
 
 `Runtime::builder()` registers Mentra's builtin tools, including `shell`, `background_run`, `check_background`, `files`, and the runtime/task/team intrinsics. Shell and background execution remain disabled by default, so coding-agent setups must opt in with a runtime policy. If you want semantic review before tools execute, install a `ToolAuthorizer`.
 
+For Responses API transport, xipe-compatible endpoints, and provider-side state
+options, see the workspace
+[`Responses Coding Agent Guide`](../docs/responses-coding-agent.md).
+
 ```rust,no_run
 use async_trait::async_trait;
 use mentra::{BuiltinProvider, Runtime, RuntimePolicy};
