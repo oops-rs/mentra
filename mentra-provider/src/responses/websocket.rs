@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures_util::SinkExt;
@@ -28,6 +27,7 @@ use crate::ProviderEvent;
 use crate::ProviderEventStream;
 use crate::ResponseHeaders;
 
+use super::SharedTurnState;
 use super::sse::StreamState;
 use super::sse::parse_json_event;
 
@@ -175,7 +175,7 @@ impl ResponsesWebsocketConnection {
     pub async fn connect(
         url: Url,
         headers: HeaderMap,
-        turn_state: Option<Arc<OnceLock<String>>>,
+        turn_state: Option<SharedTurnState>,
         idle_timeout: Duration,
         telemetry: Option<Arc<dyn ResponsesWebsocketTelemetry>>,
     ) -> Result<Self, ProviderError> {
@@ -195,7 +195,10 @@ impl ResponsesWebsocketConnection {
                 .get(X_CODEX_TURN_STATE_HEADER)
                 .and_then(|value| value.to_str().ok())
         {
-            let _ = turn_state.set(header_value.to_string());
+            *turn_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(header_value.to_string());
         }
 
         let response_headers = ResponseHeaders {

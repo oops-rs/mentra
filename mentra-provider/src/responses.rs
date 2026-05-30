@@ -29,6 +29,8 @@ use crate::embedding::EmbeddingResponse;
 use self::session::ResponsesSession;
 use self::session::ResponsesSessionState;
 
+pub(crate) type SharedTurnState = Arc<std::sync::Mutex<Option<String>>>;
+
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
 const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/";
 

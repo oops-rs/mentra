@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -29,6 +28,7 @@ use crate::ResponsesTransport;
 use crate::SessionRequestOptions;
 use crate::request::ResponsesRequestCompression;
 
+use super::SharedTurnState;
 use super::model::ResponsesModelsPage;
 use super::model::ResponsesRequest;
 use super::sse::spawn_event_stream;
@@ -87,7 +87,7 @@ impl WebsocketSession {
 pub(crate) struct ResponsesSessionState {
     disable_websockets: AtomicBool,
     websocket_session: StdMutex<WebsocketSession>,
-    turn_state: Arc<OnceLock<String>>,
+    turn_state: SharedTurnState,
     latest_response_id: StdMutex<Option<String>>,
 }
 
@@ -96,13 +96,27 @@ impl Default for ResponsesSessionState {
         Self {
             disable_websockets: AtomicBool::new(false),
             websocket_session: StdMutex::new(WebsocketSession::default()),
-            turn_state: Arc::new(OnceLock::new()),
+            turn_state: Arc::new(StdMutex::new(None)),
             latest_response_id: StdMutex::new(None),
         }
     }
 }
 
 impl ResponsesSessionState {
+    fn turn_state(&self) -> Option<String> {
+        self.turn_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_turn_state(&self, turn_state: impl Into<String>) {
+        *self
+            .turn_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(turn_state.into());
+    }
+
     fn latest_response_id(&self) -> Option<String> {
         self.latest_response_id
             .lock()
@@ -197,7 +211,7 @@ where
         turn_metadata_header: Option<&str>,
     ) -> Result<HeaderMap, ProviderError> {
         let session = SessionRequestOptions {
-            sticky_turn_state: self.state.turn_state.get().cloned(),
+            sticky_turn_state: self.state.turn_state(),
             turn_metadata: turn_metadata_header.map(str::to_string),
             subagent: None,
             prefer_connection_reuse: Some(self.connection_reused()),
@@ -212,19 +226,21 @@ where
         credentials: &ProviderCredentials,
         session: Option<&SessionRequestOptions>,
     ) -> Result<HeaderMap, ProviderError> {
+        let fallback_turn_state = self.state.turn_state();
         self.definition.build_headers_for_session(
             credentials,
             session,
-            self.state.turn_state.get().map(String::as_str),
+            fallback_turn_state.as_deref(),
         )
     }
 
     pub fn set_turn_state(&self, turn_state: impl Into<String>) -> bool {
-        self.state.turn_state.set(turn_state.into()).is_ok()
+        self.state.set_turn_state(turn_state);
+        true
     }
 
     pub fn turn_state(&self) -> Option<String> {
-        self.state.turn_state.get().cloned()
+        self.state.turn_state()
     }
 
     pub fn latest_response_id(&self) -> Option<String> {
@@ -252,7 +268,7 @@ where
         &self,
         extra_headers: HeaderMap,
         default_headers: HeaderMap,
-        turn_state: Option<Arc<OnceLock<String>>>,
+        turn_state: Option<SharedTurnState>,
         telemetry: Option<Arc<dyn ResponsesWebsocketTelemetry>>,
     ) -> Result<(), ProviderError> {
         let credentials = self.credential_source.credentials().await?;
@@ -421,7 +437,7 @@ where
             .get("x-codex-turn-state")
             .and_then(|value| value.to_str().ok())
         {
-            let _ = self.state.turn_state.set(turn_state.to_string());
+            self.state.set_turn_state(turn_state);
         }
 
         Ok(self.track_response_state(spawn_event_stream(response)))
@@ -530,7 +546,7 @@ where
         rx
     }
 
-    pub fn take_turn_state(&self) -> Arc<OnceLock<String>> {
+    pub fn take_turn_state(&self) -> SharedTurnState {
         Arc::clone(&self.state.turn_state)
     }
 
@@ -798,6 +814,61 @@ mod tests {
         (format!("http://{addr}/"), handle)
     }
 
+    fn spawn_two_turn_state_server() -> (String, thread::JoinHandle<(String, String)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("read listener addr");
+        let handle = thread::spawn(move || {
+            let (mut first_stream, _) = listener.accept().expect("accept first request");
+            let first = read_http_request(&mut first_stream);
+            let first_body = concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n"
+            );
+            let first_response = format!(
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "connection: close\r\n",
+                    "content-type: text/event-stream\r\n",
+                    "x-codex-turn-state: state-1\r\n",
+                    "content-length: {}\r\n\r\n",
+                    "{}"
+                ),
+                first_body.len(),
+                first_body
+            );
+            first_stream
+                .write_all(first_response.as_bytes())
+                .expect("write first response");
+            drop(first_stream);
+
+            let (mut second_stream, _) = listener.accept().expect("accept second request");
+            let second = read_http_request(&mut second_stream);
+            let second_body = concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n"
+            );
+            let second_response = format!(
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "connection: close\r\n",
+                    "content-type: text/event-stream\r\n",
+                    "x-codex-turn-state: state-2\r\n",
+                    "content-length: {}\r\n\r\n",
+                    "{}"
+                ),
+                second_body.len(),
+                second_body
+            );
+            second_stream
+                .write_all(second_response.as_bytes())
+                .expect("write second response");
+
+            (first, second)
+        });
+
+        (format!("http://{addr}/"), handle)
+    }
+
     fn spawn_compaction_response_server(
         response_body: &'static str,
     ) -> (String, thread::JoinHandle<(String, String)>) {
@@ -957,6 +1028,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_turn_state_updates_across_multiple_turns() {
+        let (base_url, handle) = spawn_two_turn_state_server();
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+
+        for message in ["first", "second"] {
+            let request = Request {
+                model: Cow::Borrowed("gpt-5"),
+                system: None,
+                messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                    message,
+                ))]),
+                tools: Cow::Owned(Vec::new()),
+                tool_choice: None,
+                temperature: None,
+                max_output_tokens: None,
+                metadata: Cow::Owned(BTreeMap::new()),
+                provider_request_options: ProviderRequestOptions::default(),
+            };
+
+            let mut stream = session
+                .stream_response(request)
+                .await
+                .expect("stream response should succeed");
+            while let Some(event) = stream.recv().await {
+                event.expect("stream event should decode");
+            }
+        }
+
+        let (first, second) = handle.join().expect("server should capture requests");
+        assert!(!first.contains("x-codex-turn-state:"));
+        assert!(second.contains("x-codex-turn-state: state-1\r\n"));
+        assert_eq!(session.turn_state().as_deref(), Some("state-2"));
+        assert_eq!(session.latest_response_id().as_deref(), Some("resp_2"));
+    }
+
+    #[tokio::test]
     async fn stream_response_tracks_latest_response_id_from_http_events() {
         let sse_body = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n\
 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n";
@@ -1014,8 +1128,12 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
     #[tokio::test]
     async fn websocket_transport_sends_response_create_frame() {
         use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::accept_async;
+        use http::HeaderValue;
+        use tokio_tungstenite::accept_hdr_async;
         use tokio_tungstenite::tungstenite::Message as WsMessage;
+        use tokio_tungstenite::tungstenite::handshake::server::{
+            Request as WsHandshakeRequest, Response as WsHandshakeResponse,
+        };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1025,7 +1143,17 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept websocket");
-            let mut ws = accept_async(stream).await.expect("upgrade websocket");
+            let mut ws = accept_hdr_async(
+                stream,
+                |_request: &WsHandshakeRequest, mut response: WsHandshakeResponse| {
+                    response
+                        .headers_mut()
+                        .insert("x-codex-turn-state", HeaderValue::from_static("ws-state"));
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("upgrade websocket");
             let frame = ws
                 .next()
                 .await
@@ -1108,6 +1236,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         assert_eq!(frame["type"], "response.create");
         assert_eq!(frame["response"]["model"], "gpt-5");
         assert_eq!(frame["response"]["input"][0]["role"], "user");
+        assert_eq!(session.turn_state().as_deref(), Some("ws-state"));
         assert_eq!(session.latest_response_id().as_deref(), Some("resp_ws"));
     }
 
