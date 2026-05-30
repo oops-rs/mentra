@@ -1126,6 +1126,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
     }
 
     #[tokio::test]
+    #[allow(clippy::result_large_err)]
     async fn websocket_transport_sends_response_create_frame() {
         use futures_util::{SinkExt, StreamExt};
         use http::HeaderValue;

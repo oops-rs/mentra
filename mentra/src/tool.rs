@@ -85,6 +85,19 @@ impl ToolRegistry {
     }
 }
 
+impl ToolRegistry {
+    pub(crate) fn register_skill_tool(&mut self) {
+        self.register_tool(LoadSkillTool);
+    }
+
+    pub(crate) fn register_builtin_tools(&mut self) {
+        self.register_tool(ShellTool);
+        self.register_tool(BackgroundRunTool);
+        self.register_tool(CheckBackgroundTool);
+        self.register_tool(FilesTool);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{borrow::Cow, collections::BTreeMap};
@@ -127,18 +140,5 @@ mod tests {
             assert_eq!(tool["type"], "function");
             assert_eq!(tool["strict"], false);
         }
-    }
-}
-
-impl ToolRegistry {
-    pub(crate) fn register_skill_tool(&mut self) {
-        self.register_tool(LoadSkillTool);
-    }
-
-    pub(crate) fn register_builtin_tools(&mut self) {
-        self.register_tool(ShellTool);
-        self.register_tool(BackgroundRunTool);
-        self.register_tool(CheckBackgroundTool);
-        self.register_tool(FilesTool);
     }
 }
