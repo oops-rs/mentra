@@ -22,14 +22,14 @@ An agent runtime for building tool-using LLM applications with Rust. It is:
 [docs-url]: https://docs.rs/mentra
 [mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
 [mit-url]: ./LICENSE
-[actions-badge]: https://github.com/WendellXY/mentra/actions/workflows/rust-ci.yml/badge.svg?branch=main
-[actions-url]: https://github.com/WendellXY/mentra/actions/workflows/rust-ci.yml
+[actions-badge]: https://github.com/oops-rs/mentra/actions/workflows/rust-ci.yml/badge.svg?branch=main
+[actions-url]: https://github.com/oops-rs/mentra/actions/workflows/rust-ci.yml
 
 [Crate README](./mentra/README.md) |
 [Responses Coding Agent Guide](./docs/responses-coding-agent.md) |
 [API Docs](https://docs.rs/mentra) |
 [Examples](./examples) |
-[Issues](https://github.com/WendellXY/mentra/issues)
+[Issues](https://github.com/oops-rs/mentra/issues)
 
 ## Overview
 
@@ -64,7 +64,7 @@ Add Mentra and Tokio to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mentra = "0.5.0"
+mentra = "0.7.0"
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -149,7 +149,7 @@ For release notes and migration guidance for the current tooling architecture,
 see [CHANGELOG.md](./CHANGELOG.md).
 
 If the answer is not there, please open an issue on the
-[issue tracker](https://github.com/WendellXY/mentra/issues).
+[issue tracker](https://github.com/oops-rs/mentra/issues).
 
 ## Contributing
 

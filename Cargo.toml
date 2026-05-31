@@ -5,8 +5,8 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/WendellXY/mentra"
-homepage = "https://github.com/WendellXY/mentra"
+repository = "https://github.com/oops-rs/mentra"
+homepage = "https://github.com/oops-rs/mentra"
 
 [workspace.dependencies]
 glob-match = "0.2"
