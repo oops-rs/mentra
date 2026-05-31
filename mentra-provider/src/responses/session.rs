@@ -1235,8 +1235,10 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             serde_json::from_str(&rx_frame.await.expect("server should capture frame"))
                 .expect("frame should be json");
         assert_eq!(frame["type"], "response.create");
-        assert_eq!(frame["response"]["model"], "gpt-5");
-        assert_eq!(frame["response"]["input"][0]["role"], "user");
+        assert_eq!(frame["model"], "gpt-5");
+        assert_eq!(frame["input"][0]["role"], "user");
+        assert_eq!(frame["instructions"], "");
+        assert!(frame.get("response").is_none());
         assert_eq!(session.turn_state().as_deref(), Some("ws-state"));
         assert_eq!(session.latest_response_id().as_deref(), Some("resp_ws"));
     }

@@ -295,11 +295,22 @@ pub fn merge_request_headers(
     headers
 }
 
-pub(crate) fn response_create_frame(response: Value) -> Value {
-    json!({
-        "type": "response.create",
-        "response": response,
-    })
+pub(crate) fn response_create_frame(mut response: Value) -> Value {
+    let Value::Object(response_object) = &mut response else {
+        return json!({
+            "type": "response.create",
+            "response": response,
+        });
+    };
+
+    response_object.insert(
+        "type".to_string(),
+        Value::String("response.create".to_string()),
+    );
+    response_object
+        .entry("instructions")
+        .or_insert_with(|| Value::String(String::new()));
+    response
 }
 
 async fn run_websocket_response_stream(
@@ -527,15 +538,17 @@ mod tests {
     }
 
     #[test]
-    fn response_create_frame_wraps_responses_request_payload() {
+    fn response_create_frame_adds_type_to_responses_request_payload() {
         let frame = response_create_frame(json!({
             "model": "gpt-5",
             "input": []
         }));
 
         assert_eq!(frame["type"], "response.create");
-        assert_eq!(frame["response"]["model"], "gpt-5");
-        assert_eq!(frame["response"]["input"], json!([]));
+        assert_eq!(frame["model"], "gpt-5");
+        assert_eq!(frame["input"], json!([]));
+        assert_eq!(frame["instructions"], "");
+        assert!(frame.get("response").is_none());
     }
 
     #[test]

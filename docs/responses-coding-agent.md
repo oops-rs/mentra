@@ -74,15 +74,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Switch `transport` to `ResponsesTransport::WebSocket` to use the first-class
-WebSocket path. Mentra wraps each Responses request as:
+WebSocket path. Mentra sends each Responses request as a `response.create` frame
+with the request fields at the top level:
 
 ```json
 {
   "type": "response.create",
-  "response": {
-    "model": "gpt-5.4-mini",
-    "input": []
-  }
+  "model": "gpt-5.4-mini",
+  "instructions": "",
+  "input": []
 }
 ```
 
@@ -144,4 +144,3 @@ URLs continue to target `/v1/responses`.
   `previous_response_id` HTTP failures retry without provider state.
 - Stateful is useful only when the endpoint requires provider-side chaining and
   you want failures to surface instead of replaying.
-
