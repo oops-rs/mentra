@@ -34,7 +34,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 base64 = "0.22.1"
 serde_yaml_ng = "0.10"
 directories = "6.0.0"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 thiserror = "2.0.18"
 strum = { version = "0.27", features = ["derive"] }
 libc = "0.2"
