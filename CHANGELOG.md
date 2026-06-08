@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.1
+
+### Compatibility
+
+- Update `rusqlite` from 0.32.1 to 0.39 so Mentra can share a single
+  `libsqlite3-sys` linkage family with downstream crates using newer sqlite
+  bindings.
+
+### Repository Hygiene
+
+- Ignore local `.grapha` graph artifacts.
+
 ## 0.7.0 / mentra-provider 0.3.0
 
 ### Highlights
