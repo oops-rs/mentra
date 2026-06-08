@@ -8,3 +8,4 @@ Cargo.lock
 nodus.lock
 nodus.toml
 
+.grapha
