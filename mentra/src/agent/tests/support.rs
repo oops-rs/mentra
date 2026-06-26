@@ -284,6 +284,44 @@ impl ToolExecutor for StaticTool {
     }
 }
 
+/// A tool that trips a graceful-stop token when executed, then succeeds — used to
+/// exercise [`RunOptions::stop`] firing at the round boundary *after* a real tool
+/// round, so the gathered transcript is committed rather than rolled back.
+pub(super) struct StopTrippingTool {
+    name: &'static str,
+    stop: crate::runtime::CancellationToken,
+}
+
+impl StopTrippingTool {
+    pub(super) fn new(name: &'static str, stop: crate::runtime::CancellationToken) -> Self {
+        Self { name, stop }
+    }
+}
+
+#[async_trait]
+impl ToolDefinition for StopTrippingTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder(self.name)
+            .description("test tool that requests a graceful stop")
+            .input_schema(json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } }
+            }))
+            .side_effect_level(crate::tool::ToolSideEffectLevel::None)
+            .durability(crate::tool::ToolDurability::ReplaySafe)
+            .loading_policy(crate::tool::ToolLoadingPolicy::Immediate)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for StopTrippingTool {
+    async fn execute_mut(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
+        self.stop.cancel();
+        Ok("stopped".to_string())
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ProbeTool {
     name: &'static str,

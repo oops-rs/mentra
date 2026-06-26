@@ -33,9 +33,10 @@ use crate::{
 };
 
 use super::support::{
-    ProbeTool, ScriptedProvider, StaticTool, StreamScript, background_failure_command,
-    background_success_command, command_input_json, command_input_with_working_directory_json,
-    controlled_stream, erroring_stream, model_info, ok_stream, shell_pwd_command,
+    ProbeTool, ScriptedProvider, StaticTool, StopTrippingTool, StreamScript,
+    background_failure_command, background_success_command, command_input_json,
+    command_input_with_working_directory_json, controlled_stream, erroring_stream, model_info,
+    ok_stream, shell_pwd_command,
 };
 
 #[tokio::test]
@@ -1533,6 +1534,127 @@ async fn run_options_cancelled_run_stops_before_provider_request() {
     assert!(matches!(error, RuntimeError::Cancelled));
     assert!(provider_handle.recorded_requests().await.is_empty());
     assert!(agent.history().is_empty());
+}
+
+#[tokio::test]
+async fn run_options_stop_after_tool_round_commits_transcript_and_halts() {
+    // A graceful stop tripped from inside a tool round ends the run at the next
+    // round boundary, COMMITTING the gathered transcript (unlike `cancellation`,
+    // which rolls it back) and making no further model request — so a follow-up
+    // turn on the same agent sees the gathered context.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            ok_stream(vec![
+                ProviderEvent::MessageStarted {
+                    id: "msg-1".to_string(),
+                    model: model.id.clone(),
+                    role: Role::Assistant,
+                },
+                ProviderEvent::ContentBlockStarted {
+                    index: 0,
+                    kind: ContentBlockStart::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "stop_tool".to_string(),
+                    },
+                },
+                ProviderEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::ToolUseInputJson(r#"{"value":"x"}"#.to_string()),
+                },
+                ProviderEvent::ContentBlockStopped { index: 0 },
+                ProviderEvent::MessageStopped,
+            ]),
+            // A second response that must NOT be consumed: the stop halts the run
+            // before this round's model request is issued.
+            ok_stream(vec![
+                ProviderEvent::MessageStarted {
+                    id: "msg-2".to_string(),
+                    model: model.id.clone(),
+                    role: Role::Assistant,
+                },
+                ProviderEvent::ContentBlockStarted {
+                    index: 0,
+                    kind: ContentBlockStart::Text,
+                },
+                ProviderEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::Text("must not run".to_string()),
+                },
+                ProviderEvent::ContentBlockStopped { index: 0 },
+                ProviderEvent::MessageStopped,
+            ]),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let stop = CancellationToken::default();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(StopTrippingTool::new("stop_tool", stop.clone()))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let result = agent
+        .run(
+            vec![ContentBlock::Text {
+                text: "go".to_string(),
+            }],
+            RunOptions {
+                stop: Some(stop),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // Stopped after the tool round before any final answer: an honest stop, not a
+    // failure — the gathered transcript is committed (user, the assistant tool
+    // call, the tool result), not rolled back the way cancellation would.
+    assert!(matches!(result, Err(RuntimeError::EmptyAssistantResponse)));
+    assert_eq!(
+        agent.history().len(),
+        3,
+        "the gathered round is preserved, not rolled back"
+    );
+    assert_eq!(
+        provider_handle.recorded_requests().await.len(),
+        1,
+        "the stop halted the run before the second model request"
+    );
+}
+
+#[tokio::test]
+async fn set_reasoning_updates_the_configured_reasoning_for_future_turns() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    // Default: no reasoning configured (the provider's default effort).
+    assert_eq!(agent.config().provider_request_options.reasoning, None);
+
+    // set_reasoning sets it for future turns (mirrors set_model), enabling the
+    // per-phase effort split (gather low, synthesis high) on a single agent.
+    let high = crate::provider::ReasoningOptions {
+        effort: Some(crate::provider::ReasoningEffort::High),
+        summary: None,
+    };
+    agent
+        .set_reasoning(Some(high.clone()))
+        .expect("set reasoning");
+    assert_eq!(
+        agent.config().provider_request_options.reasoning,
+        Some(high)
+    );
+
+    // None clears it back to the provider default.
+    agent.set_reasoning(None).expect("clear reasoning");
+    assert_eq!(agent.config().provider_request_options.reasoning, None);
 }
 
 #[tokio::test]

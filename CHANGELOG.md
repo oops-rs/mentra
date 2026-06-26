@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0
+
+### Highlights
+
+- Add `Agent::set_reasoning(...)` and `Session::set_reasoning(...)` to change the
+  reasoning options requested on future turns (mirrors `set_model`). Enables
+  per-phase reasoning effort on a single agent — for example a low effort while
+  gathering, then a higher effort for a final synthesis turn — without re-spawning
+  and losing the gathered context.
+- Add `RunOptions::stop`, a graceful-stop signal distinct from `cancellation`. When
+  tripped, the run ends successfully at the next round boundary, **committing** the
+  gathered transcript rather than failing and rolling it back the way
+  `cancellation` does. Lets a caller stop gathering once enough work is done while
+  preserving the context for a follow-up turn on the same agent.
+
+`mentra-provider 0.3.0` is unchanged.
+
 ## 0.7.1
 
 ### Compatibility

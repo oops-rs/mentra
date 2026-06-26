@@ -349,6 +349,25 @@ impl Agent {
         self.persist_agent_record()
     }
 
+    /// Updates the reasoning options requested on future turns, then persists the
+    /// agent record so resumed sessions continue with the same setting.
+    ///
+    /// Mirrors [`set_model`](Self::set_model): a stateful override threaded into
+    /// every subsequent model request (the runner reads
+    /// `config.provider_request_options.reasoning` live). It composes with
+    /// `set_model` for **per-phase tiering** — e.g. run the gather rounds at a low
+    /// reasoning effort, then raise the effort (and switch to a stronger model) for
+    /// a final synthesis turn on the same agent, without re-spawning and losing the
+    /// gathered context. `None` clears any configured reasoning, restoring the
+    /// provider's default effort.
+    pub fn set_reasoning(
+        &mut self,
+        reasoning: Option<crate::provider::ReasoningOptions>,
+    ) -> Result<(), RuntimeError> {
+        self.config.provider_request_options.reasoning = reasoning;
+        self.persist_agent_record()
+    }
+
     /// Returns the effective agent configuration.
     pub fn config(&self) -> &AgentConfig {
         &self.config

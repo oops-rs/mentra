@@ -47,6 +47,14 @@ impl<'a> TurnRunner<'a> {
 
         loop {
             self.options.check_limits()?;
+            // Graceful stop: end the run successfully at this round boundary (where
+            // the transcript is consistent), keeping the committed work, rather than
+            // failing and rolling back the way `cancellation` does. Lets a caller
+            // stop gathering once enough is done while preserving the context for a
+            // follow-up turn on the same agent.
+            if self.options.stop_requested() {
+                return Ok(());
+            }
             if let Some(limit) = self.agent.max_rounds()
                 && rounds >= limit
             {

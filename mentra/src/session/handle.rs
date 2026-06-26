@@ -244,6 +244,17 @@ impl Session {
         Ok(())
     }
 
+    /// Updates the reasoning options for the live session's agent and persists the
+    /// new setting (mirrors [`set_model`](Self::set_model)). Lets a caller run
+    /// per-phase tiering — e.g. a low effort while gathering, then a higher effort
+    /// for a final synthesis turn — on the same session.
+    pub fn set_reasoning(
+        &mut self,
+        reasoning: Option<crate::provider::ReasoningOptions>,
+    ) -> Result<(), RuntimeError> {
+        self.agent.set_reasoning(reasoning)
+    }
+
     /// Returns the underlying agent identifier.
     pub fn agent_id(&self) -> &str {
         self.agent.id()
