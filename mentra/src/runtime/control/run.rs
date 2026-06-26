@@ -28,6 +28,16 @@ impl CancellationToken {
 #[derive(Clone)]
 pub struct RunOptions {
     pub cancellation: Option<CancellationToken>,
+    /// A **graceful** stop signal, distinct from [`cancellation`](Self::cancellation).
+    ///
+    /// When this token is tripped (via [`CancellationToken::cancel`]) the run ends
+    /// **successfully** at the next round boundary — the committed transcript is
+    /// kept (the run resolves like the model self-terminating with no further tool
+    /// calls), rather than failing and rolling the run back the way `cancellation`
+    /// does. Use it to stop gathering once enough work is done while preserving the
+    /// gathered context for a follow-up turn on the same agent. `None` (the default)
+    /// never stops the run.
+    pub stop: Option<CancellationToken>,
     pub deadline: Option<SystemTime>,
     pub retry_budget: usize,
     pub tool_budget: Option<usize>,
@@ -38,6 +48,7 @@ impl Default for RunOptions {
     fn default() -> Self {
         Self {
             cancellation: None,
+            stop: None,
             deadline: None,
             retry_budget: DEFAULT_PROVIDER_RETRY_BUDGET,
             tool_budget: None,
@@ -64,6 +75,15 @@ impl RunOptions {
         }
 
         Ok(())
+    }
+
+    /// Whether a graceful stop has been requested via [`stop`](Self::stop). The
+    /// runner checks this at each round boundary, where the transcript is at a
+    /// consistent point, and ends the run successfully when it is set.
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
     }
 
     pub(crate) fn tool_budget(&self) -> usize {
