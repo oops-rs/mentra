@@ -404,6 +404,11 @@ async fn run_websocket_response_stream(
     Ok(())
 }
 
+/// Delay hint for connection-level websocket failures. Short enough that a
+/// tunnel blip or service restart is retried promptly, long enough to avoid
+/// hammering a target that is still coming back up.
+const WS_CONNECTION_RETRY_DELAY: Duration = Duration::from_millis(750);
+
 fn map_ws_error(error: WsError, url: &Url) -> ProviderError {
     match error {
         WsError::Http(response) => {
@@ -415,10 +420,21 @@ fn map_ws_error(error: WsError, url: &Url) -> ProviderError {
                 .unwrap_or_else(|| format!("websocket connection failed for {url}"));
             ProviderError::Http { status, body }
         }
-        WsError::ConnectionClosed | WsError::AlreadyClosed => {
-            ProviderError::MalformedStream("websocket closed".to_string())
-        }
-        WsError::Io(error) => ProviderError::InvalidResponse(error.to_string()),
+        // Connection lost mid-handshake: the peer went away before the upgrade
+        // completed. That is a transient liveness failure (restart, tunnel
+        // teardown), not a request the caller must fix — surface it as retryable.
+        WsError::ConnectionClosed | WsError::AlreadyClosed => ProviderError::Retryable {
+            message: format!("websocket connection closed while connecting to {url}"),
+            delay: Some(WS_CONNECTION_RETRY_DELAY),
+        },
+        // Transport-level failure establishing the connection (e.g. connection
+        // refused when an SSH tunnel is down, DNS blips). These clear on their
+        // own once the path is back, so the whole turn is worth retrying rather
+        // than falling straight through to a terminal failure.
+        WsError::Io(error) => ProviderError::Retryable {
+            message: format!("websocket connection failed for {url}: {error}"),
+            delay: Some(WS_CONNECTION_RETRY_DELAY),
+        },
         other => ProviderError::InvalidResponse(other.to_string()),
     }
 }
@@ -582,6 +598,31 @@ mod tests {
                 "100.0".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn ws_io_error_maps_to_retryable_with_delay() {
+        let url = Url::parse("wss://example.test/responses").expect("url parses");
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused");
+        let mapped = map_ws_error(WsError::Io(io), &url);
+        let ProviderError::Retryable { message, delay } = mapped else {
+            panic!("expected ProviderError::Retryable for a connection-level io error");
+        };
+        assert_eq!(delay, Some(WS_CONNECTION_RETRY_DELAY));
+        // The io error string is preserved so operators can see the real cause.
+        assert!(message.contains("Connection refused"), "message: {message}");
+    }
+
+    #[test]
+    fn ws_connection_closed_maps_to_retryable() {
+        let url = Url::parse("wss://example.test/responses").expect("url parses");
+        for error in [WsError::ConnectionClosed, WsError::AlreadyClosed] {
+            let mapped = map_ws_error(error, &url);
+            assert!(
+                matches!(mapped, ProviderError::Retryable { delay: Some(_), .. }),
+                "connection-closed handshake failure should be retryable",
+            );
+        }
     }
 
     #[test]
