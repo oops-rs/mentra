@@ -1,5 +1,13 @@
 # Changelog
 
+## mentra-provider 0.3.1
+
+- Map WebSocket connection failures (`WsError::Io`, `ConnectionClosed`,
+  `AlreadyClosed`) to `ProviderError::Retryable` with a 750ms suggested delay
+  instead of the terminal `InvalidResponse`/`MalformedStream`, so a consumer's
+  whole-turn retry can recover from a transport blip (a dropped SSH tunnel, a
+  proxy restart) rather than silently degrading.
+
 ## 0.8.0
 
 ### Highlights
