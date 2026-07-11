@@ -100,6 +100,12 @@ pub struct RuntimeToolDescriptor {
     pub execution_category: ToolExecutionCategory,
     pub approval_category: ToolApprovalCategory,
     pub execution_timeout: Option<Duration>,
+    /// Marks this tool as a terminal action (see
+    /// [`RuntimeToolDescriptorBuilder::terminal`]). A terminal-marked tool is
+    /// never scheduled in a parallel batch: the scheduler coerces it to an
+    /// exclusive execution category regardless of `execution_category`.
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 impl RuntimeToolDescriptor {
@@ -112,6 +118,7 @@ impl RuntimeToolDescriptor {
             execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
             approval_category: ToolApprovalCategory::Default,
             execution_timeout: None,
+            terminal: false,
         }
     }
 
@@ -137,6 +144,7 @@ pub struct RuntimeToolDescriptorBuilder {
     execution_category: ToolExecutionCategory,
     approval_category: ToolApprovalCategory,
     execution_timeout: Option<Duration>,
+    terminal: bool,
 }
 
 impl RuntimeToolDescriptorBuilder {
@@ -220,6 +228,15 @@ impl RuntimeToolDescriptorBuilder {
         self
     }
 
+    /// Marks this tool as a terminal action: a call is never scheduled in a
+    /// parallel batch regardless of `execution_category` — the scheduler
+    /// coerces it to an exclusive category, so it can never race parallel
+    /// retrieval calls scheduled in the same round.
+    pub fn terminal(mut self) -> Self {
+        self.terminal = true;
+        self
+    }
+
     pub fn build(self) -> RuntimeToolDescriptor {
         RuntimeToolDescriptor {
             provider: self.provider.build(),
@@ -229,6 +246,39 @@ impl RuntimeToolDescriptorBuilder {
             execution_category: self.execution_category,
             approval_category: self.approval_category,
             execution_timeout: self.execution_timeout,
+            terminal: self.terminal,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_defaults_to_non_terminal() {
+        let descriptor = RuntimeToolDescriptor::builder("plain_tool").build();
+        assert!(!descriptor.terminal);
+    }
+
+    #[test]
+    fn terminal_builder_flag_marks_the_descriptor_terminal() {
+        let descriptor = RuntimeToolDescriptor::builder("finish_tool")
+            .terminal()
+            .build();
+        assert!(descriptor.terminal);
+    }
+
+    #[test]
+    fn terminal_flag_is_independent_of_declared_execution_category() {
+        let descriptor = RuntimeToolDescriptor::builder("finish_tool")
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .terminal()
+            .build();
+        assert!(descriptor.terminal);
+        assert_eq!(
+            descriptor.execution_category,
+            ToolExecutionCategory::ReadOnlyParallel
+        );
     }
 }

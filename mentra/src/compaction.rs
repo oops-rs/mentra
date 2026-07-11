@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::{
     borrow::Cow,
     collections::HashSet,
@@ -174,19 +177,70 @@ pub enum CompactionExecutionMode {
     Remote,
 }
 
+/// The result of one compaction: a replacement [`AgentTranscript`] plus
+/// counts describing how it was built from the original.
+///
+/// **Metadata-preservation guarantee (mentra ADR-0001 §6).** Every item that
+/// survives into `transcript` — the untouched continuation tail, salvaged
+/// recent user turns, and salvaged recent delegation results — is copied
+/// **verbatim** from the original transcript, so any opaque
+/// [`TranscriptItem::details`] a host attached survives bit-for-bit. This
+/// holds by construction: mentra never rebuilds a preserved item from its
+/// projected [`crate::Message`] (which would drop `details`, a field that
+/// exists only on `TranscriptItem`); it clones the original item.
+///
+/// This guarantee is scoped to *preserved* items only. An item inside the
+/// summarized prefix that is **not** salvaged is replaced by the
+/// [`CompactionSummary`] along with the rest of its content — its `details`
+/// go with it. That is honest, documented behavior, not a violation: the
+/// contract never promises to resurrect a discarded item's metadata, only to
+/// never silently drop it from one that was kept. The full pre-compaction
+/// transcript — discarded items included — is written to `transcript_path`
+/// before summarization runs, so a host that needs a discarded item's
+/// `details` after the fact can still recover them from that snapshot.
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {
     pub mode: CompactionExecutionMode,
+    /// Path to the `.jsonl` snapshot of the **entire pre-compaction**
+    /// transcript, one [`TranscriptItem`] per line, written before
+    /// summarization runs. Every item's `details` round-trips through this
+    /// file, including items the compacted `transcript` goes on to discard —
+    /// this is the recovery artifact for the summarized prefix.
     pub transcript_path: PathBuf,
     pub transcript: AgentTranscript,
     pub summary: CompactionSummary,
+    /// Count of original items in the summarized prefix
+    /// (`required_tail_start_for_continuation`'s `preserve_from` split).
+    /// This counts every item in that prefix, **including** ones also
+    /// salvaged into `transcript` by `preserved_user_turns` /
+    /// `preserved_delegation_results` — from this count's point of view they
+    /// were replaced by the summary, even though their content (and
+    /// `details`) survives verbatim elsewhere in the replacement transcript.
+    /// It does not mean "gone".
     pub replaced_items: usize,
+    /// Count of items kept strictly because they are the untouched
+    /// continuation tail (outside the summarized prefix), independent of
+    /// `preserved_user_turns` / `preserved_delegation_results` below, which
+    /// count salvaged items pulled *out of* the summarized prefix instead.
+    /// The three counts are disjoint by construction.
     pub preserved_items: usize,
+    /// Count of recent user turns salvaged out of the summarized prefix and
+    /// copied verbatim (details included) into the replacement transcript.
     pub preserved_user_turns: usize,
+    /// Count of recent delegation results salvaged out of the summarized
+    /// prefix and copied verbatim (details included) into the replacement
+    /// transcript.
     pub preserved_delegation_results: usize,
     pub diagnostics: CompactionDiagnostics,
 }
 
+/// Compacts an agent transcript into a shorter one carrying a summary of the
+/// discarded portion. See [`CompactionOutcome`] for the metadata-preservation
+/// contract every implementation must uphold: `details` on any item that
+/// survives compaction (tail, salvaged user turns, salvaged delegation
+/// results) is preserved bit-for-bit; `details` on a discarded, unsalvaged
+/// item is honestly gone with the rest of that item's content, recoverable
+/// only from the pre-compaction snapshot at [`CompactionOutcome::transcript_path`].
 #[async_trait]
 pub trait CompactionEngine: Send + Sync {
     async fn compact(
@@ -196,6 +250,12 @@ pub trait CompactionEngine: Send + Sync {
     ) -> Result<Option<CompactionOutcome>, RuntimeError>;
 }
 
+/// The default [`CompactionEngine`]: summarizes the compactable prefix of a
+/// transcript (locally via the provider's chat completion, or remotely via
+/// [`Provider::compact`] when supported), while keeping the continuation
+/// tail and a bounded number of recent user turns and delegation results
+/// verbatim — including their opaque `details` — per the
+/// [`CompactionOutcome`] contract.
 #[derive(Debug, Default)]
 pub struct StandardCompactionEngine;
 
@@ -639,162 +699,3 @@ trait Pipe: Sized {
 }
 
 impl<T> Pipe for T {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{ContentBlock, Message};
-
-    fn tool_exchange_item(text: &str) -> TranscriptItem {
-        TranscriptItem::tool_exchange(
-            Message::user(ContentBlock::text(text)),
-            Some("tool_1".to_string()),
-            false,
-        )
-    }
-
-    fn user_turn_item(text: &str) -> TranscriptItem {
-        TranscriptItem::user_turn(Message::user(ContentBlock::text(text)))
-    }
-
-    #[test]
-    fn extract_context_finds_file_paths_in_tool_exchanges() {
-        let items = vec![
-            tool_exchange_item("Reading file src/main.rs and also lib/utils.py"),
-            tool_exchange_item("Modified path/to/config.toml successfully"),
-        ];
-        let ctx = extract_context(&items);
-        assert!(
-            ctx.files_touched.contains(&"src/main.rs".to_string()),
-            "should find src/main.rs, got: {:?}",
-            ctx.files_touched
-        );
-        assert!(
-            ctx.files_touched.contains(&"lib/utils.py".to_string()),
-            "should find lib/utils.py, got: {:?}",
-            ctx.files_touched
-        );
-        assert!(
-            ctx.files_touched
-                .contains(&"path/to/config.toml".to_string()),
-            "should find path/to/config.toml, got: {:?}",
-            ctx.files_touched
-        );
-    }
-
-    #[test]
-    fn extract_context_deduplicates_file_paths() {
-        let items = vec![
-            tool_exchange_item("Reading src/main.rs"),
-            tool_exchange_item("Writing src/main.rs again"),
-        ];
-        let ctx = extract_context(&items);
-        let count = ctx
-            .files_touched
-            .iter()
-            .filter(|p| p.as_str() == "src/main.rs")
-            .count();
-        assert_eq!(count, 1, "file paths should be deduplicated");
-    }
-
-    #[test]
-    fn extract_context_ignores_file_paths_in_non_tool_items() {
-        let items = vec![user_turn_item("Please edit src/main.rs")];
-        let ctx = extract_context(&items);
-        assert!(
-            ctx.files_touched.is_empty(),
-            "user turns should not contribute file paths, got: {:?}",
-            ctx.files_touched
-        );
-    }
-
-    #[test]
-    fn extract_context_finds_verification_outcomes() {
-        let items = vec![
-            tool_exchange_item("Running: cargo test result: ok. 5 passed; 0 FAILED"),
-            tool_exchange_item("npm test completed with error code 1"),
-        ];
-        let ctx = extract_context(&items);
-        assert!(
-            !ctx.verification_outcomes.is_empty(),
-            "should find verification outcomes"
-        );
-        assert!(
-            ctx.verification_outcomes
-                .iter()
-                .any(|v| v.contains("cargo test") || v.contains("FAILED")),
-            "should find cargo test outcome, got: {:?}",
-            ctx.verification_outcomes
-        );
-    }
-
-    #[test]
-    fn extract_context_finds_verification_in_any_item_kind() {
-        let items = vec![user_turn_item("cargo test result: 10 passed; 0 FAILED")];
-        let ctx = extract_context(&items);
-        assert!(
-            !ctx.verification_outcomes.is_empty(),
-            "verification outcomes should be found in any item kind"
-        );
-    }
-
-    #[test]
-    fn extract_context_finds_permission_decisions() {
-        let items = vec![tool_exchange_item(
-            "Permission denied for writing to /etc/hosts",
-        )];
-        let ctx = extract_context(&items);
-        assert!(
-            !ctx.permission_decisions.is_empty(),
-            "should find permission decisions"
-        );
-    }
-
-    #[test]
-    fn format_extracted_context_empty_produces_empty_string() {
-        let ctx = ExtractedContext::default();
-        let formatted = format_extracted_context(&ctx);
-        assert!(formatted.is_empty());
-    }
-
-    #[test]
-    fn format_extracted_context_includes_all_sections() {
-        let ctx = ExtractedContext {
-            files_touched: vec!["src/main.rs".to_string()],
-            verification_outcomes: vec!["cargo test passed".to_string()],
-            permission_decisions: vec!["write permission denied".to_string()],
-        };
-        let formatted = format_extracted_context(&ctx);
-        assert!(formatted.contains("FILES TOUCHED"));
-        assert!(formatted.contains("src/main.rs"));
-        assert!(formatted.contains("VERIFICATION OUTCOMES"));
-        assert!(formatted.contains("cargo test passed"));
-        assert!(formatted.contains("PERMISSION DECISIONS"));
-        assert!(formatted.contains("write permission denied"));
-    }
-
-    #[test]
-    fn approx_token_count_uses_larger_of_two_heuristics() {
-        // Short words: "a b c d" = 4 words * 1.3 = 5.2 -> 6, chars = 7 / 4 = 2
-        assert!(approx_token_count("a b c d") >= 6);
-
-        // Long word: "abcdefghijklmnop" = 1 word * 1.3 = 2, chars = 16 / 4 = 4
-        assert!(approx_token_count("abcdefghijklmnop") >= 4);
-    }
-
-    #[test]
-    fn approx_token_count_empty_string() {
-        assert_eq!(approx_token_count(""), 0);
-    }
-
-    #[test]
-    fn approx_token_count_items_sums_correctly() {
-        let items = vec![
-            user_turn_item("hello world"),
-            tool_exchange_item("some tool output"),
-        ];
-        let total = approx_token_count_items(&items);
-        let expected = approx_token_count("hello world") + approx_token_count("some tool output");
-        assert_eq!(total, expected);
-    }
-}

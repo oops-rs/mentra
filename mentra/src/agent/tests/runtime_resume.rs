@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     sync::{
         Arc,
@@ -12,14 +13,14 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 use crate::{
-    BuiltinProvider, ContentBlock, Message, Role,
+    BuiltinProvider, ContentBlock, Message, Role, TranscriptKind,
     agent::{AgentConfig, AgentSnapshot, AgentStatus, TeamConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     runtime::{AgentStore, Runtime, SqliteRuntimeStore},
     team::{TeamMemberStatus, TeamMessage, TeamStore},
     tool::{
-        ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolResult, ToolSideEffectLevel,
-        ToolSpec,
+        ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolOutput, ToolResult,
+        ToolSideEffectLevel, ToolSpec,
     },
 };
 
@@ -260,6 +261,68 @@ async fn resume_all_rebuilds_agents_from_agent_memory() {
     assert_eq!(
         resumed[0].last_message(),
         Some(&Message::assistant(ContentBlock::text("done")))
+    );
+}
+
+// M3 test 1: `ToolOutput::details` survives a real restart — persisted to
+// the SQLite `agent_memory` row by a live tool round, then recovered by a
+// brand new `AgentMemory` built from `RuntimeStore::load_agent` (the same
+// `resume_all` path every crash-recovery test in this file exercises),
+// keyed by the originating `tool_use_id`.
+#[tokio::test]
+async fn resumed_agent_keeps_tool_result_details_after_restart() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let store = temp_store("resume-details");
+    let runtime = Runtime::empty_builder()
+        .with_store(store.clone())
+        .with_provider_instance(ScriptedProvider::new(
+            BuiltinProvider::Anthropic,
+            vec![model.clone()],
+            vec![
+                tool_use_stream(&model.id, "call-1", "details_tool", r#"{}"#),
+                text_stream(&model.id, "done"),
+            ],
+        ))
+        .with_tool(DetailsTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model.clone()).expect("spawn agent");
+    let agent_id = agent.id().to_string();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "run the details tool".to_string(),
+        }])
+        .await
+        .expect("send");
+    clear_leases(&store);
+
+    let reboot_runtime = Runtime::empty_builder()
+        .with_store(store)
+        .with_provider_instance(ScriptedProvider::new(
+            BuiltinProvider::Anthropic,
+            vec![model],
+            Vec::new(),
+        ))
+        .build()
+        .expect("rebuild runtime");
+    let resumed = reboot_runtime.resume_all().expect("resume all");
+
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].id(), agent_id);
+
+    let item = resumed[0]
+        .transcript()
+        .items()
+        .iter()
+        .find(|item| matches!(item.kind, TranscriptKind::ToolExchange { .. }))
+        .expect("resumed transcript keeps the tool exchange item");
+    assert_eq!(
+        item.details(),
+        Some(&BTreeMap::from([(
+            "call-1".to_string(),
+            json!({ "marker": "keep-me" }),
+        )]))
     );
 }
 
@@ -558,6 +621,36 @@ async fn resume_wakes_revived_teammate_for_persisted_inbox_work() {
     assert_eq!(requests.len(), 2);
     let inbox = latest_team_inbox_text(&requests[0]).expect("team inbox");
     assert!(inbox.contains("Handle this persisted inbox work after restart"));
+}
+
+/// A tool that returns opaque `ToolOutput::details` metadata, used to prove
+/// details survive a real restart (persist/reload through the SQLite store).
+struct DetailsTool;
+
+#[async_trait]
+impl ToolDefinition for DetailsTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("details_tool")
+            .description("test tool: returns opaque details metadata")
+            .input_schema(json!({
+                "type": "object",
+                "properties": {}
+            }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for DetailsTool {
+    async fn execute_mut_output(
+        &self,
+        _ctx: ToolContext<'_>,
+        _input: Value,
+    ) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::text("tool output").with_details(json!({ "marker": "keep-me" })))
+    }
 }
 
 struct BlockingTool {

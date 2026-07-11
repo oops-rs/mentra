@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.9.0
+
+### Highlights
+
+- **Per-run round strategy.** `RunOptions::round_strategy` carries an async
+  `RoundStrategy` owned by one `Agent::run`, invoked after a committed tool
+  round and after a committed tool-free assistant message before the run
+  returns. It can continue, inject committed corrective context into the next
+  request, switch the next round's model/reasoning, or request a graceful
+  (transcript-committing) stop. An absent strategy is byte-identical to the
+  previous behavior, and strategy state cannot outlive its run.
+- **Structured tool output with termination.** Additive
+  `ToolOutput { content, details, terminate }` beside `ToolResult`; defaulted
+  `ToolExecutor::execute_output`/`execute_mut_output` bridge every existing
+  `Result<String, String>` tool unchanged. `terminate: true` ends the run as
+  the value of the tool's own execution (first-class successor to
+  `request_idle` for terminal actions). Descriptors gain a `terminal()`
+  marker: terminal tools are coerced to exclusive scheduling (never parallel),
+  a parallel-lane terminate is rejected as misuse, and calls scheduled after a
+  termination receive explicit not-executed error results.
+- **Opaque transcript metadata.** `ToolOutput.details` survives the local
+  transcript and replay as a per-`tool_use_id` map on `TranscriptItem`
+  (`with_details`/`details()`); provider requests only ever receive
+  `content`. mentra never interprets the values.
+- **Volatile runtime profile.** In-memory `VolatileRuntimeStore` implements
+  the full `RuntimeStore` composition so an ephemeral run leaves no durable
+  trace — no agent/run rows, transcript upserts, leases, team/task writes, or
+  memory ingest artifacts. Isolation on a retained store is an explicit seam
+  (fresh construction per run, or `reset()`); the SQLite default store is
+  unchanged.
+- **Metadata-preserving compaction.** Documented and regression-locked
+  guarantee that `details` on preserved and salvaged items survives
+  `StandardCompactionEngine::compact` bit-for-bit, and that the
+  pre-compaction transcript snapshot carries every item's details.
+- **Honest soft budgets.** `RunOptions::token_budget` is a round-boundary
+  soft token bound evaluated against reported usage: the crossing round
+  completes, the transcript stays committed, and the run stops gracefully —
+  never an error, never a rollback, never claimed as a hard cap.
+  `RunOptions::child()` derives child options sharing the parent's
+  cancellation, stop, deadline, and token accounting. `RoundContext` exposes
+  a distinct `transport_retries` counter; existing
+  `model_budget`/`model_requests` semantics are unchanged (they count
+  provider requests including transient retries).
+
+### Compatibility
+
+- Every seam defaults to current behavior; embedders using descriptor
+  builders and `..Default::default()` compile unchanged.
+- Source-compat notes for exhaustive constructors/matchers:
+  `RuntimeToolDescriptor` gains a public `terminal` field, `RunOptions` gains
+  `token_budget`/`token_usage`, and `RuntimeHookEvent::ToolExecutionFinished`
+  gains a `details` field — exhaustive literal constructors must add the
+  fields and exhaustive struct patterns need `..`.
+- Persisted transcripts and agent memory from earlier versions deserialize
+  unchanged (`details` is serde-default).
+
+`mentra-provider 0.3.1` is unchanged and does not need to be republished.
+
 ## mentra-provider 0.3.1
 
 - Map WebSocket connection failures (`WsError::Io`, `ConnectionClosed`,

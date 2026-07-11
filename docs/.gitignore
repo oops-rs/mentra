@@ -2,3 +2,5 @@
 !responses-coding-agent.md
 !releases/
 !releases/*.md
+!adr/
+!adr/*.md

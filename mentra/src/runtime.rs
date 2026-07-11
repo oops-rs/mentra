@@ -7,6 +7,7 @@ mod intrinsic;
 mod skill;
 mod store;
 pub(crate) mod task;
+mod volatile_store;
 
 use std::{any::Any, path::Path, sync::Arc};
 
@@ -41,6 +42,7 @@ pub use store::{
 pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot};
 pub(crate) use task::TaskIntrinsicTool;
 pub use task::{TaskItem, TaskStatus};
+pub use volatile_store::VolatileRuntimeStore;
 
 /// Entry point for configuring providers, tools, and agent lifecycles.
 ///

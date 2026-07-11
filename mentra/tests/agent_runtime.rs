@@ -1,15 +1,18 @@
 use std::{
     collections::VecDeque,
     fs,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
-use mentra::runtime::SqliteRuntimeStore;
+use mentra::runtime::{RunOptions, SqliteRuntimeStore};
 use mentra::{
     AgentConfig, BuiltinProvider, ContentBlock, Message, Role, Runtime,
-    agent::{AgentEvent, AgentStatus},
+    agent::{AgentEvent, AgentStatus, RoundContext, RoundDecision, RoundStrategy},
     error::RuntimeError,
     provider::{
         ContentBlockDelta, ContentBlockStart, ModelInfo, Provider, ProviderDescriptor,
@@ -191,6 +194,92 @@ async fn send_retries_transient_provider_error_before_streaming() {
     assert_eq!(
         agent.last_message(),
         Some(&Message::assistant(ContentBlock::text("recovered")))
+    );
+}
+
+/// Counters a [`RoundStrategy`] observed at the most recent round boundary,
+/// captured by [`CountingStrategy`].
+#[derive(Clone, Copy, Default)]
+struct RoundCounters {
+    rounds_completed: usize,
+    model_requests: usize,
+    transport_retries: usize,
+}
+
+/// A [`RoundStrategy`] that records [`RoundContext`]'s counters at each boundary
+/// it observes, always proceeding.
+struct CountingStrategy {
+    last: Mutex<Option<RoundCounters>>,
+}
+
+impl CountingStrategy {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            last: Mutex::new(None),
+        })
+    }
+
+    async fn last_counters(&self) -> RoundCounters {
+        self.last.lock().await.expect("strategy observed a round")
+    }
+}
+
+#[async_trait]
+impl RoundStrategy for CountingStrategy {
+    async fn on_round(&self, ctx: RoundContext<'_>) -> RoundDecision {
+        *self.last.lock().await = Some(RoundCounters {
+            rounds_completed: ctx.rounds_completed(),
+            model_requests: ctx.model_requests(),
+            transport_retries: ctx.transport_retries(),
+        });
+        RoundDecision::proceed()
+    }
+}
+
+#[tokio::test]
+async fn retry_and_round_counters_are_reported_distinctly() {
+    // A connection-open retry, then a success: `model_requests` (today's
+    // request-including-retries counter) must stay at 2, `rounds_completed` (the
+    // logical-round counter) must land at 1 — the round that needed a retry still
+    // counts as exactly one completed round — and the new `transport_retries`
+    // counter must isolate the one retry, distinct from both.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            failed_request(ProviderError::Http {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: "offline".to_string(),
+            }),
+            text_stream(&model.id, "recovered"),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = test_runtime(provider);
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let strategy = CountingStrategy::new();
+    let message = agent
+        .run(
+            vec![ContentBlock::text("hello")],
+            RunOptions::default().with_round_strategy(strategy.clone()),
+        )
+        .await
+        .expect("run should retry then succeed");
+
+    assert_eq!(message.text(), "recovered");
+    assert_eq!(provider_handle.recorded_requests().await.len(), 2);
+
+    let counters = strategy.last_counters().await;
+    assert_eq!(counters.rounds_completed, 1, "one logical round completed");
+    assert_eq!(
+        counters.model_requests, 2,
+        "model_requests keeps today's semantics: it counts the retry and the success"
+    );
+    assert_eq!(
+        counters.transport_retries, 1,
+        "exactly one transient retry, isolated from rounds_completed and reported distinctly"
     );
 }
 

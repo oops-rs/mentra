@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use mentra_provider::ToolResultContent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -413,6 +414,68 @@ impl ParallelToolContext {
 /// String result returned by Mentra tools.
 pub type ToolResult = Result<String, String>;
 
+/// Structured, additive successor to [`ToolResult`].
+///
+/// `content` is the provider-visible projection of a tool's result and reuses
+/// the existing [`ToolResultContent`] from `mentra-provider`, so no new
+/// provider representation is required. `details` is opaque host metadata
+/// that survives the local transcript but is never sent to a provider — mentra
+/// never interprets it. `terminate` asks the run to end as the value of this
+/// tool's own execution: a first-class successor to
+/// [`ToolContext::request_idle`] for terminal actions, honored only when the
+/// call executes in an exclusive lane (see [`RuntimeToolDescriptorBuilder::terminal`]).
+///
+/// Tool-level failures keep using the existing `Err(String)` channel on
+/// [`ToolExecutor::execute_output`] / [`ToolExecutor::execute_mut_output`];
+/// `ToolOutput` only ever appears on the `Ok` side.
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    pub content: ToolResultContent,
+    pub details: Option<Value>,
+    pub terminate: bool,
+}
+
+impl ToolOutput {
+    /// Builds a plain-text, non-terminating output with no attached metadata.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: ToolResultContent::Text(content.into()),
+            details: None,
+            terminate: false,
+        }
+    }
+
+    /// Builds a structured, non-terminating output with no attached metadata.
+    pub fn structured(content: Value) -> Self {
+        Self {
+            content: ToolResultContent::Structured(content),
+            details: None,
+            terminate: false,
+        }
+    }
+
+    /// Attaches opaque host metadata that survives transcript persistence but
+    /// is never projected to a provider.
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
+    /// Marks this output as ending the run as the value of its own execution.
+    pub fn terminating(mut self) -> Self {
+        self.terminate = true;
+        self
+    }
+}
+
+/// Bridges an existing `Ok(String)` tool result into the additive structured
+/// path: `Text` content, no metadata, no termination.
+impl From<String> for ToolOutput {
+    fn from(value: String) -> Self {
+        Self::text(value)
+    }
+}
+
 /// Definition contract for custom tools exposed to models.
 pub trait ToolDefinition: Send + Sync {
     fn descriptor(&self) -> RuntimeToolDescriptor;
@@ -456,6 +519,33 @@ pub trait ToolExecutor: ToolDefinition + Send + Sync {
 
     async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         self.execute(ctx.into(), input).await
+    }
+
+    /// Structured, parallel-lane execution. Defaults to bridging
+    /// [`ToolExecutor::execute`] through `ToolOutput::from`, so every
+    /// existing string-returning tool keeps working unchanged. Overriding
+    /// this directly (instead of `execute`) opts a tool into structured
+    /// content, opaque details, or (subject to the exclusive-lane
+    /// requirement) termination.
+    async fn execute_output(
+        &self,
+        ctx: ParallelToolContext,
+        input: Value,
+    ) -> Result<ToolOutput, String> {
+        self.execute(ctx, input).await.map(ToolOutput::from)
+    }
+
+    /// Structured, exclusive-lane execution. Defaults to bridging
+    /// [`ToolExecutor::execute_mut`] through `ToolOutput::from`, so every
+    /// existing string-returning tool keeps working unchanged. Overriding
+    /// this directly (instead of `execute_mut`) opts a tool into structured
+    /// content, opaque details, or termination.
+    async fn execute_mut_output(
+        &self,
+        ctx: ToolContext<'_>,
+        input: Value,
+    ) -> Result<ToolOutput, String> {
+        self.execute_mut(ctx, input).await.map(ToolOutput::from)
     }
 }
 
