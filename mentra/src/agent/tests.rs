@@ -6,4 +6,5 @@ mod runtime_resume;
 mod runtime_snapshot;
 mod runtime_tasks;
 mod runtime_tools;
+mod runtime_volatile_store;
 mod support;
