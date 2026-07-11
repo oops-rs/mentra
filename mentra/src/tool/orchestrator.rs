@@ -1,6 +1,6 @@
 //! Tool orchestration pipeline for scheduling, authorization, execution, and result ordering.
 
-use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::task::JoinSet;
 
@@ -22,6 +22,11 @@ pub(crate) struct ToolExecutionOutcome {
     pub(crate) results: Vec<ContentBlock>,
     pub(crate) successful_task: bool,
     pub(crate) end_turn: bool,
+    /// Per-call opaque metadata collected from this round's executions,
+    /// keyed by `tool_use_id` — the runner attaches this to the appended
+    /// transcript item so it survives persistence and replay, never
+    /// projected to a provider (ADR-0001 §4).
+    pub(crate) details: BTreeMap<String, serde_json::Value>,
 }
 
 pub(crate) struct ToolRuntime {
@@ -57,6 +62,9 @@ struct CompletedToolExecution {
     /// existing `request_idle` callers see unchanged behavior.
     terminated: bool,
     tool_name: String,
+    /// This execution's opaque `ToolOutput::details`, if any — collected by
+    /// [`ToolRuntime::execute_calls`] into [`ToolExecutionOutcome::details`].
+    details: Option<serde_json::Value>,
 }
 
 /// How a single execution affects the current round — bundled so
@@ -87,6 +95,7 @@ impl ToolRuntime {
         let mut results = Vec::new();
         let mut successful_task = false;
         let mut end_turn = false;
+        let mut details = BTreeMap::new();
 
         let mut batches = ToolCallSchedule::new(self, agent, calls)
             .batches
@@ -114,6 +123,11 @@ impl ToolRuntime {
                 if execution.terminated {
                     terminator.get_or_insert(execution.tool_name);
                 }
+                if let (Some(value), ContentBlock::ToolResult { tool_use_id, .. }) =
+                    (execution.details, &execution.result)
+                {
+                    details.insert(tool_use_id.clone(), value);
+                }
                 results.push(execution.result);
             }
 
@@ -136,6 +150,7 @@ impl ToolRuntime {
             results,
             successful_task,
             end_turn,
+            details,
         })
     }
 
@@ -365,7 +380,7 @@ impl ToolRuntime {
         effect: RoundEffect,
         details: Option<serde_json::Value>,
     ) -> CompletedToolExecution {
-        self.emit_tool_runtime_finished(call, &result, details);
+        self.emit_tool_runtime_finished(call, &result, details.clone());
         agent.emit_event(AgentEvent::ToolExecutionFinished {
             result: result.clone(),
         });
@@ -386,6 +401,7 @@ impl ToolRuntime {
             should_end_turn: effect.should_end_turn,
             terminated: effect.terminated,
             tool_name: call.name.clone(),
+            details,
         }
     }
 
@@ -524,6 +540,7 @@ impl ToolRuntime {
                 should_end_turn: false,
                 terminated: false,
                 tool_name: call.name.clone(),
+                details: None,
             });
         }
 
@@ -561,6 +578,7 @@ impl ToolRuntime {
                     should_end_turn: false,
                     terminated: false,
                     tool_name: call.name.clone(),
+                    details: None,
                 });
                 continue;
             };
@@ -705,6 +723,7 @@ impl ToolRuntime {
                 should_end_turn: false,
                 terminated: false,
                 tool_name: call.name.clone(),
+                details: None,
             };
         };
 

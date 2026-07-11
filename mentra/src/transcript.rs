@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{ContentBlock, Message, Role};
 
@@ -57,6 +60,16 @@ impl AgentTranscript {
 pub struct TranscriptItem {
     pub kind: TranscriptKind,
     pub message: Option<Message>,
+    /// Opaque per-call host metadata attached via [`TranscriptItem::with_details`]
+    /// (populated from [`crate::tool::ToolOutput::details`]), keyed by
+    /// `tool_use_id` because one tool-result message can carry several
+    /// results. mentra never interprets these values; they survive
+    /// transcript persistence and replay but are never projected into a
+    /// provider request — [`TranscriptItem::project_message`] only ever
+    /// returns `message`. `serde(default)` keeps transcripts persisted
+    /// before this field existed deserializing unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    details: Option<BTreeMap<String, Value>>,
 }
 
 impl TranscriptItem {
@@ -64,6 +77,7 @@ impl TranscriptItem {
         Self {
             kind: TranscriptKind::UserTurn,
             message: Some(message),
+            details: None,
         }
     }
 
@@ -71,6 +85,7 @@ impl TranscriptItem {
         Self {
             kind: TranscriptKind::AssistantTurn,
             message: Some(message),
+            details: None,
         }
     }
 
@@ -81,6 +96,7 @@ impl TranscriptItem {
                 is_error,
             },
             message: Some(message),
+            details: None,
         }
     }
 
@@ -88,6 +104,7 @@ impl TranscriptItem {
         Self {
             kind: TranscriptKind::CanonicalContext,
             message: Some(message),
+            details: None,
         }
     }
 
@@ -99,6 +116,7 @@ impl TranscriptItem {
         Self {
             kind: TranscriptKind::DelegationRequest { delegation, edge },
             message: Some(message),
+            details: None,
         }
     }
 
@@ -110,6 +128,7 @@ impl TranscriptItem {
         Self {
             kind: TranscriptKind::DelegationResult { delegation, edge },
             message: Some(message),
+            details: None,
         }
     }
 
@@ -119,7 +138,32 @@ impl TranscriptItem {
                 summary.render_for_handoff(),
             ))),
             kind: TranscriptKind::CompactionSummary { summary },
+            details: None,
         }
+    }
+
+    /// Attaches opaque per-call host metadata to this item, keyed by
+    /// `tool_use_id`. A no-op for an empty map, so attaching a possibly-empty
+    /// collected map never turns a details-free item into one carrying
+    /// `Some(empty map)`.
+    pub fn with_details(mut self, details: BTreeMap<String, Value>) -> Self {
+        if !details.is_empty() {
+            self.details = Some(details);
+        }
+        self
+    }
+
+    /// This item's opaque per-call host metadata, if any. mentra never
+    /// interprets these values — a host recovers its own metadata after a
+    /// round through this accessor alone, without mentra knowing any host
+    /// type.
+    pub fn details(&self) -> Option<&BTreeMap<String, Value>> {
+        self.details.as_ref()
+    }
+
+    /// Looks up this item's opaque metadata for one `tool_use_id`.
+    pub fn detail(&self, tool_use_id: &str) -> Option<&Value> {
+        self.details.as_ref()?.get(tool_use_id)
     }
 
     pub fn project_message(&self) -> Option<Message> {
@@ -288,5 +332,55 @@ fn fallback_text(text: &str) -> &str {
         "(none)"
     } else {
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Old-format compatibility (M3 test 6): a transcript persisted before
+    // `details` existed is exactly the JSON a details-free item serializes
+    // to today (the field is `skip_serializing_if` on `None`), so proving
+    // that JSON deserializes back to `details: None` proves genuinely old
+    // persisted transcripts still load.
+    #[test]
+    fn item_without_details_serializes_and_deserializes_as_old_format() {
+        let item = TranscriptItem::user_turn(Message::user(ContentBlock::text("hello")));
+        let json = serde_json::to_string(&item).expect("serialize");
+        assert!(
+            !json.contains("details"),
+            "a details-free item must serialize identically to pre-M3 transcripts, got: {json}"
+        );
+
+        let reloaded: TranscriptItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(reloaded.details(), None);
+        assert_eq!(reloaded, item);
+    }
+
+    #[test]
+    fn details_round_trip_through_json_keyed_by_tool_use_id() {
+        let mut details = BTreeMap::new();
+        details.insert("call-1".to_string(), json!({ "secret": "shh" }));
+        let item = TranscriptItem::tool_exchange(
+            Message::user(ContentBlock::text("result")),
+            Some("call-1".to_string()),
+            false,
+        )
+        .with_details(details.clone());
+
+        let json = serde_json::to_string(&item).expect("serialize");
+        let reloaded: TranscriptItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(reloaded.details(), Some(&details));
+        assert_eq!(reloaded.detail("call-1"), Some(&json!({ "secret": "shh" })));
+        assert_eq!(reloaded.detail("call-2"), None);
+    }
+
+    #[test]
+    fn with_details_is_a_no_op_for_an_empty_map() {
+        let item = TranscriptItem::user_turn(Message::user(ContentBlock::text("hello")))
+            .with_details(BTreeMap::new());
+        assert_eq!(item.details(), None);
     }
 }
