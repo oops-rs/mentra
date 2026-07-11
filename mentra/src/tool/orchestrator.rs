@@ -44,7 +44,28 @@ struct ToolCallSchedule {
 struct CompletedToolExecution {
     result: ContentBlock,
     task_succeeded: bool,
+    /// Ends the current round: true when this execution consumed
+    /// [`crate::tool::ToolContext::request_idle`] (exclusive lane) or its
+    /// [`crate::tool::ToolOutput::terminate`] successor. Controls whether
+    /// `TurnRunner::run` issues another model round.
     should_end_turn: bool,
+    /// True only when `should_end_turn` came from `ToolOutput::terminate`
+    /// specifically (never from the pre-existing idle-request signal).
+    /// Distinct from `should_end_turn` because it additionally drives
+    /// skipping not-yet-executed batches later in the same round — a new
+    /// behavior scoped to genuine termination, not to idle requests, so
+    /// existing `request_idle` callers see unchanged behavior.
+    terminated: bool,
+    tool_name: String,
+}
+
+/// How a single execution affects the current round — bundled so
+/// [`ToolRuntime::completed_execution`] stays within a reasonable argument
+/// count. `Default` is "continues": neither ends the round nor terminates.
+#[derive(Debug, Clone, Copy, Default)]
+struct RoundEffect {
+    should_end_turn: bool,
+    terminated: bool,
 }
 
 impl ToolRuntime {
@@ -67,7 +88,11 @@ impl ToolRuntime {
         let mut successful_task = false;
         let mut end_turn = false;
 
-        for batch in ToolCallSchedule::new(self, agent, calls) {
+        let mut batches = ToolCallSchedule::new(self, agent, calls)
+            .batches
+            .into_iter();
+
+        while let Some(batch) = batches.next() {
             options.check_limits()?;
             let execution_count = batch.execution_count();
             if self.tool_calls + execution_count > options.tool_budget() {
@@ -82,10 +107,28 @@ impl ToolRuntime {
                 }
             };
 
+            let mut terminator = None;
             for execution in executions {
                 successful_task |= execution.task_succeeded;
                 end_turn |= execution.should_end_turn;
+                if execution.terminated {
+                    terminator.get_or_insert(execution.tool_name);
+                }
                 results.push(execution.result);
+            }
+
+            // A terminating call ends the round as the value of its own
+            // execution; calls already scheduled for later batches in this
+            // round are never executed. Each still gets an explicit
+            // is_error result so the transcript always has one result block
+            // per tool_use — never a silent drop.
+            if let Some(terminator) = terminator {
+                for remaining_batch in batches {
+                    for call in remaining_batch.into_calls() {
+                        results.push(not_executed_result(&call, &terminator));
+                    }
+                }
+                break;
             }
         }
 
@@ -105,10 +148,29 @@ impl ToolRuntime {
             return ToolExecutionCategory::ExclusiveLocalMutation;
         }
 
-        self.runtime
-            .get_tool(&call.name)
-            .map(|tool| tool.execution_category(&call.input))
-            .unwrap_or(ToolExecutionCategory::ExclusiveLocalMutation)
+        let Some(tool) = self.runtime.get_tool(&call.name) else {
+            return ToolExecutionCategory::ExclusiveLocalMutation;
+        };
+        let category = tool.execution_category(&call.input);
+        let terminal = self
+            .runtime
+            .get_tool_descriptor(&call.name)
+            .is_some_and(|descriptor| descriptor.terminal);
+
+        // STATIC exclusivity: a terminal-marked tool is never scheduled in a
+        // parallel batch, regardless of its declared execution_category —
+        // coerce rather than panic, matching the existing fallback-to-exclusive
+        // precedent above.
+        if terminal && category.allows_parallel() {
+            eprintln!(
+                "warning: tool '{}' is marked terminal but declared a parallel \
+                 execution category; coercing to exclusive scheduling",
+                call.name
+            );
+            return ToolExecutionCategory::ExclusiveLocalMutation;
+        }
+
+        category
     }
 
     fn note_tool_started(
@@ -133,7 +195,12 @@ impl ToolRuntime {
             })
     }
 
-    fn emit_tool_runtime_finished(&self, call: &ToolCall, result: &ContentBlock) {
+    fn emit_tool_runtime_finished(
+        &self,
+        call: &ToolCall,
+        result: &ContentBlock,
+        details: Option<serde_json::Value>,
+    ) {
         let is_error = matches!(result, ContentBlock::ToolResult { is_error: true, .. });
         let output_preview = match result {
             ContentBlock::ToolResult { content, .. } => content.to_display_string(),
@@ -149,6 +216,7 @@ impl ToolRuntime {
                 is_error,
                 error,
                 output_preview,
+                details,
             });
     }
 
@@ -258,18 +326,33 @@ impl ToolRuntime {
         }
     }
 
-    fn tool_result_block(call: &ToolCall, result: crate::tool::ToolResult) -> ContentBlock {
-        match result {
-            Ok(content) => ContentBlock::ToolResult {
-                tool_use_id: call.id.clone(),
-                content: content.into(),
-                is_error: false,
-            },
-            Err(content) => ContentBlock::ToolResult {
-                tool_use_id: call.id.clone(),
-                content: content.into(),
-                is_error: true,
-            },
+    /// Splits a structured tool outcome into its provider-visible
+    /// projection, opaque host metadata, and requested termination — the
+    /// single boundary where `details` is separated from what a provider
+    /// ever sees (only `content` reaches `ContentBlock::ToolResult`).
+    fn tool_output_block(
+        call: &ToolCall,
+        output: Result<crate::tool::ToolOutput, String>,
+    ) -> (ContentBlock, Option<serde_json::Value>, bool) {
+        match output {
+            Ok(output) => (
+                ContentBlock::ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: output.content,
+                    is_error: false,
+                },
+                output.details,
+                output.terminate,
+            ),
+            Err(content) => (
+                ContentBlock::ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: content.into(),
+                    is_error: true,
+                },
+                None,
+                false,
+            ),
         }
     }
 
@@ -279,9 +362,10 @@ impl ToolRuntime {
         call: &ToolCall,
         descriptor: &RuntimeToolDescriptor,
         result: ContentBlock,
-        should_end_turn: bool,
+        effect: RoundEffect,
+        details: Option<serde_json::Value>,
     ) -> CompletedToolExecution {
-        self.emit_tool_runtime_finished(call, &result);
+        self.emit_tool_runtime_finished(call, &result, details);
         agent.emit_event(AgentEvent::ToolExecutionFinished {
             result: result.clone(),
         });
@@ -299,7 +383,9 @@ impl ToolRuntime {
         CompletedToolExecution {
             result,
             task_succeeded,
-            should_end_turn,
+            should_end_turn: effect.should_end_turn,
+            terminated: effect.terminated,
+            tool_name: call.name.clone(),
         }
     }
 
@@ -436,6 +522,8 @@ impl ToolRuntime {
                 result,
                 task_succeeded: false,
                 should_end_turn: false,
+                terminated: false,
+                tool_name: call.name.clone(),
             });
         }
 
@@ -471,13 +559,22 @@ impl ToolRuntime {
                     result,
                     task_succeeded: false,
                     should_end_turn: false,
+                    terminated: false,
+                    tool_name: call.name.clone(),
                 });
                 continue;
             };
 
             let ctx = self.parallel_tool_context(agent, &call);
             if let Some(result) = self.authorize_tool_call(&call, &tool, &ctx).await? {
-                let execution = self.completed_execution(agent, &call, &descriptor, result, false);
+                let execution = self.completed_execution(
+                    agent,
+                    &call,
+                    &descriptor,
+                    result,
+                    RoundEffect::default(),
+                    None,
+                );
                 results[index] = Some(execution);
                 continue;
             }
@@ -492,8 +589,14 @@ impl ToolRuntime {
                         content: format!("Blocked by pre-execution hook: {reason}").into(),
                         is_error: true,
                     };
-                    let execution =
-                        self.completed_execution(agent, &call, &descriptor, result, false);
+                    let execution = self.completed_execution(
+                        agent,
+                        &call,
+                        &descriptor,
+                        result,
+                        RoundEffect::default(),
+                        None,
+                    );
                     results[index] = Some(execution);
                     continue;
                 }
@@ -501,19 +604,26 @@ impl ToolRuntime {
 
             if let Err(error) = self.emit_tool_runtime_started(&call) {
                 let result = self.blocked_tool_result(&call, error);
-                let execution = self.completed_execution(agent, &call, &descriptor, result, false);
+                let execution = self.completed_execution(
+                    agent,
+                    &call,
+                    &descriptor,
+                    result,
+                    RoundEffect::default(),
+                    None,
+                );
                 results[index] = Some(execution);
                 continue;
             }
 
             join_set.spawn(async move {
-                let result = execute_tool_future(
+                let output = execute_tool_future(
                     &call.name,
                     descriptor.execution_timeout,
-                    tool.execute(ctx, call.input.clone()),
+                    tool.execute_output(ctx, call.input.clone()),
                 )
                 .await;
-                (index, call, descriptor, result)
+                (index, call, descriptor, output)
             });
         }
 
@@ -523,10 +633,31 @@ impl ToolRuntime {
                 return Err(error);
             }
             match tokio::time::timeout(PARALLEL_JOIN_POLL_INTERVAL, join_set.join_next()).await {
-                Ok(Some(Ok((index, call, descriptor, result)))) => {
-                    let result = Self::tool_result_block(&call, result);
-                    results[index] =
-                        Some(self.completed_execution(agent, &call, &descriptor, result, false));
+                Ok(Some(Ok((index, call, descriptor, output)))) => {
+                    let (result, details, terminate) = Self::tool_output_block(&call, output);
+                    // RUNTIME defense: a parallel-lane execution can never end
+                    // the run — a `terminate: true` surfacing here is a tool
+                    // misuse (or a static-coercion gap), never honored as
+                    // termination, and never a silent race with the rest of
+                    // the batch.
+                    let (result, details) = if terminate {
+                        eprintln!(
+                            "warning: tool '{}' requested termination from a parallel \
+                             execution; rejecting as a misuse error, run continues",
+                            call.name
+                        );
+                        (parallel_termination_rejected(&call), None)
+                    } else {
+                        (result, details)
+                    };
+                    results[index] = Some(self.completed_execution(
+                        agent,
+                        &call,
+                        &descriptor,
+                        result,
+                        RoundEffect::default(),
+                        details,
+                    ));
                 }
                 Ok(Some(Err(error))) => {
                     join_set.abort_all();
@@ -572,6 +703,8 @@ impl ToolRuntime {
                 result,
                 task_succeeded: false,
                 should_end_turn: false,
+                terminated: false,
+                tool_name: call.name.clone(),
             };
         };
 
@@ -581,12 +714,26 @@ impl ToolRuntime {
             .await
         {
             Ok(Some(result)) => {
-                return self.completed_execution(agent, &call, &descriptor, result, false);
+                return self.completed_execution(
+                    agent,
+                    &call,
+                    &descriptor,
+                    result,
+                    RoundEffect::default(),
+                    None,
+                );
             }
             Ok(None) => {}
             Err(error) => {
                 let result = self.blocked_tool_result(&call, error);
-                return self.completed_execution(agent, &call, &descriptor, result, false);
+                return self.completed_execution(
+                    agent,
+                    &call,
+                    &descriptor,
+                    result,
+                    RoundEffect::default(),
+                    None,
+                );
             }
         }
 
@@ -600,28 +747,49 @@ impl ToolRuntime {
                     content: format!("Blocked by pre-execution hook: {reason}").into(),
                     is_error: true,
                 };
-                return self.completed_execution(agent, &call, &descriptor, result, false);
+                return self.completed_execution(
+                    agent,
+                    &call,
+                    &descriptor,
+                    result,
+                    RoundEffect::default(),
+                    None,
+                );
             }
             Err(error) => {
                 let result = self.blocked_tool_result(&call, error);
-                return self.completed_execution(agent, &call, &descriptor, result, false);
+                return self.completed_execution(
+                    agent,
+                    &call,
+                    &descriptor,
+                    result,
+                    RoundEffect::default(),
+                    None,
+                );
             }
         }
 
         if let Err(error) = self.emit_tool_runtime_started(&call) {
             let result = self.blocked_tool_result(&call, error);
-            return self.completed_execution(agent, &call, &descriptor, result, false);
+            return self.completed_execution(
+                agent,
+                &call,
+                &descriptor,
+                result,
+                RoundEffect::default(),
+                None,
+            );
         }
 
         let working_directory = authorization_ctx.working_directory.clone();
         let runtime = authorization_ctx.runtime.clone();
         let event_tx = agent.event_sender();
-        let result = Self::tool_result_block(
+        let (result, details, terminate) = Self::tool_output_block(
             &call,
             execute_tool_future(
                 &call.name,
                 descriptor.execution_timeout,
-                tool.execute_mut(
+                tool.execute_mut_output(
                     ToolContext {
                         agent_id: self.agent_id.clone(),
                         tool_call_id: call.id.clone(),
@@ -636,8 +804,11 @@ impl ToolRuntime {
             )
             .await,
         );
-        let should_end_turn = agent.take_idle_requested();
-        self.completed_execution(agent, &call, &descriptor, result, should_end_turn)
+        let effect = RoundEffect {
+            should_end_turn: agent.take_idle_requested() || terminate,
+            terminated: terminate,
+        };
+        self.completed_execution(agent, &call, &descriptor, result, effect, details)
     }
 }
 
@@ -678,24 +849,49 @@ impl ToolCallBatch {
             ToolCallBatch::Parallel(calls) => calls.len(),
         }
     }
-}
 
-impl IntoIterator for ToolCallSchedule {
-    type Item = ToolCallBatch;
-    type IntoIter = std::vec::IntoIter<ToolCallBatch>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.batches.into_iter()
+    /// Unwraps this batch into its constituent calls, in original call order.
+    /// Used to build not-executed results for batches skipped by termination.
+    fn into_calls(self) -> Vec<ToolCall> {
+        match self {
+            ToolCallBatch::Exclusive(call) => vec![call],
+            ToolCallBatch::Parallel(calls) => calls,
+        }
     }
 }
 
-async fn execute_tool_future<F>(
+/// Builds the is_error result for a call that was never executed because an
+/// earlier call in the same round terminated the run.
+fn not_executed_result(call: &ToolCall, terminated_by: &str) -> ContentBlock {
+    ContentBlock::ToolResult {
+        tool_use_id: call.id.clone(),
+        content: format!("not executed: run terminated by '{terminated_by}'").into(),
+        is_error: true,
+    }
+}
+
+/// Builds the is_error result for a parallel-lane call that requested
+/// termination — RUNTIME defense: never honored, always surfaced as misuse.
+fn parallel_termination_rejected(call: &ToolCall) -> ContentBlock {
+    ContentBlock::ToolResult {
+        tool_use_id: call.id.clone(),
+        content: format!(
+            "not honored: tool '{}' requested termination from a parallel execution; \
+             termination is only honored from an exclusive execution",
+            call.name
+        )
+        .into(),
+        is_error: true,
+    }
+}
+
+async fn execute_tool_future<F, T>(
     tool_name: &str,
     execution_timeout: Option<Duration>,
     future: F,
-) -> crate::tool::ToolResult
+) -> Result<T, String>
 where
-    F: Future<Output = crate::tool::ToolResult>,
+    F: Future<Output = Result<T, String>>,
 {
     match execution_timeout {
         Some(timeout) => match tokio::time::timeout(timeout, future).await {
