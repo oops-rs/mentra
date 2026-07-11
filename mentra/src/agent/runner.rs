@@ -40,6 +40,11 @@ pub(super) struct TurnRunner<'a> {
     agent: &'a mut Agent,
     options: RunOptions,
     model_requests: usize,
+    /// Transient transport-connection retries made so far, counted separately
+    /// from `model_requests` (which includes them) and from the loop's `rounds`
+    /// counter (which counts only completed logical rounds). See
+    /// [`RoundContext::transport_retries`](crate::agent::RoundContext::transport_retries).
+    transport_retries: usize,
     tool_runtime: ToolRuntime,
 }
 
@@ -55,6 +60,7 @@ impl<'a> TurnRunner<'a> {
             agent,
             options,
             model_requests: 0,
+            transport_retries: 0,
             tool_runtime,
         }
     }
@@ -70,6 +76,15 @@ impl<'a> TurnRunner<'a> {
             // stop gathering once enough is done while preserving the context for a
             // follow-up turn on the same agent.
             if self.options.stop_requested() {
+                return Ok(());
+            }
+            // Soft aggregate token bound: usage is only known once a round has
+            // completed, so this never preempts a round in progress — it only
+            // refuses to start another one once the last round's reported usage
+            // pushed the cumulative total to or past the bound. The transcript
+            // through the last completed round stays committed, exactly like
+            // `stop` above.
+            if self.options.token_budget_exceeded() {
                 return Ok(());
             }
             if let Some(limit) = self.agent.max_rounds()
@@ -109,6 +124,8 @@ impl<'a> TurnRunner<'a> {
                     cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0),
                     cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0),
                 });
+                self.options
+                    .record_tokens(u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0));
             }
 
             if !invalid_tool_uses.is_empty() {
@@ -215,6 +232,7 @@ impl<'a> TurnRunner<'a> {
             tool_results,
             rounds,
             self.model_requests,
+            self.transport_retries,
         );
         match strategy.on_round(context).await {
             RoundDecision::Continue(adjustment) => {
@@ -316,6 +334,7 @@ impl<'a> TurnRunner<'a> {
                     if attempt <= self.options.retry_budget
                         && is_transient_provider_error(&error) =>
                 {
+                    self.transport_retries += 1;
                     self.agent
                         .runtime
                         .emit_hook(RuntimeHookEvent::ModelRequestFinished {
