@@ -383,4 +383,41 @@ mod tests {
             .with_details(BTreeMap::new());
         assert_eq!(item.details(), None);
     }
+
+    // M3 test 2 (projection-boundary half): `to_messages()`/`project_message`
+    // are the single place internal transcript state turns into what a
+    // provider request carries (`Message`/`ContentBlock`) — proving details
+    // never appears in that projection, independent of any live agent
+    // plumbing, is what makes "provider requests receive only content" true
+    // by construction rather than by convention. The live round-trip through
+    // a real model request is covered by
+    // `agent::tests::tool_output::structured_tool_projects_content_and_hides_details_from_provider`.
+    #[test]
+    fn to_messages_projection_never_carries_details() {
+        let mut details = BTreeMap::new();
+        details.insert("call-1".to_string(), json!({ "secret": "shh" }));
+        let transcript = AgentTranscript::new(vec![
+            TranscriptItem::user_turn(Message::user(ContentBlock::text("go"))),
+            TranscriptItem::assistant_turn(Message::assistant(ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "structured_details_tool".to_string(),
+                input: json!({}),
+            })),
+            TranscriptItem::tool_exchange(
+                Message::user(ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: crate::tool::ToolResultContent::Structured(json!({ "answer": 42 })),
+                    is_error: false,
+                }),
+                Some("call-1".to_string()),
+                false,
+            )
+            .with_details(details),
+        ]);
+
+        let projected = serde_json::to_string(&transcript.to_messages()).expect("serialize");
+        assert!(projected.contains("answer"), "content must still project");
+        assert!(!projected.contains("secret"));
+        assert!(!projected.contains("shh"));
+    }
 }
