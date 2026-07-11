@@ -4,6 +4,7 @@ mod events;
 mod lifecycle;
 mod pending;
 mod pending_block;
+mod round_strategy;
 mod runner;
 mod snapshot;
 mod subagent;
@@ -49,6 +50,10 @@ pub use events::{
     SpawnedAgentSummary,
 };
 pub use pending::PendingAssistantTurn;
+pub use round_strategy::{
+    ReasoningChange, RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy,
+    RoundToolResult,
+};
 use runner::TurnRunner;
 pub(crate) use subagent::DisposableSubagentTemplate;
 

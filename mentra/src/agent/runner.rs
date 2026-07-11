@@ -1,4 +1,4 @@
-use std::{borrow::Cow, time::Duration};
+use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
     ContentBlock, Message, Role,
@@ -9,11 +9,28 @@ use crate::{
     provider::Request,
     runtime::{RunOptions, RuntimeHookEvent, control::is_transient_provider_error},
     team::format_inbox,
-    tool::ToolRuntime,
+    tool::{ToolCall, ToolRuntime},
     transcript::{DelegationArtifact, DelegationKind, DelegationStatus},
 };
 
-use super::{Agent, AgentEvent, AgentStatus, PendingAssistantTurn, pending::InvalidToolUse};
+use super::{
+    Agent, AgentEvent, AgentStatus, PendingAssistantTurn,
+    pending::InvalidToolUse,
+    round_strategy::{
+        ReasoningChange, RoundAdjustment, RoundBoundary, RoundContext, RoundDecision,
+        RoundStrategy, RoundToolResult,
+    },
+};
+
+/// How the round loop should proceed after a [`RoundStrategy`] decision.
+enum RoundFlow {
+    /// Advance to the next round (or, at the assistant boundary, return).
+    Continue,
+    /// A corrective turn was injected; run another round.
+    Inject,
+    /// End the run gracefully at this boundary.
+    Stop,
+}
 
 const PROVIDER_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 const PROVIDER_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
@@ -103,14 +120,50 @@ impl<'a> TurnRunner<'a> {
 
             let tool_calls = streamed.pending.ready_tool_calls()?;
             if tool_calls.is_empty() {
+                if let Some(strategy) = self.options.round_strategy.clone() {
+                    let assistant_message = self
+                        .agent
+                        .last_message()
+                        .filter(|message| message.role == Role::Assistant)
+                        .cloned();
+                    let flow = self
+                        .run_round_strategy(
+                            &strategy,
+                            RoundBoundary::AssistantMessageCommitted,
+                            assistant_message.as_ref(),
+                            &[],
+                            rounds,
+                        )
+                        .await?;
+                    match flow {
+                        RoundFlow::Inject => {
+                            self.agent.note_round_without_task();
+                            self.agent.persist_agent_record()?;
+                            continue;
+                        }
+                        RoundFlow::Continue | RoundFlow::Stop => {
+                            self.agent.note_round_without_task();
+                            return Ok(());
+                        }
+                    }
+                }
                 self.agent.note_round_without_task();
                 return Ok(());
             }
+
+            let round_strategy = self.options.round_strategy.clone();
+            let call_names = round_strategy
+                .as_ref()
+                .map(|_| collect_tool_call_names(&tool_calls));
 
             let execution = self
                 .tool_runtime
                 .execute_calls(self.agent, &self.options, tool_calls)
                 .await?;
+
+            let tool_results = call_names
+                .map(|names| summarize_tool_results(&execution.results, &names))
+                .unwrap_or_default();
 
             self.agent.memory.append_message(Message {
                 role: Role::User,
@@ -126,7 +179,82 @@ impl<'a> TurnRunner<'a> {
             if execution.end_turn {
                 return Ok(());
             }
+
+            if let Some(strategy) = round_strategy {
+                let flow = self
+                    .run_round_strategy(
+                        &strategy,
+                        RoundBoundary::ToolResultsCommitted,
+                        None,
+                        &tool_results,
+                        rounds,
+                    )
+                    .await?;
+                if matches!(flow, RoundFlow::Stop) {
+                    return Ok(());
+                }
+            }
         }
+    }
+
+    /// Invokes the per-run [`RoundStrategy`] at a round boundary and applies its
+    /// decision: any model/reasoning switch, then any corrective injection. The
+    /// returned [`RoundFlow`] tells the loop whether to continue, treat the round
+    /// as injected, or stop gracefully.
+    async fn run_round_strategy(
+        &mut self,
+        strategy: &Arc<dyn RoundStrategy>,
+        boundary: RoundBoundary,
+        assistant_message: Option<&Message>,
+        tool_results: &[RoundToolResult],
+        rounds: usize,
+    ) -> Result<RoundFlow, RuntimeError> {
+        let context = RoundContext::new(
+            boundary,
+            assistant_message,
+            tool_results,
+            rounds,
+            self.model_requests,
+        );
+        match strategy.on_round(context).await {
+            RoundDecision::Continue(adjustment) => {
+                self.apply_round_adjustment(adjustment)?;
+                Ok(RoundFlow::Continue)
+            }
+            RoundDecision::Inject { content, adjust } => {
+                self.apply_round_adjustment(adjust)?;
+                self.inject_round_context(content)?;
+                Ok(RoundFlow::Inject)
+            }
+            RoundDecision::Stop => Ok(RoundFlow::Stop),
+        }
+    }
+
+    /// Applies a strategy-requested model/reasoning switch to subsequent rounds,
+    /// reusing the live-config mechanics of [`Agent::set_model`] and
+    /// [`Agent::set_reasoning`] (which `stream_turn` reads live on the next round).
+    fn apply_round_adjustment(&mut self, adjustment: RoundAdjustment) -> Result<(), RuntimeError> {
+        if let Some(model) = adjustment.model {
+            self.agent.set_model(model)?;
+        }
+        match adjustment.reasoning {
+            Some(ReasoningChange::Set(options)) => self.agent.set_reasoning(Some(options))?,
+            Some(ReasoningChange::Clear) => self.agent.set_reasoning(None)?,
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Appends strategy-supplied corrective context as a committed user turn,
+    /// mirroring [`append_invalid_tool_input_feedback`](Self::append_invalid_tool_input_feedback)
+    /// so the injection is part of the replayable transcript.
+    fn inject_round_context(&mut self, content: Vec<ContentBlock>) -> Result<(), RuntimeError> {
+        self.agent.memory.append_message(Message {
+            role: Role::User,
+            content,
+        })?;
+        self.agent.sync_memory_snapshot();
+        Ok(())
     }
 
     async fn stream_turn(&mut self) -> Result<StreamedTurn, RuntimeError> {
@@ -384,6 +512,40 @@ impl<'a> TurnRunner<'a> {
         };
         recalled_memory_message(&hits, self.agent.config().memory.auto_recall_char_budget)
     }
+}
+
+/// Builds a `tool_use_id -> tool_name` map from the round's tool calls so a
+/// committed tool result (which carries only `tool_use_id`) can be summarized
+/// with its originating tool name for a [`RoundStrategy`].
+fn collect_tool_call_names(calls: &[ToolCall]) -> HashMap<String, String> {
+    calls
+        .iter()
+        .map(|call| (call.id.clone(), call.name.clone()))
+        .collect()
+}
+
+/// Summarizes committed tool-result blocks into provider-neutral
+/// [`RoundToolResult`]s for a [`RoundStrategy`], correlating each result with its
+/// originating tool name via `names`.
+fn summarize_tool_results(
+    results: &[ContentBlock],
+    names: &HashMap<String, String>,
+) -> Vec<RoundToolResult> {
+    results
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => Some(RoundToolResult {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: names.get(tool_use_id).cloned().unwrap_or_default(),
+                is_error: *is_error,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn provider_retry_delay(attempt: usize) -> Duration {
