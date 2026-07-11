@@ -174,19 +174,70 @@ pub enum CompactionExecutionMode {
     Remote,
 }
 
+/// The result of one compaction: a replacement [`AgentTranscript`] plus
+/// counts describing how it was built from the original.
+///
+/// **Metadata-preservation guarantee (mentra ADR-0001 §6).** Every item that
+/// survives into `transcript` — the untouched continuation tail, salvaged
+/// recent user turns, and salvaged recent delegation results — is copied
+/// **verbatim** from the original transcript, so any opaque
+/// [`TranscriptItem::details`] a host attached survives bit-for-bit. This
+/// holds by construction: mentra never rebuilds a preserved item from its
+/// projected [`crate::Message`] (which would drop `details`, a field that
+/// exists only on `TranscriptItem`); it clones the original item.
+///
+/// This guarantee is scoped to *preserved* items only. An item inside the
+/// summarized prefix that is **not** salvaged is replaced by the
+/// [`CompactionSummary`] along with the rest of its content — its `details`
+/// go with it. That is honest, documented behavior, not a violation: the
+/// contract never promises to resurrect a discarded item's metadata, only to
+/// never silently drop it from one that was kept. The full pre-compaction
+/// transcript — discarded items included — is written to `transcript_path`
+/// before summarization runs, so a host that needs a discarded item's
+/// `details` after the fact can still recover them from that snapshot.
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {
     pub mode: CompactionExecutionMode,
+    /// Path to the `.jsonl` snapshot of the **entire pre-compaction**
+    /// transcript, one [`TranscriptItem`] per line, written before
+    /// summarization runs. Every item's `details` round-trips through this
+    /// file, including items the compacted `transcript` goes on to discard —
+    /// this is the recovery artifact for the summarized prefix.
     pub transcript_path: PathBuf,
     pub transcript: AgentTranscript,
     pub summary: CompactionSummary,
+    /// Count of original items in the summarized prefix
+    /// (`required_tail_start_for_continuation`'s `preserve_from` split).
+    /// This counts every item in that prefix, **including** ones also
+    /// salvaged into `transcript` by `preserved_user_turns` /
+    /// `preserved_delegation_results` — from this count's point of view they
+    /// were replaced by the summary, even though their content (and
+    /// `details`) survives verbatim elsewhere in the replacement transcript.
+    /// It does not mean "gone".
     pub replaced_items: usize,
+    /// Count of items kept strictly because they are the untouched
+    /// continuation tail (outside the summarized prefix), independent of
+    /// `preserved_user_turns` / `preserved_delegation_results` below, which
+    /// count salvaged items pulled *out of* the summarized prefix instead.
+    /// The three counts are disjoint by construction.
     pub preserved_items: usize,
+    /// Count of recent user turns salvaged out of the summarized prefix and
+    /// copied verbatim (details included) into the replacement transcript.
     pub preserved_user_turns: usize,
+    /// Count of recent delegation results salvaged out of the summarized
+    /// prefix and copied verbatim (details included) into the replacement
+    /// transcript.
     pub preserved_delegation_results: usize,
     pub diagnostics: CompactionDiagnostics,
 }
 
+/// Compacts an agent transcript into a shorter one carrying a summary of the
+/// discarded portion. See [`CompactionOutcome`] for the metadata-preservation
+/// contract every implementation must uphold: `details` on any item that
+/// survives compaction (tail, salvaged user turns, salvaged delegation
+/// results) is preserved bit-for-bit; `details` on a discarded, unsalvaged
+/// item is honestly gone with the rest of that item's content, recoverable
+/// only from the pre-compaction snapshot at [`CompactionOutcome::transcript_path`].
 #[async_trait]
 pub trait CompactionEngine: Send + Sync {
     async fn compact(
@@ -196,6 +247,12 @@ pub trait CompactionEngine: Send + Sync {
     ) -> Result<Option<CompactionOutcome>, RuntimeError>;
 }
 
+/// The default [`CompactionEngine`]: summarizes the compactable prefix of a
+/// transcript (locally via the provider's chat completion, or remotely via
+/// [`Provider::compact`] when supported), while keeping the continuation
+/// tail and a bounded number of recent user turns and delegation results
+/// verbatim — including their opaque `details` — per the
+/// [`CompactionOutcome`] contract.
 #[derive(Debug, Default)]
 pub struct StandardCompactionEngine;
 
@@ -642,8 +699,21 @@ impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeMap,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use serde_json::{Value, json};
+
     use super::*;
-    use crate::{ContentBlock, Message};
+    use crate::{
+        ContentBlock, DelegationArtifact, DelegationKind, DelegationStatus, Message, ModelInfo,
+        Role,
+        provider::{
+            ProviderDescriptor, ProviderEventStream, Response, provider_event_stream_from_response,
+        },
+    };
 
     fn tool_exchange_item(text: &str) -> TranscriptItem {
         TranscriptItem::tool_exchange(
@@ -796,5 +866,299 @@ mod tests {
         let total = approx_token_count_items(&items);
         let expected = approx_token_count("hello world") + approx_token_count("some tool output");
         assert_eq!(total, expected);
+    }
+
+    // -------------------------------------------------------------------
+    // M5: metadata-preserving compaction (mentra ADR-0001 §6)
+    // -------------------------------------------------------------------
+
+    fn delegation_result_item(label: &str) -> TranscriptItem {
+        TranscriptItem::delegation_result(
+            Message::user(ContentBlock::text(format!("{label} done"))),
+            DelegationArtifact {
+                kind: DelegationKind::Subagent,
+                agent_id: format!("agent-{label}"),
+                agent_name: label.to_string(),
+                role: None,
+                status: DelegationStatus::Finished,
+                task_summary: format!("{label} task"),
+                result_summary: None,
+                artifacts: Vec::new(),
+            },
+            None,
+        )
+    }
+
+    fn with_marker(item: TranscriptItem, key: &str, value: Value) -> TranscriptItem {
+        item.with_details(BTreeMap::from([(key.to_string(), value)]))
+    }
+
+    // Regression test 1/2: proves `select_recent_user_turns` copies its
+    // selections verbatim rather than rebuilding them from `Message`. A
+    // regression that swapped `item.clone()` for something like
+    // `TranscriptItem::user_turn(item.message.clone().unwrap())` would
+    // produce items with `details: None` here, and the derived `PartialEq`
+    // (which compares every field, `details` included) would catch it.
+    #[test]
+    fn select_recent_user_turns_copies_items_verbatim_details_included() {
+        let older = with_marker(user_turn_item("older"), "older", json!({ "keep": "older" }));
+        let newer = with_marker(user_turn_item("newer"), "newer", json!({ "keep": "newer" }));
+        let items = vec![
+            older.clone(),
+            tool_exchange_item("not a user turn"),
+            newer.clone(),
+        ];
+
+        let selected = select_recent_user_turns(&items, 20_000);
+
+        assert_eq!(selected, vec![older, newer]);
+    }
+
+    // Regression test 2/2: same property for
+    // `select_recent_delegation_results`.
+    #[test]
+    fn select_recent_delegation_results_copies_items_verbatim_details_included() {
+        let first = with_marker(delegation_result_item("first"), "first", json!({ "n": 1 }));
+        let second = with_marker(
+            delegation_result_item("second"),
+            "second",
+            json!({ "n": 2 }),
+        );
+        let items = vec![
+            first.clone(),
+            user_turn_item("not a delegation result"),
+            second.clone(),
+        ];
+
+        let selected = select_recent_delegation_results(&items, 8);
+
+        assert_eq!(selected, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn persist_transcript_snapshot_carries_every_items_details_bit_for_bit() {
+        let items = vec![
+            with_marker(user_turn_item("kept"), "kept", json!({ "n": 1 })),
+            with_marker(
+                tool_exchange_item("about to be discarded"),
+                "about-to-be-discarded",
+                json!({ "n": 2 }),
+            ),
+            TranscriptItem::assistant_turn(Message::assistant(ContentBlock::text(
+                "no details here",
+            ))),
+        ];
+        let dir = temp_dir("persist-transcript-details");
+
+        let path = persist_transcript(&items, &dir)
+            .await
+            .expect("persist snapshot");
+
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read snapshot");
+        let reloaded: Vec<TranscriptItem> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid TranscriptItem json"))
+            .collect();
+        assert_eq!(
+            reloaded, items,
+            "the pre-compaction snapshot must carry every item's details bit-for-bit, \
+             including items about to be discarded by summarization"
+        );
+    }
+
+    /// Minimal provider that returns one fixed local-summarization response —
+    /// enough to drive `StandardCompactionEngine::compact` end to end
+    /// without pulling in the full scripted-provider harness from
+    /// `agent::tests::support`, which is `pub(super)`-scoped to
+    /// `agent::tests` and unreachable from this module.
+    struct FixedSummaryProvider {
+        model: ModelInfo,
+    }
+
+    #[async_trait]
+    impl Provider for FixedSummaryProvider {
+        fn descriptor(&self) -> ProviderDescriptor {
+            ProviderDescriptor::new(self.model.provider.clone())
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![self.model.clone()])
+        }
+
+        async fn stream(
+            &self,
+            _request: Request<'_>,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            Ok(provider_event_stream_from_response(Response {
+                id: "fixed-summary-response".to_string(),
+                model: self.model.id.clone(),
+                role: Role::Assistant,
+                content: vec![ContentBlock::text("test summary")],
+                stop_reason: None,
+                usage: None,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_preserves_salvaged_details_and_lets_discarded_details_go_with_their_items() {
+        let model = ModelInfo::new("test-model", "test-provider");
+        let provider: Arc<dyn Provider> = Arc::new(FixedSummaryProvider {
+            model: model.clone(),
+        });
+
+        // Compacted-away prefix: one user turn and one delegation result
+        // that the engine salvages (and must copy verbatim, details
+        // included), plus one assistant turn and one tool exchange that are
+        // *not* salvaged and are honestly discarded along with their
+        // details.
+        let salvaged_user = with_marker(
+            user_turn_item("first message"),
+            "salvaged-user",
+            json!({ "keep": "u0" }),
+        );
+        let discarded_assistant =
+            TranscriptItem::assistant_turn(Message::assistant(ContentBlock::text("ack")));
+        let salvaged_delegation = with_marker(
+            delegation_result_item("helper"),
+            "salvaged-delegation",
+            json!({ "keep": "d0" }),
+        );
+        let discarded_tool_result = with_marker(
+            tool_exchange_item("stale tool output"),
+            "discarded-tool",
+            json!({ "drop": "t0" }),
+        );
+        // Continuation tail: kept untouched outside the compacted prefix
+        // (`required_tail_start_for_continuation` keeps the final
+        // assistant tool_use + tool result pair intact).
+        let tail_assistant =
+            TranscriptItem::assistant_turn(Message::assistant(ContentBlock::ToolUse {
+                id: "tail-1".to_string(),
+                name: "tail_tool".to_string(),
+                input: json!({}),
+            }));
+        let tail_result = with_marker(
+            TranscriptItem::tool_exchange(
+                Message::user(ContentBlock::text("tail tool output")),
+                Some("tail-1".to_string()),
+                false,
+            ),
+            "tail-tool",
+            json!({ "keep": "tail" }),
+        );
+
+        let items = vec![
+            salvaged_user.clone(),
+            discarded_assistant.clone(),
+            salvaged_delegation.clone(),
+            discarded_tool_result.clone(),
+            tail_assistant.clone(),
+            tail_result.clone(),
+        ];
+        let transcript = AgentTranscript::new(items.clone());
+        let transcript_dir = temp_dir("m5-compaction-salvage");
+
+        let request = CompactionRequest {
+            model: model.id.clone(),
+            transcript,
+            transcript_dir,
+            summary_max_input_chars: 100_000,
+            summary_max_output_tokens: 512,
+            preserve_recent_user_tokens: 20_000,
+            preserve_recent_delegation_results: 8,
+            provider_request_options: ProviderRequestOptions::default(),
+            mode: CompactionMode::LocalOnly,
+            max_persisted_transcripts: None,
+        };
+
+        let outcome = StandardCompactionEngine
+            .compact(provider, request)
+            .await
+            .expect("compaction should not error")
+            .expect("compaction should produce an outcome");
+
+        // Counts stay consistent with the documented semantics: the whole
+        // compacted prefix (4 items) counts as replaced even though two of
+        // its items are also salvaged; only the untouched tail (2 items)
+        // counts as preserved_items.
+        assert_eq!(
+            outcome.replaced_items, 4,
+            "the whole compacted prefix counts as replaced, salvaged items included"
+        );
+        assert_eq!(
+            outcome.preserved_items, 2,
+            "preserved_items counts only the untouched continuation tail"
+        );
+        assert_eq!(outcome.preserved_user_turns, 1);
+        assert_eq!(outcome.preserved_delegation_results, 1);
+
+        let replacement = outcome.transcript.items();
+
+        // Salvaged items survive verbatim, details included.
+        let replayed_user = replacement
+            .iter()
+            .find(|item| item.is_real_user_turn())
+            .expect("salvaged user turn present in the replacement transcript");
+        assert_eq!(
+            replayed_user, &salvaged_user,
+            "the salvaged user turn must survive bit-for-bit, details included"
+        );
+
+        let replayed_delegation = replacement
+            .iter()
+            .find(|item| item.is_delegation_result())
+            .expect("salvaged delegation result present in the replacement transcript");
+        assert_eq!(
+            replayed_delegation, &salvaged_delegation,
+            "the salvaged delegation result must survive bit-for-bit, details included"
+        );
+
+        // The untouched tail survives verbatim too.
+        assert_eq!(
+            replacement.last(),
+            Some(&tail_result),
+            "the untouched tail item must survive bit-for-bit, details included"
+        );
+
+        // Discarded items are honestly gone: their details never resurface
+        // on any other item in the replacement transcript.
+        let replacement_json =
+            serde_json::to_string(&replacement).expect("serialize replacement transcript");
+        assert!(
+            !replacement_json.contains("discarded-tool"),
+            "a discarded item's details must not leak into the replacement transcript, got: {replacement_json}"
+        );
+
+        // But the pre-compaction snapshot on disk still has everything,
+        // including the discarded item's details — the recovery artifact
+        // for the summarized prefix.
+        let snapshot = tokio::fs::read_to_string(&outcome.transcript_path)
+            .await
+            .expect("read pre-compaction snapshot");
+        let snapshot_items: Vec<TranscriptItem> = snapshot
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid TranscriptItem json"))
+            .collect();
+        assert_eq!(
+            snapshot_items, items,
+            "the pre-compaction snapshot must preserve every original item bit-for-bit, \
+             including ones the compaction goes on to discard"
+        );
+    }
+
+    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "mentra-compaction-test-{label}-{timestamp}-{unique}"
+        ))
     }
 }
