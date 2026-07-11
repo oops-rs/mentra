@@ -145,6 +145,7 @@ pub struct RoundContext<'a> {
     tool_results: &'a [RoundToolResult],
     rounds_completed: usize,
     model_requests: usize,
+    transport_retries: usize,
 }
 
 impl<'a> RoundContext<'a> {
@@ -154,6 +155,7 @@ impl<'a> RoundContext<'a> {
         tool_results: &'a [RoundToolResult],
         rounds_completed: usize,
         model_requests: usize,
+        transport_retries: usize,
     ) -> Self {
         Self {
             boundary,
@@ -161,6 +163,7 @@ impl<'a> RoundContext<'a> {
             tool_results,
             rounds_completed,
             model_requests,
+            transport_retries,
         }
     }
 
@@ -192,6 +195,16 @@ impl<'a> RoundContext<'a> {
     /// is not a pure logical-round counter.
     pub fn model_requests(&self) -> usize {
         self.model_requests
+    }
+
+    /// The number of transient transport-connection retries the run has made so
+    /// far — the subset of [`model_requests`](Self::model_requests) that were
+    /// *not* the round's successful attempt. Kept distinct from
+    /// [`rounds_completed`](Self::rounds_completed), which counts only completed
+    /// logical rounds: a round that needed retries before its connection opened
+    /// still counts as exactly one completed round.
+    pub fn transport_retries(&self) -> usize {
+        self.transport_retries
     }
 }
 

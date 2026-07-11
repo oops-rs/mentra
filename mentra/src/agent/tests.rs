@@ -1,3 +1,4 @@
+mod budgets;
 mod pending;
 mod round_strategy;
 mod runtime;
