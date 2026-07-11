@@ -21,9 +21,10 @@ pub use descriptor::{
     ToolCapability, ToolDurability, ToolExecutionCategory, ToolExecutionMode, ToolLoadingPolicy,
     ToolSideEffectLevel,
 };
+pub use mentra_provider::ToolResultContent;
 pub use model::{
     ExecutableTool, ParallelToolContext, ToolCall, ToolContext, ToolDefinition, ToolExecutor,
-    ToolResult, ToolSpec,
+    ToolOutput, ToolResult, ToolSpec,
 };
 pub(crate) use runtime::ToolRuntime;
 

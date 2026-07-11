@@ -9,3 +9,4 @@ mod runtime_tasks;
 mod runtime_tools;
 mod runtime_volatile_store;
 mod support;
+mod tool_output;

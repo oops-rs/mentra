@@ -72,6 +72,10 @@ pub enum RuntimeHookEvent {
         is_error: bool,
         error: Option<String>,
         output_preview: String,
+        /// Opaque host metadata attached via `ToolOutput::details`, carried up
+        /// to this observability boundary. Never sent to a provider.
+        #[serde(default)]
+        details: Option<serde_json::Value>,
     },
     PolicyDenied {
         agent_id: String,
