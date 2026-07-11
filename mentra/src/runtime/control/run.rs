@@ -42,6 +42,13 @@ pub struct RunOptions {
     pub retry_budget: usize,
     pub tool_budget: Option<usize>,
     pub model_budget: Option<usize>,
+    /// A per-run [`RoundStrategy`](crate::agent::RoundStrategy) invoked at each
+    /// round boundary (after a committed tool round and after a committed
+    /// tool-free assistant message). It is owned by this single `Agent::run`
+    /// invocation, never by a shared [`Runtime`](crate::Runtime), so one run's
+    /// steering and stop state cannot leak into another run. `None` (the default)
+    /// reproduces mentra's built-in round loop exactly.
+    pub round_strategy: Option<Arc<dyn crate::agent::RoundStrategy>>,
 }
 
 impl Default for RunOptions {
@@ -53,11 +60,19 @@ impl Default for RunOptions {
             retry_budget: DEFAULT_PROVIDER_RETRY_BUDGET,
             tool_budget: None,
             model_budget: None,
+            round_strategy: None,
         }
     }
 }
 
 impl RunOptions {
+    /// Attaches a per-run [`RoundStrategy`](crate::agent::RoundStrategy) to these
+    /// options, returning the updated value.
+    pub fn with_round_strategy(mut self, strategy: Arc<dyn crate::agent::RoundStrategy>) -> Self {
+        self.round_strategy = Some(strategy);
+        self
+    }
+
     pub(crate) fn check_limits(&self) -> Result<(), RuntimeError> {
         if self
             .cancellation
