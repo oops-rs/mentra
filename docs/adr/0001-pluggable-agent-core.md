@@ -1,6 +1,6 @@
 # ADR-0001 — Evolve mentra into a pi-shaped pluggable agent core
 
-> Status: Draft
+> Status: Accepted (2026-07-11, owner-authorized at the M7 gate)
 > Created: 2026-07-11
 > Companion decision (nous):
 > [ADR-0052 — Evolve the agent harness through typed finish and per-run mentra
