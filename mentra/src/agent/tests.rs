@@ -7,3 +7,4 @@ mod runtime_snapshot;
 mod runtime_tasks;
 mod runtime_tools;
 mod support;
+mod tool_output;
