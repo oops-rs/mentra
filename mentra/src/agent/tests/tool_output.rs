@@ -2,9 +2,12 @@
 //! from `ToolResult`, structured content + opaque `details`, and the two
 //! layers of termination exclusivity.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -55,6 +58,62 @@ impl ToolExecutor for StructuredDetailsTool {
             ToolOutput::structured(json!({ "answer": 42 }))
                 .with_details(json!({ "secret": "shh" })),
         )
+    }
+}
+
+/// A pair of parallel-eligible tools that each attach distinct `details`,
+/// used to prove a round with several tool calls maps each result's
+/// metadata to its own `tool_use_id` rather than to the wrong call or a
+/// single collapsed value (M3 test 4).
+struct DetailsToolA;
+
+#[async_trait]
+impl ToolDefinition for DetailsToolA {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("details_tool_a")
+            .description("test tool: returns details keyed to call A")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for DetailsToolA {
+    async fn execute_output(
+        &self,
+        _ctx: ParallelToolContext,
+        _input: Value,
+    ) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::text("a-result").with_details(json!({ "who": "a" })))
+    }
+}
+
+struct DetailsToolB;
+
+#[async_trait]
+impl ToolDefinition for DetailsToolB {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("details_tool_b")
+            .description("test tool: returns details keyed to call B")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for DetailsToolB {
+    async fn execute_output(
+        &self,
+        _ctx: ParallelToolContext,
+        _input: Value,
+    ) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::text("b-result").with_details(json!({ "who": "b" })))
     }
 }
 
@@ -424,6 +483,61 @@ async fn structured_tool_projects_content_and_hides_details_from_provider() {
         _ => None,
     });
     assert_eq!(details, Some(Some(json!({ "secret": "shh" }))));
+}
+
+// M3 tests 3 & 4: a round with two parallel tool calls, each returning
+// distinct `details`, maps every result's metadata to its own `tool_use_id`
+// on the committed transcript item — not to the wrong call, and not
+// collapsed into one value — and a host recovers it afterward through the
+// plain public `TranscriptItem` accessor, with no mentra-side host type or
+// downcast involved.
+#[tokio::test]
+async fn parallel_round_maps_each_results_details_to_its_own_tool_use_id() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            multi_tool_use_stream(
+                &model.id,
+                &[
+                    ("call-a", "details_tool_a", r#"{}"#),
+                    ("call-b", "details_tool_b", r#"{}"#),
+                ],
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(DetailsToolA)
+        .with_tool(DetailsToolB)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("run both details tools")])
+        .await
+        .expect("send");
+
+    // Public accessor, reached straight off `Agent::transcript()` — no
+    // downcast, no mentra-side knowledge of what "who" means.
+    let item = agent
+        .transcript()
+        .items()
+        .iter()
+        .rev()
+        .find(|item| matches!(item.kind, crate::TranscriptKind::ToolExchange { .. }))
+        .expect("tool exchange item committed");
+
+    let expected: BTreeMap<String, Value> = BTreeMap::from([
+        ("call-a".to_string(), json!({ "who": "a" })),
+        ("call-b".to_string(), json!({ "who": "b" })),
+    ]);
+    assert_eq!(item.details(), Some(&expected));
+    assert_eq!(item.detail("call-a"), Some(&json!({ "who": "a" })));
+    assert_eq!(item.detail("call-b"), Some(&json!({ "who": "b" })));
 }
 
 // 3. A terminate:true tool ends the run successfully with the transcript

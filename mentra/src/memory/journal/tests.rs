@@ -1,7 +1,9 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
+
+use serde_json::json;
 
 use crate::{
-    AgentTranscript, ContentBlock, Message,
+    AgentTranscript, ContentBlock, Message, TranscriptKind,
     memory::journal::{AgentMemory, AgentMemoryState, CompactionOutcome, PendingTurnState},
     runtime::SqliteRuntimeStore,
 };
@@ -87,4 +89,62 @@ fn rollback_and_compaction_update_memory_state() {
         .expect("compact");
     assert_eq!(memory.transcript().len(), 1);
     let _ = path;
+}
+
+// M3: `append_message_with_details` is an additive counterpart to
+// `append_message` that behaves identically except for attaching metadata —
+// proven directly against the in-process transcript here. The full
+// persist/reload round-trip through the SQLite store (which additionally
+// requires a real `agents` row, written by `Runtime::spawn`/`create_agent`,
+// not just `AgentMemory` in isolation) is covered end-to-end in
+// `agent::tests::runtime_resume::resumed_agent_keeps_tool_result_details_after_restart`.
+#[test]
+fn append_message_with_details_attaches_metadata_keyed_by_tool_use_id() {
+    let store = Arc::new(SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
+        "mentra-memory-details-test-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ))));
+    let mut memory = AgentMemory::new("agent-details", store, AgentMemoryState::default());
+
+    memory
+        .begin_run(
+            "run-1".to_string(),
+            Message::user(ContentBlock::text("run the details tool")),
+        )
+        .expect("begin run");
+    memory
+        .commit_assistant_message(Message::assistant(ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "details_tool".to_string(),
+            input: json!({}),
+        }))
+        .expect("commit assistant tool call");
+
+    let details: BTreeMap<String, serde_json::Value> =
+        BTreeMap::from([("call-1".to_string(), json!({ "secret": "shh", "n": 42 }))]);
+    memory
+        .append_message_with_details(
+            Message::user(ContentBlock::ToolResult {
+                tool_use_id: "call-1".to_string(),
+                content: "tool output".to_string().into(),
+                is_error: false,
+            }),
+            details.clone(),
+        )
+        .expect("append with details");
+
+    let item = memory
+        .transcript()
+        .items()
+        .iter()
+        .find(|item| matches!(item.kind, TranscriptKind::ToolExchange { .. }))
+        .expect("transcript keeps the tool exchange item");
+    assert_eq!(item.details(), Some(&details));
+    assert_eq!(
+        item.detail("call-1"),
+        Some(&json!({ "secret": "shh", "n": 42 }))
+    );
 }

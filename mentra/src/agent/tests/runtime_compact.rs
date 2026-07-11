@@ -5,12 +5,19 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use async_trait::async_trait;
+use serde_json::{Value, json};
+
 use crate::{
-    BuiltinProvider, ContentBlock, Message, Role,
+    BuiltinProvider, ContentBlock, Message, Role, TranscriptKind,
     agent::{AgentConfig, AgentEvent, CompactionConfig, CompactionTrigger},
     compaction::{CompactionExecutionMode, CompactionMode},
     provider::{CompactionInputItem, CompactionResponse, ProviderCapabilities, Request},
     runtime::{Runtime, SqliteRuntimeStore},
+    tool::{
+        ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolOutput, ToolSideEffectLevel,
+        ToolSpec,
+    },
 };
 
 use crate::provider::ProviderError;
@@ -19,6 +26,46 @@ use super::support::{
     ScriptedProvider, SessionGenerator, StaticTool, erroring_stream, model_info, text_stream,
     tool_use_stream,
 };
+
+/// A tool whose output is long enough to trigger micro-compaction's
+/// content-collapse threshold, and which attaches opaque `details` — used to
+/// prove micro-compaction (a request-projection concern) never touches the
+/// canonical transcript item's metadata (M3 test 5), and that full
+/// compaction preserves it on items outside the compacted prefix.
+struct DetailsTool {
+    output: String,
+}
+
+impl DetailsTool {
+    fn new(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolDefinition for DetailsTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("details_tool")
+            .description("test tool: returns long output plus opaque details")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for DetailsTool {
+    async fn execute_mut_output(
+        &self,
+        _ctx: ToolContext<'_>,
+        _input: Value,
+    ) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::text(self.output.clone()).with_details(json!({ "marker": "keep-me" })))
+    }
+}
 
 #[tokio::test]
 async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
@@ -85,6 +132,164 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
             long_output,
         ]
     );
+}
+
+// M3 test 5: micro-compaction rewrites old tool results only in the
+// *request projection* (`micro_compacted_history`, a fresh clone of the
+// transcript's `Message`s built on every `stream_turn`) — it never touches
+// the canonical `TranscriptItem`s themselves, so the details a host attached
+// to the collapsed call survive on the stored item even though the outgoing
+// request no longer carries the original content.
+#[tokio::test]
+async fn micro_compaction_leaves_stored_item_details_intact() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let long_output = "x".repeat(140);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "tool-1", "details_tool", r#"{}"#),
+            tool_use_stream(&model.id, "tool-2", "details_tool", r#"{}"#),
+            tool_use_stream(&model.id, "tool-3", "details_tool", r#"{}"#),
+            tool_use_stream(&model.id, "tool-4", "details_tool", r#"{}"#),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(DetailsTool::new(long_output.clone()))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    keep_recent_tool_results: 2,
+                    auto_compact_threshold_tokens: None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    // The outgoing request for the final round collapsed the two oldest
+    // tool results (tool-1, tool-2) to a placeholder — proof micro-compaction
+    // actually ran.
+    let requests = provider_handle.recorded_requests().await;
+    assert_eq!(requests.len(), 5);
+    let final_tool_results = tool_result_contents(&requests[4]);
+    assert_eq!(
+        final_tool_results,
+        vec![
+            "[Previous: used details_tool]".to_string(),
+            "[Previous: used details_tool]".to_string(),
+            long_output.clone(),
+            long_output,
+        ]
+    );
+
+    // The canonical transcript item for the collapsed tool-1 call still
+    // carries its full details, untouched by the request-side collapse.
+    let item = agent
+        .transcript()
+        .items()
+        .iter()
+        .find(|item| {
+            matches!(
+                item.kind,
+                TranscriptKind::ToolExchange {
+                    tool_use_id: Some(ref id),
+                    ..
+                } if id == "tool-1"
+            )
+        })
+        .expect("tool-1's transcript item is still present");
+    assert_eq!(item.detail("tool-1"), Some(&json!({ "marker": "keep-me" })));
+}
+
+// M3 (spec A6 / plan M5 prerequisite, not the M5 guarantee itself): a
+// compacted-away prefix is summarized away, but the tail — the last
+// assistant tool_use + its tool result — is copied into the replacement
+// transcript verbatim (`replacement.extend_from_slice`,
+// `src/compaction.rs::StandardCompactionEngine::compact`), so a
+// details-bearing item in that tail keeps its metadata "for free" through
+// `TranscriptItem`'s derived `Clone`. This is a cheap sanity check on that
+// existing copy path, not the exhaustive metadata-preservation contract
+// (ADR-0001 §6), which is a separate, later slice.
+#[tokio::test]
+async fn auto_compaction_preserves_details_on_tail_items() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "details_tool", r#"{}"#),
+            text_stream(&model.id, "summary"),
+            text_stream(&model.id, "after compact"),
+        ],
+    );
+    let transcript_dir = temp_dir("details-preserve-compact");
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(DetailsTool::new("tool result"))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: Some(1),
+                    transcript_dir,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "run the details tool".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    let compaction = collect_events(&mut events)
+        .into_iter()
+        .find_map(|event| match event {
+            AgentEvent::ContextCompacted { details } => Some(details),
+            _ => None,
+        })
+        .expect("expected a compaction event");
+    assert_eq!(compaction.trigger, CompactionTrigger::Auto);
+    assert_eq!(
+        compaction.preserved_items, 2,
+        "the assistant tool_use and its tool result stay in the tail"
+    );
+
+    let item = agent
+        .transcript()
+        .items()
+        .iter()
+        .find(|item| matches!(item.kind, TranscriptKind::ToolExchange { .. }))
+        .expect("compaction preserved the tool exchange item in the tail");
+    assert_eq!(item.detail("call-1"), Some(&json!({ "marker": "keep-me" })));
 }
 
 #[tokio::test]

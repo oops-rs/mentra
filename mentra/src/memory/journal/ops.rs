@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use crate::{
     Message,
@@ -59,6 +59,18 @@ impl AgentMemory {
 
     pub fn append_message(&mut self, message: Message) -> Result<(), RuntimeError> {
         self.append_transcript_item(transcript_item_from_message(message))
+    }
+
+    /// Additive counterpart to [`Self::append_message`] that also attaches
+    /// opaque per-call host metadata (keyed by `tool_use_id`) to the
+    /// resulting transcript item, so it survives persistence and replay
+    /// without mentra interpreting it (ADR-0001 §4).
+    pub fn append_message_with_details(
+        &mut self,
+        message: Message,
+        details: BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), RuntimeError> {
+        self.append_transcript_item(transcript_item_from_message(message).with_details(details))
     }
 
     pub fn append_transcript_item(&mut self, item: TranscriptItem) -> Result<(), RuntimeError> {

@@ -182,10 +182,17 @@ impl<'a> TurnRunner<'a> {
                 .map(|names| summarize_tool_results(&execution.results, &names))
                 .unwrap_or_default();
 
-            self.agent.memory.append_message(Message {
+            let tool_result_message = Message {
                 role: Role::User,
                 content: execution.results,
-            })?;
+            };
+            if execution.details.is_empty() {
+                self.agent.memory.append_message(tool_result_message)?;
+            } else {
+                self.agent
+                    .memory
+                    .append_message_with_details(tool_result_message, execution.details)?;
+            }
             self.agent.sync_memory_snapshot();
             if execution.successful_task {
                 self.agent.record_task_activity();
