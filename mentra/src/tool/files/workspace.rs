@@ -802,8 +802,8 @@ mod tests {
             .edit(
                 "note.txt".to_string(),
                 vec![TextEdit {
-                    old_string: "second\n".to_string(),
-                    new_string: "changed\n".to_string(),
+                    old_string: "second\r\n".to_string(),
+                    new_string: "changed\r\n".to_string(),
                 }],
                 false,
             )

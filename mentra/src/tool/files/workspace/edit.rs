@@ -82,6 +82,13 @@ impl WorkspaceEditor {
         };
         let original = source.replace("\r\n", "\n");
 
+        let edits = edits
+            .into_iter()
+            .map(|edit| TextEdit {
+                old_string: normalize_edit_text(&edit.old_string),
+                new_string: normalize_edit_text(&edit.new_string),
+            })
+            .collect::<Vec<_>>();
         let mut replacements = Vec::new();
         for (edit_index, edit) in edits.iter().enumerate() {
             validate_edit(edit, edit_index)?;
@@ -168,6 +175,12 @@ impl WorkspaceEditor {
             first_changed_line,
         })
     }
+}
+
+fn normalize_edit_text(text: &str) -> String {
+    text.strip_prefix('\u{feff}')
+        .unwrap_or(text)
+        .replace("\r\n", "\n")
 }
 
 fn validate_edit(edit: &TextEdit, edit_index: usize) -> Result<(), String> {
