@@ -26,6 +26,36 @@ fn user_turn_item(text: &str) -> TranscriptItem {
 }
 
 #[test]
+fn local_summary_projection_excludes_thinking_from_full_transcript_json() {
+    let items = vec![TranscriptItem::assistant_turn(Message {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "private chain".to_string(),
+                signature: Some("opaque-signature".to_string()),
+                encrypted_content: None,
+                id: None,
+                provenance: Some(crate::ReasoningProvenance {
+                    provider: crate::ProviderId::new("anthropic"),
+                    model: "claude-test".to_string(),
+                    format: crate::ReasoningFormat::AnthropicSigned,
+                }),
+                redacted: false,
+            },
+            ContentBlock::text("visible answer"),
+        ],
+    })];
+
+    let serialized = serde_json::to_string(&items_without_thinking(&items)).unwrap();
+
+    assert!(serialized.contains("visible answer"));
+    assert!(!serialized.contains("private chain"));
+    assert!(!serialized.contains("opaque-signature"));
+    assert!(!serialized.contains("Thinking"));
+    assert_eq!(items[0].message.as_ref().unwrap().content.len(), 2);
+}
+
+#[test]
 fn extract_context_finds_file_paths_in_tool_exchanges() {
     let items = vec![
         tool_exchange_item("Reading file src/main.rs and also lib/utils.py"),

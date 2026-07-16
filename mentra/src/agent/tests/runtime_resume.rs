@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 use crate::{
-    BuiltinProvider, ContentBlock, Message, Role, TranscriptKind,
+    BuiltinProvider, ContentBlock, Message, ProviderId, ReasoningFormat, ReasoningProvenance, Role,
+    TranscriptKind,
     agent::{AgentConfig, AgentSnapshot, AgentStatus, TeamConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     runtime::{AgentStore, Runtime, SqliteRuntimeStore},
@@ -24,7 +25,7 @@ use crate::{
     },
 };
 
-use super::support::{ScriptedProvider, controlled_stream, model_info, ok_stream};
+use super::support::{ScriptedProvider, controlled_stream, erroring_stream, model_info, ok_stream};
 
 #[tokio::test]
 async fn runtime_startup_preserves_memory_until_resume_and_resume_rolls_back_pending_turn() {
@@ -125,6 +126,64 @@ async fn runtime_startup_preserves_memory_until_resume_and_resume_rolls_back_pen
     assert!(persisted_after_resume.memory.pending_turn.is_none());
     assert!(persisted_after_resume.memory.run.is_none());
     assert!(persisted_after_resume.memory.transcript.is_empty());
+}
+
+#[tokio::test]
+async fn aborted_partial_thinking_stream_rolls_back_instead_of_persisting_empty_signature() {
+    let provider_id = ProviderId::new("anthropic-edge");
+    let model = model_info("claude-requested", provider_id.clone());
+    let store = temp_store("aborted-thinking");
+    let provider = ScriptedProvider::new(
+        provider_id.clone(),
+        vec![model.clone()],
+        vec![erroring_stream(
+            vec![
+                ProviderEvent::MessageStarted {
+                    id: "msg-thinking".to_string(),
+                    model: model.id.clone(),
+                    role: Role::Assistant,
+                },
+                ProviderEvent::ContentBlockStarted {
+                    index: 0,
+                    kind: ContentBlockStart::Thinking {
+                        encrypted_content: None,
+                        id: None,
+                        provenance: Some(ReasoningProvenance {
+                            provider: provider_id,
+                            model: model.id.clone(),
+                            format: ReasoningFormat::AnthropicSigned,
+                        }),
+                        redacted: false,
+                    },
+                },
+                ProviderEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::ThinkingText("partial chain".to_string()),
+                },
+                ProviderEvent::ContentBlockStopped { index: 0 },
+            ],
+            crate::ProviderError::MalformedStream("aborted".to_string()),
+        )],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_store(store.clone())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let agent_id = agent.id().to_string();
+
+    agent
+        .send(vec![ContentBlock::text("hello")])
+        .await
+        .expect_err("aborted stream should fail");
+
+    assert!(agent.history().is_empty());
+    let persisted = store
+        .load_agent(&agent_id)
+        .expect("load agent")
+        .expect("persisted agent");
+    assert!(persisted.memory.transcript.is_empty());
 }
 
 #[tokio::test]
@@ -261,6 +320,111 @@ async fn resume_all_rebuilds_agents_from_agent_memory() {
     assert_eq!(
         resumed[0].last_message(),
         Some(&Message::assistant(ContentBlock::text("done")))
+    );
+}
+
+#[tokio::test]
+async fn signed_and_redacted_thinking_survive_commit_persist_resume_and_replay() {
+    let provider_id = ProviderId::new("anthropic-edge");
+    let model = model_info("claude-requested", provider_id.clone());
+    let store = temp_store("thinking-replay");
+    let expected_thinking = vec![
+        ContentBlock::Thinking {
+            thinking: "private chain".to_string(),
+            signature: Some("opaque-signature".to_string()),
+            encrypted_content: None,
+            id: None,
+            provenance: Some(ReasoningProvenance {
+                provider: provider_id.clone(),
+                model: model.id.clone(),
+                format: ReasoningFormat::AnthropicSigned,
+            }),
+            redacted: false,
+        },
+        ContentBlock::Thinking {
+            thinking: String::new(),
+            signature: Some("opaque-redacted-data".to_string()),
+            encrypted_content: None,
+            id: None,
+            provenance: Some(ReasoningProvenance {
+                provider: provider_id.clone(),
+                model: model.id.clone(),
+                format: ReasoningFormat::AnthropicSigned,
+            }),
+            redacted: true,
+        },
+    ];
+    let first_provider = ScriptedProvider::new(
+        provider_id.clone(),
+        vec![model.clone()],
+        vec![thinking_stream(
+            &provider_id,
+            &model.id,
+            "private chain",
+            "opaque-signature",
+            "opaque-redacted-data",
+            "visible answer",
+        )],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_store(store.clone())
+        .with_provider_instance(first_provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model.clone()).expect("spawn agent");
+    let agent_id = agent.id().to_string();
+
+    let response = agent
+        .send(vec![ContentBlock::text("hello")])
+        .await
+        .expect("commit thinking response");
+    assert_eq!(&response.content[..2], expected_thinking.as_slice());
+    assert_eq!(response.text(), "visible answer");
+
+    let persisted = store
+        .load_agent(&agent_id)
+        .expect("load agent")
+        .expect("persisted agent");
+    let persisted_assistant = persisted
+        .memory
+        .transcript
+        .to_messages()
+        .into_iter()
+        .find(|message| message.role == Role::Assistant)
+        .expect("persisted assistant message");
+    assert_eq!(
+        &persisted_assistant.content[..2],
+        expected_thinking.as_slice()
+    );
+    clear_leases(&store);
+
+    let replay_provider = ScriptedProvider::new(
+        provider_id,
+        vec![model.clone()],
+        vec![text_stream(&model.id, "continued")],
+    );
+    let reboot_runtime = Runtime::empty_builder()
+        .with_store(store)
+        .with_provider_instance(replay_provider.clone())
+        .build()
+        .expect("rebuild runtime");
+    let mut resumed = reboot_runtime
+        .resume_agent(&agent_id)
+        .expect("resume persisted agent");
+
+    resumed
+        .send(vec![ContentBlock::text("continue")])
+        .await
+        .expect("replay persisted thinking");
+    let requests = replay_provider.recorded_requests().await;
+    let replayed_assistant = requests[0]
+        .messages
+        .iter()
+        .find(|message| message.role == Role::Assistant)
+        .expect("replayed assistant message");
+    assert_eq!(
+        &replayed_assistant.content[..2],
+        expected_thinking.as_slice()
     );
 }
 
@@ -752,6 +916,70 @@ fn text_stream(model: &str, text: &str) -> super::support::StreamScript {
             delta: ContentBlockDelta::Text(text.to_string()),
         },
         ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::MessageStopped,
+    ])
+}
+
+fn thinking_stream(
+    provider: &ProviderId,
+    model: &str,
+    thinking: &str,
+    signature: &str,
+    redacted_data: &str,
+    text: &str,
+) -> super::support::StreamScript {
+    let provenance = Some(ReasoningProvenance {
+        provider: provider.clone(),
+        model: model.to_string(),
+        format: ReasoningFormat::AnthropicSigned,
+    });
+    ok_stream(vec![
+        ProviderEvent::MessageStarted {
+            id: "msg-thinking".to_string(),
+            model: model.to_string(),
+            role: Role::Assistant,
+        },
+        ProviderEvent::ContentBlockStarted {
+            index: 0,
+            kind: ContentBlockStart::Thinking {
+                encrypted_content: None,
+                id: None,
+                provenance: provenance.clone(),
+                redacted: false,
+            },
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::ThinkingText(thinking.to_string()),
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::ThinkingSignature(signature.to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::ContentBlockStarted {
+            index: 1,
+            kind: ContentBlockStart::Thinking {
+                encrypted_content: None,
+                id: None,
+                provenance,
+                redacted: true,
+            },
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 1,
+            delta: ContentBlockDelta::ThinkingSignature(redacted_data.to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 1 },
+        ProviderEvent::ContentBlockStarted {
+            index: 2,
+            kind: ContentBlockStart::Text,
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 2,
+            delta: ContentBlockDelta::Text(text.to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 2 },
         ProviderEvent::MessageStopped,
     ])
 }

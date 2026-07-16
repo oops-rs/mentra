@@ -415,8 +415,9 @@ async fn summarize_locally(
     request: &CompactionRequest,
     items: &[TranscriptItem],
 ) -> Result<CompactionSummary, RuntimeError> {
+    let summary_items = items_without_thinking(items);
     let serialized =
-        serde_json::to_string(items).map_err(RuntimeError::FailedToSerializeTranscript)?;
+        serde_json::to_string(&summary_items).map_err(RuntimeError::FailedToSerializeTranscript)?;
     let transcript = truncate_to_char_boundary(&serialized, request.summary_max_input_chars);
 
     let extracted = extract_context(items);
@@ -480,6 +481,21 @@ File paths, command outputs, and error messages should be quoted verbatim.";
     serde_json::from_str(&text)
         .unwrap_or_else(|_| CompactionSummary::from_fallback_text(text))
         .pipe(Ok)
+}
+
+fn items_without_thinking(items: &[TranscriptItem]) -> Vec<TranscriptItem> {
+    items
+        .iter()
+        .cloned()
+        .map(|mut item| {
+            if let Some(message) = item.message.as_mut() {
+                message
+                    .content
+                    .retain(|block| !matches!(block, ContentBlock::Thinking { .. }));
+            }
+            item
+        })
+        .collect()
 }
 
 async fn compact_remotely(
