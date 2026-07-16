@@ -85,6 +85,9 @@ pub struct RuntimePolicy {
     pub(crate) default_command_timeout: Duration,
     pub(crate) max_command_timeout: Duration,
     pub(crate) max_output_bytes_per_stream: usize,
+    pub(crate) max_tool_result_bytes: usize,
+    pub(crate) max_tool_result_lines: usize,
+    pub(crate) spill_full_tool_output: bool,
 }
 
 impl Default for RuntimePolicy {
@@ -101,6 +104,9 @@ impl Default for RuntimePolicy {
             default_command_timeout: Duration::from_secs(30),
             max_command_timeout: Duration::from_secs(30),
             max_output_bytes_per_stream: 64 * 1024,
+            max_tool_result_bytes: 50 * 1024,
+            max_tool_result_lines: 2_000,
+            spill_full_tool_output: true,
         }
     }
 }
@@ -234,6 +240,28 @@ impl RuntimePolicy {
     /// Sets the maximum captured bytes for each output stream.
     pub fn with_max_output_bytes_per_stream(mut self, max_bytes: usize) -> Self {
         self.max_output_bytes_per_stream = max_bytes;
+        self
+    }
+
+    /// Sets the provider-visible byte limit for each completed tool result.
+    ///
+    /// The limit applies independently to successful and error results. An
+    /// actionable truncation notice is appended outside the retained head.
+    pub fn with_max_tool_result_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_tool_result_bytes = max_bytes;
+        self
+    }
+
+    /// Sets the provider-visible line limit for each completed tool result.
+    pub fn with_max_tool_result_lines(mut self, max_lines: usize) -> Self {
+        self.max_tool_result_lines = max_lines;
+        self
+    }
+
+    /// Enables or disables spilling a truncated tool result to the agent's
+    /// transcript artifact directory.
+    pub fn spill_full_tool_output(mut self, spill: bool) -> Self {
+        self.spill_full_tool_output = spill;
         self
     }
 
@@ -518,6 +546,22 @@ mod tests {
         assert_eq!(enforced_warning.outcome, ToolAuthorizationOutcome::Prompt);
         assert!(enforced_warning.should_emit_hook());
         assert!(!enforced_warning.should_deny());
+    }
+
+    #[test]
+    fn tool_result_limits_have_stable_defaults_and_builders() {
+        let defaults = RuntimePolicy::default();
+        assert_eq!(defaults.max_tool_result_bytes, 50 * 1024);
+        assert_eq!(defaults.max_tool_result_lines, 2_000);
+        assert!(defaults.spill_full_tool_output);
+
+        let configured = defaults
+            .with_max_tool_result_bytes(123)
+            .with_max_tool_result_lines(7)
+            .spill_full_tool_output(false);
+        assert_eq!(configured.max_tool_result_bytes, 123);
+        assert_eq!(configured.max_tool_result_lines, 7);
+        assert!(!configured.spill_full_tool_output);
     }
 
     #[test]
