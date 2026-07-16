@@ -407,31 +407,32 @@ impl AnthropicContentBlock {
     }
 
     fn from_with_replay_target(block: &ContentBlock, target: &AnthropicReplayTarget<'_>) -> Self {
-        if let ContentBlock::Thinking {
-            thinking,
-            signature: Some(signature),
-            provenance: Some(provenance),
-            redacted,
-            ..
-        } = block
-            && matches!(target.role, Role::Assistant)
-            && !signature.is_empty()
-            && provenance.provider == *target.provider
-            && provenance.model == target.model
-            && provenance.format == ReasoningFormat::AnthropicSigned
-        {
-            if *redacted {
-                return Self::RedactedThinking {
-                    data: signature.clone(),
-                };
+        match block {
+            ContentBlock::Thinking {
+                thinking,
+                signature: Some(signature),
+                provenance: Some(provenance),
+                redacted,
+                ..
+            } if matches!(target.role, Role::Assistant)
+                && !signature.is_empty()
+                && provenance.provider == *target.provider
+                && provenance.model == target.model
+                && provenance.format == ReasoningFormat::AnthropicSigned =>
+            {
+                if *redacted {
+                    Self::RedactedThinking {
+                        data: signature.clone(),
+                    }
+                } else {
+                    Self::Thinking {
+                        thinking: thinking.clone(),
+                        signature: signature.clone(),
+                    }
+                }
             }
-            return Self::Thinking {
-                thinking: thinking.clone(),
-                signature: signature.clone(),
-            };
+            _ => Self::from_without_replay_target(block),
         }
-
-        Self::from_without_replay_target(block)
     }
 
     fn from_non_thinking(block: &ContentBlock) -> Self {
