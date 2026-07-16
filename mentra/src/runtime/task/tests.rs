@@ -2,8 +2,8 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        Arc, Barrier,
-        atomic::{AtomicU64, Ordering},
+        Arc, Barrier, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{SystemTime, UNIX_EPOCH},
@@ -12,7 +12,8 @@ use std::{
 use serde_json::json;
 
 use crate::runtime::{
-    HybridRuntimeStore, SqliteRuntimeStore, TaskIntrinsicTool, TaskStore, VolatileRuntimeStore,
+    HybridRuntimeStore, RuntimeError, SqliteRuntimeStore, TaskIntrinsicTool, TaskStateSnapshot,
+    TaskStore, VolatileRuntimeStore,
 };
 
 use super::{
@@ -35,6 +36,74 @@ fn concurrent_intrinsic_creates_serialize_through_task_store_mutate() {
     assert_concurrent_creates(HybridRuntimeStore::new(
         temp_path("mentra-task-concurrent-hybrid".to_string()).with_extension("sqlite"),
     ));
+}
+
+#[test]
+fn custom_store_uses_the_source_compatible_default_mutate_fallback() {
+    let store = DefaultMutateStore::default();
+    let namespace = temp_namespace("default-mutate-fallback");
+
+    super::execute_with_store(
+        &store,
+        &TaskIntrinsicTool::Create,
+        json!({ "subject": "created through default mutate" }),
+        &namespace,
+        TaskAccess::Lead,
+    )
+    .expect("default mutate fallback persists the intrinsic mutation");
+
+    assert_eq!(store.load_tasks(&namespace).expect("load tasks").len(), 1);
+    assert_eq!(store.replacements.load(Ordering::SeqCst), 1);
+
+    let mut rejected = |tasks: &mut Vec<TaskItem>| {
+        tasks.clear();
+        Err(RuntimeError::InvalidTask("reject mutation".to_string()))
+    };
+    store
+        .mutate(&namespace, &mut rejected)
+        .expect_err("failed mutation must not replace the stored tasks");
+
+    assert_eq!(store.load_tasks(&namespace).expect("load tasks").len(), 1);
+    assert_eq!(store.replacements.load(Ordering::SeqCst), 1);
+}
+
+#[derive(Clone, Default)]
+struct DefaultMutateStore {
+    tasks: Arc<Mutex<Vec<TaskItem>>>,
+    replacements: Arc<AtomicUsize>,
+}
+
+impl TaskStore for DefaultMutateStore {
+    fn load_tasks(&self, _namespace: &std::path::Path) -> Result<Vec<TaskItem>, RuntimeError> {
+        Ok(self.tasks.lock().expect("task store poisoned").clone())
+    }
+
+    fn capture_tasks(
+        &self,
+        namespace: &std::path::Path,
+    ) -> Result<TaskStateSnapshot, RuntimeError> {
+        Ok(TaskStateSnapshot {
+            tasks: self.load_tasks(namespace)?,
+        })
+    }
+
+    fn restore_tasks(
+        &self,
+        namespace: &std::path::Path,
+        snapshot: &TaskStateSnapshot,
+    ) -> Result<(), RuntimeError> {
+        self.replace_tasks(namespace, &snapshot.tasks)
+    }
+
+    fn replace_tasks(
+        &self,
+        _namespace: &std::path::Path,
+        tasks: &[TaskItem],
+    ) -> Result<(), RuntimeError> {
+        *self.tasks.lock().expect("task store poisoned") = tasks.to_vec();
+        self.replacements.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 fn assert_concurrent_creates(store: impl TaskStore + Clone + 'static) {
