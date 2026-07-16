@@ -132,6 +132,7 @@ fn shell_authorization_preview(
         requested_timeout,
     } = parse_shell_command_input(input)?;
     let working_directory = ctx.resolve_working_directory(working_directory)?;
+    let validation = ctx.shell_validation(&command)?;
 
     Ok(ToolAuthorizationPreview {
         working_directory: working_directory.clone(),
@@ -148,6 +149,12 @@ fn shell_authorization_preview(
             "timeout_ms": requested_timeout.map(|timeout| timeout.as_millis()),
             "justification": justification,
             "background": background,
+            "validation": {
+                "mode": validation.mode.as_str(),
+                "intent": validation.intent_name(),
+                "outcome": validation.outcome,
+                "reason": validation.reason(),
+            },
         }),
     })
 }

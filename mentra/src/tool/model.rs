@@ -347,6 +347,13 @@ impl ParallelToolContext {
             .resolve_working_directory(&self.agent_id, working_directory)
     }
 
+    pub(crate) fn shell_validation(
+        &self,
+        command: &str,
+    ) -> Result<crate::runtime::control::ShellValidation, String> {
+        self.runtime.shell_validation(&self.agent_id, command)
+    }
+
     pub fn load_skill(&self, name: &str) -> Result<String, String> {
         self.runtime.load_skill(name)
     }

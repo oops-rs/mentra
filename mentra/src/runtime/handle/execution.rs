@@ -29,6 +29,29 @@ impl RuntimeHandle {
             return Err(detail);
         }
 
+        let validation = self
+            .execution
+            .policy
+            .evaluate_shell_command(&command, &config.base_dir);
+        if validation.should_emit_hook() {
+            let detail = validation
+                .reason()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "Shell command requires validation".to_string());
+            let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
+                agent_id: agent_id.to_string(),
+                action: if background {
+                    "background_shell_validation".to_string()
+                } else {
+                    "shell_validation".to_string()
+                },
+                detail: detail.clone(),
+            });
+            if validation.should_deny() {
+                return Err(detail);
+            }
+        }
+
         let command_request = CommandRequest {
             spec: CommandSpec::Shell { command },
             cwd,
@@ -336,6 +359,18 @@ impl RuntimeHandle {
             .get(agent_id)
             .map(|config| config.base_dir.clone())
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub(crate) fn shell_validation(
+        &self,
+        agent_id: &str,
+        command: &str,
+    ) -> Result<crate::runtime::control::ShellValidation, String> {
+        let config = self.agent_config(agent_id)?;
+        Ok(self
+            .execution
+            .policy
+            .evaluate_shell_command(command, &config.base_dir))
     }
 
     pub fn emit_hook(&self, event: RuntimeHookEvent) -> Result<(), RuntimeError> {
