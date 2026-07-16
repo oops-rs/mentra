@@ -15,6 +15,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    name: Minimum supported Rust (1.85)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+
+      - name: Check workspace against the MSRV
+        run: cargo check --workspace --all-targets
+
   rust-ci:
     name: Format, Lint, and Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

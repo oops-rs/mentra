@@ -137,9 +137,10 @@ the new neutral representation does not yet provide full Gemini fidelity.
   `wait_for_teammate_reply` intentionally consumes inbox delivery rather than
   peeking; hosts that previously polled `pending_team_messages` separately can
   continue doing so unchanged.
-- Pin `time` and `url` to Rust 1.85-compatible releases. Their previous
-  semver ranges could resolve to `time` requiring Rust 1.88 and an
-  `url`/IDNA/ICU chain requiring Rust 1.86.
+- Keep the public `time` and `url` requirements semver-compatible so downstream
+  workspaces can select compatible releases. Workspace resolver v3 and a fresh
+  lockless Rust 1.85 CI job select dependencies compatible with Mentra's MSRV
+  instead of imposing exact versions on consumers.
 
 ## 0.9.0
 
