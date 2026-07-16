@@ -20,9 +20,9 @@
 - Shell `ToolAuthorizationPreview::structured_input` gains an additive
   `validation` object. Consumers comparing that JSON exhaustively must accept
   the new key.
-- Pin `time` to the newest release compatible with the declared Rust 1.85
-  MSRV; the previous unconstrained `0.3` resolution had silently raised the
-  effective compiler requirement to Rust 1.88.
+- Pin `time` and `url` to Rust 1.85-compatible releases. Their previous
+  semver ranges could resolve to `time` requiring Rust 1.88 and an
+  `url`/IDNA/ICU chain requiring Rust 1.86.
 
 ## 0.9.0
 
