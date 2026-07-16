@@ -24,6 +24,28 @@
   replaced by a text pointer. Volatile stores suppress disk spills to preserve
   their no-durable-trace contract.
 
+### WS3 — Model-conventional coding tools
+
+- Add opt-in `read`, `ls`, `grep`, `glob`, `write`, and `edit` builtin tools as
+  thin executors over the existing transactional `WorkspaceEditor`. Read-only
+  tools use the parallel lane; writes and edits use the exclusive local-mutation
+  lane and retain the same runtime-policy checks as the batched `files` tool.
+- Add `FileToolProfile::{Batched, Split, Both}` and
+  `RuntimeBuilder::with_file_tools(...)`. The default remains `Batched`; builder
+  calls reconfigure the eagerly populated registry immediately, and `Both`
+  exposes both model-facing surfaces over one engine.
+- Add recursive globbing plus grep file filters, literal and case-insensitive
+  modes, context, multiline regular expressions, and a Unicode-safe
+  500-character cap per rendered physical line.
+- Harden the split `edit` tool with original-content multi-edit validation,
+  overlap/uniqueness/no-op guards, BOM and CRLF restoration, and NFKC/smart
+  punctuation fuzzy matching. Provider-visible content stays a short summary;
+  display diff, unified patch, and `first_changed_line` remain local
+  `ToolOutput::details` metadata.
+- Reauthorize every descendant reached by recursive list/search/glob traversal,
+  closing a symlink escape that could walk outside configured read roots while
+  preserving in-root symlink-loop detection.
+
 ### Compatibility
 
 - Shell validation defaults to `Off`, preserving existing command-execution
@@ -38,6 +60,12 @@
   applies before this projection boundary.
 - `AgentStore` gains a defaulted `allows_disk_artifacts` capability method, so
   existing store implementations continue to compile unchanged.
+- File tools still default to the historical batched `files` descriptor and
+  behavior. Split tool names and schemas appear only when an embedder selects
+  `Split` or `Both`; `files.replace` retains its prior exact-match semantics.
+- Recursive batched list/search now reject a descendant symlink that resolves
+  outside the runtime read roots. This intentional policy-enforcement fix is
+  the sole WS3 default-path behavior change.
 - Pin `time` and `url` to Rust 1.85-compatible releases. Their previous
   semver ranges could resolve to `time` requiring Rust 1.88 and an
   `url`/IDNA/ICU chain requiring Rust 1.86.

@@ -1,6 +1,6 @@
-use regex::Regex;
+use regex::RegexBuilder;
 
-use super::{BTreeSet, EntryKind, ListTraversal, OverlayEntry, WorkspaceEditor};
+use super::{BTreeSet, EntryKind, OverlayEntry, SearchOptions, WorkspaceEditor};
 use crate::tool::files::schema::{FileOperation, InsertPosition};
 
 impl WorkspaceEditor {
@@ -46,7 +46,12 @@ impl WorkspaceEditor {
         }
     }
 
-    fn read(&mut self, path: String, offset: usize, limit: usize) -> Result<String, String> {
+    pub(crate) fn read(
+        &mut self,
+        path: String,
+        offset: usize,
+        limit: usize,
+    ) -> Result<String, String> {
         if offset == 0 {
             return Err("read offset must be at least 1".to_string());
         }
@@ -71,7 +76,7 @@ impl WorkspaceEditor {
         Ok(format!("read {}\n{}", self.display_path(&path), body))
     }
 
-    fn list(&self, path: String, depth: usize, limit: usize) -> Result<String, String> {
+    pub(crate) fn list(&self, path: String, depth: usize, limit: usize) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
         let path = self.authorize_read(&path, "files_list")?;
         let kind = self.entry_kind(&path)?;
@@ -89,12 +94,27 @@ impl WorkspaceEditor {
             }
             EntryKind::Dir => {
                 let mut visited = BTreeSet::new();
-                let traversal = ListTraversal {
-                    root: path.as_path(),
-                    max_depth: depth,
-                    limit,
-                };
-                self.collect_list_entries(&path, 1, traversal, &mut visited, &mut entries)?
+                if limit > 0 {
+                    self.walk_entries(
+                        &path,
+                        1,
+                        depth,
+                        "files_list",
+                        &mut visited,
+                        &mut |child, kind| {
+                            let label = match kind {
+                                EntryKind::File => "file",
+                                EntryKind::Dir => "dir",
+                                EntryKind::Missing => return Ok(true),
+                            };
+                            entries.push(format!(
+                                "[{label}] {}",
+                                self.display_relative_to(&path, child)
+                            ));
+                            Ok(entries.len() < limit)
+                        },
+                    )?;
+                }
             }
             EntryKind::Missing => unreachable!(),
         }
@@ -107,11 +127,35 @@ impl WorkspaceEditor {
         Ok(format!("list {}\n{}", self.display_path(&path), body))
     }
 
-    fn search(&self, path: String, pattern: &str, limit: usize) -> Result<String, String> {
+    pub(crate) fn search(
+        &self,
+        path: String,
+        pattern: &str,
+        limit: usize,
+    ) -> Result<String, String> {
+        self.grep(path, pattern, SearchOptions::default(), limit)
+    }
+
+    pub(crate) fn grep(
+        &self,
+        path: String,
+        pattern: &str,
+        options: SearchOptions,
+        limit: usize,
+    ) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
         let path = self.authorize_read(&path, "files_search")?;
-        let regex =
-            Regex::new(pattern).map_err(|error| format!("Invalid regex pattern: {error}"))?;
+        let expression = if options.literal {
+            regex::escape(pattern)
+        } else {
+            pattern.to_string()
+        };
+        let regex = RegexBuilder::new(&expression)
+            .case_insensitive(options.ignore_case)
+            .multi_line(options.multiline)
+            .dot_matches_new_line(options.multiline)
+            .build()
+            .map_err(|error| format!("Invalid regex pattern: {error}"))?;
         let kind = self.entry_kind(&path)?;
         if kind == EntryKind::Missing {
             return Err(format!(
@@ -122,10 +166,13 @@ impl WorkspaceEditor {
 
         let mut matches = Vec::new();
         match kind {
-            EntryKind::File => self.search_file(&path, &regex, limit, &mut matches)?,
+            EntryKind::File => {
+                if self.path_matches_glob(&path, &path, options.file_glob.as_deref()) {
+                    self.search_file(&path, &regex, &options, limit, &mut matches)?;
+                }
+            }
             EntryKind::Dir => {
-                let mut visited = BTreeSet::new();
-                self.collect_search_matches(&path, &regex, limit, &mut visited, &mut matches)?
+                self.collect_search_matches(&path, &regex, &options, limit, &mut matches)?
             }
             EntryKind::Missing => unreachable!(),
         }
@@ -142,7 +189,45 @@ impl WorkspaceEditor {
         ))
     }
 
-    fn create(&mut self, path: String, content: String) -> Result<String, String> {
+    pub(crate) fn glob(&self, path: String, pattern: &str, limit: usize) -> Result<String, String> {
+        let path = self.resolve_path(&path)?;
+        let path = self.authorize_read(&path, "files_glob")?;
+        let kind = self.entry_kind(&path)?;
+        if kind == EntryKind::Missing {
+            return Err(format!(
+                "Path '{}' does not exist",
+                self.display_path(&path)
+            ));
+        }
+
+        let mut matches = Vec::new();
+        if limit > 0 {
+            match kind {
+                EntryKind::File => {
+                    if self.path_matches_glob(&path, &path, Some(pattern)) {
+                        matches.push(self.display_path(&path));
+                    }
+                }
+                EntryKind::Dir => {
+                    self.collect_glob_matches(&path, pattern, limit, &mut matches)?;
+                }
+                EntryKind::Missing => unreachable!(),
+            }
+        }
+
+        let body = if matches.is_empty() {
+            "(no matches)".to_string()
+        } else {
+            matches.join("\n")
+        };
+        Ok(format!(
+            "glob {} /{pattern}/\n{}",
+            self.display_path(&path),
+            body
+        ))
+    }
+
+    pub(crate) fn create(&mut self, path: String, content: String) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
         let path = self.authorize_write(&path, "files_write")?;
         match self.entry_kind(&path)? {
@@ -158,7 +243,7 @@ impl WorkspaceEditor {
         }
     }
 
-    fn set(&mut self, path: String, content: String) -> Result<String, String> {
+    pub(crate) fn set(&mut self, path: String, content: String) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
         let path = self.authorize_write(&path, "files_write")?;
         if self.entry_kind(&path)? != EntryKind::File {
@@ -173,7 +258,27 @@ impl WorkspaceEditor {
         Ok(format!("set {}", self.display_path(&path)))
     }
 
-    fn replace(
+    pub(crate) fn write(&mut self, path: String, content: String) -> Result<String, String> {
+        let path = self.resolve_path(&path)?;
+        let path = self.authorize_write(&path, "files_write")?;
+        match self.entry_kind(&path)? {
+            EntryKind::Missing | EntryKind::File => {
+                let byte_count = content.len();
+                self.overlay
+                    .insert(path.clone(), OverlayEntry::File(content.into_bytes()));
+                Ok(format!(
+                    "Wrote {byte_count} byte(s) to {}",
+                    self.display_path(&path)
+                ))
+            }
+            EntryKind::Dir => Err(format!(
+                "Path '{}' is a directory",
+                self.display_path(&path)
+            )),
+        }
+    }
+
+    pub(crate) fn replace(
         &mut self,
         path: String,
         old: &str,
@@ -184,7 +289,6 @@ impl WorkspaceEditor {
         if old.is_empty() {
             return Err("replace old text must not be empty".to_string());
         }
-
         let path = self.resolve_path(&path)?;
         let path = self.authorize_write(&path, "files_write")?;
         let content = self.load_text_file(&path)?;
@@ -211,7 +315,7 @@ impl WorkspaceEditor {
         ))
     }
 
-    fn insert(
+    pub(crate) fn insert(
         &mut self,
         path: String,
         anchor: &str,
@@ -274,7 +378,7 @@ impl WorkspaceEditor {
         Ok(format!("insert {}", self.display_path(&path)))
     }
 
-    fn move_path(&mut self, from: String, to: String) -> Result<String, String> {
+    pub(crate) fn move_path(&mut self, from: String, to: String) -> Result<String, String> {
         let from = self.resolve_path(&from)?;
         let to = self.resolve_path(&to)?;
         let from = self.authorize_write(&from, "files_write")?;
@@ -303,7 +407,7 @@ impl WorkspaceEditor {
         ))
     }
 
-    fn delete(&mut self, path: String) -> Result<String, String> {
+    pub(crate) fn delete(&mut self, path: String) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
         let path = self.authorize_write(&path, "files_write")?;
         if self.entry_kind(&path)? != EntryKind::File {

@@ -7,7 +7,7 @@ mod preview;
 #[path = "files/schema.rs"]
 mod schema;
 #[path = "files/workspace.rs"]
-mod workspace;
+pub(crate) mod workspace;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};

@@ -19,8 +19,8 @@ use tokio::{
 };
 
 use crate::{
-    AgentConfig, BuiltinProvider, ContentBlock, Role,
-    agent::CompactionConfig,
+    AgentConfig, BuiltinProvider, ContentBlock, FileToolProfile, Role,
+    agent::{CompactionConfig, WorkspaceConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     runtime::{RunOptions, Runtime, RuntimeError, RuntimeHookEvent, RuntimePolicy},
     tool::{
@@ -801,6 +801,85 @@ async fn structured_tool_projects_content_and_hides_details_from_provider() {
         _ => None,
     });
     assert_eq!(details, Some(Some(json!({ "secret": "shh" }))));
+}
+
+#[tokio::test]
+async fn edit_tool_details_never_enter_provider_projected_result_content() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "call-edit",
+                "edit",
+                r#"{"path":"note.txt","edits":[{"old_string":"before","new_string":"after"}]}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("duration")
+        .as_nanos();
+    let workspace = std::env::temp_dir().join(format!("mentra-edit-projection-{unique}"));
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    std::fs::write(workspace.join("note.txt"), "before\n").expect("write note");
+    let runtime = Runtime::builder()
+        .with_file_tools(FileToolProfile::Split)
+        .with_provider_instance(provider.clone())
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: WorkspaceConfig {
+                    base_dir: workspace.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("apply the requested edit")])
+        .await
+        .expect("send");
+
+    let detail = agent
+        .transcript()
+        .items()
+        .iter()
+        .find_map(|item| item.detail("call-edit"))
+        .expect("edit details must survive locally");
+    assert!(detail.get("diff").is_some());
+    assert!(detail.get("patch").is_some());
+    assert_eq!(detail["first_changed_line"], json!(1));
+
+    let requests = provider.recorded_requests().await;
+    let projected = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == "call-edit" => Some(content),
+            _ => None,
+        })
+        .expect("provider-projected edit result");
+    assert_eq!(
+        projected,
+        &ToolResultContent::Text("Replaced 1 block in note.txt".to_string())
+    );
+
+    std::fs::remove_dir_all(workspace).expect("remove workspace");
 }
 
 // M3 tests 3 & 4: a round with two parallel tool calls, each returning

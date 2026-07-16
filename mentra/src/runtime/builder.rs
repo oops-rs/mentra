@@ -10,7 +10,7 @@ use crate::{
         error::RuntimeError,
         skill::SkillLoadError,
     },
-    tool::{ExecutableTool, ToolAuthorizer},
+    tool::{ExecutableTool, FileToolProfile, ToolAuthorizer},
 };
 use mentra_provider::BuiltinProvider;
 
@@ -40,6 +40,16 @@ impl RuntimeBuilder {
         T: ExecutableTool + 'static,
     {
         self.handle.register_tool(tool);
+        self
+    }
+
+    /// Reconfigures the eagerly registered builtin file-tool surface.
+    ///
+    /// The default is [`FileToolProfile::Batched`], preserving the historical
+    /// `files` tool. This method also works with [`Runtime::empty_builder`] to
+    /// opt into only the selected file tools.
+    pub fn with_file_tools(self, profile: FileToolProfile) -> Self {
+        self.handle.configure_file_tools(profile);
         self
     }
 
