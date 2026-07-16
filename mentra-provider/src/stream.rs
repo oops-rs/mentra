@@ -88,6 +88,7 @@ pub enum ContentBlockDelta {
     Text(String),
     ThinkingText(String),
     ThinkingSignature(String),
+    ThinkingEncryptedContent(String),
     ToolUseInputJson(String),
     ToolResultContent(ToolResultContent),
     HostedToolSearchQuery(String),

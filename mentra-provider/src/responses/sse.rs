@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -7,8 +7,11 @@ use tokio::sync::mpsc;
 use crate::{
     ContentBlockDelta, ContentBlockStart, HostedToolSearchCall, HostedWebSearchCall,
     ImageGenerationCall, ImageGenerationResult, ProviderError, ProviderEvent, ProviderEventStream,
-    ResponseHeaders, Role, TokenUsage, WebSearchAction,
+    ProviderId, ReasoningFormat, ReasoningProvenance, ResponseHeaders, Role, TokenUsage,
+    WebSearchAction,
 };
+
+use super::model::encode_responses_tool_use_id;
 
 /// Spawns an event stream that decodes Responses SSE frames.
 pub fn spawn_event_stream(response: reqwest::Response) -> ProviderEventStream {
@@ -76,12 +79,63 @@ pub(crate) fn response_headers_event(headers: &http::HeaderMap) -> Option<Provid
     (!values.is_empty()).then_some(ProviderEvent::ResponseHeaders(ResponseHeaders { values }))
 }
 
-#[derive(Default)]
 pub(crate) struct StreamState {
     ignored_output_indices: HashSet<usize>,
     text_delta_seen: HashSet<usize>,
     function_delta_seen: HashSet<usize>,
     tool_search_delta_seen: HashSet<usize>,
+    reasoning_delta_seen: HashSet<usize>,
+    reasoning_encrypted_content_seen: HashSet<usize>,
+    reasoning_output_indices: HashMap<String, usize>,
+    reasoning_provenance: ReasoningProvenance,
+}
+
+impl Default for StreamState {
+    fn default() -> Self {
+        Self::new(ProviderId::new("openai"), String::new())
+    }
+}
+
+impl StreamState {
+    pub(crate) fn new(provider: ProviderId, requested_model: String) -> Self {
+        Self {
+            ignored_output_indices: HashSet::new(),
+            text_delta_seen: HashSet::new(),
+            function_delta_seen: HashSet::new(),
+            tool_search_delta_seen: HashSet::new(),
+            reasoning_delta_seen: HashSet::new(),
+            reasoning_encrypted_content_seen: HashSet::new(),
+            reasoning_output_indices: HashMap::new(),
+            reasoning_provenance: ReasoningProvenance {
+                provider,
+                model: requested_model,
+                format: ReasoningFormat::OpenAiEncrypted,
+            },
+        }
+    }
+
+    fn backfill_reasoning_encrypted_content(
+        &mut self,
+        output: &[ResponsesOutputItem],
+    ) -> Vec<ProviderEvent> {
+        let mut events = Vec::new();
+        for item in output {
+            let Some((id, encrypted_content)) = item.reasoning_encrypted_content() else {
+                continue;
+            };
+            let Some(index) = self.reasoning_output_indices.get(id).copied() else {
+                continue;
+            };
+            if !self.reasoning_encrypted_content_seen.insert(index) {
+                continue;
+            }
+            events.push(ProviderEvent::ContentBlockDelta {
+                index,
+                delta: ContentBlockDelta::ThinkingEncryptedContent(encrypted_content.to_string()),
+            });
+        }
+        events
+    }
 }
 
 fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -120,16 +174,29 @@ pub(crate) fn parse_json_event(
         serde_json::from_str(data).map_err(ProviderError::Deserialize)?;
 
     match event {
-        ResponsesStreamEvent::ResponseCreated { response } => Ok(vec![
-            ProviderEvent::ResponseCreated,
-            ProviderEvent::MessageStarted {
-                id: response.id,
-                model: response.model,
-                role: Role::Assistant,
-            },
-        ]),
+        ResponsesStreamEvent::ResponseCreated { response } => {
+            if state.reasoning_provenance.model.is_empty() {
+                state.reasoning_provenance.model = response.model.clone();
+            }
+            Ok(vec![
+                ProviderEvent::ResponseCreated,
+                ProviderEvent::MessageStarted {
+                    id: response.id,
+                    model: response.model,
+                    role: Role::Assistant,
+                },
+            ])
+        }
         ResponsesStreamEvent::ResponseOutputItemAdded { output_index, item } => {
-            if let Some(kind) = item.into_provider_start() {
+            if let Some(id) = item.reasoning_id() {
+                state
+                    .reasoning_output_indices
+                    .insert(id.to_string(), output_index);
+            }
+            if item.reasoning_encrypted_content().is_some() {
+                state.reasoning_encrypted_content_seen.insert(output_index);
+            }
+            if let Some(kind) = item.into_provider_start(&state.reasoning_provenance) {
                 Ok(vec![ProviderEvent::ContentBlockStarted {
                     index: output_index,
                     kind,
@@ -155,23 +222,61 @@ pub(crate) fn parse_json_event(
             }])
         }
         ResponsesStreamEvent::ResponseReasoningSummaryTextDelta {
+            output_index,
             delta,
             summary_index,
-        } => Ok(vec![ProviderEvent::ReasoningSummaryDelta {
-            delta,
-            summary_index,
-        }]),
+        } => {
+            let mut events = vec![ProviderEvent::ReasoningSummaryDelta {
+                delta: delta.clone(),
+                summary_index,
+            }];
+            if let Some(output_index) = output_index {
+                if !state.ignored_output_indices.contains(&output_index) {
+                    state.reasoning_delta_seen.insert(output_index);
+                    events.push(ProviderEvent::ContentBlockDelta {
+                        index: output_index,
+                        delta: ContentBlockDelta::ThinkingText(delta),
+                    });
+                }
+            }
+            Ok(events)
+        }
         ResponsesStreamEvent::ResponseReasoningTextDelta {
+            output_index,
             delta,
             content_index,
-        } => Ok(vec![ProviderEvent::ReasoningContentDelta {
-            delta,
-            content_index,
-        }]),
-        ResponsesStreamEvent::ResponseReasoningSummaryPartAdded { summary_index } => {
+        } => {
+            let mut events = vec![ProviderEvent::ReasoningContentDelta {
+                delta: delta.clone(),
+                content_index,
+            }];
+            if let Some(output_index) = output_index {
+                if !state.ignored_output_indices.contains(&output_index) {
+                    state.reasoning_delta_seen.insert(output_index);
+                    events.push(ProviderEvent::ContentBlockDelta {
+                        index: output_index,
+                        delta: ContentBlockDelta::ThinkingText(delta),
+                    });
+                }
+            }
+            Ok(events)
+        }
+        ResponsesStreamEvent::ResponseReasoningSummaryPartAdded { summary_index, .. } => {
             Ok(vec![ProviderEvent::ReasoningSummaryPartAdded {
                 summary_index,
             }])
+        }
+        ResponsesStreamEvent::ResponseReasoningSummaryPartDone { output_index } => {
+            if let Some(output_index) = output_index {
+                if !state.ignored_output_indices.contains(&output_index) {
+                    state.reasoning_delta_seen.insert(output_index);
+                    return Ok(vec![ProviderEvent::ContentBlockDelta {
+                        index: output_index,
+                        delta: ContentBlockDelta::ThinkingText("\n\n".to_string()),
+                    }]);
+                }
+            }
+            Ok(Vec::new())
         }
         ResponsesStreamEvent::ResponseFunctionCallArgumentsDelta {
             output_index,
@@ -209,6 +314,12 @@ pub(crate) fn parse_json_event(
 
             let mut events = Vec::new();
 
+            if let Some(id) = item.reasoning_id() {
+                state
+                    .reasoning_output_indices
+                    .insert(id.to_string(), output_index);
+            }
+
             if !state.text_delta_seen.remove(&output_index)
                 && let Some(text) = item.completed_text()
                 && !text.is_empty()
@@ -239,6 +350,21 @@ pub(crate) fn parse_json_event(
                 });
             }
 
+            if !state.reasoning_delta_seen.remove(&output_index) {
+                if let Some(reasoning) = item.completed_reasoning_text() {
+                    if !reasoning.is_empty() {
+                        events.push(ProviderEvent::ContentBlockDelta {
+                            index: output_index,
+                            delta: ContentBlockDelta::ThinkingText(reasoning),
+                        });
+                    }
+                }
+            }
+
+            if item.reasoning_encrypted_content().is_some() {
+                state.reasoning_encrypted_content_seen.insert(output_index);
+            }
+
             events.extend(item.completion_deltas(output_index));
 
             if item.is_supported() {
@@ -250,13 +376,15 @@ pub(crate) fn parse_json_event(
             Ok(events)
         }
         ResponsesStreamEvent::ResponseCompleted { response }
-        | ResponsesStreamEvent::ResponseIncomplete { response } => Ok(vec![
-            ProviderEvent::MessageDelta {
+        | ResponsesStreamEvent::ResponseIncomplete { response } => {
+            let mut events = state.backfill_reasoning_encrypted_content(&response.output);
+            events.push(ProviderEvent::MessageDelta {
                 stop_reason: response.stop_reason(),
                 usage: response.usage(),
-            },
-            ProviderEvent::MessageStopped,
-        ]),
+            });
+            events.push(ProviderEvent::MessageStopped);
+            Ok(events)
+        }
         ResponsesStreamEvent::ResponseFailed { response } => {
             Err(ProviderError::MalformedStream(format!(
                 "responses response failed{}",
@@ -310,11 +438,30 @@ enum ResponsesStreamEvent {
         content_index: Option<usize>,
     },
     #[serde(rename = "response.reasoning_summary_text.delta")]
-    ResponseReasoningSummaryTextDelta { delta: String, summary_index: i64 },
+    ResponseReasoningSummaryTextDelta {
+        #[serde(default)]
+        output_index: Option<usize>,
+        delta: String,
+        summary_index: i64,
+    },
     #[serde(rename = "response.reasoning_text.delta")]
-    ResponseReasoningTextDelta { delta: String, content_index: i64 },
+    ResponseReasoningTextDelta {
+        #[serde(default)]
+        output_index: Option<usize>,
+        delta: String,
+        content_index: i64,
+    },
     #[serde(rename = "response.reasoning_summary_part.added")]
-    ResponseReasoningSummaryPartAdded { summary_index: i64 },
+    ResponseReasoningSummaryPartAdded {
+        #[serde(default, rename = "output_index")]
+        _output_index: Option<usize>,
+        summary_index: i64,
+    },
+    #[serde(rename = "response.reasoning_summary_part.done")]
+    ResponseReasoningSummaryPartDone {
+        #[serde(default)]
+        output_index: Option<usize>,
+    },
     #[serde(rename = "response.function_call_arguments.delta")]
     ResponseFunctionCallArgumentsDelta {
         output_index: usize,
@@ -357,6 +504,8 @@ struct ResponsesResponseEnvelope {
     incomplete_details: Option<ResponsesIncompleteDetails>,
     #[serde(default)]
     error: Option<ResponsesErrorBody>,
+    #[serde(default)]
+    output: Vec<ResponsesOutputItem>,
 }
 
 impl ResponsesResponseEnvelope {
@@ -452,8 +601,20 @@ enum ResponsesOutputItem {
         #[serde(default)]
         content: Vec<ResponsesMessageContent>,
     },
+    #[serde(rename = "reasoning")]
+    Reasoning {
+        id: String,
+        #[serde(default)]
+        encrypted_content: Option<String>,
+        #[serde(default)]
+        summary: Vec<ResponsesReasoningText>,
+        #[serde(default)]
+        content: Vec<ResponsesReasoningText>,
+    },
     #[serde(rename = "function_call")]
     FunctionCall {
+        #[serde(default)]
+        id: Option<String>,
         call_id: String,
         name: String,
         #[serde(default)]
@@ -495,11 +656,27 @@ enum ResponsesOutputItem {
 }
 
 impl ResponsesOutputItem {
-    fn into_provider_start(self) -> Option<ContentBlockStart> {
+    fn into_provider_start(
+        self,
+        reasoning_provenance: &ReasoningProvenance,
+    ) -> Option<ContentBlockStart> {
         match self {
             ResponsesOutputItem::Message { .. } => Some(ContentBlockStart::Text),
-            ResponsesOutputItem::FunctionCall { call_id, name, .. } => {
-                Some(ContentBlockStart::ToolUse { id: call_id, name })
+            ResponsesOutputItem::Reasoning {
+                id,
+                encrypted_content,
+                ..
+            } => Some(ContentBlockStart::Thinking {
+                encrypted_content,
+                id: Some(id),
+                provenance: Some(reasoning_provenance.clone()),
+                redacted: false,
+            }),
+            ResponsesOutputItem::FunctionCall {
+                id, call_id, name, ..
+            } => {
+                let id = encode_responses_tool_use_id(&call_id, id.as_deref());
+                Some(ContentBlockStart::ToolUse { id, name })
             }
             ResponsesOutputItem::ToolSearchCall {
                 id,
@@ -560,6 +737,49 @@ impl ResponsesOutputItem {
         }
     }
 
+    fn completed_reasoning_text(&self) -> Option<String> {
+        match self {
+            ResponsesOutputItem::Reasoning {
+                summary, content, ..
+            } => {
+                let summary = summary
+                    .iter()
+                    .map(|part| part.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if !summary.is_empty() {
+                    return Some(summary);
+                }
+                Some(
+                    content
+                        .iter()
+                        .map(|part| part.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn reasoning_id(&self) -> Option<&str> {
+        match self {
+            ResponsesOutputItem::Reasoning { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    fn reasoning_encrypted_content(&self) -> Option<(&str, &str)> {
+        match self {
+            ResponsesOutputItem::Reasoning {
+                id,
+                encrypted_content: Some(encrypted_content),
+                ..
+            } if !encrypted_content.is_empty() => Some((id, encrypted_content)),
+            _ => None,
+        }
+    }
+
     fn completed_arguments(&self) -> Option<String> {
         match self {
             ResponsesOutputItem::FunctionCall { arguments, .. } => Some(arguments.clone()),
@@ -587,6 +807,15 @@ impl ResponsesOutputItem {
                 })
                 .into_iter()
                 .collect(),
+            ResponsesOutputItem::Reasoning {
+                encrypted_content: Some(encrypted_content),
+                ..
+            } if !encrypted_content.is_empty() => {
+                vec![ProviderEvent::ContentBlockDelta {
+                    index: output_index,
+                    delta: ContentBlockDelta::ThinkingEncryptedContent(encrypted_content.clone()),
+                }]
+            }
             ResponsesOutputItem::WebSearchCall { status, action, .. } => {
                 let mut events = Vec::new();
                 if let Some(action) = action.clone() {
@@ -647,6 +876,12 @@ impl ResponsesOutputItem {
     }
 }
 
+#[derive(Deserialize)]
+struct ResponsesReasoningText {
+    #[serde(default)]
+    text: String,
+}
+
 fn extract_tool_search_query_from_value(value: &serde_json::Value) -> Option<String> {
     value
         .get("query")
@@ -680,7 +915,10 @@ mod tests {
     use http::HeaderMap;
     use http::HeaderValue;
 
-    use crate::{ContentBlockDelta, ContentBlockStart, ProviderEvent, Role, TokenUsage};
+    use crate::{
+        ContentBlock, ContentBlockDelta, ContentBlockStart, ProviderEvent, ProviderId,
+        ReasoningFormat, ReasoningProvenance, Role, TokenUsage,
+    };
 
     use super::{StreamState, parse_frame, response_headers_event};
 
@@ -746,6 +984,154 @@ mod tests {
                 content_index: 7,
             }]
         );
+    }
+
+    #[test]
+    fn captures_reasoning_items_and_pairs_function_item_ids() {
+        let mut state =
+            StreamState::new(ProviderId::new("openai-edge"), "gpt-requested".to_string());
+
+        let added = parse_frame(
+            br#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":null,"summary":[]}}"#,
+            &mut state,
+        )
+        .expect("reasoning item start should parse");
+        assert_eq!(
+            added,
+            vec![ProviderEvent::ContentBlockStarted {
+                index: 0,
+                kind: ContentBlockStart::Thinking {
+                    encrypted_content: None,
+                    id: Some("rs_1".to_string()),
+                    provenance: Some(ReasoningProvenance {
+                        provider: ProviderId::new("openai-edge"),
+                        model: "gpt-requested".to_string(),
+                        format: ReasoningFormat::OpenAiEncrypted,
+                    }),
+                    redacted: false,
+                },
+            }]
+        );
+
+        let delta = parse_frame(
+            br#"data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"short summary"}"#,
+            &mut state,
+        )
+        .expect("reasoning summary delta should parse");
+        assert_eq!(
+            delta,
+            vec![
+                ProviderEvent::ReasoningSummaryDelta {
+                    delta: "short summary".to_string(),
+                    summary_index: 0,
+                },
+                ProviderEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::ThinkingText("short summary".to_string()),
+                },
+            ]
+        );
+
+        let done = parse_frame(
+            br#"data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"encrypted-1","summary":[{"type":"summary_text","text":"short summary"}]}}"#,
+            &mut state,
+        )
+        .expect("reasoning item completion should parse");
+        assert_eq!(
+            done,
+            vec![
+                ProviderEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::ThinkingEncryptedContent("encrypted-1".to_string()),
+                },
+                ProviderEvent::ContentBlockStopped { index: 0 },
+            ]
+        );
+
+        let tool = parse_frame(
+            br#"data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":""}}"#,
+            &mut state,
+        )
+        .expect("function call should parse");
+        assert_eq!(
+            tool,
+            vec![ProviderEvent::ContentBlockStarted {
+                index: 1,
+                kind: ContentBlockStart::ToolUse {
+                    id: "call_1|fc_1".to_string(),
+                    name: "read_file".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_response_backfills_late_azure_encrypted_content() {
+        let mut state =
+            StreamState::new(ProviderId::new("azure-openai"), "gpt-requested".to_string());
+        let frames: &[&[u8]] = &[
+            br#"data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-resolved","status":"in_progress"}}"#,
+            br#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}"#,
+            br#"data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"summary"}]}}"#,
+            br#"data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-resolved","status":"completed","output":[{"type":"reasoning","id":"rs_1","encrypted_content":"from-completed","summary":[{"type":"summary_text","text":"summary"}]}]}}"#,
+        ];
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        for frame in frames {
+            for event in parse_frame(frame, &mut state).expect("frame should parse") {
+                tx.send(Ok(event)).unwrap();
+            }
+        }
+        drop(tx);
+
+        let response = crate::collect_response_from_stream(rx)
+            .await
+            .expect("response should rebuild after metadata backfill");
+
+        assert_eq!(
+            response.content,
+            vec![ContentBlock::Thinking {
+                thinking: "summary".to_string(),
+                signature: None,
+                encrypted_content: Some("from-completed".to_string()),
+                id: Some("rs_1".to_string()),
+                provenance: Some(ReasoningProvenance {
+                    provider: ProviderId::new("azure-openai"),
+                    model: "gpt-requested".to_string(),
+                    format: ReasoningFormat::OpenAiEncrypted,
+                }),
+                redacted: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_response_does_not_replace_output_item_encrypted_content() {
+        let mut state =
+            StreamState::new(ProviderId::new("azure-openai"), "gpt-requested".to_string());
+        let frames: &[&[u8]] = &[
+            br#"data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-resolved","status":"in_progress"}}"#,
+            br#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}"#,
+            br#"data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"from-done","summary":[]}}"#,
+            br#"data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-resolved","status":"completed","output":[{"type":"reasoning","id":"rs_1","encrypted_content":"from-completed","summary":[]}]}}"#,
+        ];
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        for frame in frames {
+            for event in parse_frame(frame, &mut state).expect("frame should parse") {
+                tx.send(Ok(event)).unwrap();
+            }
+        }
+        drop(tx);
+
+        let response = crate::collect_response_from_stream(rx)
+            .await
+            .expect("response should rebuild");
+        let ContentBlock::Thinking {
+            encrypted_content, ..
+        } = &response.content[0]
+        else {
+            panic!("expected thinking block");
+        };
+        assert_eq!(encrypted_content.as_deref(), Some("from-done"));
     }
 
     #[test]

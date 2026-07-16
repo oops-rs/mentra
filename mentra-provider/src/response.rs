@@ -331,6 +331,15 @@ impl StreamingContentBlock {
                 Ok(())
             }
             (
+                StreamingContentBlock::Thinking {
+                    encrypted_content, ..
+                },
+                ContentBlockDelta::ThinkingEncryptedContent(value),
+            ) => {
+                *encrypted_content = Some(value);
+                Ok(())
+            }
+            (
                 StreamingContentBlock::ToolUse { input_json, .. },
                 ContentBlockDelta::ToolUseInputJson(delta),
             ) => {

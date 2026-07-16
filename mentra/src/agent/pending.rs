@@ -84,6 +84,14 @@ impl PendingAssistantTurn {
                         signature.get_or_insert_with(String::new).push_str(&delta);
                     }
                     (
+                        PendingContentBlock::Thinking {
+                            encrypted_content, ..
+                        },
+                        ContentBlockDelta::ThinkingEncryptedContent(value),
+                    ) => {
+                        *encrypted_content = Some(value);
+                    }
+                    (
                         PendingContentBlock::ToolUse {
                             id,
                             name,

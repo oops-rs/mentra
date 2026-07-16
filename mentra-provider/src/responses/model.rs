@@ -15,6 +15,13 @@ use crate::{
 
 use crate::tool::{ProviderToolKind, ToolLoadingPolicy, ToolSpec};
 
+pub(crate) fn encode_responses_tool_use_id(call_id: &str, item_id: Option<&str>) -> String {
+    match item_id.filter(|id| !id.is_empty()) {
+        Some(item_id) => format!("{call_id}|{item_id}"),
+        None => call_id.to_string(),
+    }
+}
+
 /// Page returned by the Responses-compatible models endpoint.
 #[derive(Debug, Deserialize)]
 pub struct ResponsesModelsPage {
