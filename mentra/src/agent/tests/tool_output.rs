@@ -8,6 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -18,9 +19,10 @@ use tokio::{
 };
 
 use crate::{
-    BuiltinProvider, ContentBlock, Role,
+    AgentConfig, BuiltinProvider, ContentBlock, Role,
+    agent::CompactionConfig,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::{RunOptions, Runtime, RuntimeError, RuntimeHookEvent},
+    runtime::{RunOptions, Runtime, RuntimeError, RuntimeHookEvent, RuntimePolicy},
     tool::{
         ParallelToolContext, ToolContext, ToolDefinition, ToolDurability, ToolExecutionCategory,
         ToolExecutor, ToolOutput, ToolResult, ToolResultContent, ToolSideEffectLevel, ToolSpec,
@@ -157,6 +159,63 @@ impl ToolDefinition for FailingOutputTool {
             .side_effect_level(ToolSideEffectLevel::None)
             .durability(ToolDurability::ReplaySafe)
             .build()
+    }
+}
+
+struct ParallelOutputTool {
+    name: &'static str,
+    output: &'static str,
+    delay: Duration,
+}
+
+#[async_trait]
+impl ToolDefinition for ParallelOutputTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder(self.name)
+            .description("test tool: returns a large parallel result")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for ParallelOutputTool {
+    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+        sleep(self.delay).await;
+        Ok(self.output.to_string())
+    }
+}
+
+struct OversizedStructuredTerminatingTool;
+
+#[async_trait]
+impl ToolDefinition for OversizedStructuredTerminatingTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("oversized_structured_terminal")
+            .description("test tool: spills structured output while preserving metadata")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .terminal()
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for OversizedStructuredTerminatingTool {
+    async fn execute_mut_output(
+        &self,
+        _ctx: ToolContext<'_>,
+        _input: Value,
+    ) -> Result<ToolOutput, String> {
+        Ok(
+            ToolOutput::structured(json!({ "payload": "x".repeat(128) }))
+                .with_details(json!({ "private": 42 }))
+                .terminating(),
+        )
     }
 }
 
@@ -419,6 +478,265 @@ async fn err_string_behaves_identically_through_bridge_and_new_surface() {
             is_error: true,
         }
     );
+}
+
+#[tokio::test]
+async fn exclusive_success_and_error_outputs_truncate_with_identical_rules() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            multi_tool_use_stream(
+                &model.id,
+                &[
+                    ("call-ok", "large_success", r#"{}"#),
+                    ("call-err", "large_error", r#"{}"#),
+                ],
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_policy(
+            RuntimePolicy::default()
+                .with_max_tool_result_bytes(usize::MAX)
+                .with_max_tool_result_lines(1)
+                .spill_full_tool_output(false),
+        )
+        .with_tool(StaticTool::success("large_success", "one\ntwo\nthree"))
+        .with_tool(StaticTool::failure("large_error", "bad\nworse\nworst"))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("run both tools")])
+        .await
+        .expect("send");
+
+    let blocks = tool_result_blocks(agent.history());
+    assert_eq!(blocks.len(), 2);
+    assert!(matches!(
+        &blocks[0],
+        ContentBlock::ToolResult { content: ToolResultContent::Text(content), is_error: false, .. }
+            if content.starts_with("one\n[truncated: showing 1 of 3 lines;")
+    ));
+    assert!(matches!(
+        &blocks[1],
+        ContentBlock::ToolResult { content: ToolResultContent::Text(content), is_error: true, .. }
+            if content.starts_with("bad\n[truncated: showing 1 of 3 lines;")
+    ));
+}
+
+#[tokio::test]
+async fn parallel_outputs_truncate_per_result_and_preserve_call_order() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            multi_tool_use_stream(
+                &model.id,
+                &[
+                    ("call-a", "large_parallel_a", r#"{}"#),
+                    ("call-b", "large_parallel_b", r#"{}"#),
+                ],
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_policy(
+            RuntimePolicy::default()
+                .with_max_tool_result_bytes(usize::MAX)
+                .with_max_tool_result_lines(1)
+                .spill_full_tool_output(false),
+        )
+        .with_tool(ParallelOutputTool {
+            name: "large_parallel_a",
+            output: "a-one\na-two",
+            delay: Duration::from_millis(25),
+        })
+        .with_tool(ParallelOutputTool {
+            name: "large_parallel_b",
+            output: "b-one\nb-two",
+            delay: Duration::from_millis(1),
+        })
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("run both parallel tools")])
+        .await
+        .expect("send");
+
+    let blocks = tool_result_blocks(agent.history());
+    assert!(matches!(
+        &blocks[0],
+        ContentBlock::ToolResult { tool_use_id, content: ToolResultContent::Text(content), .. }
+            if tool_use_id == "call-a" && content.starts_with("a-one\n[truncated:")
+    ));
+    assert!(matches!(
+        &blocks[1],
+        ContentBlock::ToolResult { tool_use_id, content: ToolResultContent::Text(content), .. }
+            if tool_use_id == "call-b" && content.starts_with("b-one\n[truncated:")
+    ));
+}
+
+#[tokio::test]
+async fn oversized_structured_output_spills_without_losing_details_or_termination() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![tool_use_stream(
+            &model.id,
+            "call-structured",
+            "oversized_structured_terminal",
+            r#"{}"#,
+        )],
+    );
+    let spill_root = std::env::temp_dir().join(format!(
+        "mentra-structured-spill-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_policy(RuntimePolicy::default().with_max_tool_result_bytes(32))
+        .with_tool(OversizedStructuredTerminatingTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    transcript_dir: spill_root.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    let result = agent
+        .run(
+            vec![ContentBlock::text("run structured tool")],
+            RunOptions::default(),
+        )
+        .await;
+    assert!(matches!(result, Err(RuntimeError::EmptyAssistantResponse)));
+
+    let blocks = tool_result_blocks(agent.history());
+    assert!(matches!(
+        &blocks[0],
+        ContentBlock::ToolResult { content: ToolResultContent::Text(content), is_error: false, .. }
+            if content.contains("structured tool output") && content.contains("full output at")
+    ));
+    let item = agent
+        .transcript()
+        .items()
+        .iter()
+        .rev()
+        .find(|item| matches!(item.kind, crate::TranscriptKind::ToolExchange { .. }))
+        .expect("tool exchange item");
+    assert_eq!(
+        item.detail("call-structured"),
+        Some(&json!({ "private": 42 }))
+    );
+
+    let output_dir = spill_root.join("tool-output");
+    let files = std::fs::read_dir(&output_dir)
+        .expect("read spill directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read spill files");
+    assert_eq!(files.len(), 1);
+    let stored = std::fs::read_to_string(files[0].path()).expect("read spill output");
+    assert_eq!(
+        stored,
+        serde_json::to_string(&json!({ "payload": "x".repeat(128) })).unwrap()
+    );
+    std::fs::remove_dir_all(spill_root).expect("remove spill root");
+}
+
+#[tokio::test]
+async fn spill_failure_preserves_structured_details_and_termination() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![tool_use_stream(
+            &model.id,
+            "call-structured",
+            "oversized_structured_terminal",
+            r#"{}"#,
+        )],
+    );
+    let blocking_file = std::env::temp_dir().join(format!(
+        "mentra-structured-spill-blocker-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::write(&blocking_file, "not a directory").expect("create blocking file");
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_policy(RuntimePolicy::default().with_max_tool_result_bytes(32))
+        .with_tool(OversizedStructuredTerminatingTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    transcript_dir: blocking_file.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    let result = agent
+        .run(
+            vec![ContentBlock::text("run structured tool")],
+            RunOptions::default(),
+        )
+        .await;
+    assert!(matches!(result, Err(RuntimeError::EmptyAssistantResponse)));
+
+    let blocks = tool_result_blocks(agent.history());
+    assert!(matches!(
+        &blocks[0],
+        ContentBlock::ToolResult { content: ToolResultContent::Text(content), is_error: false, .. }
+            if content.contains("full output could not be saved")
+    ));
+    let item = agent
+        .transcript()
+        .items()
+        .iter()
+        .rev()
+        .find(|item| matches!(item.kind, crate::TranscriptKind::ToolExchange { .. }))
+        .expect("tool exchange item");
+    assert_eq!(
+        item.detail("call-structured"),
+        Some(&json!({ "private": 42 }))
+    );
+    assert!(blocking_file.is_file());
+    std::fs::remove_file(blocking_file).expect("remove blocking file");
 }
 
 // 2. A structured tool returns Structured content plus opaque details; the

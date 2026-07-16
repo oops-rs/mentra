@@ -16,6 +16,8 @@ use crate::{
     },
 };
 
+use super::truncation::{SpillBehavior, ToolOutputLimiter};
+
 const PARALLEL_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(crate) struct ToolExecutionOutcome {
@@ -34,6 +36,7 @@ pub(crate) struct ToolRuntime {
     agent_id: String,
     tool_calls: usize,
     working_directory: Option<PathBuf>,
+    output_limiter: ToolOutputLimiter,
 }
 
 #[derive(Clone)]
@@ -78,11 +81,26 @@ struct RoundEffect {
 
 impl ToolRuntime {
     pub(crate) fn new(agent: &Agent) -> Self {
+        let runtime = agent.runtime_handle();
+        let policy = &runtime.execution.policy;
+        let spill = if !policy.spill_full_tool_output {
+            SpillBehavior::Disabled("spill-to-file is disabled by runtime policy")
+        } else if !runtime.persistence.store.allows_disk_artifacts() {
+            SpillBehavior::Disabled("the runtime store forbids durable artifacts")
+        } else {
+            SpillBehavior::Enabled(agent.config().compaction.transcript_dir.join("tool-output"))
+        };
+        let output_limiter = ToolOutputLimiter::new(
+            policy.max_tool_result_bytes,
+            policy.max_tool_result_lines,
+            spill,
+        );
         Self {
-            runtime: agent.runtime_handle(),
+            runtime,
             agent_id: agent.id().to_string(),
             tool_calls: 0,
             working_directory: None,
+            output_limiter,
         }
     }
 
@@ -345,7 +363,8 @@ impl ToolRuntime {
     /// projection, opaque host metadata, and requested termination — the
     /// single boundary where `details` is separated from what a provider
     /// ever sees (only `content` reaches `ContentBlock::ToolResult`).
-    fn tool_output_block(
+    async fn tool_output_block(
+        &self,
         call: &ToolCall,
         output: Result<crate::tool::ToolOutput, String>,
     ) -> (ContentBlock, Option<serde_json::Value>, bool) {
@@ -353,7 +372,7 @@ impl ToolRuntime {
             Ok(output) => (
                 ContentBlock::ToolResult {
                     tool_use_id: call.id.clone(),
-                    content: output.content,
+                    content: self.output_limiter.apply(output.content).await,
                     is_error: false,
                 },
                 output.details,
@@ -362,7 +381,10 @@ impl ToolRuntime {
             Err(content) => (
                 ContentBlock::ToolResult {
                     tool_use_id: call.id.clone(),
-                    content: content.into(),
+                    content: self
+                        .output_limiter
+                        .apply(mentra_provider::ToolResultContent::Text(content))
+                        .await,
                     is_error: true,
                 },
                 None,
@@ -652,7 +674,7 @@ impl ToolRuntime {
             }
             match tokio::time::timeout(PARALLEL_JOIN_POLL_INTERVAL, join_set.join_next()).await {
                 Ok(Some(Ok((index, call, descriptor, output)))) => {
-                    let (result, details, terminate) = Self::tool_output_block(&call, output);
+                    let (result, details, terminate) = self.tool_output_block(&call, output).await;
                     // RUNTIME defense: a parallel-lane execution can never end
                     // the run — a `terminate: true` surfacing here is a tool
                     // misuse (or a static-coercion gap), never honored as
@@ -803,26 +825,28 @@ impl ToolRuntime {
         let working_directory = authorization_ctx.working_directory.clone();
         let runtime = authorization_ctx.runtime.clone();
         let event_tx = agent.event_sender();
-        let (result, details, terminate) = Self::tool_output_block(
-            &call,
-            execute_tool_future(
-                &call.name,
-                descriptor.execution_timeout,
-                tool.execute_mut_output(
-                    ToolContext {
-                        agent_id: self.agent_id.clone(),
-                        tool_call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                        working_directory,
-                        runtime,
-                        agent,
-                        event_tx,
-                    },
-                    call.input.clone(),
-                ),
+        let (result, details, terminate) = self
+            .tool_output_block(
+                &call,
+                execute_tool_future(
+                    &call.name,
+                    descriptor.execution_timeout,
+                    tool.execute_mut_output(
+                        ToolContext {
+                            agent_id: self.agent_id.clone(),
+                            tool_call_id: call.id.clone(),
+                            tool_name: call.name.clone(),
+                            working_directory,
+                            runtime,
+                            agent,
+                            event_tx,
+                        },
+                        call.input.clone(),
+                    ),
+                )
+                .await,
             )
-            .await,
-        );
+            .await;
         let effect = RoundEffect {
             should_end_turn: agent.take_idle_requested() || terminate,
             terminated: terminate,

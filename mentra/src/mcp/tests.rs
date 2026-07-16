@@ -1,8 +1,66 @@
-#[cfg(test)]
-use serde_json::json;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crate::mcp::bridge::{mcp_tool_name, parse_mcp_tool_name};
-use crate::mcp::protocol::*;
+use async_trait::async_trait;
+use serde_json::{Value, json};
+
+use crate::{
+    ContentBlock,
+    mcp::{
+        bridge::{McpBridgedTool, McpToolClient, mcp_tool_name, parse_mcp_tool_name},
+        client::McpClientError,
+        protocol::*,
+    },
+    runtime::RuntimePolicy,
+    test::{MockRuntime, MockToolCall},
+    tool::{
+        ParallelToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSideEffectLevel,
+        ToolSpec,
+    },
+};
+
+struct SuccessfulMcpClient {
+    output: String,
+}
+
+#[async_trait]
+impl McpToolClient for SuccessfulMcpClient {
+    async fn call_tool(
+        &self,
+        _tool_name: &str,
+        _arguments: Option<Value>,
+    ) -> Result<McpToolCallResult, McpClientError> {
+        Ok(McpToolCallResult {
+            content: vec![McpToolCallContent {
+                kind: "text".to_string(),
+                text: Some(self.output.clone()),
+                data: None,
+                mime_type: None,
+            }],
+            is_error: false,
+        })
+    }
+}
+
+struct MatchingCustomTool {
+    output: String,
+}
+
+impl ToolDefinition for MatchingCustomTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("matching_custom_output")
+            .description("Return the same output as the MCP test tool")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::External)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for MatchingCustomTool {
+    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+        Ok(self.output.clone())
+    }
+}
 
 #[test]
 fn mcp_tool_name_namespacing() {
@@ -25,6 +83,80 @@ fn parse_mcp_tool_name_roundtrip() {
 fn parse_mcp_tool_name_rejects_non_mcp() {
     assert!(parse_mcp_tool_name("regular_tool").is_none());
     assert!(parse_mcp_tool_name("mcp_no_double_underscore").is_none());
+}
+
+#[tokio::test]
+async fn bridged_output_is_truncated_before_the_next_provider_request() {
+    let full_output = "one\ntwo\nthree";
+    let bridged_name = mcp_tool_name("fake", "large_output");
+    let mock = MockRuntime::builder()
+        .with_policy(
+            RuntimePolicy::permissive()
+                .with_max_tool_result_bytes(8)
+                .with_max_tool_result_lines(1)
+                .spill_full_tool_output(false),
+        )
+        .tool_calls([
+            MockToolCall::new(&bridged_name, json!({})).with_id("mcp-call"),
+            MockToolCall::new("matching_custom_output", json!({})).with_id("custom-call"),
+        ])
+        .text("done")
+        .build()
+        .expect("build mock runtime");
+    mock.runtime().register_tool(McpBridgedTool::new_for_test(
+        "fake".to_string(),
+        McpToolDefinition {
+            name: "large_output".to_string(),
+            description: Some("Return an oversized result".to_string()),
+            input_schema: Some(json!({ "type": "object", "properties": {} })),
+        },
+        Arc::new(SuccessfulMcpClient {
+            output: full_output.to_string(),
+        }),
+    ));
+    mock.runtime().register_tool(MatchingCustomTool {
+        output: full_output.to_string(),
+    });
+    let mut agent = mock
+        .runtime()
+        .spawn("mcp-truncation-test", mock.model())
+        .expect("spawn agent");
+
+    let response = agent
+        .send(vec![ContentBlock::text("run both tools")])
+        .await
+        .expect("run agent");
+    assert_eq!(response.text(), "done");
+
+    let requests = mock.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    let provider_results = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Some((tool_use_id.as_str(), (content.as_str(), *is_error))),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mcp_result = provider_results
+        .get("mcp-call")
+        .expect("provider request should contain the MCP result");
+    let custom_result = provider_results
+        .get("custom-call")
+        .expect("provider request should contain the custom-tool result");
+    assert_eq!(mcp_result, custom_result);
+    assert_eq!(
+        *mcp_result,
+        (
+            "one\n[truncated: showing 1 of 3 lines; full output was not saved because spill-to-file is disabled by runtime policy]",
+            false,
+        )
+    );
 }
 
 #[test]

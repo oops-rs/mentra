@@ -65,6 +65,16 @@ pub struct TaskStateSnapshot {
 /// Custom runtime backends implement this trait to store durable agent identity,
 /// configuration, and transcript state.
 pub trait AgentStore: Send + Sync {
+    /// Returns whether runtime-managed auxiliary artifacts may be written to
+    /// disk for agents backed by this store.
+    ///
+    /// Persistent stores allow artifacts by default. Volatile stores override
+    /// this capability so features such as full tool-output spilling preserve
+    /// their no-durable-trace contract.
+    fn allows_disk_artifacts(&self) -> bool {
+        true
+    }
+
     fn prepare_recovery(&self) -> Result<(), RuntimeError>;
     fn create_agent(
         &self,

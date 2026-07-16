@@ -144,6 +144,10 @@ impl Default for VolatileRuntimeStore {
 }
 
 impl AgentStore for VolatileRuntimeStore {
+    fn allows_disk_artifacts(&self) -> bool {
+        false
+    }
+
     fn prepare_recovery(&self) -> Result<(), RuntimeError> {
         // Nothing to recover: a volatile store never survives a process
         // restart, so there is no interrupted state to reconcile.

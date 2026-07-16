@@ -78,6 +78,7 @@ pub struct MockRuntimeBuilder {
     turns: Vec<MockTurn>,
     runtime_identifier: String,
     store: Option<SqliteRuntimeStore>,
+    policy: RuntimePolicy,
 }
 
 impl Default for MockRuntimeBuilder {
@@ -88,6 +89,7 @@ impl Default for MockRuntimeBuilder {
             turns: Vec::new(),
             runtime_identifier,
             store: None,
+            policy: RuntimePolicy::permissive(),
         }
     }
 }
@@ -105,6 +107,12 @@ impl MockRuntimeBuilder {
 
     pub fn with_store(mut self, store: SqliteRuntimeStore) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Replaces the runtime policy used by the scripted runtime.
+    pub fn with_policy(mut self, policy: RuntimePolicy) -> Self {
+        self.policy = policy;
         self
     }
 
@@ -151,7 +159,7 @@ impl MockRuntimeBuilder {
         let runtime = Runtime::builder()
             .with_runtime_identifier(self.runtime_identifier)
             .with_store(store)
-            .with_policy(RuntimePolicy::permissive())
+            .with_policy(self.policy)
             .with_provider_instance(provider.clone())
             .build()?;
 
