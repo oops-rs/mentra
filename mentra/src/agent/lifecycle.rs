@@ -49,6 +49,10 @@ impl Agent {
                 content: content.into(),
             },
         )?;
+        self.mutate_snapshot(|snapshot| {
+            snapshot.run_generation = snapshot.run_generation.saturating_add(1);
+            snapshot.status = AgentStatus::AwaitingModel;
+        });
         self.sync_memory_snapshot();
         self.emit_event(AgentEvent::RunStarted);
 

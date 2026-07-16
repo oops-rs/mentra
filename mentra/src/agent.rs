@@ -14,6 +14,7 @@ mod team;
 mod terminal_output;
 #[cfg(test)]
 mod tests;
+mod wait;
 
 use std::{
     collections::HashSet,
@@ -60,6 +61,7 @@ use runner::TurnRunner;
 pub use steering::{QueueMode, SteeringHandle};
 pub(crate) use subagent::DisposableSubagentTemplate;
 pub use terminal_output::{FinalOutput, TerminalOutputSpec};
+pub use wait::{AgentWaitFuture, AgentWaitHandle};
 
 static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
 

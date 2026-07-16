@@ -72,6 +72,10 @@ pub type ContextCompactionDetails = CompactionDetails;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentSnapshot {
     pub status: AgentStatus,
+    /// Monotonic generation of the run currently reflected by this snapshot.
+    /// Incremented when a new `Agent::run` checkpoint has started.
+    #[serde(default)]
+    pub run_generation: u64,
     pub history_len: usize,
     pub current_text: String,
     pub pending_tool_uses: Vec<PendingToolUseSummary>,
