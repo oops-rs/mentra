@@ -176,16 +176,26 @@ no-op variants. WS2 ships the independently useful truncation seam first.
 
 ### Why the split is cheap
 
-Every `WorkspaceEditor` op already does its own path resolution
-(workspace.rs:161), `..`-escape normalization (:468), read/write authorization
-against policy roots (:171/:187), and overlay-aware existence checks. The
-**only** batch-entangled machinery is the staged overlay + atomic commit
-(workspace.rs:67,120) — and for single-op tools it degrades gracefully:
+Every direct `WorkspaceEditor` op already did its own path resolution,
+`..`-escape normalization, read/write authorization against policy roots, and
+overlay-aware existence checks. The **only** batch-entangled machinery is the
+staged overlay + atomic commit — and for single-op tools it degrades gracefully:
 reads leave the overlay empty (commit is a no-op), single writes get temp-file
-+ atomic rename per file (:521). The only lost property is cross-file
++ atomic rename per file. The only lost property is cross-file
 transactional rollback, which no single-file conventional tool needs. The
 batched `files` tool stays for hosts that want transactions; both surfaces
 share one engine.
+
+Implementation correction (2026-07-16): the investigation's authorization
+claim was incomplete for recursive operations. `list` and `search` authorized
+their root once, then followed descendant symlinks without reauthorizing each
+target. A symlink beneath an allowed root could therefore make a recursive walk
+read outside the policy roots. WS3 first moved list/search/glob onto one walker
+that reauthorizes every descendant before inspecting or following it. Escaping
+descendants now reject the operation and emit the existing authorization hook;
+in-root symlink loops remain bounded by canonical visited-directory tracking.
+This is an intentional policy-enforcement correction to the otherwise
+byte-identical default batched profile.
 
 ### The tool set
 
@@ -200,9 +210,12 @@ share one engine.
 
 `move`/`delete` stay in batched `files`/shell initially. Read-only tools set
 their category statically (the dynamic `file_execution_category` in
-files/input.rs:20 exists only because the batched tool mixes read+write).
-Implementation: make the nine op methods `pub(crate)`, add thin executors
-mirroring files.rs:26 / execution.rs:14.
+`files/input.rs` exists only because the batched tool mixes read+write).
+Implementation: make the nine op methods `pub(crate)`, add thin executors over
+the same engine, and select their registration through
+`FileToolProfile::{Batched, Split, Both}`. Eager builtin registration is
+reconfigured immediately by `RuntimeBuilder::with_file_tools`; `Batched`
+remains the default.
 
 ### Edit hardening (port of pi's edit-diff playbook)
 
@@ -224,6 +237,14 @@ and smart-quote mismatches silently fail. Port from
    confirmed the right carrier (opaque host metadata, survives transcript +
    compaction per ADR-0001 §3/§4 and the M5 guarantee, never projected to the
    provider). Needs a diff crate (`similar` is idiomatic; none present today).
+
+Compatibility correction (2026-07-16): these semantics belong to the new
+opt-in `edit` tool. The default batched `files.replace` path retains its prior
+exact-match, expected-count, and first-match behavior byte-for-byte. Routing the
+legacy operation through fuzzy/uniqueness guards would violate the additive
+default contract even though ordinary tests still passed. `similar` 2.7.0
+(MSRV 1.60) and `unicode-normalization` 0.1.25 (MSRV 1.36) both remain below
+mentra's Rust 1.85 MSRV.
 
 ### Grep gaps to close
 
