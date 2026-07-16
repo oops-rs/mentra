@@ -111,12 +111,15 @@ alone.
 
 ### Truncation
 
-**Single choke point confirmed:** `ToolRuntime::tool_output_block`
-(tool/orchestrator.rs:348) — every result (Ok and Err, parallel lane :655 and
-exclusive lane :806, builtin/custom/MCP) passes through it before becoming a
-provider-visible `ContentBlock::ToolResult`. This is the ADR-0001 §4
-projection boundary; truncating here means transcript, replay, persistence,
-compaction, and provider all agree, and `details`/`terminate` are untouched.
+**Single executor-output choke point confirmed:**
+`ToolRuntime::tool_output_block` (tool/orchestrator.rs:348) — every actual
+executor result (Ok and Err, parallel lane :655 and exclusive lane :806,
+builtin/custom/MCP) passes through it before becoming a provider-visible
+`ContentBlock::ToolResult`. Synthetic results for missing tools,
+authorization/pre-execution-hook failures, and calls skipped after termination
+are constructed separately and do not pass this boundary. Truncating actual
+outputs here means transcript, replay, persistence, compaction, and provider
+all agree, while `details`/`terminate` remain untouched.
 
 Design:
 
@@ -127,8 +130,12 @@ Design:
 - `ToolResultContent::Structured` is never cut mid-JSON: if its stringified
   size exceeds budget, spill and replace with a Text pointer.
 - Truncate error strings too.
-- Spill full output to a file (needs a writable dir — derive from agent
-  config; verify the exact `AgentConfig` field before implementation).
+- Spill full output to
+  `AgentConfig::compaction.transcript_dir.join("tool-output")`, the existing
+  runtime-managed artifact root. `AgentStore::allows_disk_artifacts` defaults
+  true and is false for `VolatileRuntimeStore`, so volatile runs still leave no
+  durable trace. Disabled or failed spills retain an actionable explanation in
+  the notice instead of changing the tool's success/error state.
   Requires making `tool_output_block` an instance method (`&self`) —
   mechanical, both call sites already run on `&self`/`&mut self`.
 - Config on `RuntimePolicy` beside `max_output_bytes_per_stream`
@@ -137,6 +144,12 @@ Design:
   This is complementary to the shell **stream** cap, which stays.
 - Per-result truncation is race-free under the parallel JoinSet (results land
   by index, order reconstructed at orchestrator.rs:696-701).
+- The shell stream cap is upstream: a shell spill preserves the complete
+  captured stream, but cannot recover bytes already discarded by
+  `max_output_bytes_per_stream`.
+- Compatibility correction: the new 50-KB/2,000-line defaults intentionally
+  change existing oversized outputs. The byte-identical guarantee applies to
+  under-limit results, not results that now require truncation.
 
 ### Builtin tool profiles
 
@@ -150,6 +163,12 @@ pub enum FileToolProfile { Batched /* default */, Split, Both }
 ```
 
 Default `Batched` keeps existing embedders byte-identical.
+
+Implementation sequencing correction (2026-07-16): builtin registration is
+eager in `RuntimeHandle::new(true)`, and `Split`/`Both` have no truthful meaning
+until the WS3 executors exist. `FileToolProfile` therefore lands together with
+WS3, where the builder can reconfigure the eager registry without exposing
+no-op variants. WS2 ships the independently useful truncation seam first.
 
 ---
 

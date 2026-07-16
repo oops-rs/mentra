@@ -12,6 +12,18 @@
   authorization hooks, and enrich shell authorization previews with the
   classifier mode, intent, outcome, and reason.
 
+### WS2 — Generic tool-output truncation
+
+- Limit each successful or error result produced by a builtin, custom, or MCP
+  executor to a 2,000-line / 50-KB retained head before it enters the
+  transcript and provider request. Truncation preserves complete lines and
+  appends an actionable notice; parallel batches limit each result
+  independently while retaining call order.
+- Spill full oversized output beneath the agent transcript artifact directory
+  by default. Structured JSON is never sliced: it is spilled whole and
+  replaced by a text pointer. Volatile stores suppress disk spills to preserve
+  their no-durable-trace contract.
+
 ### Compatibility
 
 - Shell validation defaults to `Off`, preserving existing command-execution
@@ -20,6 +32,12 @@
 - Shell `ToolAuthorizationPreview::structured_input` gains an additive
   `validation` object. Consumers comparing that JSON exhaustively must accept
   the new key.
+- Results at or below both tool-result limits remain byte-identical. Existing
+  results above either new default limit now intentionally become a retained
+  head plus notice; the shell stream-capture limit remains separate and still
+  applies before this projection boundary.
+- `AgentStore` gains a defaulted `allows_disk_artifacts` capability method, so
+  existing store implementations continue to compile unchanged.
 
 ## 0.9.0
 
