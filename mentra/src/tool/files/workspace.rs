@@ -412,14 +412,18 @@ impl WorkspaceEditor {
     ) -> Result<(), String> {
         let content = self.load_text_file(path)?;
         let lines = content.lines().collect::<Vec<_>>();
+        if lines.is_empty() {
+            return Ok(());
+        }
         let mut matched_lines = BTreeSet::new();
 
         if options.multiline {
             let line_starts = line_start_offsets(&content);
+            let last_line = lines.len() - 1;
             for found in regex.find_iter(&content) {
-                let start_line = line_index_at(&line_starts, found.start());
+                let start_line = line_index_at(&line_starts, found.start()).min(last_line);
                 let end_position = found.end().saturating_sub(1).max(found.start());
-                let end_line = line_index_at(&line_starts, end_position);
+                let end_line = line_index_at(&line_starts, end_position).min(last_line);
                 matched_lines.extend(start_line..=end_line);
             }
         } else {
@@ -736,6 +740,52 @@ mod tests {
 
         assert_eq!(rendered.chars().count(), 500);
         assert!(rendered.ends_with('…'));
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn multiline_grep_bounds_zero_width_match_at_trailing_newline() {
+        let (root, editor) = test_editor("grep-zero-width");
+        fs::write(root.join("line.txt"), "line\n").expect("write line");
+
+        let output = editor
+            .grep(
+                "line.txt".to_string(),
+                "$",
+                SearchOptions {
+                    multiline: true,
+                    ..Default::default()
+                },
+                20,
+            )
+            .expect("grep");
+
+        assert!(output.contains("line.txt:1: line"));
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn grep_combines_literal_case_insensitive_and_file_glob_options() {
+        let (root, editor) = test_editor("grep-options");
+        fs::write(root.join("code.rs"), "Needle.[x]\n").expect("write Rust file");
+        fs::write(root.join("note.txt"), "Needle.[x]\n").expect("write text file");
+
+        let output = editor
+            .grep(
+                ".".to_string(),
+                "needle.[X]",
+                SearchOptions {
+                    file_glob: Some("*.rs".to_string()),
+                    ignore_case: true,
+                    literal: true,
+                    ..Default::default()
+                },
+                20,
+            )
+            .expect("grep");
+
+        assert!(output.contains("code.rs:1: Needle.[x]"));
+        assert!(!output.contains("note.txt"));
         fs::remove_dir_all(root).expect("remove test workspace");
     }
 
