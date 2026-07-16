@@ -377,7 +377,7 @@ impl RuntimeHandle {
     pub fn emit_hook(&self, event: RuntimeHookEvent) -> Result<(), RuntimeError> {
         self.execution
             .hooks
-            .emit(self.persistence.store.as_ref(), &event)
+            .emit_runtime(self.persistence.store.as_ref(), &event)
     }
 }
 
