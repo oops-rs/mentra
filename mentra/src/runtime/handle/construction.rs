@@ -17,7 +17,7 @@ impl BackgroundHookSink for RuntimeBackgroundHookSink {
         command: &str,
         cwd: &Path,
     ) -> Result<(), RuntimeError> {
-        self.hooks.emit(
+        self.hooks.emit_runtime(
             self.store.as_ref(),
             &RuntimeHookEvent::BackgroundTaskStarted {
                 agent_id: agent_id.to_string(),
@@ -34,7 +34,7 @@ impl BackgroundHookSink for RuntimeBackgroundHookSink {
         task_id: &str,
         status: &str,
     ) -> Result<(), RuntimeError> {
-        self.hooks.emit(
+        self.hooks.emit_runtime(
             self.store.as_ref(),
             &RuntimeHookEvent::BackgroundTaskFinished {
                 agent_id: agent_id.to_string(),

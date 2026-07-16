@@ -159,7 +159,7 @@ impl MemoryEngine {
         request: impl Into<MemorySearchRequest>,
     ) -> Result<Vec<MemoryHit>, RuntimeError> {
         let request = request.into();
-        let _ = self.hooks.emit(
+        let _ = self.hooks.emit_runtime(
             self.store.as_ref(),
             &RuntimeHookEvent::MemorySearchStarted {
                 agent_id: request.agent_id.clone(),
@@ -170,7 +170,7 @@ impl MemoryEngine {
         let records = match self.store.search_records_with_options(&request) {
             Ok(records) => records,
             Err(error) => {
-                let _ = self.hooks.emit(
+                let _ = self.hooks.emit_runtime(
                     self.store.as_ref(),
                     &RuntimeHookEvent::MemorySearchFinished {
                         agent_id: request.agent_id,
@@ -202,7 +202,7 @@ impl MemoryEngine {
         if let Some(char_budget) = request.char_budget {
             trim_hits_to_char_budget(&mut hits, char_budget);
         }
-        let _ = self.hooks.emit(
+        let _ = self.hooks.emit_runtime(
             self.store.as_ref(),
             &RuntimeHookEvent::MemorySearchFinished {
                 agent_id: request.agent_id,
@@ -222,7 +222,7 @@ impl MemoryEngine {
     }
 
     pub async fn ingest(&self, request: IngestRequest) -> Result<IngestOutcome, RuntimeError> {
-        let _ = self.hooks.emit(
+        let _ = self.hooks.emit_runtime(
             self.store.as_ref(),
             &RuntimeHookEvent::MemoryIngestStarted {
                 agent_id: request.agent_id.clone(),
@@ -233,7 +233,7 @@ impl MemoryEngine {
         let cursor = match self.store.load_agent_memory_cursor(&request.agent_id) {
             Ok(cursor) => cursor.unwrap_or_default(),
             Err(error) => {
-                let _ = self.hooks.emit(
+                let _ = self.hooks.emit_runtime(
                     self.store.as_ref(),
                     &RuntimeHookEvent::MemoryIngestFinished {
                         agent_id: request.agent_id,
@@ -247,7 +247,7 @@ impl MemoryEngine {
             }
         };
         if cursor.last_ingested_revision >= request.source_revision {
-            let _ = self.hooks.emit(
+            let _ = self.hooks.emit_runtime(
                 self.store.as_ref(),
                 &RuntimeHookEvent::MemoryIngestFinished {
                     agent_id: request.agent_id,
@@ -271,7 +271,7 @@ impl MemoryEngine {
                     last_ingested_revision: request.source_revision,
                 },
             ) {
-                let _ = self.hooks.emit(
+                let _ = self.hooks.emit_runtime(
                     self.store.as_ref(),
                     &RuntimeHookEvent::MemoryIngestFinished {
                         agent_id: request.agent_id,
@@ -283,7 +283,7 @@ impl MemoryEngine {
                 );
                 return Err(error);
             }
-            let _ = self.hooks.emit(
+            let _ = self.hooks.emit_runtime(
                 self.store.as_ref(),
                 &RuntimeHookEvent::MemoryIngestFinished {
                     agent_id: request.agent_id,
@@ -312,7 +312,7 @@ impl MemoryEngine {
             score: None,
         };
         if let Err(error) = self.store.upsert_records(&[record]) {
-            let _ = self.hooks.emit(
+            let _ = self.hooks.emit_runtime(
                 self.store.as_ref(),
                 &RuntimeHookEvent::MemoryIngestFinished {
                     agent_id: request.agent_id,
@@ -330,7 +330,7 @@ impl MemoryEngine {
                 last_ingested_revision: request.source_revision,
             },
         ) {
-            let _ = self.hooks.emit(
+            let _ = self.hooks.emit_runtime(
                 self.store.as_ref(),
                 &RuntimeHookEvent::MemoryIngestFinished {
                     agent_id: request.agent_id,
@@ -342,7 +342,7 @@ impl MemoryEngine {
             );
             return Err(error);
         }
-        let _ = self.hooks.emit(
+        let _ = self.hooks.emit_runtime(
             self.store.as_ref(),
             &RuntimeHookEvent::MemoryIngestFinished {
                 agent_id: request.agent_id,

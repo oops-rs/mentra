@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     provider::{ProviderError, TokenUsage},
-    runtime::{AuditStore, error::RuntimeError},
+    runtime::{AuditStore, RuntimeStore, error::RuntimeError},
     tool::{ToolAuthorizationOutcome, ToolAuthorizationPreview},
 };
 
@@ -259,6 +259,29 @@ impl RuntimeHooks {
             hook.on_event(store, event)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn emit_runtime(
+        &self,
+        store: &dyn RuntimeStore,
+        event: &RuntimeHookEvent,
+    ) -> Result<(), RuntimeError> {
+        self.emit(&RuntimeAuditStore(store), event)
+    }
+}
+
+/// Stable adapter for Rust versions that cannot upcast `dyn RuntimeStore` to
+/// its `AuditStore` supertrait object directly.
+struct RuntimeAuditStore<'a>(&'a dyn RuntimeStore);
+
+impl AuditStore for RuntimeAuditStore<'_> {
+    fn record_audit_event(
+        &self,
+        scope: &str,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), RuntimeError> {
+        self.0.record_audit_event(scope, event_type, payload)
     }
 }
 

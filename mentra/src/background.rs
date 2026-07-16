@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use strum::Display;
 
 use crate::agent::AgentEvent;
-use crate::runtime::control::{CommandOutput, CommandRequest, RuntimeExecutor};
+use crate::runtime::{
+    RuntimeStore,
+    control::{CommandOutput, CommandRequest, RuntimeExecutor},
+};
 
 pub(crate) use hook::BackgroundHookSink;
 pub(crate) use observer::{BackgroundObserverSink, BackgroundRegistration};
@@ -59,7 +62,7 @@ pub(crate) struct BackgroundTaskManager {
 }
 
 struct BackgroundTaskManagerInner {
-    store: Arc<dyn BackgroundStore>,
+    store: Arc<dyn RuntimeStore>,
     executor: Arc<dyn RuntimeExecutor>,
     hooks: Arc<dyn BackgroundHookSink>,
     next_task_id: AtomicU64,
@@ -84,7 +87,7 @@ struct BackgroundObserver {
 
 impl BackgroundTaskManager {
     pub(crate) fn new(
-        store: Arc<dyn BackgroundStore>,
+        store: Arc<dyn RuntimeStore>,
         executor: Arc<dyn RuntimeExecutor>,
         hooks: Arc<dyn BackgroundHookSink>,
     ) -> Self {

@@ -6,7 +6,7 @@ use crate::{
 };
 
 struct AgentTeamObserver {
-    store: Arc<dyn crate::runtime::TaskStore>,
+    store: Arc<dyn crate::runtime::RuntimeStore>,
     tasks_dir: PathBuf,
     events: AgentEventBus,
     snapshot_tx: watch::Sender<AgentSnapshot>,
@@ -15,7 +15,7 @@ struct AgentTeamObserver {
 
 impl AgentTeamObserver {
     fn new(
-        store: Arc<dyn crate::runtime::TaskStore>,
+        store: Arc<dyn crate::runtime::RuntimeStore>,
         tasks_dir: PathBuf,
         observer: &AgentObserver,
     ) -> Self {
