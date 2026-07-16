@@ -878,4 +878,22 @@ mod tests {
         assert!(no_op.contains("no-op"));
         fs::remove_dir_all(root).expect("remove test workspace");
     }
+
+    #[test]
+    fn legacy_batched_replace_keeps_its_first_match_contract() {
+        let (root, mut editor) = test_editor("legacy-replace");
+        fs::write(root.join("note.txt"), "same same\n").expect("write document");
+
+        let summary = editor
+            .replace("note.txt".to_string(), "same", "changed", false, 2)
+            .expect("legacy replace");
+        editor.commit().expect("commit replace");
+
+        assert_eq!(summary, "replace note.txt (2 replacements)");
+        assert_eq!(
+            fs::read_to_string(root.join("note.txt")).expect("read document"),
+            "changed same\n"
+        );
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
 }

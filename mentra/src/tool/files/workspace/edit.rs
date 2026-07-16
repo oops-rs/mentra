@@ -49,21 +49,8 @@ impl WorkspaceEditor {
         edits: Vec<TextEdit>,
         replace_all: bool,
     ) -> Result<EditOutcome, String> {
-        self.edit_with_expected(path, edits, replace_all, None)
-    }
-
-    pub(super) fn edit_with_expected(
-        &mut self,
-        path: String,
-        edits: Vec<TextEdit>,
-        replace_all: bool,
-        expected_replacements: Option<&[usize]>,
-    ) -> Result<EditOutcome, String> {
         if edits.is_empty() {
             return Err("At least one edit is required".to_string());
-        }
-        if expected_replacements.is_some_and(|expected| expected.len() != edits.len()) {
-            return Err("Expected-replacement counts must match the edit count".to_string());
         }
 
         let path = self.resolve_path(&path)?;
@@ -102,17 +89,6 @@ impl WorkspaceEditor {
             let fuzzy = ranges.is_empty();
             if fuzzy {
                 ranges = fuzzy_ranges(&original, &edit.old_string);
-            }
-
-            if let Some(expected) = expected_replacements {
-                let expected = expected[edit_index];
-                if ranges.len() != expected {
-                    return Err(format!(
-                        "Expected {expected} replacement(s) in '{}', found {}",
-                        self.display_path(&path),
-                        ranges.len()
-                    ));
-                }
             }
 
             if ranges.is_empty() {

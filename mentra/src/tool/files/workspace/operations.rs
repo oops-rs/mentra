@@ -1,6 +1,6 @@
 use regex::RegexBuilder;
 
-use super::{BTreeSet, EntryKind, OverlayEntry, SearchOptions, TextEdit, WorkspaceEditor};
+use super::{BTreeSet, EntryKind, OverlayEntry, SearchOptions, WorkspaceEditor};
 use crate::tool::files::schema::{FileOperation, InsertPosition};
 
 impl WorkspaceEditor {
@@ -289,24 +289,29 @@ impl WorkspaceEditor {
         if old.is_empty() {
             return Err("replace old text must not be empty".to_string());
         }
-        let outcome = self.edit_with_expected(
-            path,
-            vec![TextEdit {
-                old_string: old.to_string(),
-                new_string: new.to_string(),
-            }],
-            replace_all,
-            Some(&[expected_replacements]),
-        )?;
+        let path = self.resolve_path(&path)?;
+        let path = self.authorize_write(&path, "files_write")?;
+        let content = self.load_text_file(&path)?;
+        let actual_replacements = content.match_indices(old).count();
+        if actual_replacements != expected_replacements {
+            return Err(format!(
+                "Expected {expected_replacements} replacement(s) in '{}', found {actual_replacements}",
+                self.display_path(&path)
+            ));
+        }
+
+        let updated = if replace_all {
+            content.replace(old, new)
+        } else {
+            content.replacen(old, new, 1)
+        };
+
+        self.overlay
+            .insert(path.clone(), OverlayEntry::File(updated.into_bytes()));
         Ok(format!(
             "replace {} ({actual_replacements} replacement{})",
-            outcome.display_path,
-            if outcome.replacement_count == 1 {
-                ""
-            } else {
-                "s"
-            },
-            actual_replacements = outcome.replacement_count,
+            self.display_path(&path),
+            if actual_replacements == 1 { "" } else { "s" }
         ))
     }
 
