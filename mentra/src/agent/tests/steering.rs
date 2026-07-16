@@ -206,6 +206,68 @@ async fn failed_run_requeues_steer_and_resume_reinjects_it() {
 }
 
 #[tokio::test]
+async fn failed_run_requeues_follow_up_and_resume_reinjects_it() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            text_stream(&model.id, "first draft"),
+            erroring_stream(
+                Vec::new(),
+                ProviderError::MalformedStream("failed after follow-up".to_string()),
+            ),
+            text_stream(&model.id, "retry draft"),
+            text_stream(&model.id, "fixed"),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let steering = agent.steering_handle();
+    steering.follow_up(vec![ContentBlock::text("append the required evidence")]);
+
+    agent
+        .run(vec![ContentBlock::text("start")], RunOptions::default())
+        .await
+        .expect_err("second request fails");
+    assert!(steering.has_pending(), "failed run requeues the follow-up");
+
+    let result = agent.resume().await.expect("resume succeeds");
+    assert_eq!(result.text(), "fixed");
+    assert!(!steering.has_pending());
+    let requests = provider_handle.recorded_requests().await;
+    assert_eq!(requests.len(), 4);
+    assert!(!request_contains(
+        &requests[0].messages,
+        "append the required evidence"
+    ));
+    assert!(request_contains(
+        &requests[1].messages,
+        "append the required evidence"
+    ));
+    assert!(!request_contains(
+        &requests[2].messages,
+        "append the required evidence"
+    ));
+    assert!(request_contains(
+        &requests[3].messages,
+        "append the required evidence"
+    ));
+    assert_eq!(
+        agent
+            .history()
+            .iter()
+            .filter(|message| message.text().contains("append the required evidence"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn steering_precedes_round_strategy_without_double_injection() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
