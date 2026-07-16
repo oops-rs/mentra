@@ -24,6 +24,24 @@
   replaced by a text pointer. Volatile stores suppress disk spills to preserve
   their no-durable-trace contract.
 
+### WS4 — Thinking and reasoning preservation
+
+- Add provider-neutral, externally tagged `ContentBlock::Thinking` blocks with
+  opaque signature/encrypted metadata and exact provider/model/format
+  provenance. Stream builders, agent pending turns, persisted transcripts, and
+  response-to-event round trips preserve block ordering and metadata.
+- Capture and replay Anthropic signed and redacted thinking. Replay is limited
+  to assistant history with exact registered-provider and requested-model
+  provenance; missing/empty signatures and cross-provider/model history safely
+  downgrade to plain text, with a deterministic marker for opaque-only blocks.
+- Emit reasoning text as `AgentEvent::ReasoningDelta` and
+  `SessionEvent::AssistantReasoningDelta` while keeping signatures out of host
+  deltas. Local compaction summaries exclude thinking from both text extraction
+  and the full-transcript JSON prompt.
+
+Gemini thought capture and signatures on `ToolUse`/text blocks remain deferred;
+the new neutral representation does not yet provide full Gemini fidelity.
+
 ### Compatibility
 
 - Shell validation defaults to `Off`, preserving existing command-execution
@@ -38,6 +56,12 @@
   applies before this projection boundary.
 - `AgentStore` gains a defaulted `allows_disk_artifacts` capability method, so
   existing store implementations continue to compile unchanged.
+- Persisted messages and transcripts from before WS4 deserialize unchanged.
+  New optional thinking fields are serde-defaulted and omitted when absent.
+- `ContentBlock`, `ContentBlockStart`, `ContentBlockDelta`, `AgentEvent`, and
+  `SessionEvent` gain public variants. Exhaustive matchers must add the new
+  reasoning cases (or a deliberate fallback); existing non-exhaustive usage is
+  unchanged.
 
 ## 0.9.0
 

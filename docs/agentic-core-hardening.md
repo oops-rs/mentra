@@ -290,10 +290,14 @@ Correctness rules (pi-verified):
    (pi gates on `isSameProviderAndModel`). Never send one provider's signature
    to another — or to a different model of the same provider.
 2. **Fallback = downgrade-to-text, never skip or error.** Unreplayable
-   thinking (cross-provider/model, missing/empty/invalid signature) becomes a
-   plain Text block. Critical edge case: an **aborted stream yields a thinking
-   block with an empty signature**; replaying it to Anthropic is rejected, so
-   it must downgrade. Persisted transcripts then never hard-fail on replay.
+   thinking (cross-provider/model or missing/empty signature) becomes a plain
+   Text block. Audit correction: mentra rolls an aborted partial stream back to
+   the run baseline, so an aborted stream does **not** commit an empty-signature
+   thinking block. Empty signatures still need a guard for completed provider
+   streams, legacy/manually constructed records, and imported transcripts.
+   mentra can check that an opaque signature is nonempty but cannot prove its
+   cryptographic/provider validity locally. Persisted transcripts therefore
+   never hard-fail merely because opaque reasoning cannot replay.
 3. **Host events carry thinking text only; the signature attaches at block
    close** (Anthropic sends `signature_delta` silently; Gemini may send the
    signature only on the first delta — retain, don't null on later deltas).
@@ -305,6 +309,15 @@ Correctness rules (pi-verified):
    `call_id|item_id` so they re-link; cross-model, the `fc_...` id is nulled).
    Azure quirk: `encrypted_content` can be absent on item.done and must be
    backfilled from `response.completed`.
+
+Implementation corrections (2026-07-16): capture and replay mappers receive
+the target registered provider id and the **requested** model explicitly; the
+response-reported model is not a substitute for replay provenance. Thinking in
+a user-role message always downgrades to Text, even when provenance matches.
+Opaque-only fallback uses a deterministic nonempty marker. For Azure-compatible
+Responses endpoints, late `encrypted_content` is modeled as an internal
+metadata delta/backfill sourced from final `response.output`; it is not a host
+reasoning-text event.
 
 Per-provider work:
 
@@ -319,9 +332,9 @@ Per-provider work:
   (settable at model.rs:84-85, currently unconsumed).
 - **Gemini:** add `thought`/`thoughtSignature` to response `GeminiPart`,
   branch thought parts to Thinking (not Text); request `includeThoughts`.
-  Full Gemini fidelity eventually needs signatures on **ToolUse** (Google's
-  `thoughtSignature` rides on any part) — explicitly **phase 2**; document the
-  limitation now.
+  Full Gemini fidelity eventually needs signatures on **ToolUse** and text
+  blocks (Google's `thoughtSignature` rides on any part) — explicitly **phase
+  3 and out of scope for this handoff**; document the limitation now.
 
 Compaction/persistence: safe by construction — preserved tail keeps
 TranscriptItems verbatim (thinking survives the in-flight tool loop, guarded
