@@ -230,14 +230,14 @@ pub(crate) fn parse_json_event(
                 delta: delta.clone(),
                 summary_index,
             }];
+            let output_index = output_index
+                .filter(|output_index| !state.ignored_output_indices.contains(output_index));
             if let Some(output_index) = output_index {
-                if !state.ignored_output_indices.contains(&output_index) {
-                    state.reasoning_delta_seen.insert(output_index);
-                    events.push(ProviderEvent::ContentBlockDelta {
-                        index: output_index,
-                        delta: ContentBlockDelta::ThinkingText(delta),
-                    });
-                }
+                state.reasoning_delta_seen.insert(output_index);
+                events.push(ProviderEvent::ContentBlockDelta {
+                    index: output_index,
+                    delta: ContentBlockDelta::ThinkingText(delta),
+                });
             }
             Ok(events)
         }
@@ -250,14 +250,14 @@ pub(crate) fn parse_json_event(
                 delta: delta.clone(),
                 content_index,
             }];
+            let output_index = output_index
+                .filter(|output_index| !state.ignored_output_indices.contains(output_index));
             if let Some(output_index) = output_index {
-                if !state.ignored_output_indices.contains(&output_index) {
-                    state.reasoning_delta_seen.insert(output_index);
-                    events.push(ProviderEvent::ContentBlockDelta {
-                        index: output_index,
-                        delta: ContentBlockDelta::ThinkingText(delta),
-                    });
-                }
+                state.reasoning_delta_seen.insert(output_index);
+                events.push(ProviderEvent::ContentBlockDelta {
+                    index: output_index,
+                    delta: ContentBlockDelta::ThinkingText(delta),
+                });
             }
             Ok(events)
         }
@@ -267,14 +267,14 @@ pub(crate) fn parse_json_event(
             }])
         }
         ResponsesStreamEvent::ResponseReasoningSummaryPartDone { output_index } => {
+            let output_index = output_index
+                .filter(|output_index| !state.ignored_output_indices.contains(output_index));
             if let Some(output_index) = output_index {
-                if !state.ignored_output_indices.contains(&output_index) {
-                    state.reasoning_delta_seen.insert(output_index);
-                    return Ok(vec![ProviderEvent::ContentBlockDelta {
-                        index: output_index,
-                        delta: ContentBlockDelta::ThinkingText("\n\n".to_string()),
-                    }]);
-                }
+                state.reasoning_delta_seen.insert(output_index);
+                return Ok(vec![ProviderEvent::ContentBlockDelta {
+                    index: output_index,
+                    delta: ContentBlockDelta::ThinkingText("\n\n".to_string()),
+                }]);
             }
             Ok(Vec::new())
         }
@@ -350,15 +350,17 @@ pub(crate) fn parse_json_event(
                 });
             }
 
-            if !state.reasoning_delta_seen.remove(&output_index) {
-                if let Some(reasoning) = item.completed_reasoning_text() {
-                    if !reasoning.is_empty() {
-                        events.push(ProviderEvent::ContentBlockDelta {
-                            index: output_index,
-                            delta: ContentBlockDelta::ThinkingText(reasoning),
-                        });
-                    }
-                }
+            let reasoning = if state.reasoning_delta_seen.remove(&output_index) {
+                None
+            } else {
+                item.completed_reasoning_text()
+                    .filter(|reasoning| !reasoning.is_empty())
+            };
+            if let Some(reasoning) = reasoning {
+                events.push(ProviderEvent::ContentBlockDelta {
+                    index: output_index,
+                    delta: ContentBlockDelta::ThinkingText(reasoning),
+                });
             }
 
             if item.reasoning_encrypted_content().is_some() {
