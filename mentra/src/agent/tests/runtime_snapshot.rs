@@ -64,6 +64,75 @@ async fn owned_waits_coexist_with_mutable_runs_and_track_run_generation() {
 }
 
 #[tokio::test]
+async fn wait_handle_targets_the_generation_active_when_the_future_is_created() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let (script, tx) = controlled_stream();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![script],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let agent = runtime.spawn("agent", model.clone()).expect("spawn agent");
+    let waits = agent.wait_handle();
+    let mut snapshots = agent.watch_snapshot();
+
+    let send_task = tokio::spawn(async move {
+        let mut agent = agent;
+        agent.send(vec![ContentBlock::text("start")]).await
+    });
+    wait_for_status(&mut snapshots, AgentStatus::Streaming).await;
+    assert_eq!(snapshots.borrow().run_generation, 1);
+
+    let idle = waits.wait_until_idle();
+    let finished = waits.wait_for_snapshot(|snapshot| {
+        snapshot.run_generation == 1 && snapshot.status == AgentStatus::Finished
+    });
+    for event in [
+        ProviderEvent::MessageStarted {
+            id: "msg-active-wait".to_string(),
+            model: model.id,
+            role: Role::Assistant,
+        },
+        ProviderEvent::ContentBlockStarted {
+            index: 0,
+            kind: ContentBlockStart::Text,
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::Text("done".to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::MessageStopped,
+    ] {
+        tx.send(Ok(event)).expect("stream receiver remains alive");
+    }
+    drop(tx);
+
+    let (idle, finished, result) = tokio::join!(
+        timeout(Duration::from_secs(5), idle),
+        timeout(Duration::from_secs(5), finished),
+        send_task,
+    );
+    let idle = idle.expect("idle wait timed out");
+    let finished = finished.expect("snapshot wait timed out");
+    assert_eq!(
+        result
+            .expect("send task joins")
+            .expect("run succeeds")
+            .text(),
+        "done"
+    );
+    assert_eq!(idle.run_generation, 1);
+    assert_eq!(idle.status, AgentStatus::Finished);
+    assert_eq!(finished.run_generation, 1);
+    assert_eq!(finished.status, AgentStatus::Finished);
+}
+
+#[tokio::test]
 async fn teammate_reply_wait_consumes_the_snapshot_signaled_inbox() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
@@ -89,6 +158,7 @@ async fn teammate_reply_wait_consumes_the_snapshot_signaled_inbox() {
     let bob = runtime
         .spawn_with_config("bob", model, config)
         .expect("spawn bob");
+    let waits = bob.wait_handle();
     let reply = bob.wait_for_teammate_reply();
 
     alice
@@ -102,6 +172,20 @@ async fn teammate_reply_wait_consumes_the_snapshot_signaled_inbox() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].sender, "alice");
     assert_eq!(messages[0].content, "the review is ready");
+    assert_eq!(bob.watch_snapshot().borrow().pending_team_messages, 0);
+
+    let reply = waits.wait_for_teammate_reply();
+    alice
+        .send_team_message("bob", "the follow-up review is ready")
+        .expect("send second reply");
+    let messages = timeout(Duration::from_secs(5), reply)
+        .await
+        .expect("handle reply wait timed out")
+        .expect("read second reply");
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender, "alice");
+    assert_eq!(messages[0].content, "the follow-up review is ready");
     assert_eq!(bob.watch_snapshot().borrow().pending_team_messages, 0);
 }
 
