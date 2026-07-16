@@ -60,9 +60,11 @@
 - `TaskStore` gains a defaulted, object-safe `mutate` method, so existing
   implementations remain source-compatible. Its fallback is load/replace and
   is not atomic; custom stores must override it for concurrent-writer safety.
-- `AgentSnapshot` gains the public serde-default `run_generation` field.
-  Exhaustive struct literals must add it and exhaustive patterns should use
-  `..`. No existing public enum gains a variant.
+- `AgentSnapshot` gains the public serde-defaulted, zero-omitted
+  `run_generation` field, so old snapshots load unchanged and generation-zero
+  snapshots keep the old serialized shape. Exhaustive struct literals must add
+  it and exhaustive patterns should use `..`. No existing public enum gains a
+  variant.
 - Default agents have empty steering queues and unchanged run behavior.
   `wait_for_teammate_reply` intentionally consumes inbox delivery rather than
   peeking; hosts that previously polled `pending_team_messages` separately can
