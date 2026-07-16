@@ -21,7 +21,7 @@ use tokio::{
 
 use crate::{
     AgentConfig, BuiltinProvider, ContentBlock, Role, TerminalOutputSpec,
-    agent::CompactionConfig,
+    agent::{CompactionConfig, ToolProfile},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, ToolChoice},
     runtime::{RunOptions, Runtime, RuntimeError, RuntimeHookEvent, RuntimePolicy},
     tool::{
@@ -1203,7 +1203,14 @@ async fn run_to_output_forces_scoped_terminal_tool_and_extracts_exact_call_detai
         .build()
         .expect("build runtime");
     let mut agent = runtime
-        .spawn("target", model.clone())
+        .spawn_with_config(
+            "target",
+            model.clone(),
+            AgentConfig {
+                tool_profile: ToolProfile::only(["ordinary_tool_only"]),
+                ..AgentConfig::default()
+            },
+        )
         .expect("spawn target");
     let other_agent = runtime.spawn("other", model).expect("spawn other");
     let steering = agent.steering_handle();

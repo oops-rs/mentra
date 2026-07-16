@@ -484,8 +484,14 @@ impl Agent {
         self.runtime
             .tools()
             .iter()
-            .filter(|tool| terminal_tool.as_ref().is_none_or(|name| name == &tool.name))
-            .filter(|tool| self.can_use_tool(&tool.name))
+            .filter(|tool| {
+                if let Some(name) = terminal_tool.as_ref() {
+                    name == &tool.name
+                        && self.runtime.tool_is_visible_to_agent(&tool.name, &self.id)
+                } else {
+                    self.can_use_tool(&tool.name)
+                }
+            })
             .cloned()
             .collect::<Vec<_>>()
             .into()
@@ -494,6 +500,16 @@ impl Agent {
     pub(crate) fn can_use_tool(&self, name: &str) -> bool {
         if !self.runtime.tool_is_visible_to_agent(name, &self.id) {
             return false;
+        }
+
+        if self
+            .terminal_tool_gate
+            .lock()
+            .expect("terminal tool gate poisoned")
+            .as_deref()
+            == Some(name)
+        {
+            return true;
         }
 
         if self.hidden_tools.contains(name) {
