@@ -15,9 +15,10 @@ Repository-wide MSRV correction (2026-07-16): fresh dependency resolution
 invalidated the assumption that the declared Rust 1.85 floor was enforced by
 the existing broad version ranges. `time` could resolve to a release requiring
 Rust 1.88, while `url` 2.5.8 selected IDNA/ICU releases requiring Rust 1.86.
-Both public crates now pin `time` 0.3.45 and `url` 2.5.2; the latter is the
-narrow direct constraint that retains the pre-ICU IDNA path without pinning a
-cluster of implementation-detail transitive crates.
+Both public crates retain consumer-compatible `time = "0.3"` and `url = "2.5"`
+requirements. Workspace resolver v3, a workspace-wide `rust-version = "1.85"`,
+and a fresh lockless Rust 1.85 CI job select compatible transitive releases for
+Mentra without imposing exact versions on downstream dependency graphs.
 
 ## Workstream overview
 

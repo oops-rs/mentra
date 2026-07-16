@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 / mentra-provider 0.4.0
 
 ### WS1 — Hygiene
 
@@ -15,14 +15,15 @@
 ### WS2 — Generic tool-output truncation
 
 - Limit each successful or error result produced by a builtin, custom, or MCP
-  executor to a 2,000-line / 50-KB retained head before it enters the
+  executor to a 2,000-line / 50-KiB retained head before it enters the
   transcript and provider request. Truncation preserves complete lines and
   appends an actionable notice; parallel batches limit each result
   independently while retaining call order.
 - Spill full oversized output beneath the agent transcript artifact directory
-  by default. Structured JSON is never sliced: it is spilled whole and
-  replaced by a text pointer. Volatile stores suppress disk spills to preserve
-  their no-durable-trace contract.
+  by default. Structured JSON is never sliced: when spill succeeds, it is
+  written whole and replaced by a text pointer; otherwise the replacement
+  notice explains why the full output was not saved. Volatile stores suppress
+  disk spills to preserve their no-durable-trace contract.
 
 ### WS3 — Model-conventional coding tools
 
@@ -100,7 +101,7 @@ the new neutral representation does not yet provide full Gemini fidelity.
 
 - Shell validation defaults to `Off`, preserving existing command-execution
   behavior. `RuntimePolicy` only gains private state, so existing constructors
-  remain source-compatible; no existing public enum gains a variant.
+  remain source-compatible.
 - Shell `ToolAuthorizationPreview::structured_input` gains an additive
   `validation` object. Consumers comparing that JSON exhaustively must accept
   the new key.
@@ -121,18 +122,17 @@ the new neutral representation does not yet provide full Gemini fidelity.
 - Responses streams without a reasoning item retain their historical plain
   `call_id` tool-use IDs; composite IDs are limited to newly preserved
   reasoning/tool associations.
-- `ContentBlock`, `ContentBlockStart`, `ContentBlockDelta`, `AgentEvent`, and
-  `SessionEvent` gain public variants. Exhaustive matchers must add the new
-  reasoning cases (or a deliberate fallback); existing non-exhaustive usage is
-  unchanged.
+- `ContentBlock`, `ContentBlockStart`, `ContentBlockDelta`, `AgentEvent`,
+  `SessionEvent`, and `ResponsesInputItem` gain public variants. Exhaustive
+  matchers must add the new reasoning cases (or a deliberate fallback);
+  existing non-exhaustive usage is unchanged.
 - `TaskStore` gains a defaulted, object-safe `mutate` method, so existing
   implementations remain source-compatible. Its fallback is load/replace and
   is not atomic; custom stores must override it for concurrent-writer safety.
 - `AgentSnapshot` gains the public serde-defaulted, zero-omitted
   `run_generation` field, so old snapshots load unchanged and generation-zero
   snapshots keep the old serialized shape. Exhaustive struct literals must add
-  it and exhaustive patterns should use `..`. No existing public enum gains a
-  variant.
+  it and exhaustive patterns should use `..`.
 - Default agents have empty steering queues and unchanged run behavior.
   `wait_for_teammate_reply` intentionally consumes inbox delivery rather than
   peeking; hosts that previously polled `pending_team_messages` separately can
@@ -141,6 +141,26 @@ the new neutral representation does not yet provide full Gemini fidelity.
   workspaces can select compatible releases. Workspace resolver v3 and a fresh
   lockless Rust 1.85 CI job select dependencies compatible with Mentra's MSRV
   instead of imposing exact versions on consumers.
+
+### Downstream migration
+
+- Upgrade `mentra` and `mentra-provider` together. `mentra 0.10.0` depends on
+  `mentra-provider 0.4.0`; consumers that name provider-core types directly
+  must not retain `mentra-provider 0.3.x` alongside it.
+- Machine-readable string tool protocols must account for the new default
+  2,000-line / 50-KiB result cap. A single JSON line above 50 KiB is replaced by
+  a truncation notice and is no longer parseable JSON. Until such a protocol
+  implements its own bounded projection, preserve the old behavior with:
+
+  ```rust
+  RuntimePolicy::default()
+      .with_max_tool_result_bytes(usize::MAX)
+      .with_max_tool_result_lines(usize::MAX)
+      .spill_full_tool_output(false)
+  ```
+
+- Publish `mentra-provider 0.4.0` before `mentra 0.10.0`. The repository uses
+  one `v0.10.0` tag for the combined release.
 
 ## 0.9.0
 
