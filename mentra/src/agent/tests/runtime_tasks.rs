@@ -39,7 +39,10 @@ fn task_board_exposes_typed_lead_operations_and_agent_namespace() {
         })
         .expect("create first task");
     let second = board
-        .create(NewTask::new("implement"))
+        .create(NewTask {
+            working_directory: Some("workspace".to_string()),
+            ..NewTask::new("implement")
+        })
         .expect("create second task");
     assert_eq!((first.id, second.id), (1, 2));
 
@@ -62,11 +65,19 @@ fn task_board_exposes_typed_lead_operations_and_agent_namespace() {
             second.id,
             TaskPatch {
                 status: Some(TaskStatus::InProgress),
+                working_directory: Some(None),
                 ..TaskPatch::default()
             },
         )
         .expect("update task");
     assert_eq!(updated.status, TaskStatus::InProgress);
+    assert_eq!(updated.working_directory, None);
+
+    let deserialized_patch: TaskPatch = serde_json::from_value(serde_json::json!({
+        "workingDirectory": null
+    }))
+    .expect("deserialize explicit task working-directory clear");
+    assert_eq!(deserialized_patch.working_directory, Some(None));
 
     let agent = runtime
         .spawn_with_config("lead", model, task_config(tasks_dir))

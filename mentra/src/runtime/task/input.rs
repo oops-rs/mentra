@@ -34,7 +34,10 @@ pub(crate) struct TaskUpdateInput {
     pub(crate) description: Option<String>,
     #[serde(default)]
     pub(crate) owner: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::deserialize_present_nullable_string"
+    )]
     pub(crate) working_directory: Option<Option<String>>,
     #[serde(default)]
     pub(crate) status: Option<TaskStatus>,

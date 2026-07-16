@@ -43,7 +43,11 @@ pub struct TaskPatch {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::task::deserialize_present_nullable_string"
+    )]
     pub working_directory: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<TaskStatus>,

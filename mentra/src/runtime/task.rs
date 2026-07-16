@@ -20,6 +20,15 @@ pub(crate) const TASK_REMINDER_TEXT: &str = "Reminder: use task_create, task_cla
 pub(crate) use graph::has_unfinished_tasks;
 pub use types::{TaskItem, TaskStatus};
 
+pub(crate) fn deserialize_present_nullable_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<String> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskAccess<'a> {
     Lead,
