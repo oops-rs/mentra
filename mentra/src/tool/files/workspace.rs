@@ -234,7 +234,7 @@ impl WorkspaceEditor {
         })
     }
 
-    fn child_names(&self, dir: &Path) -> Result<Vec<String>, String> {
+    fn child_names(&self, dir: &Path, action: &str) -> Result<Vec<String>, String> {
         let mut names = BTreeSet::new();
 
         match fs::read_dir(dir) {
@@ -267,13 +267,18 @@ impl WorkspaceEditor {
             }
         }
 
-        let filtered = names
-            .into_iter()
-            .filter(|name| {
-                let child = dir.join(name);
-                !matches!(self.entry_kind(&child), Ok(EntryKind::Missing))
-            })
-            .collect::<Vec<_>>();
+        let mut filtered = Vec::with_capacity(names.len());
+        for name in names {
+            let child = dir.join(&name);
+            // The traversal root was authorized before recursion starts, but a
+            // descendant may be a symlink whose target leaves every allowed
+            // read root. Reauthorize each child before inspecting or following
+            // it so recursive list/search cannot cross that boundary.
+            self.authorize_read(&child, action)?;
+            if self.entry_kind(&child)? != EntryKind::Missing {
+                filtered.push(name);
+            }
+        }
         Ok(filtered)
     }
 
@@ -292,7 +297,7 @@ impl WorkspaceEditor {
             return Ok(());
         }
 
-        for child_name in self.child_names(dir)? {
+        for child_name in self.child_names(dir, "files_list")? {
             if entries.len() >= traversal.limit {
                 break;
             }
@@ -335,7 +340,7 @@ impl WorkspaceEditor {
             return Ok(());
         }
 
-        for child_name in self.child_names(dir)? {
+        for child_name in self.child_names(dir, "files_search")? {
             if matches.len() >= limit {
                 break;
             }

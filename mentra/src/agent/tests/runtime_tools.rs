@@ -1249,6 +1249,93 @@ async fn files_tool_search_handles_symlink_loops() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn files_tool_list_rejects_symlink_escape_during_recursive_traversal() {
+    assert_files_recursive_operation_rejects_symlink_escape(
+        r#"{"op":"list","path":".","depth":2,"limit":10}"#,
+        "list",
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn files_tool_search_rejects_symlink_escape_during_recursive_traversal() {
+    assert_files_recursive_operation_rejects_symlink_escape(
+        r#"{"op":"search","path":".","pattern":"outside-secret","limit":10}"#,
+        "search",
+    )
+    .await;
+}
+
+#[cfg(unix)]
+async fn assert_files_recursive_operation_rejects_symlink_escape(operation: &str, label: &str) {
+    use std::os::unix::fs::symlink;
+
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let input = format!(r#"{{"operations":[{operation}]}}"#);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                &format!("files-{label}-symlink-escape"),
+                "files",
+                &input,
+            ),
+            text_stream(&model.id, "handled"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir(&format!("files-{label}-symlink-root"));
+    let outside_dir = temp_team_dir(&format!("files-{label}-symlink-outside"));
+    fs::write(outside_dir.join("secret.txt"), "outside-secret\n").expect("write outside file");
+    symlink(&outside_dir, repo_dir.join("escape")).expect("create escape symlink");
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("inspect the repo")])
+        .await
+        .expect("send");
+
+    match &agent.history()[2] {
+        Message {
+            role: Role::User,
+            content,
+        } => match content.first().expect("tool result") {
+            ContentBlock::ToolResult {
+                is_error: true,
+                content,
+                ..
+            } => assert!(
+                content.contains("outside the runtime policy read roots"),
+                "unexpected denial: {content}"
+            ),
+            other => panic!("unexpected content block: {other:?}"),
+        },
+        other => panic!("expected tool result, got {other:?}"),
+    }
+
+    fs::remove_dir_all(&repo_dir).expect("remove workspace");
+    fs::remove_dir_all(&outside_dir).expect("remove outside directory");
+}
+
 #[tokio::test]
 async fn run_options_tool_budget_blocks_second_tool_call() {
     let model = model_info("model", BuiltinProvider::Anthropic);
