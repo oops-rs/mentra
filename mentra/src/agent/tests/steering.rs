@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     BuiltinProvider, ContentBlock, Message, QueueMode, Role, RoundContext, RoundDecision,
-    RoundStrategy, Runtime,
+    RoundStrategy, Runtime, SteeringHandle,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{CancellationToken, RunOptions},
 };
@@ -106,6 +106,63 @@ async fn queue_modes_drain_one_or_all_entries_per_boundary() {
     assert_eq!(all.len(), 2);
     assert!(request_contains(&all[1], "first steer"));
     assert!(request_contains(&all[1], "second steer"));
+}
+
+#[test]
+fn clear_methods_remove_only_their_pending_queue() {
+    assert_eq!(QueueMode::default(), QueueMode::OneAtATime);
+
+    let steering = SteeringHandle::default();
+    steering.steer(vec![ContentBlock::text("steer")]);
+    steering.follow_up(vec![ContentBlock::text("follow-up")]);
+
+    steering.clear_steer();
+    assert!(steering.has_pending(), "the follow-up remains queued");
+
+    steering.steer(vec![ContentBlock::text("replacement steer")]);
+    steering.clear_follow_up();
+    assert!(
+        steering.has_pending(),
+        "the replacement steer remains queued"
+    );
+
+    steering.clear_steer();
+    assert!(!steering.has_pending());
+}
+
+#[tokio::test]
+async fn follow_up_all_mode_drains_every_entry_at_the_would_stop_boundary() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            text_stream(&model.id, "draft"),
+            text_stream(&model.id, "final"),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let steering = agent.steering_handle();
+    steering.set_follow_up_mode(QueueMode::All);
+    steering.follow_up(vec![ContentBlock::text("first follow-up")]);
+    steering.follow_up(vec![ContentBlock::text("second follow-up")]);
+
+    let result = agent
+        .send(vec![ContentBlock::text("start")])
+        .await
+        .expect("run succeeds");
+
+    assert_eq!(result.text(), "final");
+    let requests = provider_handle.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(request_contains(&requests[1].messages, "first follow-up"));
+    assert!(request_contains(&requests[1].messages, "second follow-up"));
+    assert!(!steering.has_pending());
 }
 
 #[tokio::test]
