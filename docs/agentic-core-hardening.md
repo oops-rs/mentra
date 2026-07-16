@@ -533,6 +533,12 @@ checkpoint starts. `wait_until_idle` waits for the active generation when called
 mid-run, or the next generation when called from initial/terminal idle state, so
 it cannot immediately return a stale `Finished` snapshot.
 
+Snapshot-channel lifetime correction: dropping an `Agent` does not by itself
+close its watch channel because runtime-registered team/background observers
+retain sender clones and there is no observer-unregister seam. An unsatisfied
+`wait_for_snapshot` therefore remains pending while those runtime observers are
+alive; it returns the last published snapshot only after every sender is dropped.
+
 `wait_for_teammate_reply` is intentionally consuming. The underlying inbox read
 moves pending rows to inflight and resets `pending_team_messages`; it is not a
 peek and must not race an `Agent::run` inbox read. The host owns the returned

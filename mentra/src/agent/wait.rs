@@ -23,7 +23,11 @@ pub struct AgentWaitHandle {
 
 impl AgentWaitHandle {
     /// Resolves with the first current or future snapshot satisfying `predicate`.
-    /// If the agent is dropped first, the final published snapshot is returned.
+    ///
+    /// If every snapshot sender is dropped first, the final published snapshot
+    /// is returned even when it does not satisfy `predicate`. Dropping the
+    /// [`Agent`] alone does not close this channel while runtime observers for
+    /// that agent still own sender clones.
     pub fn wait_for_snapshot<P>(&self, predicate: P) -> AgentWaitFuture<AgentSnapshot>
     where
         P: Fn(&AgentSnapshot) -> bool + Send + 'static,
