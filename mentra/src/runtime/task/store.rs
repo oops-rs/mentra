@@ -46,7 +46,7 @@ pub(super) fn validate_update_access(
     access: TaskAccess<'_>,
 ) -> Result<(), TaskError> {
     match access {
-        TaskAccess::Lead => Ok(()),
+        TaskAccess::Lead | TaskAccess::LeadClaimant(_) => Ok(()),
         TaskAccess::Teammate(name) if task.owner == name => {
             if updates_dependencies(input) {
                 return Err(TaskError::Validation(format!(

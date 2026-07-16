@@ -76,6 +76,26 @@
 Gemini thought capture and signatures on `ToolUse`/text blocks remain deferred;
 the new neutral representation does not yet provide full Gemini fidelity.
 
+### WS5 — Steering and host orchestration
+
+- Add agent-scoped, in-memory `SteeringHandle` queues for live steers and
+  would-stop-only follow-ups, with `OneAtATime`/`All` drain modes, explicit
+  idle `run_queued`, rollback-safe inflight requeue through runner and
+  finalization errors, deterministic steering-before-strategy precedence, and
+  stable steering-before-team-before-background request ordering.
+- Add object-safe `TaskStore::mutate` and serialize builtin task mutations with
+  SQLite Immediate transactions or the Volatile store lock. Expose typed
+  `Runtime::task_board`/`Agent::task_board` façades that reuse the intrinsic
+  access checks, status transitions, and DAG validation.
+- Add `Agent::run_to_output<T>` using unique owner-scoped terminal tools and
+  exact `tool_use_id` transcript-detail extraction. Generated tools are forced
+  only for their target agent and removed when the run future completes or is
+  dropped.
+- Add cloneable `AgentWaitHandle` and owned snapshot, idle, and teammate-reply
+  wait futures. `AgentSnapshot::run_generation` prevents a previous terminal
+  snapshot from satisfying a wait for the next run.
+- Document the Proposed host-orchestration decision in ADR-0004.
+
 ### Compatibility
 
 - Shell validation defaults to `Off`, preserving existing command-execution
@@ -105,6 +125,18 @@ the new neutral representation does not yet provide full Gemini fidelity.
   `SessionEvent` gain public variants. Exhaustive matchers must add the new
   reasoning cases (or a deliberate fallback); existing non-exhaustive usage is
   unchanged.
+- `TaskStore` gains a defaulted, object-safe `mutate` method, so existing
+  implementations remain source-compatible. Its fallback is load/replace and
+  is not atomic; custom stores must override it for concurrent-writer safety.
+- `AgentSnapshot` gains the public serde-defaulted, zero-omitted
+  `run_generation` field, so old snapshots load unchanged and generation-zero
+  snapshots keep the old serialized shape. Exhaustive struct literals must add
+  it and exhaustive patterns should use `..`. No existing public enum gains a
+  variant.
+- Default agents have empty steering queues and unchanged run behavior.
+  `wait_for_teammate_reply` intentionally consumes inbox delivery rather than
+  peeking; hosts that previously polled `pending_team_messages` separately can
+  continue doing so unchanged.
 - Pin `time` and `url` to Rust 1.85-compatible releases. Their previous
   semver ranges could resolve to `time` requiring Rust 1.88 and an
   `url`/IDNA/ICU chain requiring Rust 1.86.

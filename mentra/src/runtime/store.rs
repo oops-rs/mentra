@@ -123,6 +123,27 @@ pub trait TaskStore: Send + Sync {
         snapshot: &TaskStateSnapshot,
     ) -> Result<(), RuntimeError>;
     fn replace_tasks(&self, namespace: &Path, tasks: &[TaskItem]) -> Result<(), RuntimeError>;
+
+    /// Applies one read-modify-write operation to a namespace.
+    ///
+    /// The callback form keeps this method object-safe, so runtime code can use
+    /// it through `dyn TaskStore`. The default preserves source compatibility
+    /// for external stores by composing [`TaskStore::load_tasks`] and
+    /// [`TaskStore::replace_tasks`], but that fallback cannot promise
+    /// serialization across concurrent writers. Stores that can provide a
+    /// transaction or lock should override this method.
+    ///
+    /// If `mutation` returns an error, the modified task vector must not be
+    /// installed by overrides.
+    fn mutate(
+        &self,
+        namespace: &Path,
+        mutation: &mut dyn FnMut(&mut Vec<TaskItem>) -> Result<(), RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        let mut tasks = self.load_tasks(namespace)?;
+        mutation(&mut tasks)?;
+        self.replace_tasks(namespace, &tasks)
+    }
 }
 
 /// Persistence backend for runtime audit hooks.
@@ -1165,31 +1186,22 @@ impl TaskStore for SqliteRuntimeStore {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
-        let namespace = Self::task_namespace(namespace);
-        tx.execute(
-            "DELETE FROM tasks WHERE namespace = ?1",
-            params![namespace.clone()],
-        )
-        .map_err(sqlite_error)?;
-        tx.execute(
-            "DELETE FROM task_edges WHERE namespace = ?1",
-            params![namespace.clone()],
-        )
-        .map_err(sqlite_error)?;
-        for task in tasks {
-            tx.execute(
-                "INSERT INTO tasks (namespace, id, payload_json) VALUES (?1, ?2, ?3)",
-                params![namespace.clone(), task.id as i64, to_json(task)?],
-            )
+        self.replace_tasks_in_conn(&tx, namespace, tasks)?;
+        tx.commit().map_err(sqlite_error)
+    }
+
+    fn mutate(
+        &self,
+        namespace: &Path,
+        mutation: &mut dyn FnMut(&mut Vec<TaskItem>) -> Result<(), RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        let mut conn = self.open()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
-            for blocker in &task.blocked_by {
-                tx.execute(
-                    "INSERT OR IGNORE INTO task_edges (namespace, blocker_id, dependent_id) VALUES (?1, ?2, ?3)",
-                    params![namespace.clone(), *blocker as i64, task.id as i64],
-                )
-                .map_err(sqlite_error)?;
-            }
-        }
+        let mut tasks = self.load_tasks_from_conn(&tx, namespace)?;
+        mutation(&mut tasks)?;
+        self.replace_tasks_in_conn(&tx, namespace, &tasks)?;
         tx.commit().map_err(sqlite_error)
     }
 }
@@ -1583,6 +1595,40 @@ impl SqliteRuntimeStore {
             tasks.push(from_json(&row.map_err(sqlite_error)?)?);
         }
         Ok(tasks)
+    }
+
+    fn replace_tasks_in_conn(
+        &self,
+        conn: &Connection,
+        namespace: &Path,
+        tasks: &[TaskItem],
+    ) -> Result<(), RuntimeError> {
+        let namespace = Self::task_namespace(namespace);
+        conn.execute(
+            "DELETE FROM tasks WHERE namespace = ?1",
+            params![namespace.clone()],
+        )
+        .map_err(sqlite_error)?;
+        conn.execute(
+            "DELETE FROM task_edges WHERE namespace = ?1",
+            params![namespace.clone()],
+        )
+        .map_err(sqlite_error)?;
+        for task in tasks {
+            conn.execute(
+                "INSERT INTO tasks (namespace, id, payload_json) VALUES (?1, ?2, ?3)",
+                params![namespace.clone(), task.id as i64, to_json(task)?],
+            )
+            .map_err(sqlite_error)?;
+            for blocker in &task.blocked_by {
+                conn.execute(
+                    "INSERT OR IGNORE INTO task_edges (namespace, blocker_id, dependent_id) VALUES (?1, ?2, ?3)",
+                    params![namespace.clone(), *blocker as i64, task.id as i64],
+                )
+                .map_err(sqlite_error)?;
+            }
+        }
+        Ok(())
     }
 }
 

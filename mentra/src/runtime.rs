@@ -7,6 +7,7 @@ mod intrinsic;
 mod skill;
 mod store;
 pub(crate) mod task;
+mod task_board;
 mod volatile_store;
 
 use std::{any::Any, path::Path, sync::Arc};
@@ -43,6 +44,7 @@ pub use store::{
 pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot};
 pub(crate) use task::TaskIntrinsicTool;
 pub use task::{TaskItem, TaskStatus};
+pub use task_board::{NewTask, TaskBoard, TaskBoardError, TaskPatch};
 pub use volatile_store::VolatileRuntimeStore;
 
 /// Entry point for configuring providers, tools, and agent lifecycles.
@@ -126,6 +128,15 @@ impl Runtime {
         self.handle
             .register_skill_loader(skill::SkillLoader::from_dir(path)?);
         Ok(())
+    }
+
+    /// Returns a lead-privileged task-board view for `namespace`.
+    ///
+    /// The namespace is an opaque store key; no directory is created. Reads are
+    /// live and every mutation passes through the same validation and
+    /// transactional store path as the builtin task tools.
+    pub fn task_board(&self, namespace: impl AsRef<Path>) -> TaskBoard {
+        TaskBoard::lead(self.handle.clone(), namespace.as_ref().to_path_buf())
     }
 
     /// Spawns a new agent with the default [`AgentConfig`].

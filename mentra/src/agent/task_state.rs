@@ -2,13 +2,28 @@ use std::borrow::Cow;
 
 use crate::error::RuntimeError;
 use crate::runtime::{
-    TaskStateSnapshot,
+    TaskBoard, TaskStateSnapshot,
     task::{TASK_REMINDER_TEXT, TaskAccess, TaskIntrinsicTool, has_unfinished_tasks},
 };
 
 use super::Agent;
 
 impl Agent {
+    /// Returns a task-board view with this agent's own access identity.
+    ///
+    /// Lead agents retain lead privileges. Teammates remain constrained to
+    /// their own tasks and cannot edit dependency edges. Task-board mutations
+    /// update the shared store immediately; this agent's cached snapshot is
+    /// refreshed at the next normal task refresh/run boundary.
+    pub fn task_board(&self) -> TaskBoard {
+        TaskBoard::agent(
+            self.runtime.clone(),
+            self.config.task.tasks_dir.clone(),
+            self.name.clone(),
+            self.teammate_identity.is_some(),
+        )
+    }
+
     pub(crate) fn effective_system_prompt(&self) -> Option<Cow<'_, str>> {
         let mut sections = Vec::new();
 

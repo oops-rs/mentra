@@ -311,6 +311,14 @@ impl TaskStore for HybridRuntimeStore {
     fn replace_tasks(&self, namespace: &Path, tasks: &[TaskItem]) -> Result<(), RuntimeError> {
         self.inner.replace_tasks(namespace, tasks)
     }
+
+    fn mutate(
+        &self,
+        namespace: &Path,
+        mutation: &mut dyn FnMut(&mut Vec<TaskItem>) -> Result<(), RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        self.inner.mutate(namespace, mutation)
+    }
 }
 
 impl AuditStore for HybridRuntimeStore {

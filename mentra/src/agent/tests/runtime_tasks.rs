@@ -10,11 +10,164 @@ use crate::{
     agent::{AgentConfig, CompactionConfig, TaskConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{
-        Runtime, SqliteRuntimeStore, TaskItem, TaskStatus, TaskStore, task::TASK_REMINDER_TEXT,
+        NewTask, Runtime, SqliteRuntimeStore, TaskItem, TaskPatch, TaskStatus, TaskStore,
+        task::TASK_REMINDER_TEXT,
     },
 };
 
+use super::super::TeammateIdentity;
 use super::support::{ScriptedProvider, erroring_stream, model_info, ok_stream};
+
+#[test]
+fn task_board_exposes_typed_lead_operations_and_agent_namespace() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let tasks_dir = temp_tasks_dir("typed-board");
+    let runtime = Runtime::builder()
+        .with_provider_instance(ScriptedProvider::new(
+            BuiltinProvider::Anthropic,
+            vec![model.clone()],
+            vec![],
+        ))
+        .build()
+        .expect("build runtime");
+    let board = runtime.task_board(&tasks_dir);
+
+    let first = board
+        .create(NewTask {
+            owner: "alice".to_string(),
+            ..NewTask::new("design")
+        })
+        .expect("create first task");
+    let second = board
+        .create(NewTask {
+            working_directory: Some("workspace".to_string()),
+            ..NewTask::new("implement")
+        })
+        .expect("create second task");
+    assert_eq!((first.id, second.id), (1, 2));
+
+    let dependent = board
+        .add_dependency(first.id, second.id)
+        .expect("add dependency");
+    assert_eq!(dependent.blocked_by, vec![first.id]);
+    assert_eq!(
+        board.get(first.id).expect("get first").blocks,
+        vec![second.id]
+    );
+    assert_eq!(board.list().expect("list tasks").len(), 2);
+
+    let unblocked = board
+        .remove_dependency(first.id, second.id)
+        .expect("remove dependency");
+    assert!(unblocked.blocked_by.is_empty());
+    let updated = board
+        .update(
+            second.id,
+            TaskPatch {
+                status: Some(TaskStatus::InProgress),
+                working_directory: Some(None),
+                ..TaskPatch::default()
+            },
+        )
+        .expect("update task");
+    assert_eq!(updated.status, TaskStatus::InProgress);
+    assert_eq!(updated.working_directory, None);
+
+    let deserialized_patch: TaskPatch = serde_json::from_value(serde_json::json!({
+        "workingDirectory": null
+    }))
+    .expect("deserialize explicit task working-directory clear");
+    assert_eq!(deserialized_patch.working_directory, Some(None));
+
+    let agent = runtime
+        .spawn_with_config("lead", model, task_config(tasks_dir))
+        .expect("spawn agent");
+    assert_eq!(
+        agent.task_board().list().expect("agent board list").len(),
+        2
+    );
+}
+
+#[test]
+fn task_board_preserves_teammate_access_and_explicit_lead_claimant() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let tasks_dir = temp_tasks_dir("typed-board-access");
+    let runtime = Runtime::builder()
+        .with_provider_instance(ScriptedProvider::new(
+            BuiltinProvider::Anthropic,
+            vec![model.clone()],
+            vec![],
+        ))
+        .build()
+        .expect("build runtime");
+    let lead_board = runtime.task_board(&tasks_dir);
+    let alice_task = lead_board
+        .create(NewTask {
+            owner: "alice".to_string(),
+            ..NewTask::new("alice-owned")
+        })
+        .expect("create alice task");
+    let bob_task = lead_board
+        .create(NewTask {
+            owner: "bob".to_string(),
+            ..NewTask::new("bob-owned")
+        })
+        .expect("create bob task");
+    let unowned = lead_board
+        .create(NewTask::new("claimable"))
+        .expect("create claimable task");
+
+    let mut alice = runtime
+        .spawn_with_config("alice", model, task_config(tasks_dir))
+        .expect("spawn alice");
+    alice.teammate_identity = Some(TeammateIdentity {
+        role: "worker".to_string(),
+        lead: "lead".to_string(),
+    });
+    let alice_board = alice.task_board();
+
+    alice_board
+        .update(
+            alice_task.id,
+            TaskPatch {
+                description: Some("mine".to_string()),
+                ..TaskPatch::default()
+            },
+        )
+        .expect("update own task");
+    assert!(
+        alice_board
+            .update(
+                bob_task.id,
+                TaskPatch {
+                    description: Some("not mine".to_string()),
+                    ..TaskPatch::default()
+                },
+            )
+            .expect_err("cannot update another teammate task")
+            .to_string()
+            .contains("cannot update")
+    );
+    assert!(
+        alice_board
+            .add_dependency(alice_task.id, bob_task.id)
+            .expect_err("teammate cannot edit dependencies")
+            .to_string()
+            .contains("cannot update")
+    );
+    assert!(
+        alice_board
+            .claim(Some(unowned.id), "bob")
+            .expect_err("teammate cannot pose as bob")
+            .to_string()
+            .contains("cannot claim a task for")
+    );
+
+    let claimed = lead_board
+        .claim(Some(unowned.id), "carol")
+        .expect("lead board uses explicit claimant");
+    assert_eq!(claimed.owner, "carol");
+}
 
 #[tokio::test]
 async fn task_updates_snapshot_and_persists_for_new_agents() {

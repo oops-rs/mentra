@@ -72,6 +72,10 @@ pub type ContextCompactionDetails = CompactionDetails;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentSnapshot {
     pub status: AgentStatus,
+    /// Monotonic generation of the run currently reflected by this snapshot.
+    /// Incremented when a new `Agent::run` checkpoint has started.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub run_generation: u64,
     pub history_len: usize,
     pub current_text: String,
     pub pending_tool_uses: Vec<PendingToolUseSummary>,
@@ -166,4 +170,34 @@ pub enum AgentEvent {
     RunFailed {
         error: String,
     },
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::AgentSnapshot;
+
+    #[test]
+    fn zero_run_generation_uses_the_pre_field_json_shape() {
+        let json = serde_json::to_value(AgentSnapshot::default()).expect("serialize snapshot");
+        assert!(json.get("run_generation").is_none());
+
+        let restored: AgentSnapshot = serde_json::from_value(json).expect("load old snapshot JSON");
+        assert_eq!(restored.run_generation, 0);
+
+        let current = AgentSnapshot {
+            run_generation: 1,
+            ..AgentSnapshot::default()
+        };
+        let Value::Object(current) = serde_json::to_value(current).expect("serialize generation")
+        else {
+            panic!("snapshot must serialize as an object");
+        };
+        assert_eq!(current.get("run_generation"), Some(&Value::from(1)));
+    }
 }

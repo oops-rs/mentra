@@ -47,15 +47,16 @@ pub use mentra_provider::{
 pub use provider::{Provider, ProviderRegistry};
 
 pub use agent::{
-    Agent, AgentConfig, ReasoningChange, RoundAdjustment, RoundBoundary, RoundContext,
-    RoundDecision, RoundStrategy, RoundToolResult, SpawnedAgentStatus, SpawnedAgentSummary,
+    Agent, AgentConfig, AgentWaitFuture, AgentWaitHandle, FinalOutput, QueueMode, ReasoningChange,
+    RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy, RoundToolResult,
+    SpawnedAgentStatus, SpawnedAgentSummary, SteeringHandle, TerminalOutputSpec,
 };
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
 pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
 pub use mcp::{McpClientError, McpManager, McpServerConfig, McpServerStatus, McpServerSummary};
 pub use runtime::{
-    AgentStore, AuditStore, HybridRuntimeStore, LeaseStore, PermissionRuleStore, RunStore, Runtime,
-    RuntimePolicy, ShellValidationMode, TaskStore,
+    AgentStore, AuditStore, HybridRuntimeStore, LeaseStore, NewTask, PermissionRuleStore, RunStore,
+    Runtime, RuntimePolicy, ShellValidationMode, TaskBoard, TaskBoardError, TaskPatch, TaskStore,
 };
 pub use session::{
     PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore, Session,

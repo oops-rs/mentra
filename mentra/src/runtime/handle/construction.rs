@@ -61,6 +61,13 @@ fn clone_tooling_services(tooling: &ToolingServices) -> ToolingServices {
                 .expect("tool registry poisoned")
                 .clone(),
         )),
+        scoped_tools: Arc::new(RwLock::new(
+            tooling
+                .scoped_tools
+                .read()
+                .expect("scoped tool registry poisoned")
+                .clone(),
+        )),
         skill_loader: Arc::new(RwLock::new(
             tooling
                 .skill_loader
@@ -112,6 +119,7 @@ impl RuntimeHandle {
             },
             tooling: ToolingServices {
                 tool_registry: Arc::new(RwLock::new(tool_registry)),
+                scoped_tools: Arc::new(RwLock::new(HashMap::new())),
                 skill_loader: Arc::new(RwLock::new(None)),
                 app_contexts: Arc::new(RwLock::new(HashMap::new())),
             },

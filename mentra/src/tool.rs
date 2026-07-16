@@ -93,6 +93,14 @@ impl ToolRegistry {
         self.tools.get(name).map(|tool| tool.descriptor.clone())
     }
 
+    pub(crate) fn unregister_tool(&mut self, name: &str) -> bool {
+        let removed = self.tools.remove(name).is_some();
+        if removed {
+            self.refresh_provider_specs();
+        }
+        removed
+    }
+
     fn refresh_provider_specs(&mut self) {
         self.provider_specs = self
             .tools

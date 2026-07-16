@@ -1,13 +1,20 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Barrier, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::json;
 
-use crate::runtime::{SqliteRuntimeStore, TaskIntrinsicTool, TaskStore};
+use crate::runtime::{
+    HybridRuntimeStore, RuntimeError, SqliteRuntimeStore, TaskIntrinsicTool, TaskStateSnapshot,
+    TaskStore, VolatileRuntimeStore,
+};
 
 use super::{
     TaskAccess, TaskItem,
@@ -19,6 +26,125 @@ use super::{
 };
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn concurrent_intrinsic_creates_serialize_through_task_store_mutate() {
+    assert_concurrent_creates(SqliteRuntimeStore::new(
+        temp_path("mentra-task-concurrent-sqlite".to_string()).with_extension("sqlite"),
+    ));
+    assert_concurrent_creates(VolatileRuntimeStore::new());
+    assert_concurrent_creates(HybridRuntimeStore::new(
+        temp_path("mentra-task-concurrent-hybrid".to_string()).with_extension("sqlite"),
+    ));
+}
+
+#[test]
+fn custom_store_uses_the_source_compatible_default_mutate_fallback() {
+    let store = DefaultMutateStore::default();
+    let namespace = temp_namespace("default-mutate-fallback");
+
+    super::execute_with_store(
+        &store,
+        &TaskIntrinsicTool::Create,
+        json!({ "subject": "created through default mutate" }),
+        &namespace,
+        TaskAccess::Lead,
+    )
+    .expect("default mutate fallback persists the intrinsic mutation");
+
+    assert_eq!(store.load_tasks(&namespace).expect("load tasks").len(), 1);
+    assert_eq!(store.replacements.load(Ordering::SeqCst), 1);
+
+    let mut rejected = |tasks: &mut Vec<TaskItem>| {
+        tasks.clear();
+        Err(RuntimeError::InvalidTask("reject mutation".to_string()))
+    };
+    store
+        .mutate(&namespace, &mut rejected)
+        .expect_err("failed mutation must not replace the stored tasks");
+
+    assert_eq!(store.load_tasks(&namespace).expect("load tasks").len(), 1);
+    assert_eq!(store.replacements.load(Ordering::SeqCst), 1);
+}
+
+#[derive(Clone, Default)]
+struct DefaultMutateStore {
+    tasks: Arc<Mutex<Vec<TaskItem>>>,
+    replacements: Arc<AtomicUsize>,
+}
+
+impl TaskStore for DefaultMutateStore {
+    fn load_tasks(&self, _namespace: &std::path::Path) -> Result<Vec<TaskItem>, RuntimeError> {
+        Ok(self.tasks.lock().expect("task store poisoned").clone())
+    }
+
+    fn capture_tasks(
+        &self,
+        namespace: &std::path::Path,
+    ) -> Result<TaskStateSnapshot, RuntimeError> {
+        Ok(TaskStateSnapshot {
+            tasks: self.load_tasks(namespace)?,
+        })
+    }
+
+    fn restore_tasks(
+        &self,
+        namespace: &std::path::Path,
+        snapshot: &TaskStateSnapshot,
+    ) -> Result<(), RuntimeError> {
+        self.replace_tasks(namespace, &snapshot.tasks)
+    }
+
+    fn replace_tasks(
+        &self,
+        _namespace: &std::path::Path,
+        tasks: &[TaskItem],
+    ) -> Result<(), RuntimeError> {
+        *self.tasks.lock().expect("task store poisoned") = tasks.to_vec();
+        self.replacements.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn assert_concurrent_creates(store: impl TaskStore + Clone + 'static) {
+    const WRITERS: usize = 8;
+
+    let namespace = temp_namespace("concurrent-writers");
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let mut writers = Vec::new();
+
+    // Initialize lazy stores before the simultaneous writes so this test
+    // isolates task-mutation serialization from schema initialization.
+    store.load_tasks(&namespace).expect("initialize store");
+
+    for index in 0..WRITERS {
+        let store = store.clone();
+        let namespace = namespace.clone();
+        let barrier = Arc::clone(&barrier);
+        writers.push(thread::spawn(move || {
+            barrier.wait();
+            super::execute_with_store(
+                &store,
+                &TaskIntrinsicTool::Create,
+                json!({ "subject": format!("writer-{index}") }),
+                &namespace,
+                TaskAccess::Lead,
+            )
+            .expect("create task concurrently");
+        }));
+    }
+
+    for writer in writers {
+        writer.join().expect("writer thread");
+    }
+
+    let tasks = store.load_tasks(&namespace).expect("load final tasks");
+    assert_eq!(tasks.len(), WRITERS);
+    assert_eq!(
+        tasks.iter().map(|task| task.id).collect::<Vec<_>>(),
+        (1..=WRITERS as u64).collect::<Vec<_>>()
+    );
+}
 
 #[test]
 fn create_and_list_group_ready_blocked_and_completed_tasks() {

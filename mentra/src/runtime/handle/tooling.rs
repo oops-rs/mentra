@@ -54,6 +54,52 @@ impl RuntimeHandle {
             .register_tool(tool);
     }
 
+    pub(crate) fn register_scoped_tool<T>(&self, agent_id: &str, tool: T)
+    where
+        T: ExecutableTool + 'static,
+    {
+        let name = tool.descriptor().provider.name;
+        self.tooling
+            .scoped_tools
+            .write()
+            .expect("scoped tool registry poisoned")
+            .insert(name, agent_id.to_string());
+        self.register_tool(tool);
+    }
+
+    pub(crate) fn unregister_scoped_tool(&self, agent_id: &str, name: &str) {
+        let owner_matches = self
+            .tooling
+            .scoped_tools
+            .read()
+            .expect("scoped tool registry poisoned")
+            .get(name)
+            .is_some_and(|owner| owner == agent_id);
+        if !owner_matches {
+            return;
+        }
+
+        self.tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .unregister_tool(name);
+        self.tooling
+            .scoped_tools
+            .write()
+            .expect("scoped tool registry poisoned")
+            .remove(name);
+    }
+
+    pub(crate) fn tool_is_visible_to_agent(&self, name: &str, agent_id: &str) -> bool {
+        self.tooling
+            .scoped_tools
+            .read()
+            .expect("scoped tool registry poisoned")
+            .get(name)
+            .is_none_or(|owner| owner == agent_id)
+    }
+
     pub fn register_skill_loader(&self, loader: SkillLoader) {
         *self
             .tooling

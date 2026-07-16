@@ -398,7 +398,10 @@ out of scope for this handoff.
 `Agent::run(&mut self)` holds the borrow for the whole run
 (lifecycle.rs:34), so live-run interaction goes through `Arc`-shared handles
 obtained before the run — the pattern `subscribe_events()`/`watch_snapshot()`
-already use.
+already use. Wait conveniences must follow the same rule: returning an async
+method future that still borrows `&self` prevents it from coexisting with
+`run(&mut self)`. The implemented API therefore exposes a cloneable
+`AgentWaitHandle` and owned `'static` futures.
 
 ### 5a. Steering / follow-up queue
 
@@ -443,11 +446,28 @@ impl Agent {
   zero-runner-change spike, but it steals the slot and can't requeue on
   rollback — prototype only.)
 - Rollback safety: `inflight_steer`/`inflight_follow_up` on Agent mirroring
-  `inflight_team_messages` (agent.rs:80); clear on Ok, requeue on Err.
+  `inflight_team_messages` (agent.rs:80); acknowledge only after every fallible
+  success-finalization step completes, and requeue on runner or finalization
+  error. Run checkpoint IDs remain live until the store accepts the finish or
+  failure transition.
 - Queue is **Agent-scoped** (not RunOptions-scoped): preserves ADR-0001
   per-run isolation across a pooled runtime while intentionally surviving
   between one agent's runs.
-- Document a stable drain order relative to team-inbox injection.
+- Stable next-request order is **steering → team inbox → background**. A steer
+  is committed at the preceding boundary; `stream_turn` then destructively
+  reads and appends team inbox entries, followed by background notifications.
+  A follow-up is considered only at the tool-free assistant boundary where the
+  run would otherwise stop. Terminal/end-turn signals win before any queue
+  drain, and a drained queue skips the user `RoundStrategy` for that boundary.
+- Limits and graceful-stop state are checked before draining a queue, so an
+  entry is not consumed when no next provider request can start.
+
+Verified correction: the transcript snapshot, agent record, and run checkpoint
+are separate store operations rather than one transaction. A late persistence
+failure can therefore report a degraded run after an earlier finalization write
+has committed. Inflight steering/team/background input is still requeued before
+the error returns, but making every finalization artifact atomically rollback is
+a separate store-transaction design problem.
 
 Effort ~1–1.5 days. Tests: steer visible in next provider request (scripted
 provider); follow-up only at would-stop; QueueMode variants; requeue on error
@@ -487,6 +507,26 @@ namespace — last-writer-wins races exist today. Fix: transactional
 route `execute_with_store` + façade through it. Touches all three store
 impls. Confirm no higher-level lock exists before building (none was found).
 
+Verified correction: `TaskStore` is used as `dyn TaskStore`, so a generic
+`mutate<F, T>` method would destroy object safety. The additive seam accepts a
+`&mut dyn FnMut(&mut Vec<TaskItem>) -> Result<(), RuntimeError>` and retains a
+default implementation for existing custom stores. That compatibility default
+necessarily composes `load_tasks` + `replace_tasks` and is **not transactional**;
+custom stores must override it to serialize writers. SQLite overrides it with
+an Immediate transaction, Volatile holds its mutex while applying a
+clone-then-install mutation, and Hybrid delegates to SQLite.
+
+This fixes task-operation read/modify/write races, but it does **not** serialize
+the older full-board failed-run rollback. `Agent::run` still captures every task
+before the run and restores that snapshot after failure; a concurrent successful
+host or agent mutation between capture and restore can still be overwritten.
+Narrow mutation journaling or generation-checked restore is a separate follow-up.
+
+`TaskBoard` reads are live, but an `Agent` also keeps a cached `tasks` vector and
+snapshot for prompt reminders/UI. A façade mutation does not synchronously
+refresh that per-agent cache; it refreshes at the next normal task refresh/run
+boundary (or through an existing observer update).
+
 ### 5c. Typed run results
 
 Pieces already shipped in 0.9.0: `ToolOutput { details, terminate }`,
@@ -513,6 +553,14 @@ extraction by `tool_use_id`. Provider-native request-level structured output
 (`response_format`) does **not** exist today (the Request built at
 runner.rs:304-314 has no such field) — defer as a provider-layer enhancement.
 
+Verified correction: a terminating tool commits a user-role tool-result as the
+last message, so the underlying `Agent::run` finalizes the run and then returns
+`RuntimeError::EmptyAssistantResponse`; there is no final assistant message.
+`run_to_output` treats that specific result as success only when the expected
+new terminal tool's exact `tool_use_id` has details on the last transcript item.
+Generated tools are uniquely named, owner-scoped, forced for only that agent,
+and removed by an RAII guard; prior/cross-agent details cannot satisfy a run.
+
 ### 5d. Wait/notify conveniences
 
 Push channels already exist (`subscribe_events`, `watch_snapshot`; teammate
@@ -521,11 +569,34 @@ runtime/handle/agents.rs:33-49). Add thin wrappers:
 
 ```rust
 impl Agent {
-    pub async fn wait_for_snapshot(&self, pred: impl Fn(&AgentSnapshot) -> bool) -> AgentSnapshot;
-    pub async fn wait_until_idle(&self) -> AgentSnapshot;   // Finished/Failed/Interrupted
-    pub async fn wait_for_teammate_reply(&self) -> Result<Vec<TeamMessage>, RuntimeError>;
+    pub fn wait_handle(&self) -> AgentWaitHandle;
+    pub fn wait_until_idle(&self) -> AgentWaitFuture<AgentSnapshot>;
+}
+impl AgentWaitHandle {
+    pub fn wait_for_snapshot(&self, pred: impl Fn(&AgentSnapshot) -> bool + Send + 'static)
+        -> AgentWaitFuture<AgentSnapshot>;
+    pub fn wait_for_teammate_reply(&self)
+        -> AgentWaitFuture<Result<Vec<TeamMessage>, RuntimeError>>;
 }
 ```
+
+Verified correction: these are owned futures produced by `AgentWaitHandle`, not
+borrowing async methods. `AgentSnapshot::run_generation` increments when a run
+checkpoint starts. `wait_until_idle` waits for the active generation when called
+mid-run, or the next generation when called from initial/terminal idle state, so
+it cannot immediately return a stale `Finished` snapshot.
+
+Snapshot-channel lifetime correction: dropping an `Agent` does not by itself
+close its watch channel because runtime-registered team/background observers
+retain sender clones and there is no observer-unregister seam. An unsatisfied
+`wait_for_snapshot` therefore remains pending while those runtime observers are
+alive; it returns the last published snapshot only after every sender is dropped.
+
+`wait_for_teammate_reply` is intentionally consuming. The underlying inbox read
+moves pending rows to inflight and resets `pending_team_messages`; it is not a
+peek and must not race an `Agent::run` inbox read. The host owns the returned
+content (it will not also appear in a later provider request); a later successful
+run acknowledges inflight rows and a failed run requeues them.
 
 ### Host-scripted orchestration, end to end
 
@@ -536,19 +607,20 @@ via `tokio::spawn(agent.run(...))` holding `steering_handle()` +
 
 ---
 
-## Open decisions
+## Locked decisions
 
-1. **Steering persistence:** in-memory with requeue-on-error (recommended) vs
-   SQLite-persisted like team-inbox.
-2. **Idle steer:** explicit `run_queued()` (recommended) vs auto-starting a run.
-3. **Boundary drain order:** steering-queue > user RoundStrategy (recommended);
-   fix and document order relative to team-inbox.
-4. **Task-board atomicity:** add `TaskStore::mutate` seam (recommended — the
-   race pre-exists) vs document last-writer-wins.
-5. **Thinking scope:** signatures on `ToolUse` blocks (full Gemini fidelity)
-   now or phase 3 (recommended: phase 3, document the limitation).
-6. **ShellValidationMode default:** Off (recommended) — permissive()/
-   workspace_bounded()/read_only() behavior unchanged until opt-in.
+1. **Steering persistence:** in-memory with inflight requeue-on-error; no SQLite
+   persistence.
+2. **Idle steer:** explicit `run_queued()`; enqueueing never auto-starts a run.
+3. **Boundary drain order:** steering queue precedes and skips the user
+   `RoundStrategy` at that boundary; next-request context order is steering →
+   team inbox → background.
+4. **Task-board atomicity:** add the object-safe `TaskStore::mutate` seam and
+   override it transactionally in builtin stores.
+5. **Thinking scope:** signatures on `ToolUse`/Text blocks remain deferred to
+   phase 3; document the Gemini limitation.
+6. **ShellValidationMode default:** `Off`; existing permissive/workspace-bounded/
+   read-only behavior remains unchanged until opt-in.
 
 ## Source of findings
 
