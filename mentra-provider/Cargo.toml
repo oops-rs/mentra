@@ -26,5 +26,5 @@ thiserror = "2.0.18"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.50.0", features = ["macros", "sync"] }
 tokio-tungstenite = "0.28"
-url = "2.5.8"
+url = "=2.5.2"
 zstd = "0.13"
