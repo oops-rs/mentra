@@ -240,7 +240,7 @@ impl WorkspaceEditor {
         })
     }
 
-    fn child_names(&self, dir: &Path, action: &str) -> Result<Vec<String>, String> {
+    fn child_names(&self, dir: &Path) -> Result<Vec<String>, String> {
         let mut names = BTreeSet::new();
 
         match fs::read_dir(dir) {
@@ -273,19 +273,7 @@ impl WorkspaceEditor {
             }
         }
 
-        let mut filtered = Vec::with_capacity(names.len());
-        for name in names {
-            let child = dir.join(&name);
-            // The traversal root was authorized before recursion starts, but a
-            // descendant may be a symlink whose target leaves every allowed
-            // read root. Reauthorize each child before inspecting or following
-            // it so recursive list/search cannot cross that boundary.
-            self.authorize_read(&child, action)?;
-            if self.entry_kind(&child)? != EntryKind::Missing {
-                filtered.push(name);
-            }
-        }
-        Ok(filtered)
+        Ok(names.into_iter().collect())
     }
 
     fn walk_entries<F>(
@@ -307,8 +295,14 @@ impl WorkspaceEditor {
             return Ok(true);
         }
 
-        for child_name in self.child_names(dir, action)? {
+        for child_name in self.child_names(dir)? {
             let child = dir.join(&child_name);
+            // The traversal root was authorized before recursion starts, but a
+            // descendant may be a symlink whose target leaves every allowed
+            // read root. Reauthorize each child immediately before inspecting
+            // or following it so recursion cannot cross that boundary. Doing
+            // this lazily also preserves the existing limit short-circuit.
+            self.authorize_read(&child, action)?;
             let kind = self.entry_kind(&child)?;
             if kind == EntryKind::Missing {
                 continue;
@@ -692,6 +686,31 @@ mod tests {
         assert!(output.contains("src/nested/mod.rs"));
         assert!(!output.contains("note.txt"));
         fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_limits_short_circuit_before_unvisited_descendants() {
+        use std::os::unix::fs::symlink;
+
+        let (root, editor) = test_editor("walk-limit");
+        let outside = root.with_file_name(format!(
+            "{}-outside",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        fs::create_dir_all(&outside).expect("create outside directory");
+        fs::write(root.join("a.txt"), "match\n").expect("write first file");
+        symlink(&outside, root.join("z_escape")).expect("create escape symlink");
+
+        let list = editor.list(".".to_string(), 1, 1).expect("limited list");
+        assert!(list.contains("[file] a.txt"));
+        let search = editor
+            .search(".".to_string(), "match", 1)
+            .expect("limited search");
+        assert!(search.contains("a.txt:1: match"));
+
+        fs::remove_dir_all(root).expect("remove test workspace");
+        fs::remove_dir_all(outside).expect("remove outside directory");
     }
 
     #[test]
