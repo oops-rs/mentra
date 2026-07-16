@@ -48,15 +48,21 @@ deterministic fallback when exact replay is not possible.
    turns an otherwise valid transcript into a local error. Redacted Anthropic
    blocks replay their opaque data as `redacted_thinking.data`.
 
-4. Implement providers in fidelity order. Phase 1 captures and replays
-   Anthropic signed and redacted thinking. Phase 2 captures Responses
-   reasoning output items, requests `reasoning.encrypted_content`, replays
-   reasoning input items, and preserves reasoning-item/tool-call association.
-   Because Azure-compatible endpoints may add encrypted content only in the
-   final `response.output`, the stream model includes an internal metadata
-   backfill event; it is not exposed as reasoning text. Gemini thought capture
-   and signatures on `ToolUse`/text parts remain deferred because full Gemini
-   fidelity requires signature carriage on more than thinking blocks.
+4. Implement providers in fidelity order. This change ships Phase 1, capturing
+   and replaying Anthropic signed and redacted thinking, and Phase 2, capturing
+   Responses reasoning output items and replaying them as reasoning input
+   items. A request with reasoning enabled adds
+   `reasoning.encrypted_content` to `include` exactly once. A reasoning-bearing
+   response composite-encodes `call_id|function_item_id` locally so replay can
+   restore the function item ID; ordinary Responses calls retain the historical
+   plain `call_id`, function-call outputs always use the raw call ID, and a
+   provenance downgrade omits the function item ID. Because Azure-compatible
+   endpoints may add encrypted content only in final `response.output`, the
+   stream model backfills it through an internal metadata delta without
+   replacing output-item ciphertext or exposing it as reasoning text. Gemini
+   thought capture and signatures on `ToolUse`/text parts remain deferred
+   because full Gemini fidelity requires signature carriage on more than
+   thinking blocks.
 
 5. Persist thinking as ordinary message content. Required continuation tails
    and transcript snapshots therefore preserve it verbatim. Summarizer text
@@ -72,8 +78,8 @@ deterministic fallback when exact replay is not possible.
 
 - Anthropic tool loops can resume from local persistence without dropping the
   signed thinking blocks required by the API.
-- Hybrid Responses fallback no longer depends on inaccessible server state
-  once phase 2 is enabled.
+- Hybrid Responses fallback no longer depends on inaccessible server state for
+  captured reasoning/tool exchanges.
 - Cross-provider and cross-model transcript reuse remains valid because opaque
   payloads become ordinary text instead of being forwarded unsafely.
 - Hosts can render live reasoning text separately from assistant answer tokens

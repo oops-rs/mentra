@@ -241,24 +241,24 @@ agent/tests/tool_output.rs) and sandbox/policy parity per split tool.
 
 ## WS4 — Thinking/reasoning preservation
 
-### Corrected baseline (important)
+### Corrected pre-implementation baseline (important)
 
-**No provider round-trips reasoning today — including OpenAI Responses.**
-Responses streams reasoning *deltas* and leans on server-side state
-(`previous_response_id`); it does not capture the reasoning output item
+At investigation time, **no provider round-tripped reasoning — including
+OpenAI Responses.** Responses streamed reasoning *deltas* and leaned on
+server-side state (`previous_response_id`); it did not capture the reasoning output item
 (`ResponsesOutputItem` has no reasoning arm → `Unsupported`, sse.rs:448-495),
-has no reasoning input item to replay, and **loses reasoning on the Hybrid
-replay fallback** (session.rs:415-423). There is no neutral Thinking content
-block anywhere (`ContentBlock`, mentra-provider/src/model.rs:279-306). This is
-an add-a-first-class-content-type project, not a decoder fix.
+had no reasoning input item to replay, and **lost reasoning on the Hybrid
+replay fallback** (session.rs:415-423). There was no neutral Thinking content
+block anywhere (`ContentBlock`, mentra-provider/src/model.rs:279-306). This
+made the work an add-a-first-class-content-type project, not a decoder fix.
 
-Three drop points: (1) provider decode — Anthropic thinking →
+The three drop points were: (1) provider decode — Anthropic thinking →
 `#[serde(other)] Unsupported` (anthropic/stream_model.rs:36-48,66,77-86),
 Responses reasoning item → Unsupported, Gemini thought not modeled
-(gemini/sse.rs:366-372); (2) stream→Response collapse ignores the three
-reasoning events (response.rs:218-220); (3) runner accumulation ignores them
+(gemini/sse.rs:366-372); (2) stream→Response collapse ignored the three
+reasoning events (response.rs:218-220); (3) runner accumulation ignored them
 (agent/pending.rs:39-43), so committed Messages/transcript/host events never
-see reasoning.
+saw reasoning.
 
 ### Design
 
@@ -314,22 +314,28 @@ Implementation corrections (2026-07-16): capture and replay mappers receive
 the target registered provider id and the **requested** model explicitly; the
 response-reported model is not a substitute for replay provenance. Thinking in
 a user-role message always downgrades to Text, even when provenance matches.
-Opaque-only fallback uses a deterministic nonempty marker. For Azure-compatible
-Responses endpoints, late `encrypted_content` is modeled as an internal
-metadata delta/backfill sourced from final `response.output`; it is not a host
-reasoning-text event.
+Opaque-only fallback uses a deterministic nonempty marker. P2 adds
+`reasoning.encrypted_content` to `include` exactly once when reasoning is
+requested. It composite-encodes function item IDs only after a reasoning item
+has appeared in that response, preserving the historical plain `call_id` for
+ordinary Responses calls; replay strips the item ID whenever its reasoning
+downgrades. For Azure-compatible Responses endpoints, late
+`encrypted_content` is modeled as an internal metadata delta/backfill sourced
+from final `response.output`; output-item ciphertext wins and the backfill is
+not a host reasoning-text event. Both HTTP and WebSocket paths carry the exact
+registered-provider/requested-model provenance into the stream decoder.
 
 Per-provider work:
 
-- **Anthropic (highest value — required for Claude tool-loop correctness):**
+- **Anthropic (P1 implemented; highest value for Claude tool-loop correctness):**
   capture `Thinking`/`RedactedThinking` stream blocks + `ThinkingDelta`/
   `SignatureDelta`; replay arms in `From<&ContentBlock>` (model.rs:315-356)
   keeping thinking first; also the non-stream `TryFrom` arms (:358-381).
-- **Responses:** capture `ResponsesOutputItem::Reasoning { id,
-  encrypted_content, summary }`; replay as a reasoning `ResponsesInputItem`
-  (belt-and-suspenders with `previous_response_id`); request
-  `include:["reasoning.encrypted_content"]` when reasoning is on
-  (settable at model.rs:84-85, currently unconsumed).
+- **Responses (P2 implemented):** capture `ResponsesOutputItem::Reasoning {
+  id, encrypted_content, summary }`; replay as a reasoning
+  `ResponsesInputItem` (belt-and-suspenders with `previous_response_id`);
+  request `include:["reasoning.encrypted_content"]` when reasoning is on; and
+  preserve reasoning-item/function-call association across local replay.
 - **Gemini:** add `thought`/`thoughtSignature` to response `GeminiPart`,
   branch thought parts to Thinking (not Text); request `includeThoughts`.
   Full Gemini fidelity eventually needs signatures on **ToolUse** and text
@@ -347,9 +353,10 @@ shim (journal/state.rs:33-48) is the precedent. Keep `signature` an opaque
 `Option<String>`; if it ever becomes structured, version it (`{v:1,...}`) with
 dual-read of the bare form.
 
-Phasing: **P1** neutral type + builders + events + Anthropic capture/replay +
-downgrade-to-text guard. **P2** Responses item capture/replay + id pairing.
-**P3** Gemini thoughts + ToolUse signature carriage.
+Implementation status: **P1** (neutral type, builders, events, and Anthropic
+capture/replay) and **P2** (Responses item capture/replay and ID pairing) are
+complete. **P3** Gemini thoughts plus `ToolUse`/text signature carriage remains
+out of scope for this handoff.
 
 ---
 

@@ -34,6 +34,18 @@
   to assistant history with exact registered-provider and requested-model
   provenance; missing/empty signatures and cross-provider/model history safely
   downgrade to plain text, with a deterministic marker for opaque-only blocks.
+- Capture OpenAI Responses reasoning output items, including summaries,
+  encrypted content, and reasoning-item IDs. Requests with reasoning enabled
+  automatically include `reasoning.encrypted_content` exactly once, and exact
+  provider/model replay restores the reasoning input item.
+- Preserve Responses reasoning/tool association with local
+  `call_id|function_item_id` tool-use IDs only when the response emitted a
+  reasoning item. Function-call outputs always project the raw `call_id`, and
+  replay omits the function item ID whenever reasoning downgrades across a
+  provider or model boundary.
+- Backfill Azure-compatible late reasoning ciphertext from terminal
+  `response.output` without replacing encrypted content already captured from
+  the completed output item or emitting a host reasoning-text delta.
 - Emit reasoning text as `AgentEvent::ReasoningDelta` and
   `SessionEvent::AssistantReasoningDelta` while keeping signatures out of host
   deltas. Local compaction summaries exclude thinking from both text extraction
@@ -58,6 +70,9 @@ the new neutral representation does not yet provide full Gemini fidelity.
   existing store implementations continue to compile unchanged.
 - Persisted messages and transcripts from before WS4 deserialize unchanged.
   New optional thinking fields are serde-defaulted and omitted when absent.
+- Responses streams without a reasoning item retain their historical plain
+  `call_id` tool-use IDs; composite IDs are limited to newly preserved
+  reasoning/tool associations.
 - `ContentBlock`, `ContentBlockStart`, `ContentBlockDelta`, `AgentEvent`, and
   `SessionEvent` gain public variants. Exhaustive matchers must add the new
   reasoning cases (or a deliberate fallback); existing non-exhaustive usage is
