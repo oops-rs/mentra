@@ -4,9 +4,9 @@ use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError,
-    ProviderToolKind, ReasoningEffort, Request, Response, Role, TokenUsage, ToolChoice,
-    ToolLoadingPolicy, ToolResultContent, ToolSearchMode, ToolSpec,
+    BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ProviderId,
+    ProviderToolKind, ReasoningEffort, ReasoningFormat, ReasoningProvenance, Request, Response,
+    Role, TokenUsage, ToolChoice, ToolLoadingPolicy, ToolResultContent, ToolSearchMode, ToolSpec,
 };
 
 #[derive(Deserialize)]
@@ -110,21 +110,38 @@ impl TryFrom<AnthropicResponse> for Response {
     type Error = ProviderError;
 
     fn try_from(response: AnthropicResponse) -> Result<Self, Self::Error> {
+        let provider = ProviderId::from(BuiltinProvider::Anthropic);
+        let requested_model = response.model.clone();
+        response.try_into_response_with_provider(&provider, &requested_model)
+    }
+}
+
+impl AnthropicResponse {
+    fn try_into_response_with_provider(
+        self,
+        provider: &ProviderId,
+        requested_model: &str,
+    ) -> Result<Response, ProviderError> {
+        let provenance = ReasoningProvenance {
+            provider: provider.clone(),
+            model: requested_model.to_string(),
+            format: ReasoningFormat::AnthropicSigned,
+        };
         Ok(Response {
-            id: response.id,
-            model: response.model,
-            role: match response.role.as_str() {
+            id: self.id,
+            model: self.model,
+            role: match self.role.as_str() {
                 "user" => Role::User,
                 "assistant" => Role::Assistant,
-                _ => Role::Unknown(response.role),
+                _ => Role::Unknown(self.role),
             },
-            content: response
+            content: self
                 .content
                 .into_iter()
-                .map(ContentBlock::try_from)
+                .map(|block| ContentBlock::try_from((block, provenance.clone())))
                 .collect::<Result<Vec<_>, _>>()?,
-            stop_reason: response.stop_reason,
-            usage: response.usage.and_then(|usage| usage.into_token_usage()),
+            stop_reason: self.stop_reason,
+            usage: self.usage.and_then(|usage| usage.into_token_usage()),
         })
     }
 }
@@ -164,6 +181,16 @@ impl<'a> TryFrom<Request<'a>> for AnthropicRequest {
     type Error = ProviderError;
 
     fn try_from(value: Request<'a>) -> Result<Self, Self::Error> {
+        let provider = ProviderId::from(BuiltinProvider::Anthropic);
+        Self::try_from_with_provider(value, &provider)
+    }
+}
+
+impl AnthropicRequest {
+    pub(crate) fn try_from_with_provider(
+        value: Request<'_>,
+        target_provider: &ProviderId,
+    ) -> Result<Self, ProviderError> {
         if value
             .provider_request_options
             .reasoning
@@ -178,13 +205,17 @@ impl<'a> TryFrom<Request<'a>> for AnthropicRequest {
             )));
         }
 
+        let target_model = value.model.to_string();
+
         Ok(AnthropicRequest {
             model: value.model.into_owned(),
             system: value.system.map(|s| build_system_blocks(s.into_owned())),
             messages: value
                 .messages
                 .iter()
-                .map(AnthropicMessage::try_from)
+                .map(|message| {
+                    AnthropicMessage::try_from_with_target(message, target_provider, &target_model)
+                })
                 .collect::<Result<Vec<_>, _>>()?,
             tools: build_anthropic_tools(
                 value.tools.as_ref(),
@@ -273,9 +304,47 @@ impl TryFrom<&Message> for AnthropicMessage {
 
         Ok(AnthropicMessage {
             role: message.role.to_string(),
-            content: message.content.iter().map(|block| block.into()).collect(),
+            content: message
+                .content
+                .iter()
+                .map(AnthropicContentBlock::from_without_replay_target)
+                .collect(),
         })
     }
+}
+
+impl AnthropicMessage {
+    fn try_from_with_target(
+        message: &Message,
+        provider: &ProviderId,
+        model: &str,
+    ) -> Result<Self, ProviderError> {
+        if !matches!(message.role, Role::User) && message_has_image(message) {
+            return Err(ProviderError::InvalidRequest(
+                "Anthropic image inputs are only supported in user messages".to_string(),
+            ));
+        }
+
+        let target = AnthropicReplayTarget {
+            provider,
+            model,
+            role: &message.role,
+        };
+        Ok(Self {
+            role: message.role.to_string(),
+            content: message
+                .content
+                .iter()
+                .map(|block| AnthropicContentBlock::from_with_replay_target(block, &target))
+                .collect(),
+        })
+    }
+}
+
+struct AnthropicReplayTarget<'a> {
+    provider: &'a ProviderId,
+    model: &'a str,
+    role: &'a Role,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -283,6 +352,13 @@ impl TryFrom<&Message> for AnthropicMessage {
 enum AnthropicContentBlock {
     Text {
         text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
     },
     Image {
         source: AnthropicImageSource,
@@ -314,8 +390,57 @@ impl From<ContentBlock> for AnthropicContentBlock {
 
 impl From<&ContentBlock> for AnthropicContentBlock {
     fn from(block: &ContentBlock) -> Self {
+        Self::from_without_replay_target(block)
+    }
+}
+
+impl AnthropicContentBlock {
+    fn from_without_replay_target(block: &ContentBlock) -> Self {
+        match block {
+            ContentBlock::Thinking { .. } => AnthropicContentBlock::Text {
+                text: block
+                    .thinking_fallback_text()
+                    .expect("thinking block has fallback text"),
+            },
+            _ => Self::from_non_thinking(block),
+        }
+    }
+
+    fn from_with_replay_target(block: &ContentBlock, target: &AnthropicReplayTarget<'_>) -> Self {
+        match block {
+            ContentBlock::Thinking {
+                thinking,
+                signature: Some(signature),
+                provenance: Some(provenance),
+                redacted,
+                ..
+            } if matches!(target.role, Role::Assistant)
+                && !signature.is_empty()
+                && provenance.provider == *target.provider
+                && provenance.model == target.model
+                && provenance.format == ReasoningFormat::AnthropicSigned =>
+            {
+                if *redacted {
+                    Self::RedactedThinking {
+                        data: signature.clone(),
+                    }
+                } else {
+                    Self::Thinking {
+                        thinking: thinking.clone(),
+                        signature: signature.clone(),
+                    }
+                }
+            }
+            _ => Self::from_without_replay_target(block),
+        }
+    }
+
+    fn from_non_thinking(block: &ContentBlock) -> Self {
         match block {
             ContentBlock::Text { text } => AnthropicContentBlock::Text { text: text.clone() },
+            ContentBlock::Thinking { .. } => {
+                unreachable!("thinking blocks are handled before non-thinking projection")
+            }
             ContentBlock::Image { source } => AnthropicContentBlock::Image {
                 source: source.into(),
             },
@@ -355,12 +480,33 @@ impl From<&ContentBlock> for AnthropicContentBlock {
     }
 }
 
-impl TryFrom<AnthropicContentBlock> for ContentBlock {
+impl TryFrom<(AnthropicContentBlock, ReasoningProvenance)> for ContentBlock {
     type Error = ProviderError;
 
-    fn try_from(block: AnthropicContentBlock) -> Result<Self, Self::Error> {
+    fn try_from(
+        (block, provenance): (AnthropicContentBlock, ReasoningProvenance),
+    ) -> Result<Self, Self::Error> {
         Ok(match block {
             AnthropicContentBlock::Text { text } => ContentBlock::Text { text },
+            AnthropicContentBlock::Thinking {
+                thinking,
+                signature,
+            } => ContentBlock::Thinking {
+                thinking,
+                signature: Some(signature),
+                encrypted_content: None,
+                id: None,
+                provenance: Some(provenance),
+                redacted: false,
+            },
+            AnthropicContentBlock::RedactedThinking { data } => ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: Some(data),
+                encrypted_content: None,
+                id: None,
+                provenance: Some(provenance),
+                redacted: true,
+            },
             AnthropicContentBlock::Image { source } => ContentBlock::Image {
                 source: source.try_into()?,
             },
@@ -545,12 +691,51 @@ mod tests {
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     use crate::{
-        AnthropicRequestOptions, ContentBlock, Message, ModelInfo, ProviderError,
-        ProviderRequestOptions, ReasoningEffort, ReasoningOptions, Request, Role, ToolChoice,
-        ToolLoadingPolicy, ToolResultContent, ToolSearchMode, ToolSpec,
+        AnthropicRequestOptions, ContentBlock, ImageSource, Message, ModelInfo, ProviderError,
+        ProviderId, ProviderRequestOptions, ReasoningEffort, ReasoningFormat, ReasoningOptions,
+        ReasoningProvenance, Request, Role, ToolChoice, ToolLoadingPolicy, ToolResultContent,
+        ToolSearchMode, ToolSpec,
     };
 
-    use super::{AnthropicContentBlock, AnthropicImageSource, AnthropicModel, AnthropicRequest};
+    use super::{
+        AnthropicContentBlock, AnthropicImageSource, AnthropicModel, AnthropicRequest,
+        AnthropicResponse,
+    };
+
+    fn request_with_message(model: &str, message: Message) -> Request<'static> {
+        Request {
+            model: Cow::Owned(model.to_string()),
+            system: None,
+            messages: Cow::Owned(vec![message]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: Some(512),
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        }
+    }
+
+    fn anthropic_thinking(
+        thinking: &str,
+        signature: Option<&str>,
+        provider: &str,
+        model: &str,
+        redacted: bool,
+    ) -> ContentBlock {
+        ContentBlock::Thinking {
+            thinking: thinking.to_string(),
+            signature: signature.map(str::to_string),
+            encrypted_content: None,
+            id: None,
+            provenance: Some(ReasoningProvenance {
+                provider: ProviderId::new(provider),
+                model: model.to_string(),
+                format: ReasoningFormat::AnthropicSigned,
+            }),
+            redacted,
+        }
+    }
 
     #[test]
     fn converts_rfc3339_timestamp_to_offset_datetime() {
@@ -626,11 +811,9 @@ mod tests {
 
     #[test]
     fn rejects_invalid_base64_image_payloads() {
-        let error = ContentBlock::try_from(AnthropicContentBlock::Image {
-            source: AnthropicImageSource::Base64 {
-                media_type: "image/png".to_string(),
-                data: "!not-base64!".to_string(),
-            },
+        let error = ImageSource::try_from(AnthropicImageSource::Base64 {
+            media_type: "image/png".to_string(),
+            data: "!not-base64!".to_string(),
         })
         .expect_err("invalid base64 should fail");
 
@@ -641,6 +824,184 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn replays_signed_and_redacted_thinking_only_to_exact_provider_and_model() {
+        let provider = ProviderId::new("anthropic-edge");
+        let request = request_with_message(
+            "claude-requested",
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    anthropic_thinking(
+                        "private chain",
+                        Some("opaque-signature"),
+                        "anthropic-edge",
+                        "claude-requested",
+                        false,
+                    ),
+                    anthropic_thinking(
+                        "",
+                        Some("opaque-redacted-data"),
+                        "anthropic-edge",
+                        "claude-requested",
+                        true,
+                    ),
+                ],
+            },
+        );
+
+        let payload = serde_json::to_value(
+            AnthropicRequest::try_from_with_provider(request, &provider).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(payload["messages"][0]["content"][0]["type"], "thinking");
+        assert_eq!(
+            payload["messages"][0]["content"][0]["thinking"],
+            "private chain"
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][0]["signature"],
+            "opaque-signature"
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][1]["type"],
+            "redacted_thinking"
+        );
+        assert_eq!(
+            payload["messages"][0]["content"][1]["data"],
+            "opaque-redacted-data"
+        );
+    }
+
+    #[test]
+    fn downgrades_unreplayable_thinking_to_nonempty_text() {
+        let provider = ProviderId::new("anthropic-edge");
+        let cases = [
+            anthropic_thinking(
+                "wrong provider",
+                Some("signature"),
+                "anthropic-other",
+                "claude-requested",
+                false,
+            ),
+            anthropic_thinking(
+                "wrong model",
+                Some("signature"),
+                "anthropic-edge",
+                "claude-other",
+                false,
+            ),
+            anthropic_thinking(
+                "missing signature",
+                None,
+                "anthropic-edge",
+                "claude-requested",
+                false,
+            ),
+            anthropic_thinking(
+                "empty signature",
+                Some(""),
+                "anthropic-edge",
+                "claude-requested",
+                false,
+            ),
+            anthropic_thinking("", None, "anthropic-edge", "claude-requested", true),
+        ];
+        let request = request_with_message(
+            "claude-requested",
+            Message {
+                role: Role::Assistant,
+                content: cases.to_vec(),
+            },
+        );
+
+        let payload = serde_json::to_value(
+            AnthropicRequest::try_from_with_provider(request, &provider).unwrap(),
+        )
+        .unwrap();
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+
+        assert_eq!(content.len(), cases.len());
+        assert!(content.iter().all(|block| block["type"] == "text"));
+        assert!(
+            content
+                .iter()
+                .all(|block| { block["text"].as_str().is_some_and(|text| !text.is_empty()) })
+        );
+        assert_eq!(content[4]["text"], "[redacted reasoning]");
+    }
+
+    #[test]
+    fn downgrades_user_role_thinking_even_with_matching_provenance() {
+        let provider = ProviderId::new("anthropic-edge");
+        let request = request_with_message(
+            "claude-requested",
+            Message::user(anthropic_thinking(
+                "private chain",
+                Some("opaque-signature"),
+                "anthropic-edge",
+                "claude-requested",
+                false,
+            )),
+        );
+
+        let payload = serde_json::to_value(
+            AnthropicRequest::try_from_with_provider(request, &provider).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(payload["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            payload["messages"][0]["content"][0]["text"],
+            "private chain"
+        );
+    }
+
+    #[test]
+    fn non_stream_response_captures_thinking_and_redacted_data() {
+        let response = AnthropicResponse {
+            id: "msg-1".to_string(),
+            model: "claude-resolved".to_string(),
+            role: "assistant".to_string(),
+            usage: None,
+            content: vec![
+                AnthropicContentBlock::Thinking {
+                    thinking: "private chain".to_string(),
+                    signature: "opaque-signature".to_string(),
+                },
+                AnthropicContentBlock::RedactedThinking {
+                    data: "opaque-redacted-data".to_string(),
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+        };
+
+        let converted = response
+            .try_into_response_with_provider(&ProviderId::new("anthropic-edge"), "claude-requested")
+            .unwrap();
+
+        assert_eq!(
+            converted.content,
+            vec![
+                anthropic_thinking(
+                    "private chain",
+                    Some("opaque-signature"),
+                    "anthropic-edge",
+                    "claude-requested",
+                    false,
+                ),
+                anthropic_thinking(
+                    "",
+                    Some("opaque-redacted-data"),
+                    "anthropic-edge",
+                    "claude-requested",
+                    true,
+                ),
+            ]
+        );
     }
 
     #[test]

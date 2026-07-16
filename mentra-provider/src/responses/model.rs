@@ -7,13 +7,27 @@ use time::OffsetDateTime;
 
 use crate::ProviderId;
 use crate::{
-    ContentBlock, HostedToolSearchCall, HostedWebSearchCall, ImageGenerationCall,
+    BuiltinProvider, ContentBlock, HostedToolSearchCall, HostedWebSearchCall, ImageGenerationCall,
     ImageGenerationResult, ImageSource, Message, ModelInfo, ProviderError, ReasoningEffort,
-    ReasoningOptions, ReasoningSummary, Request, ResponsesTextControls, Role, ToolChoice,
-    ToolSearchMode, WebSearchAction,
+    ReasoningFormat, ReasoningOptions, ReasoningSummary, Request, ResponsesTextControls, Role,
+    ToolChoice, ToolSearchMode, WebSearchAction,
 };
 
 use crate::tool::{ProviderToolKind, ToolLoadingPolicy, ToolSpec};
+
+pub(crate) fn encode_responses_tool_use_id(call_id: &str, item_id: Option<&str>) -> String {
+    match item_id.filter(|id| !id.is_empty()) {
+        Some(item_id) => format!("{call_id}|{item_id}"),
+        None => call_id.to_string(),
+    }
+}
+
+pub(crate) fn decode_responses_tool_use_id(id: &str) -> (&str, Option<&str>) {
+    match id.split_once('|') {
+        Some((call_id, item_id)) if !item_id.is_empty() => (call_id, Some(item_id)),
+        _ => (id, None),
+    }
+}
 
 /// Page returned by the Responses-compatible models endpoint.
 #[derive(Debug, Deserialize)]
@@ -99,7 +113,11 @@ impl<'a> TryFrom<Request<'a>> for ResponsesRequest {
     type Error = ProviderError;
 
     fn try_from(value: Request<'a>) -> Result<Self, Self::Error> {
-        Self::try_from_request(value, "Responses")
+        Self::try_from_request_with_provider(
+            value,
+            "Responses",
+            &ProviderId::from(BuiltinProvider::OpenAI),
+        )
     }
 }
 
@@ -108,10 +126,37 @@ impl ResponsesRequest {
         value: Request<'a>,
         provider_name: &str,
     ) -> Result<Self, ProviderError> {
+        Self::try_from_request_with_provider(
+            value,
+            provider_name,
+            &ProviderId::from(BuiltinProvider::OpenAI),
+        )
+    }
+
+    pub(crate) fn try_from_request_with_provider(
+        value: Request<'_>,
+        provider_name: &str,
+        target_provider: &ProviderId,
+    ) -> Result<Self, ProviderError> {
         let mut input = Vec::new();
+        let target_model = value.model.to_string();
+        let reasoning_enabled = value.provider_request_options.reasoning.is_some();
 
         for message in value.messages.iter() {
-            input.extend(ResponsesInputItem::from_message(message)?);
+            input.extend(ResponsesInputItem::from_message(
+                message,
+                target_provider,
+                &target_model,
+            )?);
+        }
+
+        let mut include = value.provider_request_options.responses.include.clone();
+        if reasoning_enabled
+            && !include
+                .iter()
+                .any(|item| item == "reasoning.encrypted_content")
+        {
+            include.push("reasoning.encrypted_content".to_string());
         }
 
         Ok(Self {
@@ -135,7 +180,7 @@ impl ResponsesRequest {
             parallel_tool_calls: value.provider_request_options.responses.parallel_tool_calls,
             store: value.provider_request_options.responses.store,
             stream: value.provider_request_options.responses.stream,
-            include: value.provider_request_options.responses.include.clone(),
+            include,
             service_tier: value
                 .provider_request_options
                 .responses
@@ -221,6 +266,7 @@ impl From<ReasoningSummary> for ResponsesReasoningSummary {
 #[serde(untagged)]
 pub enum ResponsesInputItem {
     Message(ResponsesMessageInput),
+    Reasoning(ResponsesReasoningInput),
     FunctionCall(ResponsesFunctionCallInput),
     FunctionCallOutput(ResponsesFunctionCallOutputInput),
     ToolSearchCall(ResponsesToolSearchCallInput),
@@ -229,14 +275,61 @@ pub enum ResponsesInputItem {
 }
 
 impl ResponsesInputItem {
-    fn from_message(message: &Message) -> Result<Vec<Self>, ProviderError> {
+    fn from_message(
+        message: &Message,
+        target_provider: &ProviderId,
+        target_model: &str,
+    ) -> Result<Vec<Self>, ProviderError> {
         let mut items = Vec::new();
         let mut content = Vec::new();
         let mut text_buffer = String::new();
+        let mut replayed_reasoning = false;
 
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => text_buffer.push_str(text),
+                ContentBlock::Thinking {
+                    thinking,
+                    encrypted_content,
+                    id,
+                    provenance,
+                    ..
+                } => {
+                    let replayable = matches!(message.role, Role::Assistant)
+                        && encrypted_content
+                            .as_deref()
+                            .is_some_and(|value| !value.is_empty())
+                        && id.as_deref().is_some_and(|value| !value.is_empty())
+                        && provenance.as_ref().is_some_and(|provenance| {
+                            provenance.provider == *target_provider
+                                && provenance.model == target_model
+                                && provenance.format == ReasoningFormat::OpenAiEncrypted
+                        });
+                    if replayable {
+                        Self::flush_message(message, &mut text_buffer, &mut content, &mut items)?;
+                        items.push(Self::Reasoning(ResponsesReasoningInput {
+                            kind: "reasoning",
+                            id: id.clone().expect("replayable reasoning has an id"),
+                            encrypted_content: encrypted_content
+                                .clone()
+                                .expect("replayable reasoning has encrypted content"),
+                            summary: (!thinking.is_empty())
+                                .then(|| ResponsesReasoningSummaryInput {
+                                    kind: "summary_text",
+                                    text: thinking.clone(),
+                                })
+                                .into_iter()
+                                .collect(),
+                        }));
+                        replayed_reasoning = true;
+                    } else {
+                        text_buffer.push_str(
+                            &block
+                                .thinking_fallback_text()
+                                .expect("thinking block has fallback text"),
+                        );
+                    }
+                }
                 ContentBlock::Image { source } => {
                     Self::flush_text(&mut text_buffer, &message.role, &mut content)?;
                     content.push(ResponsesMessageContentPart::try_from((
@@ -246,9 +339,15 @@ impl ResponsesInputItem {
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     Self::flush_message(message, &mut text_buffer, &mut content, &mut items)?;
+                    let (call_id, item_id) = decode_responses_tool_use_id(id);
                     items.push(Self::FunctionCall(ResponsesFunctionCallInput {
                         kind: "function_call",
-                        call_id: id.clone(),
+                        id: if replayed_reasoning {
+                            item_id.map(str::to_string)
+                        } else {
+                            None
+                        },
+                        call_id: call_id.to_string(),
                         name: name.clone(),
                         arguments: input.to_string(),
                     }));
@@ -259,9 +358,10 @@ impl ResponsesInputItem {
                     is_error,
                 } => {
                     Self::flush_message(message, &mut text_buffer, &mut content, &mut items)?;
+                    let (call_id, _) = decode_responses_tool_use_id(tool_use_id);
                     items.push(Self::FunctionCallOutput(ResponsesFunctionCallOutputInput {
                         kind: "function_call_output",
-                        call_id: tool_use_id.clone(),
+                        call_id: call_id.to_string(),
                         output: render_tool_output(&tool_output.to_display_string(), *is_error),
                     }));
                 }
@@ -325,6 +425,22 @@ impl ResponsesInputItem {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct ResponsesReasoningInput {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: String,
+    encrypted_content: String,
+    summary: Vec<ResponsesReasoningSummaryInput>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResponsesReasoningSummaryInput {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+}
+
 fn render_tool_output(content: &str, is_error: bool) -> String {
     if is_error {
         format!("Tool error: {content}")
@@ -385,6 +501,8 @@ impl TryFrom<(&ImageSource, &Role)> for ResponsesMessageContentPart {
 pub struct ResponsesFunctionCallInput {
     #[serde(rename = "type")]
     kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     call_id: String,
     name: String,
     arguments: String,
@@ -665,14 +783,50 @@ mod tests {
 
     use crate::{
         ContentBlock, HostedToolSearchCall, HostedWebSearchCall, ImageGenerationCall,
-        ImageGenerationResult, Message, ProviderError, ProviderRequestOptions, ReasoningEffort,
-        ReasoningOptions, ReasoningSummary, Request, ResponsesRequestCompression,
-        ResponsesRequestOptions, ResponsesStateMode, ResponsesTextControls, ResponsesTextFormat,
-        ResponsesTransport, ResponsesVerbosity, Role, ToolChoice, ToolLoadingPolicy,
-        ToolResultContent, ToolSearchMode, ToolSpec, WebSearchAction,
+        ImageGenerationResult, Message, ProviderError, ProviderId, ProviderRequestOptions,
+        ReasoningEffort, ReasoningFormat, ReasoningOptions, ReasoningProvenance, ReasoningSummary,
+        Request, ResponsesRequestCompression, ResponsesRequestOptions, ResponsesStateMode,
+        ResponsesTextControls, ResponsesTextFormat, ResponsesTransport, ResponsesVerbosity, Role,
+        ToolChoice, ToolLoadingPolicy, ToolResultContent, ToolSearchMode, ToolSpec,
+        WebSearchAction,
     };
 
     use super::{ResponsesModel, ResponsesModelsPage, ResponsesRequest};
+
+    fn responses_thinking(
+        thinking: &str,
+        encrypted_content: Option<&str>,
+        id: Option<&str>,
+        provider: &str,
+        model: &str,
+    ) -> ContentBlock {
+        ContentBlock::Thinking {
+            thinking: thinking.to_string(),
+            signature: None,
+            encrypted_content: encrypted_content.map(str::to_string),
+            id: id.map(str::to_string),
+            provenance: Some(ReasoningProvenance {
+                provider: ProviderId::new(provider),
+                model: model.to_string(),
+                format: ReasoningFormat::OpenAiEncrypted,
+            }),
+            redacted: false,
+        }
+    }
+
+    fn replay_request(model: &str, messages: Vec<Message>) -> Request<'static> {
+        Request {
+            model: Cow::Owned(model.to_string()),
+            system: None,
+            messages: Cow::Owned(messages),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        }
+    }
 
     #[test]
     fn converts_request_to_responses_payload() {
@@ -753,6 +907,148 @@ mod tests {
         assert!((temperature - 0.2).abs() < 1e-6);
         assert_eq!(payload["max_output_tokens"], 256);
         assert_eq!(payload["metadata"]["agent"], "mentra");
+    }
+
+    #[test]
+    fn replays_reasoning_and_paired_function_ids_for_exact_provider_and_model() {
+        let request = replay_request(
+            "gpt-requested",
+            vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        responses_thinking(
+                            "short summary",
+                            Some("encrypted-1"),
+                            Some("rs_1"),
+                            "openai-edge",
+                            "gpt-requested",
+                        ),
+                        ContentBlock::ToolUse {
+                            id: "call_1|fc_1".to_string(),
+                            name: "read_file".to_string(),
+                            input: json!({"path":"README.md"}),
+                        },
+                    ],
+                },
+                Message::user(ContentBlock::ToolResult {
+                    tool_use_id: "call_1|fc_1".to_string(),
+                    content: ToolResultContent::text("contents"),
+                    is_error: false,
+                }),
+            ],
+        );
+
+        let payload = serde_json::to_value(
+            ResponsesRequest::try_from_request_with_provider(
+                request,
+                "OpenAI edge",
+                &ProviderId::new("openai-edge"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(payload["input"][0]["type"], "reasoning");
+        assert_eq!(payload["input"][0]["id"], "rs_1");
+        assert_eq!(payload["input"][0]["encrypted_content"], "encrypted-1");
+        assert_eq!(payload["input"][0]["summary"][0]["text"], "short summary");
+        assert_eq!(payload["input"][1]["type"], "function_call");
+        assert_eq!(payload["input"][1]["id"], "fc_1");
+        assert_eq!(payload["input"][1]["call_id"], "call_1");
+        assert_eq!(payload["input"][2]["type"], "function_call_output");
+        assert_eq!(payload["input"][2]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn cross_model_reasoning_downgrades_and_omits_function_item_id() {
+        let request = replay_request(
+            "gpt-new",
+            vec![Message {
+                role: Role::Assistant,
+                content: vec![
+                    responses_thinking(
+                        "short summary",
+                        Some("encrypted-1"),
+                        Some("rs_1"),
+                        "openai-edge",
+                        "gpt-old",
+                    ),
+                    ContentBlock::ToolUse {
+                        id: "call_1|fc_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({}),
+                    },
+                ],
+            }],
+        );
+
+        let payload = serde_json::to_value(
+            ResponsesRequest::try_from_request_with_provider(
+                request,
+                "OpenAI edge",
+                &ProviderId::new("openai-edge"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(payload["input"][0]["role"], "assistant");
+        assert_eq!(payload["input"][0]["content"][0]["text"], "short summary");
+        assert_eq!(payload["input"][1]["type"], "function_call");
+        assert!(payload["input"][1].get("id").is_none());
+        assert_eq!(payload["input"][1]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn cross_provider_user_and_incomplete_reasoning_downgrade_to_text() {
+        let blocks = vec![
+            responses_thinking(
+                "cross provider",
+                Some("encrypted-1"),
+                Some("rs_1"),
+                "openai-other",
+                "gpt-requested",
+            ),
+            responses_thinking(
+                "missing encrypted content",
+                None,
+                Some("rs_2"),
+                "openai-edge",
+                "gpt-requested",
+            ),
+            responses_thinking(
+                "missing id",
+                Some("encrypted-3"),
+                None,
+                "openai-edge",
+                "gpt-requested",
+            ),
+        ];
+        let request = replay_request(
+            "gpt-requested",
+            vec![Message {
+                role: Role::User,
+                content: blocks,
+            }],
+        );
+
+        let payload = serde_json::to_value(
+            ResponsesRequest::try_from_request_with_provider(
+                request,
+                "OpenAI edge",
+                &ProviderId::new("openai-edge"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(payload["input"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["input"][0]["role"], "user");
+        assert_eq!(
+            payload["input"][0]["content"][0]["text"],
+            "cross providermissing encrypted contentmissing id"
+        );
     }
 
     #[test]
@@ -1059,6 +1355,29 @@ mod tests {
             .expect("request should serialize");
 
         assert_eq!(payload["reasoning"]["effort"], "high");
+        assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn reasoning_encrypted_content_include_is_added_once() {
+        let mut request = replay_request("gpt-5", Vec::new());
+        request.provider_request_options.reasoning = Some(ReasoningOptions {
+            effort: None,
+            summary: Some(ReasoningSummary::Auto),
+        });
+        request.provider_request_options.responses.include = vec![
+            "message.output_text.logprobs".to_string(),
+            "reasoning.encrypted_content".to_string(),
+        ];
+
+        let payload = serde_json::to_value(ResponsesRequest::try_from(request).unwrap()).unwrap();
+        assert_eq!(
+            payload["include"],
+            json!([
+                "message.output_text.logprobs",
+                "reasoning.encrypted_content"
+            ])
+        );
     }
 
     #[test]

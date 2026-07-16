@@ -57,6 +57,84 @@ fn text_turn_commits_after_message_stop() {
 }
 
 #[test]
+fn thinking_turn_emits_text_only_deltas_and_commits_signature_at_block_close() {
+    let provenance = crate::ReasoningProvenance {
+        provider: crate::ProviderId::new("anthropic-edge"),
+        model: "claude-test".to_string(),
+        format: crate::ReasoningFormat::AnthropicSigned,
+    };
+    let mut pending = PendingAssistantTurn::default();
+    pending
+        .apply(ProviderEvent::MessageStarted {
+            id: "msg-thinking".to_string(),
+            model: "claude-test".to_string(),
+            role: Role::Assistant,
+        })
+        .unwrap();
+    pending
+        .apply(ProviderEvent::ContentBlockStarted {
+            index: 0,
+            kind: ContentBlockStart::Thinking {
+                encrypted_content: None,
+                id: None,
+                provenance: Some(provenance.clone()),
+                redacted: false,
+            },
+        })
+        .unwrap();
+
+    assert_eq!(
+        pending
+            .apply(ProviderEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::ThinkingText("private ".to_string()),
+            })
+            .unwrap(),
+        vec![AgentEvent::ReasoningDelta {
+            delta: "private ".to_string(),
+            full_text: "private ".to_string(),
+        }]
+    );
+    assert_eq!(
+        pending
+            .apply(ProviderEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::ThinkingText("chain".to_string()),
+            })
+            .unwrap(),
+        vec![AgentEvent::ReasoningDelta {
+            delta: "chain".to_string(),
+            full_text: "private chain".to_string(),
+        }]
+    );
+    assert!(
+        pending
+            .apply(ProviderEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentBlockDelta::ThinkingSignature("opaque-signature".to_string()),
+            })
+            .unwrap()
+            .is_empty()
+    );
+    pending
+        .apply(ProviderEvent::ContentBlockStopped { index: 0 })
+        .unwrap();
+    pending.apply(ProviderEvent::MessageStopped).unwrap();
+
+    assert_eq!(
+        pending.to_message().unwrap(),
+        Message::assistant(ContentBlock::Thinking {
+            thinking: "private chain".to_string(),
+            signature: Some("opaque-signature".to_string()),
+            encrypted_content: None,
+            id: None,
+            provenance: Some(provenance),
+            redacted: false,
+        })
+    );
+}
+
+#[test]
 fn tool_use_turn_emits_ready_event_and_parses_call() {
     let mut pending = PendingAssistantTurn::default();
 

@@ -69,6 +69,10 @@ pub enum SessionEvent {
         delta: String,
         full_text: String,
     },
+    AssistantReasoningDelta {
+        delta: String,
+        full_text: String,
+    },
     AssistantMessageCompleted {
         text: String,
     },

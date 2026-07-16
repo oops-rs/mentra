@@ -1,9 +1,9 @@
 use tokio::sync::mpsc;
 
 use crate::{
-    model::HostedToolSearchCall, model::HostedWebSearchCall, model::ImageGenerationCall,
-    model::ImageGenerationResult, model::ImageSource, model::Role, model::TokenUsage,
-    model::ToolResultContent, model::WebSearchAction,
+    ReasoningProvenance, model::HostedToolSearchCall, model::HostedWebSearchCall,
+    model::ImageGenerationCall, model::ImageGenerationResult, model::ImageSource, model::Role,
+    model::TokenUsage, model::ToolResultContent, model::WebSearchAction,
 };
 
 pub type ProviderEventStream = mpsc::UnboundedReceiver<Result<ProviderEvent, crate::ProviderError>>;
@@ -54,6 +54,12 @@ pub enum ProviderEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlockStart {
     Text,
+    Thinking {
+        encrypted_content: Option<String>,
+        id: Option<String>,
+        provenance: Option<ReasoningProvenance>,
+        redacted: bool,
+    },
     Image {
         source: ImageSource,
     },
@@ -80,6 +86,9 @@ pub enum ContentBlockStart {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlockDelta {
     Text(String),
+    ThinkingText(String),
+    ThinkingSignature(String),
+    ThinkingEncryptedContent(String),
     ToolUseInputJson(String),
     ToolResultContent(ToolResultContent),
     HostedToolSearchQuery(String),

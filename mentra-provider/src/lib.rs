@@ -39,6 +39,8 @@ pub use model::ImageSource;
 pub use model::Message;
 pub use model::ModelInfo;
 pub use model::ModelSelector;
+pub use model::ReasoningFormat;
+pub use model::ReasoningProvenance;
 pub use model::Role;
 pub use model::TokenUsage;
 pub use model::ToolChoice;
@@ -112,7 +114,9 @@ pub mod provider {
         pub use crate::ProviderId;
         pub use crate::ProviderRequestOptions;
         pub use crate::ReasoningEffort;
+        pub use crate::ReasoningFormat;
         pub use crate::ReasoningOptions;
+        pub use crate::ReasoningProvenance;
         pub use crate::ReasoningSummary;
         pub use crate::Request;
         pub use crate::Response;

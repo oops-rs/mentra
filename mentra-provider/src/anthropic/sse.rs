@@ -4,17 +4,24 @@ use std::collections::HashSet;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::{ProviderError, ProviderEvent, ProviderEventStream, TokenUsage};
+use crate::{
+    ProviderError, ProviderEvent, ProviderEventStream, ProviderId, ReasoningFormat,
+    ReasoningProvenance, TokenUsage,
+};
 
 use super::stream_model::AnthropicContentBlockDelta;
 use super::stream_model::AnthropicStreamContentBlock;
 use super::stream_model::AnthropicStreamEvent;
 
-pub(crate) fn spawn_event_stream(response: reqwest::Response) -> ProviderEventStream {
+pub(crate) fn spawn_event_stream(
+    response: reqwest::Response,
+    provider: ProviderId,
+    requested_model: String,
+) -> ProviderEventStream {
     let (tx, rx) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {
-        if let Err(error) = forward_events(response, tx.clone()).await {
+        if let Err(error) = forward_events(response, tx.clone(), provider, requested_model).await {
             let _ = tx.send(Err(error));
         }
     });
@@ -25,10 +32,12 @@ pub(crate) fn spawn_event_stream(response: reqwest::Response) -> ProviderEventSt
 async fn forward_events(
     response: reqwest::Response,
     tx: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
+    provider: ProviderId,
+    requested_model: String,
 ) -> Result<(), ProviderError> {
     let mut bytes_stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    let mut state = StreamState::default();
+    let mut state = StreamState::new(provider, requested_model);
 
     while let Some(chunk) = bytes_stream.next().await {
         let chunk = chunk.map_err(ProviderError::Transport)?;
@@ -55,11 +64,26 @@ async fn forward_events(
     Ok(())
 }
 
-#[derive(Default)]
 struct StreamState {
     ignored_blocks: HashSet<usize>,
     latest_usage: Option<TokenUsage>,
     block_kinds: HashMap<usize, StreamingBlockKind>,
+    reasoning_provenance: ReasoningProvenance,
+}
+
+impl StreamState {
+    fn new(provider: ProviderId, requested_model: String) -> Self {
+        Self {
+            ignored_blocks: HashSet::new(),
+            latest_usage: None,
+            block_kinds: HashMap::new(),
+            reasoning_provenance: ReasoningProvenance {
+                provider,
+                model: requested_model,
+                format: ReasoningFormat::AnthropicSigned,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,12 +172,14 @@ fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEven
         _ => {}
     }
 
-    let events = event.into_provider_events().map_err(|error| {
-        ProviderError::MalformedStream(format!(
-            "anthropic stream error ({}): {}",
-            error.kind, error.message
-        ))
-    })?;
+    let events = event
+        .into_provider_events(&state.reasoning_provenance)
+        .map_err(|error| {
+            ProviderError::MalformedStream(format!(
+                "anthropic stream error ({}): {}",
+                error.kind, error.message
+            ))
+        })?;
 
     Ok(events
         .into_iter()
@@ -237,11 +263,18 @@ fn find_frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::{StreamState, parse_frame};
-    use crate::{ProviderEvent, Role, TokenUsage};
+    use crate::{ProviderEvent, ProviderId, Role, TokenUsage};
+
+    fn stream_state() -> StreamState {
+        StreamState::new(
+            ProviderId::new("anthropic-edge"),
+            "claude-requested".to_string(),
+        )
+    }
 
     #[test]
     fn merges_anthropic_usage_updates_into_cumulative_totals() {
-        let mut state = StreamState::default();
+        let mut state = stream_state();
 
         let started = parse_frame(
             br#"data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet","role":"assistant","content":[],"usage":{"input_tokens":10,"cache_read_input_tokens":2}}}"#,
@@ -297,7 +330,7 @@ mod tests {
 
     #[test]
     fn parses_hosted_tool_search_bookkeeping_blocks() {
-        let mut state = StreamState::default();
+        let mut state = stream_state();
 
         let started = parse_frame(
             br#"data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25"}}"#,
@@ -339,6 +372,89 @@ mod tests {
         assert_eq!(
             stopped,
             vec![ProviderEvent::ContentBlockStopped { index: 1 }]
+        );
+    }
+
+    #[test]
+    fn parses_signed_and_redacted_thinking_with_requested_provenance() {
+        let mut state = stream_state();
+
+        let started = parse_frame(
+            br#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            &mut state,
+        )
+        .expect("thinking start should parse");
+        assert_eq!(
+            started,
+            vec![ProviderEvent::ContentBlockStarted {
+                index: 0,
+                kind: crate::ContentBlockStart::Thinking {
+                    encrypted_content: None,
+                    id: None,
+                    provenance: Some(crate::ReasoningProvenance {
+                        provider: ProviderId::new("anthropic-edge"),
+                        model: "claude-requested".to_string(),
+                        format: crate::ReasoningFormat::AnthropicSigned,
+                    }),
+                    redacted: false,
+                },
+            }]
+        );
+
+        let thinking = parse_frame(
+            br#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"private chain"}}"#,
+            &mut state,
+        )
+        .expect("thinking delta should parse");
+        assert_eq!(
+            thinking,
+            vec![ProviderEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::ContentBlockDelta::ThinkingText("private chain".to_string()),
+            }]
+        );
+
+        let signature = parse_frame(
+            br#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque-signature"}}"#,
+            &mut state,
+        )
+        .expect("signature delta should parse");
+        assert_eq!(
+            signature,
+            vec![ProviderEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::ContentBlockDelta::ThinkingSignature("opaque-signature".to_string()),
+            }]
+        );
+
+        let redacted = parse_frame(
+            br#"data: {"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"opaque-redacted-data"}}"#,
+            &mut state,
+        )
+        .expect("redacted thinking should parse");
+        assert_eq!(
+            redacted,
+            vec![
+                ProviderEvent::ContentBlockStarted {
+                    index: 1,
+                    kind: crate::ContentBlockStart::Thinking {
+                        encrypted_content: None,
+                        id: None,
+                        provenance: Some(crate::ReasoningProvenance {
+                            provider: ProviderId::new("anthropic-edge"),
+                            model: "claude-requested".to_string(),
+                            format: crate::ReasoningFormat::AnthropicSigned,
+                        }),
+                        redacted: true,
+                    },
+                },
+                ProviderEvent::ContentBlockDelta {
+                    index: 1,
+                    delta: crate::ContentBlockDelta::ThinkingSignature(
+                        "opaque-redacted-data".to_string()
+                    ),
+                },
+            ]
         );
     }
 }

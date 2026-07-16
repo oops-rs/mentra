@@ -120,6 +120,10 @@ pub enum AgentEvent {
         delta: String,
         full_text: String,
     },
+    ReasoningDelta {
+        delta: String,
+        full_text: String,
+    },
     ToolUseUpdated {
         index: usize,
         id: String,

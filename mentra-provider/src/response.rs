@@ -6,6 +6,7 @@ use crate::model::ContentBlock;
 use crate::model::HostedToolSearchCall;
 use crate::model::HostedWebSearchCall;
 use crate::model::ImageGenerationCall;
+use crate::model::ReasoningProvenance;
 use crate::model::Role;
 use crate::model::TokenUsage;
 use crate::model::ToolResultContent;
@@ -269,6 +270,15 @@ enum StreamingContentBlock {
         text: String,
         complete: bool,
     },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+        encrypted_content: Option<String>,
+        id: Option<String>,
+        provenance: Option<ReasoningProvenance>,
+        redacted: bool,
+        complete: bool,
+    },
     Image {
         source: crate::model::ImageSource,
         complete: bool,
@@ -304,6 +314,29 @@ impl StreamingContentBlock {
         match (self, delta) {
             (StreamingContentBlock::Text { text, .. }, ContentBlockDelta::Text(delta)) => {
                 text.push_str(&delta);
+                Ok(())
+            }
+            (
+                StreamingContentBlock::Thinking { thinking, .. },
+                ContentBlockDelta::ThinkingText(delta),
+            ) => {
+                thinking.push_str(&delta);
+                Ok(())
+            }
+            (
+                StreamingContentBlock::Thinking { signature, .. },
+                ContentBlockDelta::ThinkingSignature(delta),
+            ) => {
+                signature.get_or_insert_with(String::new).push_str(&delta);
+                Ok(())
+            }
+            (
+                StreamingContentBlock::Thinking {
+                    encrypted_content, ..
+                },
+                ContentBlockDelta::ThinkingEncryptedContent(value),
+            ) => {
+                *encrypted_content = Some(value);
                 Ok(())
             }
             (
@@ -393,6 +426,7 @@ impl StreamingContentBlock {
     fn mark_complete(&mut self) {
         match self {
             StreamingContentBlock::Text { complete, .. }
+            | StreamingContentBlock::Thinking { complete, .. }
             | StreamingContentBlock::Image { complete, .. }
             | StreamingContentBlock::ToolUse { complete, .. }
             | StreamingContentBlock::ToolResult { complete, .. }
@@ -405,6 +439,7 @@ impl StreamingContentBlock {
     fn is_complete(&self) -> bool {
         match self {
             StreamingContentBlock::Text { complete, .. }
+            | StreamingContentBlock::Thinking { complete, .. }
             | StreamingContentBlock::Image { complete, .. }
             | StreamingContentBlock::ToolUse { complete, .. }
             | StreamingContentBlock::ToolResult { complete, .. }
@@ -417,6 +452,22 @@ impl StreamingContentBlock {
     fn try_into_content_block(self) -> Result<ContentBlock, ProviderError> {
         match self {
             StreamingContentBlock::Text { text, .. } => Ok(ContentBlock::Text { text }),
+            StreamingContentBlock::Thinking {
+                thinking,
+                signature,
+                encrypted_content,
+                id,
+                provenance,
+                redacted,
+                ..
+            } => Ok(ContentBlock::Thinking {
+                thinking,
+                signature,
+                encrypted_content,
+                id,
+                provenance,
+                redacted,
+            }),
             StreamingContentBlock::Image { source, .. } => Ok(ContentBlock::Image { source }),
             StreamingContentBlock::ToolUse {
                 id,
@@ -453,6 +504,7 @@ impl StreamingContentBlock {
     fn kind_name(&self) -> &'static str {
         match self {
             StreamingContentBlock::Text { .. } => "text",
+            StreamingContentBlock::Thinking { .. } => "thinking",
             StreamingContentBlock::Image { .. } => "image",
             StreamingContentBlock::ToolUse { .. } => "tool_use",
             StreamingContentBlock::ToolResult { .. } => "tool_result",
@@ -468,6 +520,20 @@ impl From<ContentBlockStart> for StreamingContentBlock {
         match value {
             ContentBlockStart::Text => StreamingContentBlock::Text {
                 text: String::new(),
+                complete: false,
+            },
+            ContentBlockStart::Thinking {
+                encrypted_content,
+                id,
+                provenance,
+                redacted,
+            } => StreamingContentBlock::Thinking {
+                thinking: String::new(),
+                signature: None,
+                encrypted_content,
+                id,
+                provenance,
+                redacted,
                 complete: false,
             },
             ContentBlockStart::Image { source } => StreamingContentBlock::Image {
@@ -520,6 +586,38 @@ impl ContentBlock {
                     events.push(ProviderEvent::ContentBlockDelta {
                         index,
                         delta: ContentBlockDelta::Text(text),
+                    });
+                }
+                events.push(ProviderEvent::ContentBlockStopped { index });
+                events
+            }
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+                encrypted_content,
+                id,
+                provenance,
+                redacted,
+            } => {
+                let mut events = vec![ProviderEvent::ContentBlockStarted {
+                    index,
+                    kind: ContentBlockStart::Thinking {
+                        encrypted_content,
+                        id,
+                        provenance,
+                        redacted,
+                    },
+                }];
+                if !thinking.is_empty() {
+                    events.push(ProviderEvent::ContentBlockDelta {
+                        index,
+                        delta: ContentBlockDelta::ThinkingText(thinking),
+                    });
+                }
+                if let Some(signature) = signature {
+                    events.push(ProviderEvent::ContentBlockDelta {
+                        index,
+                        delta: ContentBlockDelta::ThinkingSignature(signature),
                     });
                 }
                 events.push(ProviderEvent::ContentBlockStopped { index });
@@ -631,6 +729,47 @@ mod tests {
             collect_response_from_stream(provider_event_stream_from_response(response.clone()))
                 .await
                 .expect("response should rebuild");
+
+        assert_eq!(rebuilt, response);
+    }
+
+    #[tokio::test]
+    async fn response_round_trip_preserves_signed_and_redacted_thinking() {
+        let provenance = ReasoningProvenance {
+            provider: crate::ProviderId::new("anthropic-edge"),
+            model: "claude-test".to_string(),
+            format: crate::ReasoningFormat::AnthropicSigned,
+        };
+        let response = Response {
+            id: "resp-thinking".to_string(),
+            model: "claude-test".to_string(),
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "private chain".to_string(),
+                    signature: Some("opaque-signature".to_string()),
+                    encrypted_content: None,
+                    id: None,
+                    provenance: Some(provenance.clone()),
+                    redacted: false,
+                },
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: Some("opaque-redacted-data".to_string()),
+                    encrypted_content: None,
+                    id: None,
+                    provenance: Some(provenance),
+                    redacted: true,
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+            usage: None,
+        };
+
+        let rebuilt =
+            collect_response_from_stream(provider_event_stream_from_response(response.clone()))
+                .await
+                .expect("thinking response should rebuild");
 
         assert_eq!(rebuilt, response);
     }

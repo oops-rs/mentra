@@ -17,6 +17,7 @@ pub struct PendingAssistantTurn {
     blocks: BTreeMap<usize, PendingContentBlock>,
     invalid_tool_uses: Vec<InvalidToolUse>,
     current_text: String,
+    current_reasoning: String,
     stop_reason: Option<String>,
     usage: Option<TokenUsage>,
     stopped: bool,
@@ -64,6 +65,31 @@ impl PendingAssistantTurn {
                             delta,
                             full_text: self.current_text.clone(),
                         });
+                    }
+                    (
+                        PendingContentBlock::Thinking { thinking, .. },
+                        ContentBlockDelta::ThinkingText(delta),
+                    ) => {
+                        thinking.push_str(&delta);
+                        self.current_reasoning.push_str(&delta);
+                        derived_events.push(AgentEvent::ReasoningDelta {
+                            delta,
+                            full_text: self.current_reasoning.clone(),
+                        });
+                    }
+                    (
+                        PendingContentBlock::Thinking { signature, .. },
+                        ContentBlockDelta::ThinkingSignature(delta),
+                    ) => {
+                        signature.get_or_insert_with(String::new).push_str(&delta);
+                    }
+                    (
+                        PendingContentBlock::Thinking {
+                            encrypted_content, ..
+                        },
+                        ContentBlockDelta::ThinkingEncryptedContent(value),
+                    ) => {
+                        *encrypted_content = Some(value);
                     }
                     (
                         PendingContentBlock::ToolUse {
