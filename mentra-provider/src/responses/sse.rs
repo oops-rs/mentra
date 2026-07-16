@@ -15,10 +15,18 @@ use super::model::encode_responses_tool_use_id;
 
 /// Spawns an event stream that decodes Responses SSE frames.
 pub fn spawn_event_stream(response: reqwest::Response) -> ProviderEventStream {
+    spawn_event_stream_with_provenance(response, ProviderId::new("openai"), String::new())
+}
+
+pub(crate) fn spawn_event_stream_with_provenance(
+    response: reqwest::Response,
+    provider: ProviderId,
+    requested_model: String,
+) -> ProviderEventStream {
     let (tx, rx) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {
-        if let Err(error) = forward_events(response, tx.clone()).await {
+        if let Err(error) = forward_events(response, tx.clone(), provider, requested_model).await {
             let _ = tx.send(Err(error));
         }
     });
@@ -29,6 +37,8 @@ pub fn spawn_event_stream(response: reqwest::Response) -> ProviderEventStream {
 async fn forward_events(
     response: reqwest::Response,
     tx: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
+    provider: ProviderId,
+    requested_model: String,
 ) -> Result<(), ProviderError> {
     if let Some(headers) = response_headers_event(response.headers())
         && tx.send(Ok(headers)).is_err()
@@ -38,7 +48,7 @@ async fn forward_events(
 
     let mut bytes_stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    let mut state = StreamState::default();
+    let mut state = StreamState::new(provider, requested_model);
 
     while let Some(chunk) = bytes_stream.next().await {
         let chunk = chunk.map_err(ProviderError::Transport)?;

@@ -22,6 +22,8 @@ use crate::ProviderError;
 use crate::ProviderEvent;
 use crate::ProviderEventStream;
 use crate::ProviderSession;
+use crate::ReasoningFormat;
+use crate::ReasoningProvenance;
 use crate::Request;
 use crate::Response;
 use crate::ResponsesTransport;
@@ -31,7 +33,7 @@ use crate::request::ResponsesRequestCompression;
 use super::SharedTurnState;
 use super::model::ResponsesModelsPage;
 use super::model::ResponsesRequest;
-use super::sse::spawn_event_stream;
+use super::sse::spawn_event_stream_with_provenance;
 use super::websocket::ResponsesWebsocketConnection;
 use super::websocket::ResponsesWebsocketTelemetry;
 use super::websocket::merge_request_headers;
@@ -318,6 +320,32 @@ where
             .await
     }
 
+    async fn stream_websocket_request_with_provenance(
+        &self,
+        request_body: serde_json::Value,
+        provenance: ReasoningProvenance,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let (connection, connection_reused) = {
+            let websocket_session = self
+                .state
+                .websocket_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                websocket_session.connection(),
+                websocket_session.connection_reused(),
+            )
+        };
+        let Some(connection) = connection else {
+            return Err(ProviderError::MalformedStream(
+                "websocket connection is unavailable".to_string(),
+            ));
+        };
+        connection
+            .stream_request_with_provenance(request_body, connection_reused, provenance)
+            .await
+    }
+
     pub fn clear_websocket_connection(&self) {
         self.state
             .websocket_session
@@ -364,6 +392,13 @@ where
             .display_name
             .as_deref()
             .unwrap_or(self.definition.descriptor.id.as_str());
+        let target_provider = self.definition.descriptor.id.clone();
+        let requested_model = request.model.to_string();
+        let reasoning_provenance = ReasoningProvenance {
+            provider: target_provider.clone(),
+            model: requested_model.clone(),
+            format: ReasoningFormat::OpenAiEncrypted,
+        };
         let session = request.provider_request_options.session.clone();
         let state_mode = request.provider_request_options.responses.state_mode;
         let transport = request.provider_request_options.responses.transport;
@@ -380,17 +415,33 @@ where
                 .previous_response_id = self.state.latest_response_id();
         }
         let compression = request.provider_request_options.responses.compression;
-        let request = ResponsesRequest::try_from_request(request, provider_name)?;
+        let request = ResponsesRequest::try_from_request_with_provider(
+            request,
+            provider_name,
+            &target_provider,
+        )?;
         let credentials = self.credential_source.credentials().await?;
 
         match transport {
             ResponsesTransport::HttpSse => {
-                self.stream_http_response(request, compression, &credentials, &session, state_mode)
-                    .await
+                self.stream_http_response(
+                    request,
+                    compression,
+                    &credentials,
+                    &session,
+                    state_mode,
+                    reasoning_provenance,
+                )
+                .await
             }
             ResponsesTransport::WebSocket => {
-                self.stream_websocket_response(request, &credentials, &session)
-                    .await
+                self.stream_websocket_response(
+                    request,
+                    &credentials,
+                    &session,
+                    reasoning_provenance,
+                )
+                .await
             }
         }
     }
@@ -402,6 +453,7 @@ where
         credentials: &ProviderCredentials,
         session: &SessionRequestOptions,
         state_mode: crate::ResponsesStateMode,
+        reasoning_provenance: ReasoningProvenance,
     ) -> Result<ProviderEventStream, ProviderError> {
         let response = self
             .send_http_responses_request(&request, compression, credentials, session)
@@ -427,7 +479,13 @@ where
                         body: response.text().await.unwrap_or_default(),
                     });
                 }
-                return Ok(self.track_response_state(spawn_event_stream(response)));
+                return Ok(
+                    self.track_response_state(spawn_event_stream_with_provenance(
+                        response,
+                        reasoning_provenance.provider,
+                        reasoning_provenance.model,
+                    )),
+                );
             }
             return Err(error);
         }
@@ -440,7 +498,13 @@ where
             self.state.set_turn_state(turn_state);
         }
 
-        Ok(self.track_response_state(spawn_event_stream(response)))
+        Ok(
+            self.track_response_state(spawn_event_stream_with_provenance(
+                response,
+                reasoning_provenance.provider,
+                reasoning_provenance.model,
+            )),
+        )
     }
 
     async fn stream_websocket_response(
@@ -448,6 +512,7 @@ where
         request: ResponsesRequest,
         credentials: &ProviderCredentials,
         session: &SessionRequestOptions,
+        reasoning_provenance: ReasoningProvenance,
     ) -> Result<ProviderEventStream, ProviderError> {
         if !self.websockets_enabled() {
             return Err(ProviderError::UnsupportedCapability(
@@ -477,7 +542,10 @@ where
 
         let response = serde_json::to_value(request).map_err(ProviderError::Serialize)?;
         let stream = self
-            .stream_websocket_request(response_create_frame(response))
+            .stream_websocket_request_with_provenance(
+                response_create_frame(response),
+                reasoning_provenance,
+            )
             .await?;
         Ok(self.track_response_state(stream))
     }
@@ -650,6 +718,7 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use crate::ProviderId;
     use crate::ProviderRequestOptions;
     use crate::StaticCredentialSource;
     use crate::responses::ResponsesProvider;
@@ -990,6 +1059,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_http_path_threads_custom_provider_and_requested_model_provenance() {
+        let sse_body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-resolved\",\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_new\",\"summary\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_new\",\"encrypted_content\":\"encrypted-new\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"new summary\"}]}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-resolved\",\"status\":\"completed\"}}\n\n"
+        );
+        let (base_url, handle) = spawn_single_response_server(sse_body);
+        let provider_id = ProviderId::new("openai-edge");
+        let requested_model = "gpt-requested";
+        let mut definition = super::super::openai_definition();
+        definition.descriptor.id = provider_id.clone();
+        definition.base_url = Some(base_url);
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+        let request = Request {
+            model: Cow::Borrowed(requested_model),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::assistant(
+                crate::ContentBlock::Thinking {
+                    thinking: "old summary".to_string(),
+                    signature: None,
+                    encrypted_content: Some("encrypted-old".to_string()),
+                    id: Some("rs_old".to_string()),
+                    provenance: Some(crate::ReasoningProvenance {
+                        provider: provider_id.clone(),
+                        model: requested_model.to_string(),
+                        format: crate::ReasoningFormat::OpenAiEncrypted,
+                    }),
+                    redacted: false,
+                },
+            )]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                reasoning: Some(crate::ReasoningOptions {
+                    effort: Some(crate::ReasoningEffort::Medium),
+                    summary: Some(crate::ReasoningSummary::Auto),
+                }),
+                ..ProviderRequestOptions::default()
+            },
+        };
+
+        let response = session
+            .send_response(request)
+            .await
+            .expect("custom Responses request should complete");
+        let captured = handle.join().expect("server should capture request");
+        let body: serde_json::Value =
+            serde_json::from_str(request_body(&captured)).expect("request body should be JSON");
+
+        assert_eq!(body["input"][0]["type"], "reasoning");
+        assert_eq!(body["input"][0]["id"], "rs_old");
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+        assert_eq!(
+            response.content,
+            vec![crate::ContentBlock::Thinking {
+                thinking: "new summary".to_string(),
+                signature: None,
+                encrypted_content: Some("encrypted-new".to_string()),
+                id: Some("rs_new".to_string()),
+                provenance: Some(crate::ReasoningProvenance {
+                    provider: provider_id,
+                    model: requested_model.to_string(),
+                    format: crate::ReasoningFormat::OpenAiEncrypted,
+                }),
+                redacted: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn stream_response_captures_turn_state_from_http_response_headers() {
         let sse_body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n";
         let (base_url, _handle) = spawn_single_response_server_with_headers(
@@ -1170,7 +1317,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
                     "type": "response.created",
                     "response": {
                         "id": "resp_ws",
-                        "model": "gpt-5",
+                        "model": "gpt-resolved",
                         "status": "in_progress"
                     }
                 })
@@ -1181,10 +1328,41 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             .expect("send response.created");
             ws.send(WsMessage::Text(
                 serde_json::json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "reasoning",
+                        "id": "rs_ws",
+                        "summary": []
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send reasoning start");
+            ws.send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "reasoning",
+                        "id": "rs_ws",
+                        "encrypted_content": "encrypted-ws",
+                        "summary": [{"type": "summary_text", "text": "ws summary"}]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send reasoning completion");
+            ws.send(WsMessage::Text(
+                serde_json::json!({
                     "type": "response.completed",
                     "response": {
                         "id": "resp_ws",
-                        "model": "gpt-5",
+                        "model": "gpt-resolved",
                         "status": "completed"
                     }
                 })
@@ -1196,6 +1374,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         });
 
         let mut definition = super::super::openai_definition();
+        definition.descriptor.id = ProviderId::new("openai-ws-edge");
         definition.base_url = Some(format!("http://{addr}/v1"));
         let session = ResponsesProvider::with_shared_credential_source(
             definition,
@@ -1204,7 +1383,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         .session();
 
         let request = Request {
-            model: Cow::Borrowed("gpt-5"),
+            model: Cow::Borrowed("gpt-requested"),
             system: None,
             messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
                 "hello",
@@ -1227,20 +1406,38 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             .stream_response(request)
             .await
             .expect("websocket transport should stream");
+        let mut events = Vec::new();
         while let Some(event) = stream.recv().await {
-            event.expect("websocket event should parse");
+            events.push(event.expect("websocket event should parse"));
         }
 
         let frame: serde_json::Value =
             serde_json::from_str(&rx_frame.await.expect("server should capture frame"))
                 .expect("frame should be json");
         assert_eq!(frame["type"], "response.create");
-        assert_eq!(frame["model"], "gpt-5");
+        assert_eq!(frame["model"], "gpt-requested");
         assert_eq!(frame["input"][0]["role"], "user");
         assert_eq!(frame["instructions"], "");
         assert!(frame.get("response").is_none());
         assert_eq!(session.turn_state().as_deref(), Some("ws-state"));
         assert_eq!(session.latest_response_id().as_deref(), Some("resp_ws"));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ContentBlockStarted {
+                kind: crate::ContentBlockStart::Thinking {
+                    id: Some(id),
+                    provenance: Some(crate::ReasoningProvenance {
+                        provider,
+                        model,
+                        format: crate::ReasoningFormat::OpenAiEncrypted,
+                    }),
+                    ..
+                },
+                ..
+            } if id == "rs_ws"
+                && provider == &ProviderId::new("openai-ws-edge")
+                && model == "gpt-requested"
+        )));
     }
 
     #[tokio::test]

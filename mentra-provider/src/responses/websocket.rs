@@ -25,6 +25,9 @@ use url::Url;
 use crate::ProviderError;
 use crate::ProviderEvent;
 use crate::ProviderEventStream;
+use crate::ProviderId;
+use crate::ReasoningFormat;
+use crate::ReasoningProvenance;
 use crate::ResponseHeaders;
 
 use super::SharedTurnState;
@@ -231,6 +234,29 @@ impl ResponsesWebsocketConnection {
         request_body: Value,
         connection_reused: bool,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let requested_model = request_body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        self.stream_request_with_provenance(
+            request_body,
+            connection_reused,
+            ReasoningProvenance {
+                provider: ProviderId::new("openai"),
+                model: requested_model,
+                format: ReasoningFormat::OpenAiEncrypted,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn stream_request_with_provenance(
+        &self,
+        request_body: Value,
+        connection_reused: bool,
+        provenance: ReasoningProvenance,
+    ) -> Result<ProviderEventStream, ProviderError> {
         let (tx_event, rx_event) =
             mpsc::unbounded_channel::<Result<ProviderEvent, ProviderError>>();
         let stream = Arc::clone(&self.stream);
@@ -264,6 +290,7 @@ impl ResponsesWebsocketConnection {
                     idle_timeout,
                     telemetry,
                     connection_reused,
+                    StreamState::new(provenance.provider, provenance.model),
                 )
                 .await
             };
@@ -320,6 +347,7 @@ async fn run_websocket_response_stream(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn ResponsesWebsocketTelemetry>>,
     connection_reused: bool,
+    mut state: StreamState,
 ) -> Result<(), ProviderError> {
     let request_start = Instant::now();
     let send_result = ws_stream.send(Message::Text(request_text.into())).await;
@@ -336,7 +364,6 @@ async fn run_websocket_response_stream(
     }
     send_result.map_err(|error| ProviderError::MalformedStream(error.to_string()))?;
 
-    let mut state = StreamState::default();
     loop {
         let poll_start = Instant::now();
         let message_result = tokio::time::timeout(idle_timeout, ws_stream.next())
