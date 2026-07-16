@@ -668,6 +668,77 @@ async fn oversized_structured_output_spills_without_losing_details_or_terminatio
     std::fs::remove_dir_all(spill_root).expect("remove spill root");
 }
 
+#[tokio::test]
+async fn spill_failure_preserves_structured_details_and_termination() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![tool_use_stream(
+            &model.id,
+            "call-structured",
+            "oversized_structured_terminal",
+            r#"{}"#,
+        )],
+    );
+    let blocking_file = std::env::temp_dir().join(format!(
+        "mentra-structured-spill-blocker-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::write(&blocking_file, "not a directory").expect("create blocking file");
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_policy(RuntimePolicy::default().with_max_tool_result_bytes(32))
+        .with_tool(OversizedStructuredTerminatingTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    transcript_dir: blocking_file.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    let result = agent
+        .run(
+            vec![ContentBlock::text("run structured tool")],
+            RunOptions::default(),
+        )
+        .await;
+    assert!(matches!(result, Err(RuntimeError::EmptyAssistantResponse)));
+
+    let blocks = tool_result_blocks(agent.history());
+    assert!(matches!(
+        &blocks[0],
+        ContentBlock::ToolResult { content: ToolResultContent::Text(content), is_error: false, .. }
+            if content.contains("full output could not be saved")
+    ));
+    let item = agent
+        .transcript()
+        .items()
+        .iter()
+        .rev()
+        .find(|item| matches!(item.kind, crate::TranscriptKind::ToolExchange { .. }))
+        .expect("tool exchange item");
+    assert_eq!(
+        item.detail("call-structured"),
+        Some(&json!({ "private": 42 }))
+    );
+    assert!(blocking_file.is_file());
+    std::fs::remove_file(blocking_file).expect("remove blocking file");
+}
+
 // 2. A structured tool returns Structured content plus opaque details; the
 // recorded provider request contains only the content projection, no
 // details bytes.

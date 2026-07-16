@@ -30,20 +30,19 @@ impl ToolOutputLimiter {
         }
     }
 
-    pub(super) fn apply(&self, content: ToolResultContent) -> ToolResultContent {
+    pub(super) async fn apply(&self, content: ToolResultContent) -> ToolResultContent {
         match content {
-            ToolResultContent::Text(text) => self.apply_text(text),
-            ToolResultContent::Structured(value) => self.apply_structured(value),
+            ToolResultContent::Text(text) => self.apply_text(text).await,
+            ToolResultContent::Structured(value) => self.apply_structured(value).await,
         }
     }
 
-    fn apply_text(&self, text: String) -> ToolResultContent {
+    async fn apply_text(&self, text: String) -> ToolResultContent {
         let total_lines = line_count(&text);
         if text.len() <= self.max_bytes && total_lines <= self.max_lines {
             return ToolResultContent::Text(text);
         }
 
-        let spill = self.spill(&text, "txt");
         let mut shown_bytes = 0_usize;
         let mut shown_lines = 0_usize;
         for line in text.split_inclusive('\n') {
@@ -60,13 +59,14 @@ impl ToolOutputLimiter {
         if !truncated.is_empty() && !truncated.ends_with('\n') {
             truncated.push('\n');
         }
+        let spill = self.spill(text, "txt").await;
         truncated.push_str(&format!(
             "[truncated: showing {shown_lines} of {total_lines} lines; {spill}]"
         ));
         ToolResultContent::Text(truncated)
     }
 
-    fn apply_structured(&self, value: serde_json::Value) -> ToolResultContent {
+    async fn apply_structured(&self, value: serde_json::Value) -> ToolResultContent {
         let serialized = serde_json::to_string(&value)
             .expect("serde_json::Value always serializes to valid JSON");
         let total_lines = line_count(&serialized);
@@ -74,21 +74,31 @@ impl ToolOutputLimiter {
             return ToolResultContent::Structured(value);
         }
 
-        let spill = self.spill(&serialized, "json");
+        let serialized_len = serialized.len();
+        let spill = self.spill(serialized, "json").await;
         ToolResultContent::Text(format!(
-            "[truncated: structured tool output is {} bytes across {total_lines} lines; {spill}]",
-            serialized.len()
+            "[truncated: structured tool output is {serialized_len} bytes across {total_lines} lines; {spill}]"
         ))
     }
 
-    fn spill(&self, content: &str, extension: &str) -> String {
+    async fn spill(&self, content: String, extension: &'static str) -> String {
         match &self.spill {
-            SpillBehavior::Enabled(directory) => match spill_file(directory, extension, content) {
-                Ok(path) => format!("full output at {}", path.display()),
-                Err(error) => format!(
-                    "full output could not be saved ({error}); increase the tool-result limits"
-                ),
-            },
+            SpillBehavior::Enabled(directory) => {
+                let directory = directory.clone();
+                match tokio::task::spawn_blocking(move || {
+                    spill_file(&directory, extension, &content)
+                })
+                .await
+                {
+                    Ok(Ok(path)) => format!("full output at {}", path.display()),
+                    Ok(Err(error)) => format!(
+                        "full output could not be saved ({error}); increase the tool-result limits"
+                    ),
+                    Err(error) => format!(
+                        "full output could not be saved (spill task failed: {error}); increase the tool-result limits"
+                    ),
+                }
+            }
             SpillBehavior::Disabled(reason) => {
                 format!("full output was not saved because {reason}")
             }
@@ -166,44 +176,56 @@ mod tests {
         }
     }
 
-    #[test]
-    fn under_limit_text_is_byte_identical() {
+    #[tokio::test]
+    async fn under_limit_text_is_byte_identical() {
         let original = "alpha\r\nbéta\n".to_string();
         assert_eq!(
-            no_spill(original.len(), 2).apply(ToolResultContent::Text(original.clone())),
+            no_spill(original.len(), 2)
+                .apply(ToolResultContent::Text(original.clone()))
+                .await,
             ToolResultContent::Text(original)
         );
     }
 
-    #[test]
-    fn truncation_preserves_complete_crlf_and_utf8_lines() {
-        let result = text(no_spill(10, 10).apply(ToolResultContent::Text(
-            "alpha\r\nbéta\r\ngamma\r\n".to_string(),
-        )));
+    #[tokio::test]
+    async fn truncation_preserves_complete_crlf_and_utf8_lines() {
+        let result = text(
+            no_spill(10, 10)
+                .apply(ToolResultContent::Text(
+                    "alpha\r\nbéta\r\ngamma\r\n".to_string(),
+                ))
+                .await,
+        );
         assert!(result.starts_with("alpha\r\n"));
         assert!(!result.contains("béta"));
         assert!(result.contains("showing 1 of 3 lines"));
     }
 
-    #[test]
-    fn oversized_first_line_is_never_partially_emitted() {
-        let result = text(no_spill(4, 10).apply(ToolResultContent::Text("ééé\nnext".to_string())));
+    #[tokio::test]
+    async fn oversized_first_line_is_never_partially_emitted() {
+        let result = text(
+            no_spill(4, 10)
+                .apply(ToolResultContent::Text("ééé\nnext".to_string()))
+                .await,
+        );
         assert!(result.starts_with("[truncated:"));
         assert!(result.contains("showing 0 of 2 lines"));
         assert!(!result.contains('é'));
     }
 
-    #[test]
-    fn line_limit_preserves_the_requested_head() {
+    #[tokio::test]
+    async fn line_limit_preserves_the_requested_head() {
         let result = text(
-            no_spill(usize::MAX, 2).apply(ToolResultContent::Text("one\ntwo\nthree\n".to_string())),
+            no_spill(usize::MAX, 2)
+                .apply(ToolResultContent::Text("one\ntwo\nthree\n".to_string()))
+                .await,
         );
         assert!(result.starts_with("one\ntwo\n[truncated:"));
         assert!(result.contains("showing 2 of 3 lines"));
     }
 
-    #[test]
-    fn structured_content_spills_whole_json_and_becomes_pointer_text() {
+    #[tokio::test]
+    async fn structured_content_spills_whole_json_and_becomes_pointer_text() {
         let directory = std::env::temp_dir().join(format!(
             "mentra-tool-output-limiter-{}-{}",
             std::process::id(),
@@ -211,7 +233,11 @@ mod tests {
         ));
         let limiter = ToolOutputLimiter::new(4, 10, SpillBehavior::Enabled(directory.clone()));
         let value = serde_json::json!({"answer": [1, 2, 3]});
-        let pointer = text(limiter.apply(ToolResultContent::Structured(value.clone())));
+        let pointer = text(
+            limiter
+                .apply(ToolResultContent::Structured(value.clone()))
+                .await,
+        );
         assert!(pointer.contains("structured tool output"));
         assert!(pointer.contains("full output at"));
 
@@ -223,5 +249,40 @@ mod tests {
         let stored = fs::read_to_string(files[0].path()).expect("read spill file");
         assert_eq!(stored, serde_json::to_string(&value).unwrap());
         fs::remove_dir_all(directory).expect("remove spill directory");
+    }
+
+    #[tokio::test]
+    async fn spill_failures_keep_text_and_structured_results_actionable() {
+        let blocking_file = std::env::temp_dir().join(format!(
+            "mentra-tool-output-blocker-{}-{}",
+            std::process::id(),
+            NEXT_SPILL_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&blocking_file, "not a directory").expect("create blocking file");
+        let limiter = ToolOutputLimiter::new(
+            4,
+            10,
+            SpillBehavior::Enabled(blocking_file.join("tool-output")),
+        );
+
+        let text_result = text(
+            limiter
+                .apply(ToolResultContent::Text("oversized text".to_string()))
+                .await,
+        );
+        assert!(text_result.contains("full output could not be saved"));
+        assert!(text_result.contains("increase the tool-result limits"));
+
+        let structured_result = text(
+            limiter
+                .apply(ToolResultContent::Structured(
+                    serde_json::json!({"oversized": true}),
+                ))
+                .await,
+        );
+        assert!(structured_result.contains("full output could not be saved"));
+        assert!(structured_result.contains("increase the tool-result limits"));
+        assert!(blocking_file.is_file());
+        fs::remove_file(blocking_file).expect("remove blocking file");
     }
 }
