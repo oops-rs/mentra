@@ -681,27 +681,27 @@ mod tests {
                     break;
                 }
                 buffer.extend_from_slice(&temp[..read]);
-                if header_end.is_none() {
-                    if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
-                    {
-                        let end = index + 4;
-                        header_end = Some(end);
-                        let headers = String::from_utf8_lossy(&buffer[..end]);
-                        content_length = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length").then(|| {
-                                    value.trim().parse::<usize>().expect("parse content-length")
-                                })
+                let discovered_header = if header_end.is_none() {
+                    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                } else {
+                    None
+                };
+                if let Some(index) = discovered_header {
+                    let end = index + 4;
+                    header_end = Some(end);
+                    let headers = String::from_utf8_lossy(&buffer[..end]);
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then(|| {
+                                value.trim().parse::<usize>().expect("parse content-length")
                             })
-                            .unwrap_or_default();
-                    }
+                        })
+                        .unwrap_or_default();
                 }
-                if let Some(end) = header_end {
-                    if buffer.len() >= end + content_length {
-                        break;
-                    }
+                if header_end.is_some_and(|end| buffer.len() >= end + content_length) {
+                    break;
                 }
             }
 
@@ -738,26 +738,26 @@ mod tests {
                 break;
             }
             buffer.extend_from_slice(&temp[..read]);
-            if header_end.is_none() {
-                if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
-                    let end = index + 4;
-                    header_end = Some(end);
-                    let headers = String::from_utf8_lossy(&buffer[..end]);
-                    content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length").then(|| {
-                                value.trim().parse::<usize>().expect("parse content-length")
-                            })
-                        })
-                        .unwrap_or_default();
-                }
+            let discovered_header = if header_end.is_none() {
+                buffer.windows(4).position(|window| window == b"\r\n\r\n")
+            } else {
+                None
+            };
+            if let Some(index) = discovered_header {
+                let end = index + 4;
+                header_end = Some(end);
+                let headers = String::from_utf8_lossy(&buffer[..end]);
+                content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("parse content-length"))
+                    })
+                    .unwrap_or_default();
             }
-            if let Some(end) = header_end {
-                if buffer.len() >= end + content_length {
-                    break;
-                }
+            if header_end.is_some_and(|end| buffer.len() >= end + content_length) {
+                break;
             }
         }
 
@@ -891,27 +891,27 @@ mod tests {
                     break;
                 }
                 buffer.extend_from_slice(&temp[..read]);
-                if header_end.is_none() {
-                    if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
-                    {
-                        let end = index + 4;
-                        header_end = Some(end);
-                        let headers = String::from_utf8_lossy(&buffer[..end]);
-                        content_length = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length").then(|| {
-                                    value.trim().parse::<usize>().expect("parse content-length")
-                                })
+                let discovered_header = if header_end.is_none() {
+                    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                } else {
+                    None
+                };
+                if let Some(index) = discovered_header {
+                    let end = index + 4;
+                    header_end = Some(end);
+                    let headers = String::from_utf8_lossy(&buffer[..end]);
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then(|| {
+                                value.trim().parse::<usize>().expect("parse content-length")
                             })
-                            .unwrap_or_default();
-                    }
+                        })
+                        .unwrap_or_default();
                 }
-                if let Some(end) = header_end {
-                    if buffer.len() >= end + content_length {
-                        break;
-                    }
+                if header_end.is_some_and(|end| buffer.len() >= end + content_length) {
+                    break;
                 }
             }
 
