@@ -10,7 +10,7 @@ use crate::{
     BuiltinProvider, ContentBlock, Message, QueueMode, Role, RoundContext, RoundDecision,
     RoundStrategy, Runtime, SteeringHandle,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
-    runtime::{CancellationToken, RunOptions},
+    runtime::{CancellationToken, RunOptions, VolatileRuntimeStore},
 };
 
 use super::support::{
@@ -265,6 +265,62 @@ async fn failed_run_requeues_follow_up_and_resume_reinjects_it() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn finalization_error_requeues_steering_before_returning() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let (first_stream, first_tx) = controlled_stream();
+    let (second_stream, second_tx) = controlled_stream();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            first_stream,
+            second_stream,
+            text_stream(&model.id, "queued steer completed"),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let store = VolatileRuntimeStore::new();
+    let runtime = Runtime::empty_builder()
+        .with_store(store.clone())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model.clone()).expect("spawn agent");
+    let steering = agent.steering_handle();
+    steering.steer(vec![ContentBlock::text("preserve this steer")]);
+
+    let drive = async {
+        wait_for_request_count(&provider_handle, 1).await;
+        send_text_response(&first_tx, &model.id, "draft");
+        drop(first_tx);
+
+        wait_for_request_count(&provider_handle, 2).await;
+        store.fail_next_agent_record_save();
+        send_text_response(&second_tx, &model.id, "final");
+        drop(second_tx);
+    };
+    let (result, ()) = tokio::join!(
+        agent.run(vec![ContentBlock::text("start")], RunOptions::default()),
+        drive
+    );
+
+    assert!(
+        result
+            .expect_err("finalization persistence fails")
+            .to_string()
+            .contains("injected agent-record persistence failure")
+    );
+    assert!(steering.has_pending(), "finalization error requeues steer");
+
+    let recovered = agent
+        .run_queued(RunOptions::default())
+        .await
+        .expect("queued steer remains runnable");
+    assert_eq!(recovered.text(), "queued steer completed");
+    assert!(!steering.has_pending());
 }
 
 #[tokio::test]

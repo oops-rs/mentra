@@ -100,6 +100,8 @@ struct VolatileState {
     background: BackgroundState,
     permissions: PermissionState,
     memory: MemoryState,
+    #[cfg(test)]
+    fail_next_agent_record_save: bool,
 }
 
 /// An in-memory [`RuntimeStore`](super::RuntimeStore) that leaves no durable
@@ -128,6 +130,11 @@ impl VolatileRuntimeStore {
     /// next. See the module docs for why a retained store needs this.
     pub fn reset(&self) {
         *self.lock() = VolatileState::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_agent_record_save(&self) {
+        self.lock().fail_next_agent_record_save = true;
     }
 
     fn lock(&self) -> MutexGuard<'_, VolatileState> {
@@ -170,6 +177,12 @@ impl AgentStore for VolatileRuntimeStore {
 
     fn save_agent_record(&self, record: &PersistedAgentRecord) -> Result<(), RuntimeError> {
         let mut state = self.lock();
+        #[cfg(test)]
+        if std::mem::take(&mut state.fail_next_agent_record_save) {
+            return Err(RuntimeError::Store(
+                "injected agent-record persistence failure".to_string(),
+            ));
+        }
         if !state.agents.contains_key(&record.id) {
             state.agent_order.push(record.id.clone());
         }

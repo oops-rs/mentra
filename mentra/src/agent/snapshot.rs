@@ -94,8 +94,9 @@ impl Agent {
     }
 
     pub(crate) fn finish_run_checkpoint(&mut self) -> Result<(), crate::runtime::RuntimeError> {
-        if let Some(run_id) = self.current_run_id.take() {
-            self.runtime.store().finish_run(&run_id)?;
+        if let Some(run_id) = self.current_run_id.as_deref() {
+            self.runtime.store().finish_run(run_id)?;
+            self.current_run_id = None;
         }
         Ok(())
     }
@@ -104,8 +105,9 @@ impl Agent {
         &mut self,
         error: &str,
     ) -> Result<(), crate::runtime::RuntimeError> {
-        if let Some(run_id) = self.current_run_id.take() {
-            self.runtime.store().fail_run(&run_id, error)?;
+        if let Some(run_id) = self.current_run_id.as_deref() {
+            self.runtime.store().fail_run(run_id, error)?;
+            self.current_run_id = None;
         }
         Ok(())
     }

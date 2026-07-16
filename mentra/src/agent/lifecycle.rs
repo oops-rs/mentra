@@ -64,11 +64,20 @@ impl Agent {
                     .cloned()
                     .filter(|message| message.role == Role::Assistant);
                 let run_delta = self.memory.current_run_delta().unwrap_or_default();
+                let finalization = (|| {
+                    self.memory.finish_run()?;
+                    self.sync_memory_snapshot();
+                    self.set_status(AgentStatus::Finished);
+                    self.persist_agent_record()?;
+                    self.finish_run_checkpoint()
+                })();
+                if let Err(error) = finalization {
+                    return Err(self.handle_finalization_error(error));
+                }
+
                 self.clear_inflight_steering();
                 self.clear_inflight_team_messages();
                 self.clear_inflight_background_notifications();
-                self.memory.finish_run()?;
-                self.sync_memory_snapshot();
                 self.runtime
                     .memory_engine()
                     .schedule_ingest(crate::memory::IngestRequest {
@@ -76,9 +85,6 @@ impl Agent {
                         source_revision: self.memory.revision(),
                         messages: run_delta,
                     });
-                self.set_status(AgentStatus::Finished);
-                self.persist_agent_record()?;
-                self.finish_run_checkpoint()?;
                 self.emit_event(AgentEvent::RunFinished);
                 final_message.ok_or(RuntimeError::EmptyAssistantResponse)
             }
@@ -97,6 +103,26 @@ impl Agent {
                 self.emit_event(AgentEvent::RunFailed { error: message });
                 Err(error)
             }
+        }
+    }
+
+    fn handle_finalization_error(&mut self, error: RuntimeError) -> RuntimeError {
+        self.idle_requested = false;
+        self.requeue_inflight_steering();
+        let team_requeue = self.requeue_inflight_team_messages();
+        self.requeue_inflight_background_notifications();
+
+        let message = error.to_string();
+        self.set_status(AgentStatus::Failed(message.clone()));
+        let _ = self.persist_agent_record();
+        let _ = self.fail_run_checkpoint(&message);
+        self.emit_event(AgentEvent::RunFailed { error: message });
+
+        match team_requeue {
+            Ok(()) => error,
+            Err(requeue_error) => RuntimeError::Store(format!(
+                "{error}; additionally failed to requeue the team inbox: {requeue_error}"
+            )),
         }
     }
 
