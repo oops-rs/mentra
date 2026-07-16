@@ -241,8 +241,8 @@ fn load_store_tasks<S: TaskStore + ?Sized>(
         .map_err(|error| format!("Task storage failed: {error}"))
 }
 
-fn mutate_store_tasks(
-    store: &dyn TaskStore,
+fn mutate_store_tasks<S: TaskStore + ?Sized>(
+    store: &S,
     namespace: &Path,
     mut operation: impl FnMut(&mut Vec<TaskItem>) -> Result<String, String>,
 ) -> Result<String, String> {
