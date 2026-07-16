@@ -206,7 +206,10 @@ pub(crate) fn parse_json_event(
             if item.reasoning_encrypted_content().is_some() {
                 state.reasoning_encrypted_content_seen.insert(output_index);
             }
-            if let Some(kind) = item.into_provider_start(&state.reasoning_provenance) {
+            let pair_function_item_ids = !state.reasoning_output_indices.is_empty();
+            if let Some(kind) =
+                item.into_provider_start(&state.reasoning_provenance, pair_function_item_ids)
+            {
                 Ok(vec![ProviderEvent::ContentBlockStarted {
                     index: output_index,
                     kind,
@@ -671,6 +674,7 @@ impl ResponsesOutputItem {
     fn into_provider_start(
         self,
         reasoning_provenance: &ReasoningProvenance,
+        pair_function_item_ids: bool,
     ) -> Option<ContentBlockStart> {
         match self {
             ResponsesOutputItem::Message { .. } => Some(ContentBlockStart::Text),
@@ -687,7 +691,12 @@ impl ResponsesOutputItem {
             ResponsesOutputItem::FunctionCall {
                 id, call_id, name, ..
             } => {
-                let id = encode_responses_tool_use_id(&call_id, id.as_deref());
+                let item_id = if pair_function_item_ids {
+                    id.as_deref()
+                } else {
+                    None
+                };
+                let id = encode_responses_tool_use_id(&call_id, item_id);
                 Some(ContentBlockStart::ToolUse { id, name })
             }
             ResponsesOutputItem::ToolSearchCall {
@@ -1071,6 +1080,28 @@ mod tests {
                 index: 1,
                 kind: ContentBlockStart::ToolUse {
                     id: "call_1|fc_1".to_string(),
+                    name: "read_file".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn function_item_id_stays_out_of_non_reasoning_tool_use_ids() {
+        let mut state = StreamState::default();
+
+        let tool = parse_frame(
+            br#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":""}}"#,
+            &mut state,
+        )
+        .expect("function call should parse");
+
+        assert_eq!(
+            tool,
+            vec![ProviderEvent::ContentBlockStarted {
+                index: 0,
+                kind: ContentBlockStart::ToolUse {
+                    id: "call_1".to_string(),
                     name: "read_file".to_string(),
                 },
             }]
