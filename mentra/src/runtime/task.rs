@@ -23,6 +23,7 @@ pub use types::{TaskItem, TaskStatus};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskAccess<'a> {
     Lead,
+    LeadClaimant(&'a str),
     Teammate(&'a str),
 }
 
@@ -226,7 +227,7 @@ impl<'a> TaskAccess<'a> {
     pub(crate) fn actor_name(self) -> Option<&'a str> {
         match self {
             Self::Lead => None,
-            Self::Teammate(name) => Some(name),
+            Self::LeadClaimant(name) | Self::Teammate(name) => Some(name),
         }
     }
 }
