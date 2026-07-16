@@ -3,6 +3,7 @@
 //! `Agent::send`), not just the store's own unit tests.
 
 use std::{
+    fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -13,10 +14,10 @@ use crate::{
     agent::{AgentConfig, CompactionConfig, TaskConfig, TeamConfig},
     memory::MemoryStore,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::{AgentStore, Runtime, TaskStore, VolatileRuntimeStore},
+    runtime::{AgentStore, Runtime, RuntimePolicy, TaskStore, VolatileRuntimeStore},
 };
 
-use super::support::{ScriptedProvider, model_info, ok_stream};
+use super::support::{ScriptedProvider, StaticTool, model_info, ok_stream};
 
 #[tokio::test]
 async fn volatile_run_leaves_no_durable_trace_on_disk() {
@@ -88,6 +89,78 @@ async fn volatile_run_leaves_no_durable_trace_on_disk() {
             .is_empty(),
         "the detached memory-ingest task should have written into the volatile store"
     );
+}
+
+#[tokio::test]
+async fn volatile_store_truncates_without_creating_spill_artifacts() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let tasks_dir = temp_path("volatile-truncation-tasks");
+    let team_dir = temp_path("volatile-truncation-team");
+    let transcript_dir = temp_path("volatile-truncation-transcripts");
+    let spill_dir = transcript_dir.join("tool-output");
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            task_tool_stream("tool-output", "oversized_output", r#"{}"#),
+            text_stream("done"),
+        ],
+    );
+
+    let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .with_policy(
+            RuntimePolicy::default()
+                .with_max_tool_result_bytes(usize::MAX)
+                .with_max_tool_result_lines(1),
+        )
+        .with_tool(StaticTool::success("oversized_output", "one\ntwo\nthree"))
+        .build()
+        .expect("build runtime");
+    let config = volatile_config(tasks_dir.clone(), team_dir.clone(), transcript_dir.clone());
+    let mut agent = runtime
+        .spawn_with_config("primary", model, config)
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "run the oversized tool".to_string(),
+        }])
+        .await
+        .expect("run completes");
+
+    let content = match agent.history()[2].content.first().expect("tool result") {
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => {
+            assert!(!is_error);
+            content.to_display_string()
+        }
+        other => panic!("unexpected content block: {other:?}"),
+    };
+    let tasks_dir_exists = tasks_dir.exists();
+    let team_dir_exists = team_dir.exists();
+    let transcript_dir_exists = transcript_dir.exists();
+    let spill_dir_exists = spill_dir.exists();
+
+    for path in [&tasks_dir, &team_dir, &transcript_dir] {
+        if path.exists() {
+            fs::remove_dir_all(path).expect("remove unexpected volatile artifact directory");
+        }
+    }
+
+    assert_eq!(
+        content,
+        "one\n[truncated: showing 1 of 3 lines; full output was not saved because the runtime store forbids durable artifacts]"
+    );
+    assert!(!tasks_dir_exists, "volatile task artifacts must not exist");
+    assert!(!team_dir_exists, "volatile team artifacts must not exist");
+    assert!(
+        !transcript_dir_exists,
+        "volatile transcript artifacts must not exist"
+    );
+    assert!(!spill_dir_exists, "volatile spill artifacts must not exist");
 }
 
 #[tokio::test]

@@ -807,6 +807,76 @@ async fn files_tool_reads_numbered_lines() {
 }
 
 #[tokio::test]
+async fn oversized_files_read_is_truncated_by_runtime_policy() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-read-truncated",
+                "files",
+                r#"{"operations":[{"op":"read","path":"note.txt"}]}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-read-truncated");
+    fs::write(repo_dir.join("note.txt"), "alpha\nbeta\ngamma\n").expect("write note");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_policy(
+            RuntimePolicy::default()
+                .with_max_tool_result_bytes(usize::MAX)
+                .with_max_tool_result_lines(2)
+                .spill_full_tool_output(false),
+        )
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "read the note".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    let content = match &agent.history()[2] {
+        Message {
+            role: Role::User,
+            content,
+        } => match content.first().expect("tool result") {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(!is_error);
+                content.to_display_string()
+            }
+            other => panic!("unexpected content block: {other:?}"),
+        },
+        other => panic!("expected tool result message, got {other:?}"),
+    };
+
+    fs::remove_dir_all(&repo_dir).expect("remove files-read workspace");
+    assert_eq!(
+        content,
+        "read note.txt\nL1: alpha\n[truncated: showing 2 of 4 lines; full output was not saved because spill-to-file is disabled by runtime policy]"
+    );
+}
+
+#[tokio::test]
 async fn files_tool_can_stage_create_then_read_in_one_call() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
