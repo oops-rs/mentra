@@ -38,9 +38,9 @@
   applies before this projection boundary.
 - `AgentStore` gains a defaulted `allows_disk_artifacts` capability method, so
   existing store implementations continue to compile unchanged.
-- Pin `time` to the newest release compatible with the declared Rust 1.85
-  MSRV; the previous unconstrained `0.3` resolution had silently raised the
-  effective compiler requirement to Rust 1.88.
+- Pin `time` and `url` to Rust 1.85-compatible releases. Their previous
+  semver ranges could resolve to `time` requiring Rust 1.88 and an
+  `url`/IDNA/ICU chain requiring Rust 1.86.
 
 ## 0.9.0
 
