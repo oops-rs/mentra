@@ -45,6 +45,7 @@ impl GrepInput {
             literal: self.literal,
             context: self.context,
             multiline: self.multiline,
+            max_line_chars: Some(500),
         }
     }
 }

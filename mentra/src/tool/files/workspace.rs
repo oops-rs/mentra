@@ -42,6 +42,7 @@ pub(crate) struct SearchOptions {
     pub(crate) literal: bool,
     pub(crate) context: usize,
     pub(crate) multiline: bool,
+    pub(crate) max_line_chars: Option<usize>,
 }
 
 pub(crate) struct WorkspaceEditor {
@@ -453,7 +454,10 @@ impl WorkspaceEditor {
                 self.display_path(path),
                 index + 1,
                 separator,
-                cap_search_line(lines[index])
+                options.max_line_chars.map_or_else(
+                    || lines[index].to_string(),
+                    |max_chars| cap_search_line(lines[index], max_chars),
+                )
             ));
         }
         Ok(())
@@ -555,14 +559,16 @@ fn line_index_at(line_starts: &[usize], byte_offset: usize) -> usize {
         .saturating_sub(1)
 }
 
-fn cap_search_line(line: &str) -> String {
-    const MAX_CHARS: usize = 500;
+fn cap_search_line(line: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
     let mut chars = line.chars();
-    let retained = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    let retained = chars.by_ref().take(max_chars).collect::<String>();
     if chars.next().is_none() {
         retained
     } else {
-        let mut capped = retained.chars().take(MAX_CHARS - 1).collect::<String>();
+        let mut capped = retained.chars().take(max_chars - 1).collect::<String>();
         capped.push('…');
         capped
     }
@@ -750,7 +756,15 @@ mod tests {
             .expect("write long line");
 
         let output = editor
-            .grep("long.txt".to_string(), "界", SearchOptions::default(), 20)
+            .grep(
+                "long.txt".to_string(),
+                "界",
+                SearchOptions {
+                    max_line_chars: Some(500),
+                    ..Default::default()
+                },
+                20,
+            )
             .expect("grep");
         let rendered = output
             .lines()
@@ -759,6 +773,24 @@ mod tests {
 
         assert_eq!(rendered.chars().count(), 500);
         assert!(rendered.ends_with('…'));
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn legacy_batched_search_keeps_uncapped_matching_lines() {
+        let (root, editor) = test_editor("legacy-search-line");
+        fs::write(root.join("long.txt"), format!("{}\n", "界".repeat(600)))
+            .expect("write long line");
+
+        let output = editor
+            .search("long.txt".to_string(), "界", 20)
+            .expect("search");
+        let rendered = output
+            .lines()
+            .find_map(|line| line.strip_prefix("long.txt:1: "))
+            .expect("rendered match");
+
+        assert_eq!(rendered.chars().count(), 600);
         fs::remove_dir_all(root).expect("remove test workspace");
     }
 
