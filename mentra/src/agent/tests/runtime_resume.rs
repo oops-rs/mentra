@@ -428,6 +428,60 @@ async fn signed_and_redacted_thinking_survive_commit_persist_resume_and_replay()
     );
 }
 
+#[tokio::test]
+async fn responses_reasoning_and_paired_tool_ids_survive_agent_replay() {
+    let provider_id = ProviderId::new("openai-edge");
+    let model = model_info("gpt-requested", provider_id.clone());
+    let provider = ScriptedProvider::new(
+        provider_id.clone(),
+        vec![model.clone()],
+        vec![
+            responses_reasoning_tool_stream(&provider_id, &model.id),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_store(temp_store("responses-reasoning-replay"))
+        .with_provider_instance(provider.clone())
+        .with_tool(DetailsTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("use the tool")])
+        .await
+        .expect("Responses reasoning tool loop should complete");
+
+    let requests = provider.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    let replayed_assistant = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == Role::Assistant)
+        .expect("assistant reasoning turn should replay");
+    assert!(matches!(
+        &replayed_assistant.content[0],
+        ContentBlock::Thinking {
+            id: Some(id),
+            encrypted_content: Some(encrypted_content),
+            ..
+        } if id == "rs_1" && encrypted_content == "encrypted-1"
+    ));
+    assert!(matches!(
+        &replayed_assistant.content[1],
+        ContentBlock::ToolUse { id, .. } if id == "call_1|fc_1"
+    ));
+    assert!(requests[1].messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call_1|fc_1"
+            )
+        })
+    }));
+}
+
 // M3 test 1: `ToolOutput::details` survives a real restart — persisted to
 // the SQLite `agent_memory` row by a live tool round, then recovered by a
 // brand new `AgentMemory` built from `RuntimeStore::load_agent` (the same
@@ -980,6 +1034,54 @@ fn thinking_stream(
             delta: ContentBlockDelta::Text(text.to_string()),
         },
         ProviderEvent::ContentBlockStopped { index: 2 },
+        ProviderEvent::MessageStopped,
+    ])
+}
+
+fn responses_reasoning_tool_stream(
+    provider: &ProviderId,
+    model: &str,
+) -> super::support::StreamScript {
+    ok_stream(vec![
+        ProviderEvent::MessageStarted {
+            id: "resp-reasoning-tool".to_string(),
+            model: model.to_string(),
+            role: Role::Assistant,
+        },
+        ProviderEvent::ContentBlockStarted {
+            index: 0,
+            kind: ContentBlockStart::Thinking {
+                encrypted_content: None,
+                id: Some("rs_1".to_string()),
+                provenance: Some(ReasoningProvenance {
+                    provider: provider.clone(),
+                    model: model.to_string(),
+                    format: ReasoningFormat::OpenAiEncrypted,
+                }),
+                redacted: false,
+            },
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::ThinkingText("short summary".to_string()),
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::ThinkingEncryptedContent("encrypted-1".to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::ContentBlockStarted {
+            index: 1,
+            kind: ContentBlockStart::ToolUse {
+                id: "call_1|fc_1".to_string(),
+                name: "details_tool".to_string(),
+            },
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 1,
+            delta: ContentBlockDelta::ToolUseInputJson("{}".to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 1 },
         ProviderEvent::MessageStopped,
     ])
 }
