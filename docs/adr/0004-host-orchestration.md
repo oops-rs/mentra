@@ -42,9 +42,11 @@ architecture, agent isolation, rollback safety, and existing default behavior.
    without an eligible next request.
 
 3. **Queue delivery is rollback-safe.** Drained entries move into agent-local
-   inflight vectors. Successful runs clear them; failed runs prepend them to
-   their original queue, ahead of entries added later. Queues are deliberately
-   not persisted and never cross agent identities on a shared runtime.
+   inflight vectors. Successful runs clear them only after fallible run
+   finalization completes; runner and finalization errors prepend them to their
+   original queue, ahead of entries added later. Run checkpoint identity is
+   retained until its store transition succeeds. Queues are deliberately not
+   persisted and never cross agent identities on a shared runtime.
 
 4. **Task mutations gain an object-safe transactional seam.** `TaskStore::mutate`
    accepts an erased callback so `dyn TaskStore` remains valid. Its default
@@ -88,6 +90,10 @@ architecture, agent isolation, rollback safety, and existing default behavior.
   refresh/run boundary.
 - The existing full-board failed-run restore remains a distinct race: it can
   overwrite a concurrent successful mutation that occurred after capture.
+- Agent memory, agent records, and run checkpoints do not share one store
+  transaction. Queue delivery is preserved across a late finalization error,
+  but atomically rolling back every already-committed finalization artifact is
+  a separate persistence design problem.
 - Host reply waits are destructive delivery operations, not passive peeks; the
   host must route returned content explicitly if a model should see it.
 

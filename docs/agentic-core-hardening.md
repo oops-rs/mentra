@@ -403,7 +403,10 @@ impl Agent {
   zero-runner-change spike, but it steals the slot and can't requeue on
   rollback — prototype only.)
 - Rollback safety: `inflight_steer`/`inflight_follow_up` on Agent mirroring
-  `inflight_team_messages` (agent.rs:80); clear on Ok, requeue on Err.
+  `inflight_team_messages` (agent.rs:80); acknowledge only after every fallible
+  success-finalization step completes, and requeue on runner or finalization
+  error. Run checkpoint IDs remain live until the store accepts the finish or
+  failure transition.
 - Queue is **Agent-scoped** (not RunOptions-scoped): preserves ADR-0001
   per-run isolation across a pooled runtime while intentionally surviving
   between one agent's runs.
@@ -415,6 +418,13 @@ impl Agent {
   drain, and a drained queue skips the user `RoundStrategy` for that boundary.
 - Limits and graceful-stop state are checked before draining a queue, so an
   entry is not consumed when no next provider request can start.
+
+Verified correction: the transcript snapshot, agent record, and run checkpoint
+are separate store operations rather than one transaction. A late persistence
+failure can therefore report a degraded run after an earlier finalization write
+has committed. Inflight steering/team/background input is still requeued before
+the error returns, but making every finalization artifact atomically rollback is
+a separate store-transaction design problem.
 
 Effort ~1–1.5 days. Tests: steer visible in next provider request (scripted
 provider); follow-up only at would-stop; QueueMode variants; requeue on error

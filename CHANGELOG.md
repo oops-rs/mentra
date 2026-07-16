@@ -28,8 +28,9 @@
 
 - Add agent-scoped, in-memory `SteeringHandle` queues for live steers and
   would-stop-only follow-ups, with `OneAtATime`/`All` drain modes, explicit
-  idle `run_queued`, rollback-safe inflight requeue, and deterministic
-  steering-before-strategy precedence.
+  idle `run_queued`, rollback-safe inflight requeue through runner and
+  finalization errors, deterministic steering-before-strategy precedence, and
+  stable steering-before-team-before-background request ordering.
 - Add object-safe `TaskStore::mutate` and serialize builtin task mutations with
   SQLite Immediate transactions or the Volatile store lock. Expose typed
   `Runtime::task_board`/`Agent::task_board` façades that reuse the intrinsic
