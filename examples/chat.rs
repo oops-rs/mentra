@@ -536,148 +536,120 @@ fn subscribe_events(agent: &mentra::Agent) -> tokio::task::JoinHandle<()> {
 }
 
 fn describe_tool_call(call: &ToolCall) -> String {
-    if call.name == "shell" {
-        if let Some(command) = call.input.get("command").and_then(|value| value.as_str()) {
-            return command.to_string();
-        }
-    }
-
-    if call.name == "background_run" {
-        if let Some(command) = call.input.get("command").and_then(|value| value.as_str()) {
-            return format!("background_run {command}");
-        }
-    }
-
-    if call.name == "check_background" {
-        if let Some(task_id) = call.input.get("task_id").and_then(|value| value.as_str()) {
-            return format!("check_background {task_id}");
-        }
-
-        return "check_background".to_string();
-    }
-
-    if call.name == "files" {
-        if let Some(operations) = call
+    let description = match call.name.as_str() {
+        "shell" => call
+            .input
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(|command| command.to_string()),
+        "background_run" => call
+            .input
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(|command| format!("background_run {command}")),
+        "check_background" => Some(
+            call.input
+                .get("task_id")
+                .and_then(|value| value.as_str())
+                .map(|task_id| format!("check_background {task_id}"))
+                .unwrap_or_else(|| "check_background".to_string()),
+        ),
+        "files" => call
             .input
             .get("operations")
             .and_then(|value| value.as_array())
-        {
-            if let Some(operation) = operations.first() {
-                if let Some(op) = operation.get("op").and_then(|value| value.as_str()) {
-                    let path = operation
-                        .get("path")
-                        .or_else(|| operation.get("from"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("?");
-                    let suffix = if operations.len() > 1 {
-                        format!(" (+{} more)", operations.len() - 1)
-                    } else {
-                        String::new()
-                    };
-                    return format!("files {op} {path}{suffix}");
-                }
-            }
-
-            return "files".to_string();
-        }
-    }
-
-    if call.name == "task" {
-        if let Some(prompt) = call.input.get("prompt").and_then(|value| value.as_str()) {
-            return format!("task \"{prompt}\"");
-        }
-    }
-
-    if call.name == "team_spawn" {
-        let name = call
+            .map(|operations| {
+                operations
+                    .first()
+                    .and_then(|operation| {
+                        let op = operation.get("op").and_then(|value| value.as_str())?;
+                        let path = operation
+                            .get("path")
+                            .or_else(|| operation.get("from"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("?");
+                        let suffix = if operations.len() > 1 {
+                            format!(" (+{} more)", operations.len() - 1)
+                        } else {
+                            String::new()
+                        };
+                        Some(format!("files {op} {path}{suffix}"))
+                    })
+                    .unwrap_or_else(|| "files".to_string())
+            }),
+        "task" => call
             .input
-            .get("name")
+            .get("prompt")
             .and_then(|value| value.as_str())
-            .unwrap_or("?");
-        let role = call
+            .map(|prompt| format!("task \"{prompt}\"")),
+        "team_spawn" => {
+            let name = call
+                .input
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let role = call
+                .input
+                .get("role")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            Some(format!("team_spawn {name} ({role})"))
+        }
+        "team_send" => call
             .input
-            .get("role")
+            .get("to")
             .and_then(|value| value.as_str())
-            .unwrap_or("?");
-        return format!("team_spawn {name} ({role})");
-    }
-
-    if call.name == "team_send" {
-        if let Some(to) = call.input.get("to").and_then(|value| value.as_str()) {
-            return format!("team_send {to}");
-        }
-    }
-
-    if call.name == "team_request" {
-        if let (Some(to), Some(protocol)) = (
-            call.input.get("to").and_then(|value| value.as_str()),
-            call.input.get("protocol").and_then(|value| value.as_str()),
-        ) {
-            return format!("team_request {to} ({protocol})");
-        }
-    }
-
-    if call.name == "team_respond" {
-        if let Some(request_id) = call
+            .map(|to| format!("team_send {to}")),
+        "team_request" => call
+            .input
+            .get("to")
+            .and_then(|value| value.as_str())
+            .zip(call.input.get("protocol").and_then(|value| value.as_str()))
+            .map(|(to, protocol)| format!("team_request {to} ({protocol})")),
+        "team_respond" => call
             .input
             .get("request_id")
             .and_then(|value| value.as_str())
-        {
-            return format!("team_respond {request_id}");
-        }
-    }
+            .map(|request_id| format!("team_respond {request_id}")),
+        "team_list_requests" => Some("team_list_requests".to_string()),
+        "team_read_inbox" => Some("team_read_inbox".to_string()),
+        "team_broadcast" => call
+            .input
+            .get("content")
+            .and_then(|value| value.as_str())
+            .map(|content| format!("team_broadcast \"{content}\"")),
+        "task_create" => call
+            .input
+            .get("subject")
+            .and_then(|value| value.as_str())
+            .map(|subject| format!("task_create \"{subject}\"")),
+        "task_update" => call
+            .input
+            .get("taskId")
+            .and_then(|value| value.as_u64())
+            .map(|task_id| format!("task_update {task_id}")),
+        "task_claim" => Some(
+            call.input
+                .get("taskId")
+                .and_then(|value| value.as_u64())
+                .map(|task_id| format!("task_claim {task_id}"))
+                .unwrap_or_else(|| "task_claim".to_string()),
+        ),
+        "task_get" => call
+            .input
+            .get("taskId")
+            .and_then(|value| value.as_u64())
+            .map(|task_id| format!("task_get {task_id}")),
+        "task_list" => Some("task_list".to_string()),
+        "load_skill" => call
+            .input
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(|name| format!("load_skill {name}")),
+        _ => None,
+    };
 
-    if call.name == "team_list_requests" {
-        return "team_list_requests".to_string();
-    }
-
-    if call.name == "team_read_inbox" {
-        return "team_read_inbox".to_string();
-    }
-
-    if call.name == "team_broadcast" {
-        if let Some(content) = call.input.get("content").and_then(|value| value.as_str()) {
-            return format!("team_broadcast \"{content}\"");
-        }
-    }
-
-    if call.name == "task_create" {
-        if let Some(subject) = call.input.get("subject").and_then(|value| value.as_str()) {
-            return format!("task_create \"{subject}\"");
-        }
-    }
-
-    if call.name == "task_update" {
-        if let Some(task_id) = call.input.get("taskId").and_then(|value| value.as_u64()) {
-            return format!("task_update {task_id}");
-        }
-    }
-
-    if call.name == "task_claim" {
-        if let Some(task_id) = call.input.get("taskId").and_then(|value| value.as_u64()) {
-            return format!("task_claim {task_id}");
-        }
-
-        return "task_claim".to_string();
-    }
-
-    if call.name == "task_get" {
-        if let Some(task_id) = call.input.get("taskId").and_then(|value| value.as_u64()) {
-            return format!("task_get {task_id}");
-        }
-    }
-
-    if call.name == "task_list" {
-        return "task_list".to_string();
-    }
-
-    if call.name == "load_skill" {
-        if let Some(name) = call.input.get("name").and_then(|value| value.as_str()) {
-            return format!("load_skill {name}");
-        }
-    }
-
-    format!("{} {}", call.name, call.input)
+    description.unwrap_or_else(|| format!("{} {}", call.name, call.input))
 }
 
 fn end_assistant_line(assistant_line_open: &mut bool) {
