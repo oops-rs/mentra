@@ -185,8 +185,10 @@ where
     C: CredentialSource + 'static,
 {
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let requested_model = request.model.to_string();
+        let provider = self.definition.provider_id().clone();
         let response = self.send_message(request, true).await?;
-        Ok(sse::spawn_event_stream(response))
+        Ok(sse::spawn_event_stream(response, provider, requested_model))
     }
 
     async fn compact(
@@ -228,7 +230,10 @@ where
         stream: bool,
     ) -> Result<reqwest::Response, ProviderError> {
         let session = request.provider_request_options.session.clone();
-        let request = model::AnthropicRequest::try_from(request)?;
+        let request = model::AnthropicRequest::try_from_with_provider(
+            request,
+            self.definition.provider_id(),
+        )?;
         let mut body = serde_json::to_value(request).map_err(ProviderError::Serialize)?;
         if stream {
             body["stream"] = Value::Bool(true);

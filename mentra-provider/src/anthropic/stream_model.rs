@@ -1,6 +1,9 @@
 use serde::Deserialize;
 
-use crate::{ContentBlockDelta, ContentBlockStart, HostedToolSearchCall, ProviderEvent, Role};
+use crate::{
+    ContentBlockDelta, ContentBlockStart, HostedToolSearchCall, ProviderEvent, ReasoningProvenance,
+    Role,
+};
 
 use super::model::{AnthropicResponse, AnthropicUsage};
 
@@ -35,6 +38,13 @@ pub(crate) enum AnthropicStreamEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AnthropicStreamContentBlock {
     Text {},
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -48,22 +58,70 @@ pub(crate) enum AnthropicStreamContentBlock {
 }
 
 impl AnthropicStreamContentBlock {
-    pub(crate) fn into_provider_start(self) -> Option<ContentBlockStart> {
+    pub(crate) fn into_provider_events(
+        self,
+        index: usize,
+        provenance: &ReasoningProvenance,
+    ) -> Vec<ProviderEvent> {
         match self {
-            AnthropicStreamContentBlock::Text {} => Some(ContentBlockStart::Text),
+            AnthropicStreamContentBlock::Text {} => vec![ProviderEvent::ContentBlockStarted {
+                index,
+                kind: ContentBlockStart::Text,
+            }],
+            AnthropicStreamContentBlock::Thinking { thinking } => {
+                let mut events = vec![ProviderEvent::ContentBlockStarted {
+                    index,
+                    kind: ContentBlockStart::Thinking {
+                        encrypted_content: None,
+                        id: None,
+                        provenance: Some(provenance.clone()),
+                        redacted: false,
+                    },
+                }];
+                if !thinking.is_empty() {
+                    events.push(ProviderEvent::ContentBlockDelta {
+                        index,
+                        delta: ContentBlockDelta::ThinkingText(thinking),
+                    });
+                }
+                events
+            }
+            AnthropicStreamContentBlock::RedactedThinking { data } => vec![
+                ProviderEvent::ContentBlockStarted {
+                    index,
+                    kind: ContentBlockStart::Thinking {
+                        encrypted_content: None,
+                        id: None,
+                        provenance: Some(provenance.clone()),
+                        redacted: true,
+                    },
+                },
+                ProviderEvent::ContentBlockDelta {
+                    index,
+                    delta: ContentBlockDelta::ThinkingSignature(data),
+                },
+            ],
             AnthropicStreamContentBlock::ToolUse { id, name } => {
-                Some(ContentBlockStart::ToolUse { id, name })
+                vec![ProviderEvent::ContentBlockStarted {
+                    index,
+                    kind: ContentBlockStart::ToolUse { id, name },
+                }]
             }
             AnthropicStreamContentBlock::ServerToolUse { id, name } => name
                 .starts_with("tool_search")
-                .then_some(ContentBlockStart::HostedToolSearch {
-                    call: HostedToolSearchCall {
-                        id,
-                        status: Some("in_progress".to_string()),
-                        query: None,
+                .then(|| ProviderEvent::ContentBlockStarted {
+                    index,
+                    kind: ContentBlockStart::HostedToolSearch {
+                        call: HostedToolSearchCall {
+                            id,
+                            status: Some("in_progress".to_string()),
+                            query: None,
+                        },
                     },
-                }),
-            AnthropicStreamContentBlock::Unsupported => None,
+                })
+                .into_iter()
+                .collect(),
+            AnthropicStreamContentBlock::Unsupported => Vec::new(),
         }
     }
 
@@ -81,6 +139,12 @@ pub(crate) enum AnthropicContentBlockDelta {
     InputJsonDelta {
         partial_json: String,
     },
+    ThinkingDelta {
+        thinking: String,
+    },
+    SignatureDelta {
+        signature: String,
+    },
     #[serde(other)]
     Unsupported,
 }
@@ -91,6 +155,12 @@ impl AnthropicContentBlockDelta {
             AnthropicContentBlockDelta::TextDelta { text } => Some(ContentBlockDelta::Text(text)),
             AnthropicContentBlockDelta::InputJsonDelta { partial_json } => {
                 Some(ContentBlockDelta::ToolUseInputJson(partial_json))
+            }
+            AnthropicContentBlockDelta::ThinkingDelta { thinking } => {
+                Some(ContentBlockDelta::ThinkingText(thinking))
+            }
+            AnthropicContentBlockDelta::SignatureDelta { signature } => {
+                Some(ContentBlockDelta::ThinkingSignature(signature))
             }
             AnthropicContentBlockDelta::Unsupported => None,
         }
@@ -112,7 +182,10 @@ pub(crate) struct AnthropicStreamError {
 }
 
 impl AnthropicStreamEvent {
-    pub(crate) fn into_provider_events(self) -> Result<Vec<ProviderEvent>, AnthropicStreamError> {
+    pub(crate) fn into_provider_events(
+        self,
+        reasoning_provenance: &ReasoningProvenance,
+    ) -> Result<Vec<ProviderEvent>, AnthropicStreamError> {
         match self {
             AnthropicStreamEvent::MessageStart { message } => {
                 let usage = message
@@ -139,10 +212,7 @@ impl AnthropicStreamEvent {
             AnthropicStreamEvent::ContentBlockStart {
                 index,
                 content_block,
-            } => Ok(content_block
-                .into_provider_start()
-                .map(|kind| vec![ProviderEvent::ContentBlockStarted { index, kind }])
-                .unwrap_or_default()),
+            } => Ok(content_block.into_provider_events(index, reasoning_provenance)),
             AnthropicStreamEvent::ContentBlockDelta { index, delta } => Ok(delta
                 .into_provider_delta()
                 .map(|delta| vec![ProviderEvent::ContentBlockDelta { index, delta }])
