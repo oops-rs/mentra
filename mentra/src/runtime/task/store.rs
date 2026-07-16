@@ -54,13 +54,13 @@ pub(super) fn validate_update_access(
                     task.id
                 )));
             }
-            if let Some(owner) = &input.owner
-                && owner != name
-            {
-                return Err(TaskError::Validation(format!(
-                    "Teammate '{name}' cannot reassign task {} to '{}'",
-                    task.id, owner
-                )));
+            if let Some(owner) = &input.owner {
+                if owner != name {
+                    return Err(TaskError::Validation(format!(
+                        "Teammate '{name}' cannot reassign task {} to '{}'",
+                        task.id, owner
+                    )));
+                }
             }
             Ok(())
         }

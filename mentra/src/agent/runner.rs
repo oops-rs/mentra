@@ -87,10 +87,10 @@ impl<'a> TurnRunner<'a> {
             if self.options.token_budget_exceeded() {
                 return Ok(());
             }
-            if let Some(limit) = self.agent.max_rounds()
-                && rounds >= limit
-            {
-                return Err(RuntimeError::MaxRoundsExceeded(limit));
+            if let Some(limit) = self.agent.max_rounds() {
+                if rounds >= limit {
+                    return Err(RuntimeError::MaxRoundsExceeded(limit));
+                }
             }
 
             rounds += 1;

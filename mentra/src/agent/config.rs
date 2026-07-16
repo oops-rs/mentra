@@ -169,10 +169,10 @@ impl ToolProfile {
     }
 
     pub fn allows(&self, tool_name: &str) -> bool {
-        if let Some(allowed_tools) = &self.allowed_tools
-            && !allowed_tools.contains(tool_name)
-        {
-            return false;
+        if let Some(allowed_tools) = &self.allowed_tools {
+            if !allowed_tools.contains(tool_name) {
+                return false;
+            }
         }
 
         !self.hidden_tools.contains(tool_name)
