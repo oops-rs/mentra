@@ -151,23 +151,22 @@ pub(crate) struct TeamRequestFilter {
 
 impl TeamRequestFilter {
     pub(crate) fn matches(&self, agent_name: &str, request: &TeamProtocolRequestSummary) -> bool {
-        if let Some(status) = &self.status
-            && &request.status != status
-        {
-            return false;
+        if let Some(status) = &self.status {
+            if &request.status != status {
+                return false;
+            }
         }
 
-        if let Some(protocol) = &self.protocol
-            && request.protocol != *protocol
-        {
-            return false;
+        if let Some(protocol) = &self.protocol {
+            if request.protocol != *protocol {
+                return false;
+            }
         }
 
-        if let Some(counterparty) = &self.counterparty
-            && request.from != *counterparty
-            && request.to != *counterparty
-        {
-            return false;
+        if let Some(counterparty) = &self.counterparty {
+            if request.from != *counterparty && request.to != *counterparty {
+                return false;
+            }
         }
 
         match self.direction {

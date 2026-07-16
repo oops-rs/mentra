@@ -237,16 +237,16 @@ impl ProviderDefinition {
             format!("{base}/{path}")
         };
 
-        if let Some(params) = &self.query_params
-            && !params.is_empty()
-        {
-            let qs = params
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect::<Vec<_>>()
-                .join("&");
-            url.push('?');
-            url.push_str(&qs);
+        if let Some(params) = &self.query_params {
+            if !params.is_empty() {
+                let qs = params
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                url.push('?');
+                url.push_str(&qs);
+            }
         }
 
         url
@@ -297,22 +297,24 @@ impl ProviderDefinition {
     ) -> Result<HeaderMap, crate::ProviderError> {
         let mut headers = self.build_headers(credentials)?;
 
-        if let Some(turn_state) = session
+        if let Some(value) = session
             .and_then(|session| session.sticky_turn_state.as_deref())
             .or(fallback_turn_state)
-            && let Ok(value) = HeaderValue::from_str(turn_state)
+            .and_then(|turn_state| HeaderValue::from_str(turn_state).ok())
         {
             headers.insert("x-mentra-turn-state", value.clone());
             headers.insert("x-codex-turn-state", value);
         }
-        if let Some(value) = session.and_then(|session| session.turn_metadata.as_deref())
-            && let Ok(value) = HeaderValue::from_str(value)
+        if let Some(value) = session
+            .and_then(|session| session.turn_metadata.as_deref())
+            .and_then(|value| HeaderValue::from_str(value).ok())
         {
             headers.insert("x-mentra-turn-metadata", value.clone());
             headers.insert("x-codex-turn-metadata", value);
         }
-        if let Some(value) = session.and_then(|session| session.session_affinity.as_deref())
-            && let Ok(value) = HeaderValue::from_str(value)
+        if let Some(value) = session
+            .and_then(|session| session.session_affinity.as_deref())
+            .and_then(|value| HeaderValue::from_str(value).ok())
         {
             headers.insert("x-mentra-session-affinity", value);
         }
@@ -328,8 +330,9 @@ impl ProviderDefinition {
                 }),
             );
         }
-        if let Some(value) = session.and_then(|session| session.subagent.as_deref())
-            && let Ok(value) = HeaderValue::from_str(value)
+        if let Some(value) = session
+            .and_then(|session| session.subagent.as_deref())
+            .and_then(|value| HeaderValue::from_str(value).ok())
         {
             headers.insert("x-openai-subagent", value);
         }
