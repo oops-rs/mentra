@@ -74,20 +74,21 @@ impl RuntimeHandle {
         let (_config, command_request) =
             self.build_command_request(agent_id, command, requested_timeout, cwd, true)?;
 
-        if let Some(limit) = self.execution.policy.background_task_limit
-            && self
+        if let Some(limit) = self.execution.policy.background_task_limit {
+            if self
                 .collaboration
                 .background_tasks
                 .running_task_count(agent_id)
                 >= limit
-        {
-            let detail = format!("Background task limit of {limit} reached");
-            let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
-                agent_id: agent_id.to_string(),
-                action: "background_limit".to_string(),
-                detail: detail.clone(),
-            });
-            return Err(detail);
+            {
+                let detail = format!("Background task limit of {limit} reached");
+                let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
+                    agent_id: agent_id.to_string(),
+                    action: "background_limit".to_string(),
+                    detail: detail.clone(),
+                });
+                return Err(detail);
+            }
         }
 
         self.collaboration

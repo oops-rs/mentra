@@ -259,11 +259,10 @@ impl WorkspaceEditor {
         }
 
         for path in self.overlay.keys() {
-            if let Ok(relative) = path.strip_prefix(dir)
-                && let Some(component) = relative.components().next()
-                && let Component::Normal(name) = component
-            {
-                names.insert(name.to_string_lossy().into_owned());
+            if let Ok(relative) = path.strip_prefix(dir) {
+                if let Some(Component::Normal(name)) = relative.components().next() {
+                    names.insert(name.to_string_lossy().into_owned());
+                }
             }
         }
 
