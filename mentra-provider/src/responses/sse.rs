@@ -40,10 +40,10 @@ async fn forward_events(
     provider: ProviderId,
     requested_model: String,
 ) -> Result<(), ProviderError> {
-    if let Some(headers) = response_headers_event(response.headers())
-        && tx.send(Ok(headers)).is_err()
-    {
-        return Ok(());
+    if let Some(headers) = response_headers_event(response.headers()) {
+        if tx.send(Ok(headers)).is_err() {
+            return Ok(());
+        }
     }
 
     let mut bytes_stream = response.bytes_stream();
@@ -333,34 +333,37 @@ pub(crate) fn parse_json_event(
                     .insert(id.to_string(), output_index);
             }
 
-            if !state.text_delta_seen.remove(&output_index)
-                && let Some(text) = item.completed_text()
-                && !text.is_empty()
-            {
-                events.push(ProviderEvent::ContentBlockDelta {
-                    index: output_index,
-                    delta: ContentBlockDelta::Text(text),
-                });
+            if !state.text_delta_seen.remove(&output_index) {
+                if let Some(text) = item.completed_text().filter(|text| !text.is_empty()) {
+                    events.push(ProviderEvent::ContentBlockDelta {
+                        index: output_index,
+                        delta: ContentBlockDelta::Text(text),
+                    });
+                }
             }
 
-            if !state.function_delta_seen.remove(&output_index)
-                && let Some(arguments) = item.completed_arguments()
-                && !arguments.is_empty()
-            {
-                events.push(ProviderEvent::ContentBlockDelta {
-                    index: output_index,
-                    delta: ContentBlockDelta::ToolUseInputJson(arguments),
-                });
+            if !state.function_delta_seen.remove(&output_index) {
+                if let Some(arguments) = item
+                    .completed_arguments()
+                    .filter(|arguments| !arguments.is_empty())
+                {
+                    events.push(ProviderEvent::ContentBlockDelta {
+                        index: output_index,
+                        delta: ContentBlockDelta::ToolUseInputJson(arguments),
+                    });
+                }
             }
 
-            if !state.tool_search_delta_seen.remove(&output_index)
-                && let Some(query) = item.completed_tool_search_query()
-                && !query.is_empty()
-            {
-                events.push(ProviderEvent::ContentBlockDelta {
-                    index: output_index,
-                    delta: ContentBlockDelta::HostedToolSearchQuery(query),
-                });
+            if !state.tool_search_delta_seen.remove(&output_index) {
+                if let Some(query) = item
+                    .completed_tool_search_query()
+                    .filter(|query| !query.is_empty())
+                {
+                    events.push(ProviderEvent::ContentBlockDelta {
+                        index: output_index,
+                        delta: ContentBlockDelta::HostedToolSearchQuery(query),
+                    });
+                }
             }
 
             let reasoning = if state.reasoning_delta_seen.remove(&output_index) {
@@ -525,8 +528,10 @@ struct ResponsesResponseEnvelope {
 
 impl ResponsesResponseEnvelope {
     fn stop_reason(&self) -> Option<String> {
-        if let Some(details) = &self.incomplete_details
-            && let Some(reason) = &details.reason
+        if let Some(reason) = self
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.reason.as_ref())
         {
             return Some(reason.clone());
         }
@@ -845,9 +850,7 @@ impl ResponsesOutputItem {
                         delta: ContentBlockDelta::HostedWebSearchAction(action),
                     });
                 }
-                if let Some(status) = status.clone()
-                    && !status.is_empty()
-                {
+                if let Some(status) = status.clone().filter(|status| !status.is_empty()) {
                     events.push(ProviderEvent::ContentBlockDelta {
                         index: output_index,
                         delta: ContentBlockDelta::HostedWebSearchStatus(status),
@@ -862,8 +865,9 @@ impl ResponsesOutputItem {
                 ..
             } => {
                 let mut events = Vec::new();
-                if let Some(revised_prompt) = revised_prompt.clone()
-                    && !revised_prompt.is_empty()
+                if let Some(revised_prompt) = revised_prompt
+                    .clone()
+                    .filter(|revised_prompt| !revised_prompt.is_empty())
                 {
                     events.push(ProviderEvent::ContentBlockDelta {
                         index: output_index,

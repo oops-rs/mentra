@@ -636,14 +636,16 @@ where
         session: Option<&SessionRequestOptions>,
     ) -> Result<HeaderMap, ProviderError> {
         let mut headers = self.build_websocket_headers_for_session(credentials, session)?;
-        if let Some(session_id) = session.and_then(|session| session.session_affinity.as_deref())
-            && let Ok(value) = http::HeaderValue::from_str(session_id)
+        if let Some(value) = session
+            .and_then(|session| session.session_affinity.as_deref())
+            .and_then(|session_id| http::HeaderValue::from_str(session_id).ok())
         {
             headers.insert("x-client-request-id", value.clone());
             headers.insert("session_id", value);
         }
-        if let Some(subagent) = session.and_then(|session| session.subagent.as_deref())
-            && let Ok(value) = http::HeaderValue::from_str(subagent)
+        if let Some(value) = session
+            .and_then(|session| session.subagent.as_deref())
+            .and_then(|subagent| http::HeaderValue::from_str(subagent).ok())
         {
             headers.insert("x-openai-subagent", value);
         }
@@ -748,26 +750,27 @@ mod tests {
                     break;
                 }
                 buffer.extend_from_slice(&temp[..read]);
-                if header_end.is_none()
-                    && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
-                {
-                    let end = index + 4;
-                    header_end = Some(end);
-                    let headers = String::from_utf8_lossy(&buffer[..end]);
-                    content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length").then(|| {
-                                value.trim().parse::<usize>().expect("parse content-length")
+                if header_end.is_none() {
+                    if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let end = index + 4;
+                        header_end = Some(end);
+                        let headers = String::from_utf8_lossy(&buffer[..end]);
+                        content_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length").then(|| {
+                                    value.trim().parse::<usize>().expect("parse content-length")
+                                })
                             })
-                        })
-                        .unwrap_or_default();
+                            .unwrap_or_default();
+                    }
                 }
-                if let Some(end) = header_end
-                    && buffer.len() >= end + content_length
-                {
-                    break;
+                if let Some(end) = header_end {
+                    if buffer.len() >= end + content_length {
+                        break;
+                    }
                 }
             }
 
@@ -804,25 +807,26 @@ mod tests {
                 break;
             }
             buffer.extend_from_slice(&temp[..read]);
-            if header_end.is_none()
-                && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
-            {
-                let end = index + 4;
-                header_end = Some(end);
-                let headers = String::from_utf8_lossy(&buffer[..end]);
-                content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().expect("parse content-length"))
-                    })
-                    .unwrap_or_default();
+            if header_end.is_none() {
+                if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let end = index + 4;
+                    header_end = Some(end);
+                    let headers = String::from_utf8_lossy(&buffer[..end]);
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then(|| {
+                                value.trim().parse::<usize>().expect("parse content-length")
+                            })
+                        })
+                        .unwrap_or_default();
+                }
             }
-            if let Some(end) = header_end
-                && buffer.len() >= end + content_length
-            {
-                break;
+            if let Some(end) = header_end {
+                if buffer.len() >= end + content_length {
+                    break;
+                }
             }
         }
 
@@ -956,26 +960,27 @@ mod tests {
                     break;
                 }
                 buffer.extend_from_slice(&temp[..read]);
-                if header_end.is_none()
-                    && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
-                {
-                    let end = index + 4;
-                    header_end = Some(end);
-                    let headers = String::from_utf8_lossy(&buffer[..end]);
-                    content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length").then(|| {
-                                value.trim().parse::<usize>().expect("parse content-length")
+                if header_end.is_none() {
+                    if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let end = index + 4;
+                        header_end = Some(end);
+                        let headers = String::from_utf8_lossy(&buffer[..end]);
+                        content_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length").then(|| {
+                                    value.trim().parse::<usize>().expect("parse content-length")
+                                })
                             })
-                        })
-                        .unwrap_or_default();
+                            .unwrap_or_default();
+                    }
                 }
-                if let Some(end) = header_end
-                    && buffer.len() >= end + content_length
-                {
-                    break;
+                if let Some(end) = header_end {
+                    if buffer.len() >= end + content_length {
+                        break;
+                    }
                 }
             }
 
