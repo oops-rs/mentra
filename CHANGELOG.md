@@ -66,9 +66,9 @@
 - Recursive batched list/search now reject a descendant symlink that resolves
   outside the runtime read roots. This intentional policy-enforcement fix is
   the sole WS3 default-path behavior change.
-- Pin `time` to the newest release compatible with the declared Rust 1.85
-  MSRV; the previous unconstrained `0.3` resolution had silently raised the
-  effective compiler requirement to Rust 1.88.
+- Pin `time` and `url` to Rust 1.85-compatible releases. Their previous
+  semver ranges could resolve to `time` requiring Rust 1.88 and an
+  `url`/IDNA/ICU chain requiring Rust 1.86.
 
 ## 0.9.0
 
