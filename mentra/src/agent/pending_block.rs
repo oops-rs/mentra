@@ -1,7 +1,7 @@
 use crate::{ContentBlock, ImageSource, error::RuntimeError, provider::ContentBlockStart};
 use mentra_provider::{
     HostedToolSearchCall, HostedWebSearchCall, ImageGenerationCall, ImageGenerationResult,
-    ToolResultContent, WebSearchAction,
+    ReasoningProvenance, ToolResultContent, WebSearchAction,
 };
 
 use super::PendingToolUseSummary;
@@ -10,6 +10,15 @@ use super::PendingToolUseSummary;
 pub(super) enum PendingContentBlock {
     Text {
         text: String,
+        complete: bool,
+    },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+        encrypted_content: Option<String>,
+        id: Option<String>,
+        provenance: Option<ReasoningProvenance>,
+        redacted: bool,
         complete: bool,
     },
     Image {
@@ -46,6 +55,7 @@ impl PendingContentBlock {
     pub(super) fn is_complete(&self) -> bool {
         match self {
             PendingContentBlock::Text { complete, .. }
+            | PendingContentBlock::Thinking { complete, .. }
             | PendingContentBlock::Image { complete, .. }
             | PendingContentBlock::ToolUse { complete, .. }
             | PendingContentBlock::ToolResult { complete, .. }
@@ -58,6 +68,7 @@ impl PendingContentBlock {
     pub(super) fn mark_complete(&mut self) {
         match self {
             PendingContentBlock::Text { complete, .. }
+            | PendingContentBlock::Thinking { complete, .. }
             | PendingContentBlock::Image { complete, .. }
             | PendingContentBlock::ToolUse { complete, .. }
             | PendingContentBlock::ToolResult { complete, .. }
@@ -70,6 +81,22 @@ impl PendingContentBlock {
     pub(super) fn to_content_block(&self) -> Result<ContentBlock, RuntimeError> {
         match self {
             PendingContentBlock::Text { text, .. } => Ok(ContentBlock::Text { text: text.clone() }),
+            PendingContentBlock::Thinking {
+                thinking,
+                signature,
+                encrypted_content,
+                id,
+                provenance,
+                redacted,
+                ..
+            } => Ok(ContentBlock::Thinking {
+                thinking: thinking.clone(),
+                signature: signature.clone(),
+                encrypted_content: encrypted_content.clone(),
+                id: id.clone(),
+                provenance: provenance.clone(),
+                redacted: *redacted,
+            }),
             PendingContentBlock::Image { source, .. } => Ok(ContentBlock::Image {
                 source: source.clone(),
             }),
@@ -114,6 +141,7 @@ impl PendingContentBlock {
     pub(super) fn kind_name(&self) -> &'static str {
         match self {
             PendingContentBlock::Text { .. } => "text",
+            PendingContentBlock::Thinking { .. } => "thinking",
             PendingContentBlock::Image { .. } => "image",
             PendingContentBlock::ToolUse { .. } => "tool_use",
             PendingContentBlock::ToolResult { .. } => "tool_result",
@@ -146,6 +174,20 @@ impl From<ContentBlockStart> for PendingContentBlock {
         match value {
             ContentBlockStart::Text => PendingContentBlock::Text {
                 text: String::new(),
+                complete: false,
+            },
+            ContentBlockStart::Thinking {
+                encrypted_content,
+                id,
+                provenance,
+                redacted,
+            } => PendingContentBlock::Thinking {
+                thinking: String::new(),
+                signature: None,
+                encrypted_content,
+                id,
+                provenance,
+                redacted,
                 complete: false,
             },
             ContentBlockStart::Image { source } => PendingContentBlock::Image {

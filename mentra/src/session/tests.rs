@@ -45,6 +45,18 @@ fn session_event_assistant_token_delta_roundtrip() {
 }
 
 #[test]
+fn session_event_assistant_reasoning_delta_roundtrip() {
+    let event = SessionEvent::AssistantReasoningDelta {
+        delta: "private".to_string(),
+        full_text: "private chain".to_string(),
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "assistant_reasoning_delta");
+    let deserialized: SessionEvent = serde_json::from_value(json).unwrap();
+    assert_eq!(event, deserialized);
+}
+
+#[test]
 fn session_event_tool_queued_roundtrip() {
     let event = SessionEvent::ToolQueued {
         tool_call_id: "tc-1".to_string(),
@@ -123,6 +135,10 @@ fn all_session_event_variants_serialize_with_type_tag() {
         SessionEvent::AssistantTokenDelta {
             delta: "h".to_string(),
             full_text: "h".to_string(),
+        },
+        SessionEvent::AssistantReasoningDelta {
+            delta: "r".to_string(),
+            full_text: "r".to_string(),
         },
         SessionEvent::AssistantMessageCompleted {
             text: "hello".to_string(),
@@ -1832,6 +1848,7 @@ async fn full_scenario_prompt_shell_file_events_end_to_end() {
         .map(|e| match e {
             SessionEvent::UserMessage { .. } => "user_message",
             SessionEvent::AssistantTokenDelta { .. } => "token_delta",
+            SessionEvent::AssistantReasoningDelta { .. } => "reasoning_delta",
             SessionEvent::AssistantMessageCompleted { .. } => "assistant_completed",
             SessionEvent::ToolQueued { .. } => "tool_queued",
             SessionEvent::ToolStarted { .. } => "tool_started",

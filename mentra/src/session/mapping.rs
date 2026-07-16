@@ -36,6 +36,13 @@ fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
             }]
         }
 
+        AgentEvent::ReasoningDelta { delta, full_text } => {
+            vec![SessionEvent::AssistantReasoningDelta {
+                delta: delta.clone(),
+                full_text: full_text.clone(),
+            }]
+        }
+
         AgentEvent::ToolUseReady { call, .. } => {
             let input_str = call.input.to_string();
             let summary = derive_tool_summary(&call.name, &input_str);
@@ -299,6 +306,23 @@ mod tests {
         assert!(matches!(
             &mapped[0].1,
             SessionEvent::AssistantTokenDelta { delta, .. } if delta == "hi"
+        ));
+        assert_eq!(seq, 1);
+    }
+
+    #[test]
+    fn reasoning_delta_maps_to_assistant_reasoning_delta() {
+        let event = AgentEvent::ReasoningDelta {
+            delta: "private".to_string(),
+            full_text: "private chain".to_string(),
+        };
+        let mut seq = 0;
+        let mapped = map_agent_event(&event, &mut seq);
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::AssistantReasoningDelta { delta, full_text }
+                if delta == "private" && full_text == "private chain"
         ));
         assert_eq!(seq, 1);
     }
