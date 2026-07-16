@@ -10,9 +10,10 @@ use std::{
 
 use super::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamObserverSink,
-    TeamProtocolRequestSummary, TeamProtocolStatus, TeamRegistration, TeamRequestFilter, TeamStore,
+    TeamProtocolRequestSummary, TeamProtocolStatus, TeamRegistration, TeamRequestFilter,
     TeammateActorHandle,
 };
+use crate::runtime::RuntimeStore;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -22,7 +23,7 @@ pub(crate) struct TeamManager {
 }
 
 struct TeamManagerInner {
-    store: Arc<dyn TeamStore>,
+    store: Arc<dyn RuntimeStore>,
     state: Mutex<TeamManagerState>,
 }
 
@@ -56,7 +57,7 @@ struct ObserverUpdate {
 }
 
 impl TeamManager {
-    pub(crate) fn new(store: Arc<dyn TeamStore>) -> Self {
+    pub(crate) fn new(store: Arc<dyn RuntimeStore>) -> Self {
         Self {
             inner: Arc::new(TeamManagerInner {
                 store,
@@ -602,7 +603,7 @@ impl TeamManager {
 }
 
 fn ensure_team_state<'a>(
-    store: &Arc<dyn TeamStore>,
+    store: &Arc<dyn RuntimeStore>,
     state: &'a mut TeamManagerState,
     team_dir: &Path,
 ) -> Result<&'a mut TeamState, RuntimeError> {
