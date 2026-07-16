@@ -684,7 +684,18 @@ fn observer_updates(team: &TeamState) -> Vec<ObserverUpdate> {
 
 fn next_request_id() -> String {
     let counter = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    format!("{:08x}", unix_timestamp_secs() ^ counter)
+    format_request_id(unix_timestamp_nanos(), counter)
+}
+
+fn format_request_id(timestamp_nanos: u128, counter: u64) -> String {
+    format!("{timestamp_nanos:x}-{counter:x}")
+}
+
+fn unix_timestamp_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -692,4 +703,20 @@ fn unix_timestamp_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_request_id;
+
+    #[test]
+    fn request_ids_remain_distinct_for_the_old_cross_second_xor_collision() {
+        assert_eq!(100_u128 ^ 2, 101_u128 ^ 3);
+        assert_ne!(format_request_id(100, 2), format_request_id(101, 3));
+    }
+
+    #[test]
+    fn request_ids_remain_distinct_when_only_the_counter_changes() {
+        assert_ne!(format_request_id(100, 2), format_request_id(100, 3));
+    }
 }

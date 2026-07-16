@@ -95,6 +95,10 @@ the new neutral representation does not yet provide full Gemini fidelity.
 - Add cloneable `AgentWaitHandle` and owned snapshot, idle, and teammate-reply
   wait futures. `AgentSnapshot::run_generation` prevents a previous terminal
   snapshot from satisfying a wait for the next run.
+- Make opaque team-protocol request IDs collision-resistant by retaining the
+  timestamp and atomic counter as separate components instead of XORing them.
+  This prevents one request from resolving another during cross-second
+  interleavings.
 - Document the Proposed host-orchestration decision in ADR-0004.
 
 ### Compatibility
