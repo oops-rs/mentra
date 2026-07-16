@@ -1,13 +1,19 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::json;
 
-use crate::runtime::{SqliteRuntimeStore, TaskIntrinsicTool, TaskStore};
+use crate::runtime::{
+    HybridRuntimeStore, SqliteRuntimeStore, TaskIntrinsicTool, TaskStore, VolatileRuntimeStore,
+};
 
 use super::{
     TaskAccess, TaskItem,
@@ -19,6 +25,57 @@ use super::{
 };
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn concurrent_intrinsic_creates_serialize_through_task_store_mutate() {
+    assert_concurrent_creates(SqliteRuntimeStore::new(
+        temp_path("mentra-task-concurrent-sqlite".to_string()).with_extension("sqlite"),
+    ));
+    assert_concurrent_creates(VolatileRuntimeStore::new());
+    assert_concurrent_creates(HybridRuntimeStore::new(
+        temp_path("mentra-task-concurrent-hybrid".to_string()).with_extension("sqlite"),
+    ));
+}
+
+fn assert_concurrent_creates(store: impl TaskStore + Clone + 'static) {
+    const WRITERS: usize = 8;
+
+    let namespace = temp_namespace("concurrent-writers");
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let mut writers = Vec::new();
+
+    // Initialize lazy stores before the simultaneous writes so this test
+    // isolates task-mutation serialization from schema initialization.
+    store.load_tasks(&namespace).expect("initialize store");
+
+    for index in 0..WRITERS {
+        let store = store.clone();
+        let namespace = namespace.clone();
+        let barrier = Arc::clone(&barrier);
+        writers.push(thread::spawn(move || {
+            barrier.wait();
+            super::execute_with_store(
+                &store,
+                &TaskIntrinsicTool::Create,
+                json!({ "subject": format!("writer-{index}") }),
+                &namespace,
+                TaskAccess::Lead,
+            )
+            .expect("create task concurrently");
+        }));
+    }
+
+    for writer in writers {
+        writer.join().expect("writer thread");
+    }
+
+    let tasks = store.load_tasks(&namespace).expect("load final tasks");
+    assert_eq!(tasks.len(), WRITERS);
+    assert_eq!(
+        tasks.iter().map(|task| task.id).collect::<Vec<_>>(),
+        (1..=WRITERS as u64).collect::<Vec<_>>()
+    );
+}
 
 #[test]
 fn create_and_list_group_ready_blocked_and_completed_tasks() {

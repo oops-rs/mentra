@@ -43,6 +43,24 @@ impl TaskStore for VolatileRuntimeStore {
             .insert(path_key(namespace), tasks.to_vec());
         Ok(())
     }
+
+    fn mutate(
+        &self,
+        namespace: &Path,
+        mutation: &mut dyn FnMut(&mut Vec<TaskItem>) -> Result<(), RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        let mut state = self.lock();
+        let key = path_key(namespace);
+        let mut tasks = state
+            .tasks
+            .by_namespace
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        mutation(&mut tasks)?;
+        state.tasks.by_namespace.insert(key, tasks);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -105,6 +123,31 @@ mod tests {
         store.restore_tasks(&namespace, &snapshot).expect("restore");
         assert_eq!(
             store.load_tasks(&namespace).expect("load restored"),
+            vec![item]
+        );
+    }
+
+    #[test]
+    fn failed_mutation_does_not_install_partial_changes() {
+        let store = VolatileRuntimeStore::new();
+        let namespace = PathBuf::from("/tmp/does-not-exist/tasks-rollback");
+        let item = task(1, "original");
+        store
+            .replace_tasks(&namespace, std::slice::from_ref(&item))
+            .expect("seed");
+
+        let mut mutation = |tasks: &mut Vec<TaskItem>| {
+            tasks[0].subject = "partial".to_string();
+            Err(crate::runtime::RuntimeError::InvalidTask(
+                "reject mutation".to_string(),
+            ))
+        };
+        store
+            .mutate(&namespace, &mut mutation)
+            .expect_err("mutation should fail");
+
+        assert_eq!(
+            store.load_tasks(&namespace).expect("load tasks"),
             vec![item]
         );
     }
