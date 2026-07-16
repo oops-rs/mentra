@@ -10,7 +10,10 @@ use crate::{
     BuiltinProvider, ContentBlock, Message, QueueMode, Role, RoundContext, RoundDecision,
     RoundStrategy, Runtime, SteeringHandle,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
-    runtime::{CancellationToken, RunOptions, VolatileRuntimeStore},
+    runtime::{
+        CancellationToken, CommandOutput, CommandRequest, RunOptions, RuntimeExecutor,
+        RuntimePolicy, VolatileRuntimeStore,
+    },
 };
 
 use super::support::{
@@ -367,6 +370,76 @@ async fn steering_precedes_round_strategy_without_double_injection() {
 }
 
 #[tokio::test]
+async fn next_provider_request_orders_steering_team_inbox_then_background() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let (first_stream, first_tx) = controlled_stream();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![first_stream, text_stream(&model.id, "final")],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_executor(ImmediateExecutor)
+        .with_policy(RuntimePolicy::permissive())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model.clone()).expect("spawn agent");
+    let steering = agent.steering_handle();
+    let runtime_handle = agent.runtime.clone();
+    let agent_id = agent.id.clone();
+    let agent_name = agent.name.clone();
+    let team_dir = agent.config.team.team_dir.clone();
+    let cwd = agent.config.workspace.base_dir.clone();
+
+    let drive = async {
+        wait_for_request_count(&provider_handle, 1).await;
+        steering.steer(vec![ContentBlock::text("ordering-steer-marker")]);
+        runtime_handle
+            .send_team_message(
+                &team_dir,
+                "host",
+                &agent_name,
+                "ordering-team-marker".to_string(),
+            )
+            .expect("enqueue team message");
+        runtime_handle
+            .start_background_task(
+                &agent_id,
+                "ordering-background-marker".to_string(),
+                None,
+                None,
+                cwd,
+            )
+            .expect("start background task");
+        while !runtime_handle.has_deliverable_background_notifications(&agent_id) {
+            tokio::task::yield_now().await;
+        }
+
+        send_text_response(&first_tx, &model.id, "draft");
+        drop(first_tx);
+    };
+    let (result, ()) = tokio::join!(
+        agent.run(vec![ContentBlock::text("start")], RunOptions::default()),
+        drive
+    );
+
+    assert_eq!(result.expect("run succeeds").text(), "final");
+    let requests = provider_handle.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1].messages.as_ref();
+    let steer = message_index(messages, "ordering-steer-marker");
+    let team = message_index(messages, "ordering-team-marker");
+    let background = message_index(messages, "ordering-background-marker");
+    assert!(
+        steer < team && team < background,
+        "expected steering -> team inbox -> background, got {:?}",
+        messages.iter().map(Message::text).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn run_queued_consumes_idle_steer_as_the_user_turn() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
@@ -532,10 +605,34 @@ impl RoundStrategy for InjectOnceStrategy {
     }
 }
 
+struct ImmediateExecutor;
+
+#[async_trait]
+impl RuntimeExecutor for ImmediateExecutor {
+    async fn run(&self, _request: CommandRequest) -> Result<CommandOutput, String> {
+        Ok(CommandOutput {
+            stdout: "ordering background output".to_string(),
+            stderr: String::new(),
+            success: true,
+            status_code: Some(0),
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        })
+    }
+}
+
 fn request_contains(messages: &[Message], needle: &str) -> bool {
     messages
         .iter()
         .any(|message| message.text().contains(needle))
+}
+
+fn message_index(messages: &[Message], needle: &str) -> usize {
+    messages
+        .iter()
+        .position(|message| message.text().contains(needle))
+        .unwrap_or_else(|| panic!("request did not contain {needle:?}"))
 }
 
 async fn wait_for_request_count(provider: &ScriptedProvider, expected: usize) {
