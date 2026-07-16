@@ -273,10 +273,10 @@ pub async fn read_limited_file(path: &Path, max_lines: Option<usize>) -> Result<
     let mut content = Vec::new();
 
     loop {
-        if let Some(limit) = max_lines
-            && content.len() >= limit
-        {
-            break;
+        if let Some(limit) = max_lines {
+            if content.len() >= limit {
+                break;
+            }
         }
 
         match lines.next_line().await {
