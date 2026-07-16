@@ -29,7 +29,8 @@ pub use control::sandbox::{ExecutionEnvironment, detect_environment};
 pub use control::{
     AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
     CommandSpec, ExecOutput, RunOptions, RuntimeExecutor, RuntimeHook, RuntimeHookEvent,
-    RuntimeHooks, RuntimePolicy, is_transient_provider_error, is_transient_runtime_error,
+    RuntimeHooks, RuntimePolicy, ShellValidationMode, is_transient_provider_error,
+    is_transient_runtime_error,
 };
 pub use error::{ErrorCategory, RuntimeError};
 pub(crate) use handle::RuntimeHandle;

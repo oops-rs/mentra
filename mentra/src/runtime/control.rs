@@ -14,5 +14,6 @@ pub use hooks::{
     PreExecutionHooks, RuntimeHook, RuntimeHookEvent, RuntimeHooks, is_transient_provider_error,
     is_transient_runtime_error,
 };
-pub use policy::RuntimePolicy;
+pub(crate) use policy::ShellValidation;
+pub use policy::{RuntimePolicy, ShellValidationMode};
 pub use run::{CancellationFlag, CancellationToken, RunOptions};

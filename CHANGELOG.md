@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### WS1 — Hygiene
+
+- Remove the orphaned 5,924-line `mentra/src/provider/` source tree; the live
+  `mentra/src/provider.rs` adapters remain unchanged.
+- Add opt-in `ShellValidationMode::{Off, Warn, Enforce}` policy handling for
+  builtin foreground and background shell execution. Validation outcomes map
+  to the existing allow/prompt/deny authorization vocabulary, emit existing
+  authorization hooks, and enrich shell authorization previews with the
+  classifier mode, intent, outcome, and reason.
+
+### Compatibility
+
+- Shell validation defaults to `Off`, preserving existing command-execution
+  behavior. `RuntimePolicy` only gains private state, so existing constructors
+  remain source-compatible; no existing public enum gains a variant.
+- Shell `ToolAuthorizationPreview::structured_input` gains an additive
+  `validation` object. Consumers comparing that JSON exhaustively must accept
+  the new key.
+- Pin `time` and `url` to Rust 1.85-compatible releases. Their previous
+  semver ranges could resolve to `time` requiring Rust 1.88 and an
+  `url`/IDNA/ICU chain requiring Rust 1.86.
+
 ## 0.9.0
 
 ### Highlights

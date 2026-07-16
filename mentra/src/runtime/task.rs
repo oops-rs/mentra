@@ -38,8 +38,8 @@ pub(crate) enum TaskError {
     Validation(String),
 }
 
-pub(crate) fn execute_with_store(
-    store: &dyn TaskStore,
+pub(crate) fn execute_with_store<S: TaskStore + ?Sized>(
+    store: &S,
     tool: &TaskIntrinsicTool,
     input: Value,
     namespace: &Path,
@@ -236,7 +236,10 @@ impl<'a> TaskAccess<'a> {
     }
 }
 
-fn load_store_tasks(store: &dyn TaskStore, namespace: &Path) -> Result<Vec<TaskItem>, String> {
+fn load_store_tasks<S: TaskStore + ?Sized>(
+    store: &S,
+    namespace: &Path,
+) -> Result<Vec<TaskItem>, String> {
     store
         .load_tasks(namespace)
         .map_err(|error| format!("Task storage failed: {error}"))

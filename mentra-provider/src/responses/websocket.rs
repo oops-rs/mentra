@@ -189,12 +189,11 @@ impl ResponsesWebsocketConnection {
             .await
             .map_err(|error| map_ws_error(error, &url))?;
 
-        if let Some(turn_state) = turn_state
-            && let Some(header_value) = response
-                .headers()
-                .get(X_CODEX_TURN_STATE_HEADER)
-                .and_then(|value| value.to_str().ok())
-        {
+        let header_value = response
+            .headers()
+            .get(X_CODEX_TURN_STATE_HEADER)
+            .and_then(|value| value.to_str().ok());
+        if let (Some(turn_state), Some(header_value)) = (turn_state, header_value) {
             *turn_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -363,11 +362,15 @@ async fn run_websocket_response_stream(
         match message {
             Message::Text(text) => {
                 if let Some(mapped) = parse_wrapped_websocket_error_event(&text) {
-                    if let Some(headers) = mapped.headers
-                        && tx_event
-                            .send(Ok(ProviderEvent::ResponseHeaders(headers)))
-                            .is_err()
-                    {
+                    let receiver_closed = mapped
+                        .headers
+                        .map(|headers| {
+                            tx_event
+                                .send(Ok(ProviderEvent::ResponseHeaders(headers)))
+                                .is_err()
+                        })
+                        .unwrap_or(false);
+                    if receiver_closed {
                         return Ok(());
                     }
                     return Err(mapped.error);
@@ -469,9 +472,10 @@ fn parse_wrapped_websocket_error_event(payload: &str) -> Option<MappedWebsocketE
         return None;
     }
 
-    if let Some(error) = event.error.as_ref()
-        && let Some(code) = error.code.as_deref()
-        && code == WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE
+    if let Some(error) = event
+        .error
+        .as_ref()
+        .filter(|error| error.code.as_deref() == Some(WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE))
     {
         return Some(MappedWebsocketError {
             error: ProviderError::Retryable {

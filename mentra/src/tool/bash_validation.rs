@@ -5,6 +5,8 @@
 
 use std::path::Path;
 
+use crate::tool::ToolAuthorizationOutcome;
+
 /// Result of validating a bash command before execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationResult {
@@ -14,6 +16,24 @@ pub enum ValidationResult {
     Block { reason: String },
     /// Command requires user confirmation with the given warning.
     Warn { message: String },
+}
+
+impl ValidationResult {
+    pub(crate) fn authorization_outcome(&self) -> ToolAuthorizationOutcome {
+        match self {
+            Self::Allow => ToolAuthorizationOutcome::Allow,
+            Self::Block { .. } => ToolAuthorizationOutcome::Deny,
+            Self::Warn { .. } => ToolAuthorizationOutcome::Prompt,
+        }
+    }
+
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Allow => None,
+            Self::Block { reason } => Some(reason),
+            Self::Warn { message } => Some(message),
+        }
+    }
 }
 
 /// Semantic classification of a bash command's intent.
@@ -794,6 +814,28 @@ mod tests {
         assert_eq!(
             validate_command("ls -la", &workspace, true),
             ValidationResult::Allow
+        );
+    }
+
+    #[test]
+    fn validation_results_map_to_authorization_outcomes() {
+        assert_eq!(
+            ValidationResult::Allow.authorization_outcome(),
+            ToolAuthorizationOutcome::Allow
+        );
+        assert_eq!(
+            ValidationResult::Warn {
+                message: "review".to_string(),
+            }
+            .authorization_outcome(),
+            ToolAuthorizationOutcome::Prompt
+        );
+        assert_eq!(
+            ValidationResult::Block {
+                reason: "blocked".to_string(),
+            }
+            .authorization_outcome(),
+            ToolAuthorizationOutcome::Deny
         );
     }
 

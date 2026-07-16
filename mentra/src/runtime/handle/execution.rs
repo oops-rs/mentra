@@ -29,6 +29,29 @@ impl RuntimeHandle {
             return Err(detail);
         }
 
+        let validation = self
+            .execution
+            .policy
+            .evaluate_shell_command(&command, &config.base_dir);
+        if validation.should_emit_hook() {
+            let detail = validation
+                .reason()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "Shell command requires validation".to_string());
+            let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
+                agent_id: agent_id.to_string(),
+                action: if background {
+                    "background_shell_validation".to_string()
+                } else {
+                    "shell_validation".to_string()
+                },
+                detail: detail.clone(),
+            });
+            if validation.should_deny() {
+                return Err(detail);
+            }
+        }
+
         let command_request = CommandRequest {
             spec: CommandSpec::Shell { command },
             cwd,
@@ -51,20 +74,21 @@ impl RuntimeHandle {
         let (_config, command_request) =
             self.build_command_request(agent_id, command, requested_timeout, cwd, true)?;
 
-        if let Some(limit) = self.execution.policy.background_task_limit
-            && self
+        if let Some(limit) = self.execution.policy.background_task_limit {
+            if self
                 .collaboration
                 .background_tasks
                 .running_task_count(agent_id)
                 >= limit
-        {
-            let detail = format!("Background task limit of {limit} reached");
-            let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
-                agent_id: agent_id.to_string(),
-                action: "background_limit".to_string(),
-                detail: detail.clone(),
-            });
-            return Err(detail);
+            {
+                let detail = format!("Background task limit of {limit} reached");
+                let _ = self.emit_hook(RuntimeHookEvent::AuthorizationDenied {
+                    agent_id: agent_id.to_string(),
+                    action: "background_limit".to_string(),
+                    detail: detail.clone(),
+                });
+                return Err(detail);
+            }
         }
 
         self.collaboration
@@ -338,10 +362,22 @@ impl RuntimeHandle {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    pub(crate) fn shell_validation(
+        &self,
+        agent_id: &str,
+        command: &str,
+    ) -> Result<crate::runtime::control::ShellValidation, String> {
+        let config = self.agent_config(agent_id)?;
+        Ok(self
+            .execution
+            .policy
+            .evaluate_shell_command(command, &config.base_dir))
+    }
+
     pub fn emit_hook(&self, event: RuntimeHookEvent) -> Result<(), RuntimeError> {
         self.execution
             .hooks
-            .emit(self.persistence.store.as_ref(), &event)
+            .emit_runtime(self.persistence.store.as_ref(), &event)
     }
 }
 

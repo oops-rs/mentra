@@ -11,7 +11,7 @@ use crate::{
     BuiltinProvider, ContentBlock, Role,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, TokenUsage},
     runtime::{
-        RunOptions, Runtime, RuntimeHook, RuntimeHookEvent, RuntimePolicy,
+        RunOptions, Runtime, RuntimeHook, RuntimeHookEvent, RuntimePolicy, ShellValidationMode,
         is_transient_runtime_error,
     },
     tool::{
@@ -97,6 +97,118 @@ async fn policy_can_deny_shell_tool_execution() {
         ContentBlock::ToolResult { content, is_error: true, .. }
             if content.contains("disabled by the runtime policy")
     ));
+}
+
+#[tokio::test]
+async fn enforced_shell_validation_blocks_destructive_command_and_emits_hook() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let sentinel = std::env::temp_dir().join(format!(
+        "mentra-shell-validation-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&sentinel).expect("create sentinel directory");
+    let input = json!({ "command": format!("rm -rf {}", sentinel.display()) }).to_string();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "rm", "shell", &input),
+            text_stream("done"),
+        ],
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_policy(
+            RuntimePolicy::read_only(std::env::current_dir().expect("current directory"))
+                .shell_validation(ShellValidationMode::Enforce),
+        )
+        .with_hook(RecordingHook {
+            events: recorded.clone(),
+        })
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).unwrap();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "delete everything".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    assert!(matches!(
+        &agent.history()[2].content[0],
+        ContentBlock::ToolResult { content, is_error: true, .. }
+            if content.contains("not allowed in read-only mode")
+    ));
+    assert!(
+        recorded
+            .lock()
+            .expect("hook events poisoned")
+            .iter()
+            .any(|event| matches!(
+                event,
+                RuntimeHookEvent::AuthorizationDenied { action, detail, .. }
+                    if action == "shell_validation" && detail.contains("not allowed")
+            ))
+    );
+    assert!(
+        sentinel.exists(),
+        "blocked command must not reach the executor"
+    );
+    std::fs::remove_dir_all(sentinel).expect("remove sentinel directory");
+}
+
+#[tokio::test]
+async fn shell_authorization_preview_carries_validation_intent() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "rm",
+                "shell",
+                r#"{"command":"rm -rf /tmp/mentra-preview-never-execute"}"#,
+            ),
+            text_stream("done"),
+        ],
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_policy(RuntimePolicy::workspace_bounded(
+            std::env::current_dir().expect("current directory"),
+        ))
+        .with_tool_authorizer(RecordingAuthorizer::deny(
+            "destructive command denied",
+            requests.clone(),
+        ))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).unwrap();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "classify this command".to_string(),
+        }])
+        .await
+        .expect("send");
+
+    let requests = requests.lock().expect("requests poisoned");
+    let validation = &requests[0].preview.structured_input["validation"];
+    assert_eq!(validation["mode"], "off");
+    assert_eq!(validation["intent"], "destructive");
+    assert_eq!(validation["outcome"], "prompt");
+    assert!(validation["reason"].as_str().is_some());
 }
 
 #[tokio::test]

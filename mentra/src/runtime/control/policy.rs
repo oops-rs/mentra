@@ -4,6 +4,73 @@ use std::{
     time::Duration,
 };
 
+use crate::tool::{
+    ToolAuthorizationOutcome,
+    bash_validation::{CommandIntent, ValidationResult, classify_command, validate_command},
+};
+
+/// Controls heuristic validation of builtin shell commands.
+///
+/// Shell validation is a defense-in-depth guardrail and permission-prompt UX
+/// signal. It is heuristic and is not a security boundary; filesystem roots,
+/// environment isolation, process groups, and command timeouts remain the
+/// enforceable runtime boundaries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShellValidationMode {
+    /// Classify commands for authorization previews without changing execution.
+    #[default]
+    Off,
+    /// Emit an authorization hook for warnings or blocks, but allow execution.
+    Warn,
+    /// Deny commands classified as blocked and surface warnings through hooks.
+    Enforce,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShellValidation {
+    pub(crate) mode: ShellValidationMode,
+    pub(crate) intent: CommandIntent,
+    pub(crate) result: ValidationResult,
+    pub(crate) outcome: ToolAuthorizationOutcome,
+}
+
+impl ShellValidationMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Warn => "warn",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+impl ShellValidation {
+    pub(crate) const fn intent_name(&self) -> &'static str {
+        match self.intent {
+            CommandIntent::ReadOnly => "read_only",
+            CommandIntent::Write => "write",
+            CommandIntent::Destructive => "destructive",
+            CommandIntent::Network => "network",
+            CommandIntent::ProcessManagement => "process_management",
+            CommandIntent::PackageManagement => "package_management",
+            CommandIntent::SystemAdmin => "system_admin",
+            CommandIntent::Unknown => "unknown",
+        }
+    }
+
+    pub(crate) fn reason(&self) -> Option<&str> {
+        self.result.reason()
+    }
+
+    pub(crate) fn should_emit_hook(&self) -> bool {
+        self.mode != ShellValidationMode::Off && self.outcome != ToolAuthorizationOutcome::Allow
+    }
+
+    pub(crate) fn should_deny(&self) -> bool {
+        self.mode == ShellValidationMode::Enforce && self.outcome == ToolAuthorizationOutcome::Deny
+    }
+}
+
 /// Authorization policy for builtin shell, background, and file tools.
 #[derive(Debug, Clone)]
 pub struct RuntimePolicy {
@@ -13,6 +80,7 @@ pub struct RuntimePolicy {
     allowed_read_roots: Vec<PathBuf>,
     allowed_write_roots: Vec<PathBuf>,
     allowed_env_vars: Vec<String>,
+    shell_validation_mode: ShellValidationMode,
     pub(crate) background_task_limit: Option<usize>,
     pub(crate) default_command_timeout: Duration,
     pub(crate) max_command_timeout: Duration,
@@ -28,6 +96,7 @@ impl Default for RuntimePolicy {
             allowed_read_roots: Vec::new(),
             allowed_write_roots: Vec::new(),
             allowed_env_vars: default_allowed_env_vars(),
+            shell_validation_mode: ShellValidationMode::Off,
             background_task_limit: Some(8),
             default_command_timeout: Duration::from_secs(30),
             max_command_timeout: Duration::from_secs(30),
@@ -111,6 +180,15 @@ impl RuntimePolicy {
         self
     }
 
+    /// Selects heuristic validation for builtin shell commands.
+    ///
+    /// This is a defense-in-depth guardrail and prompt signal, not a security
+    /// boundary. [`ShellValidationMode::Off`] preserves execution behavior.
+    pub fn shell_validation(mut self, mode: ShellValidationMode) -> Self {
+        self.shell_validation_mode = mode;
+        self
+    }
+
     /// Adds an extra working-directory root allowed for shell commands.
     pub fn with_allowed_working_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.allowed_working_roots.push(path.into());
@@ -173,6 +251,27 @@ impl RuntimePolicy {
         background: bool,
     ) -> Result<(), String> {
         self.authorize_command_roots(base_dir, cwd, background)
+    }
+
+    pub(crate) fn evaluate_shell_command(
+        &self,
+        command: &str,
+        default_workspace: &Path,
+    ) -> ShellValidation {
+        let workspace = self
+            .allowed_working_roots
+            .first()
+            .map(PathBuf::as_path)
+            .unwrap_or(default_workspace);
+        let result = validate_command(command, workspace, self.allowed_write_roots.is_empty());
+        let outcome = result.authorization_outcome();
+
+        ShellValidation {
+            mode: self.shell_validation_mode,
+            intent: classify_command(command),
+            result,
+            outcome,
+        }
     }
 
     pub(crate) fn effective_timeout(&self, requested: Option<Duration>) -> Duration {
@@ -389,6 +488,36 @@ mod tests {
             .authorize_command_execution(&cwd, &cwd, true)
             .expect_err("background should be disabled");
         assert!(error.contains("Background command execution is disabled"));
+    }
+
+    #[test]
+    fn shell_validation_defaults_off_and_uses_authorization_semantics() {
+        let workspace = test_path("validation-workspace");
+        let default_validation =
+            RuntimePolicy::default().evaluate_shell_command("rm -rf /tmp/sentinel", &workspace);
+        assert_eq!(default_validation.mode, ShellValidationMode::Off);
+        assert_eq!(default_validation.intent, CommandIntent::Destructive);
+        assert_eq!(default_validation.outcome, ToolAuthorizationOutcome::Deny);
+        assert!(!default_validation.should_deny());
+
+        let warned = RuntimePolicy::default()
+            .shell_validation(ShellValidationMode::Warn)
+            .evaluate_shell_command("rm -rf /tmp/sentinel", &workspace);
+        assert!(warned.should_emit_hook());
+        assert!(!warned.should_deny());
+
+        let enforced = RuntimePolicy::default()
+            .shell_validation(ShellValidationMode::Enforce)
+            .evaluate_shell_command("rm -rf /tmp/sentinel", &workspace);
+        assert!(enforced.should_emit_hook());
+        assert!(enforced.should_deny());
+
+        let enforced_warning = RuntimePolicy::workspace_bounded(&workspace)
+            .shell_validation(ShellValidationMode::Enforce)
+            .evaluate_shell_command("rm -rf /", &workspace);
+        assert_eq!(enforced_warning.outcome, ToolAuthorizationOutcome::Prompt);
+        assert!(enforced_warning.should_emit_hook());
+        assert!(!enforced_warning.should_deny());
     }
 
     #[test]

@@ -27,9 +27,10 @@ async fn forward_events(
     response: reqwest::Response,
     tx: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
 ) -> Result<(), ProviderError> {
-    if let Some(headers) = response_headers_event(response.headers())
-        && tx.send(Ok(headers)).is_err()
-    {
+    let receiver_closed = response_headers_event(response.headers())
+        .map(|headers| tx.send(Ok(headers)).is_err())
+        .unwrap_or(false);
+    if receiver_closed {
         return Ok(());
     }
 
@@ -209,30 +210,38 @@ pub(crate) fn parse_json_event(
 
             let mut events = Vec::new();
 
-            if !state.text_delta_seen.remove(&output_index)
-                && let Some(text) = item.completed_text()
-                && !text.is_empty()
-            {
+            let completed_text = if state.text_delta_seen.remove(&output_index) {
+                None
+            } else {
+                item.completed_text().filter(|text| !text.is_empty())
+            };
+            if let Some(text) = completed_text {
                 events.push(ProviderEvent::ContentBlockDelta {
                     index: output_index,
                     delta: ContentBlockDelta::Text(text),
                 });
             }
 
-            if !state.function_delta_seen.remove(&output_index)
-                && let Some(arguments) = item.completed_arguments()
-                && !arguments.is_empty()
-            {
+            let completed_arguments = if state.function_delta_seen.remove(&output_index) {
+                None
+            } else {
+                item.completed_arguments()
+                    .filter(|arguments| !arguments.is_empty())
+            };
+            if let Some(arguments) = completed_arguments {
                 events.push(ProviderEvent::ContentBlockDelta {
                     index: output_index,
                     delta: ContentBlockDelta::ToolUseInputJson(arguments),
                 });
             }
 
-            if !state.tool_search_delta_seen.remove(&output_index)
-                && let Some(query) = item.completed_tool_search_query()
-                && !query.is_empty()
-            {
+            let completed_query = if state.tool_search_delta_seen.remove(&output_index) {
+                None
+            } else {
+                item.completed_tool_search_query()
+                    .filter(|query| !query.is_empty())
+            };
+            if let Some(query) = completed_query {
                 events.push(ProviderEvent::ContentBlockDelta {
                     index: output_index,
                     delta: ContentBlockDelta::HostedToolSearchQuery(query),
@@ -361,8 +370,10 @@ struct ResponsesResponseEnvelope {
 
 impl ResponsesResponseEnvelope {
     fn stop_reason(&self) -> Option<String> {
-        if let Some(details) = &self.incomplete_details
-            && let Some(reason) = &details.reason
+        if let Some(reason) = self
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.reason.as_ref())
         {
             return Some(reason.clone());
         }
@@ -595,9 +606,7 @@ impl ResponsesOutputItem {
                         delta: ContentBlockDelta::HostedWebSearchAction(action),
                     });
                 }
-                if let Some(status) = status.clone()
-                    && !status.is_empty()
-                {
+                if let Some(status) = status.clone().filter(|status| !status.is_empty()) {
                     events.push(ProviderEvent::ContentBlockDelta {
                         index: output_index,
                         delta: ContentBlockDelta::HostedWebSearchStatus(status),
@@ -612,8 +621,9 @@ impl ResponsesOutputItem {
                 ..
             } => {
                 let mut events = Vec::new();
-                if let Some(revised_prompt) = revised_prompt.clone()
-                    && !revised_prompt.is_empty()
+                if let Some(revised_prompt) = revised_prompt
+                    .clone()
+                    .filter(|revised_prompt| !revised_prompt.is_empty())
                 {
                     events.push(ProviderEvent::ContentBlockDelta {
                         index: output_index,
