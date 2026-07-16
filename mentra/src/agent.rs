@@ -11,6 +11,7 @@ mod steering;
 mod subagent;
 mod task_state;
 mod team;
+mod terminal_output;
 #[cfg(test)]
 mod tests;
 
@@ -58,6 +59,7 @@ pub use round_strategy::{
 use runner::TurnRunner;
 pub use steering::{QueueMode, SteeringHandle};
 pub(crate) use subagent::DisposableSubagentTemplate;
+pub use terminal_output::{FinalOutput, TerminalOutputSpec};
 
 static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -77,6 +79,7 @@ pub struct Agent {
     snapshot_tx: watch::Sender<AgentSnapshot>,
     provider: Arc<dyn Provider>,
     hidden_tools: HashSet<String>,
+    terminal_tool_gate: Arc<Mutex<Option<String>>>,
     max_rounds: Option<usize>,
     inflight_background_notifications: Vec<BackgroundNotification>,
     inflight_team_messages: Vec<TeamMessage>,
@@ -223,6 +226,7 @@ impl Agent {
             snapshot_tx,
             provider,
             hidden_tools,
+            terminal_tool_gate: Arc::new(Mutex::new(None)),
             max_rounds,
             inflight_background_notifications: Vec::new(),
             inflight_team_messages: Vec::new(),
@@ -306,6 +310,7 @@ impl Agent {
             snapshot_tx,
             provider,
             hidden_tools: state.record.hidden_tools,
+            terminal_tool_gate: Arc::new(Mutex::new(None)),
             max_rounds: state.record.max_rounds,
             inflight_background_notifications: Vec::new(),
             inflight_team_messages: Vec::new(),
@@ -471,9 +476,15 @@ impl Agent {
     }
 
     pub(crate) fn tools(&self) -> Arc<[crate::tool::ProviderToolSpec]> {
+        let terminal_tool = self
+            .terminal_tool_gate
+            .lock()
+            .expect("terminal tool gate poisoned")
+            .clone();
         self.runtime
             .tools()
             .iter()
+            .filter(|tool| terminal_tool.as_ref().is_none_or(|name| name == &tool.name))
             .filter(|tool| self.can_use_tool(&tool.name))
             .cloned()
             .collect::<Vec<_>>()
@@ -481,6 +492,10 @@ impl Agent {
     }
 
     pub(crate) fn can_use_tool(&self, name: &str) -> bool {
+        if !self.runtime.tool_is_visible_to_agent(name, &self.id) {
+            return false;
+        }
+
         if self.hidden_tools.contains(name) {
             return false;
         }
@@ -505,6 +520,15 @@ impl Agent {
     }
 
     pub(crate) fn tool_choice(&self) -> Option<ToolChoice> {
+        if let Some(name) = self
+            .terminal_tool_gate
+            .lock()
+            .expect("terminal tool gate poisoned")
+            .clone()
+        {
+            return Some(ToolChoice::Tool { name });
+        }
+
         match self.config.tool_choice.clone() {
             Some(ToolChoice::Tool { name }) if !self.can_use_tool(&name) => Some(ToolChoice::Auto),
             other => other,

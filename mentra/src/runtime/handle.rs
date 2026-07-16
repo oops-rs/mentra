@@ -78,6 +78,7 @@ pub(crate) struct CollaborationServices {
 #[derive(Clone)]
 pub(crate) struct ToolingServices {
     pub(crate) tool_registry: Arc<RwLock<ToolRegistry>>,
+    pub(crate) scoped_tools: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) skill_loader: Arc<RwLock<Option<SkillLoader>>>,
     pub(crate) app_contexts: Arc<RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>>,
 }

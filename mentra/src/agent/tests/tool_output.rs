@@ -12,16 +12,17 @@ use std::{
 };
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
-    sync::Mutex as TokioMutex,
+    sync::{Mutex as TokioMutex, mpsc},
     time::{Duration, sleep},
 };
 
 use crate::{
-    AgentConfig, BuiltinProvider, ContentBlock, Role,
+    AgentConfig, BuiltinProvider, ContentBlock, Role, TerminalOutputSpec,
     agent::CompactionConfig,
-    provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
+    provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, ToolChoice},
     runtime::{RunOptions, Runtime, RuntimeError, RuntimeHookEvent, RuntimePolicy},
     tool::{
         ParallelToolContext, ToolContext, ToolDefinition, ToolDurability, ToolExecutionCategory,
@@ -29,7 +30,9 @@ use crate::{
     },
 };
 
-use super::support::{ScriptedProvider, StaticTool, StreamScript, model_info, ok_stream};
+use super::support::{
+    ScriptedProvider, StaticTool, StreamScript, controlled_stream, model_info, ok_stream,
+};
 
 /// A tool that only implements the new structured, exclusive-lane entry
 /// point directly (no `execute_mut` override) — proves a tool need not touch
@@ -1177,4 +1180,222 @@ async fn parallel_lane_terminate_is_rejected_as_misuse_and_run_continues() {
     let text = content.to_display_string();
     assert!(text.contains("not honored"));
     assert!(text.contains("parallel"));
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct TypedAnswer {
+    answer: u64,
+    evidence: Vec<String>,
+}
+
+#[tokio::test]
+async fn run_to_output_forces_scoped_terminal_tool_and_extracts_exact_call_detail() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let (stream, tx) = controlled_stream();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![stream],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn("target", model.clone())
+        .expect("spawn target");
+    let other_agent = runtime.spawn("other", model).expect("spawn other");
+    let steering = agent.steering_handle();
+    steering.steer(vec![ContentBlock::text("keep this queued")]);
+
+    let drive = async {
+        wait_for_recorded_requests(&provider_handle, 1).await;
+        let requests = provider_handle.recorded_requests().await;
+        let ToolChoice::Tool { name } = requests[0]
+            .tool_choice
+            .clone()
+            .expect("terminal tool choice")
+        else {
+            panic!("run_to_output must force its terminal tool");
+        };
+        assert_eq!(requests[0].tools.len(), 1);
+        assert_eq!(requests[0].tools[0].name, name);
+        assert!(name.starts_with("mentra_terminal_finish_report_"));
+        assert!(
+            other_agent.tools().iter().all(|tool| tool.name != name),
+            "a scoped terminal tool must not leak into another agent's request"
+        );
+        send_tool_response(
+            &tx,
+            "model",
+            "terminal-call-42",
+            &name,
+            r#"{"answer":42,"evidence":["a","b"]}"#,
+        );
+        drop(tx);
+        name
+    };
+    let (result, tool_name) = tokio::join!(
+        agent.run_to_output::<TypedAnswer>(
+            vec![ContentBlock::text("produce typed output")],
+            RunOptions::default(),
+            TerminalOutputSpec::new(
+                "finish-report",
+                "Return the final report",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "integer" },
+                        "evidence": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["answer", "evidence"]
+                }),
+            ),
+        ),
+        drive
+    );
+
+    let output = result.expect("typed terminal output succeeds");
+    assert_eq!(
+        output.value,
+        TypedAnswer {
+            answer: 42,
+            evidence: vec!["a".to_string(), "b".to_string()],
+        }
+    );
+    assert_eq!(output.message.role, Role::User);
+    assert!(matches!(
+        output.message.content.as_slice(),
+        [ContentBlock::ToolResult { tool_use_id, .. }] if tool_use_id == "terminal-call-42"
+    ));
+    let last = agent.transcript().items().last().expect("terminal item");
+    assert_eq!(
+        last.detail("terminal-call-42"),
+        Some(&json!({ "answer": 42, "evidence": ["a", "b"] }))
+    );
+    assert!(
+        steering.has_pending(),
+        "terminal end_turn precedes steering"
+    );
+    assert!(
+        runtime.tool_descriptor(&tool_name).is_none(),
+        "the generated tool is unregistered after the run"
+    );
+}
+
+#[tokio::test]
+async fn run_to_output_never_reuses_stale_terminal_details() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let (first_stream, first_tx) = controlled_stream();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![first_stream, text_stream(&model.id, "plain answer")],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let drive = async {
+        wait_for_recorded_requests(&provider_handle, 1).await;
+        let requests = provider_handle.recorded_requests().await;
+        let ToolChoice::Tool { name } = requests[0]
+            .tool_choice
+            .clone()
+            .expect("terminal tool choice")
+        else {
+            panic!("expected forced tool");
+        };
+        send_tool_response(
+            &first_tx,
+            "model",
+            "first-terminal-call",
+            &name,
+            r#"{"answer":1,"evidence":[]}"#,
+        );
+        drop(first_tx);
+    };
+    let (first, ()) = tokio::join!(
+        agent.run_to_output::<TypedAnswer>(
+            vec![ContentBlock::text("first")],
+            RunOptions::default(),
+            terminal_spec(),
+        ),
+        drive
+    );
+    assert_eq!(first.expect("first output").value.answer, 1);
+
+    let error = agent
+        .run_to_output::<TypedAnswer>(
+            vec![ContentBlock::text("second")],
+            RunOptions::default(),
+            terminal_spec(),
+        )
+        .await
+        .expect_err("plain response must not reuse prior details");
+    assert!(
+        error
+            .to_string()
+            .contains("without invoking the expected terminal tool")
+    );
+}
+
+fn terminal_spec() -> TerminalOutputSpec {
+    TerminalOutputSpec::new(
+        "finish",
+        "Return typed output",
+        json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "integer" },
+                "evidence": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["answer", "evidence"]
+        }),
+    )
+}
+
+async fn wait_for_recorded_requests(provider: &ScriptedProvider, expected: usize) {
+    loop {
+        if provider.recorded_requests().await.len() >= expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn send_tool_response(
+    tx: &mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
+    model: &str,
+    id: &str,
+    name: &str,
+    input: &str,
+) {
+    let events = [
+        ProviderEvent::MessageStarted {
+            id: format!("message-{id}"),
+            model: model.to_string(),
+            role: Role::Assistant,
+        },
+        ProviderEvent::ContentBlockStarted {
+            index: 0,
+            kind: ContentBlockStart::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::ToolUseInputJson(input.to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::MessageStopped,
+    ];
+    for event in events {
+        tx.send(Ok(event)).expect("stream receiver remains alive");
+    }
 }
