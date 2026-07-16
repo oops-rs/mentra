@@ -86,7 +86,7 @@ impl RuntimeHandle {
         let mut tool_registry = ToolRegistry::default();
         if runtime_intrinsics_enabled {
             crate::runtime::intrinsic::register_tools(&mut tool_registry);
-            tool_registry.register_builtin_tools();
+            tool_registry.register_builtin_tools(crate::tool::FileToolProfile::default());
         }
         let handle = Self {
             execution: ExecutionServices {

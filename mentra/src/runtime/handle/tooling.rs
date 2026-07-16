@@ -1,6 +1,14 @@
 use super::*;
 
 impl RuntimeHandle {
+    pub fn configure_file_tools(&self, profile: crate::tool::FileToolProfile) {
+        self.tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .configure_file_tools(profile);
+    }
+
     pub fn register_app_context(&self, context: Arc<dyn Any + Send + Sync>) {
         self.tooling
             .app_contexts

@@ -13,7 +13,7 @@ use tokio::time::timeout;
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    BackgroundTaskStatus, BuiltinProvider, ContentBlock, Message, Role,
+    BackgroundTaskStatus, BuiltinProvider, ContentBlock, FileToolProfile, Message, Role,
     agent::{
         Agent, AgentConfig, AgentEvent, MemoryConfig, SpawnedAgentStatus, TaskConfig,
         TeamAutonomyConfig, TeamConfig, ToolProfile, WorkspaceConfig,
@@ -1334,6 +1334,271 @@ async fn assert_files_recursive_operation_rejects_symlink_escape(operation: &str
 
     fs::remove_dir_all(&repo_dir).expect("remove workspace");
     fs::remove_dir_all(&outside_dir).expect("remove outside directory");
+}
+
+#[test]
+fn builtin_file_tool_profiles_default_to_batched_and_reconfigure_eagerly() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model], Vec::new());
+
+    let default_runtime = Runtime::builder()
+        .with_provider_instance(provider.clone())
+        .build()
+        .expect("build default runtime");
+    let default_names = default_runtime
+        .tools()
+        .into_iter()
+        .map(|tool| tool.provider.name)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(default_names.contains("files"));
+    assert!(!default_names.contains("read"));
+
+    let split_runtime = Runtime::builder()
+        .with_file_tools(FileToolProfile::Both)
+        .with_file_tools(FileToolProfile::Split)
+        .with_provider_instance(provider.clone())
+        .build()
+        .expect("build split runtime");
+    let split_names = split_runtime
+        .tools()
+        .into_iter()
+        .map(|tool| tool.provider.name)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(!split_names.contains("files"));
+    for name in ["read", "ls", "grep", "glob", "write", "edit"] {
+        assert!(split_names.contains(name), "missing {name}");
+    }
+
+    let both_runtime = Runtime::builder()
+        .with_file_tools(FileToolProfile::Split)
+        .with_file_tools(FileToolProfile::Both)
+        .with_provider_instance(provider)
+        .build()
+        .expect("build combined runtime");
+    let both_names = both_runtime
+        .tools()
+        .into_iter()
+        .map(|tool| tool.provider.name)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(both_names.contains("files"));
+    for name in ["read", "ls", "grep", "glob", "write", "edit"] {
+        assert!(both_names.contains(name), "missing {name}");
+    }
+}
+
+#[tokio::test]
+async fn split_read_list_and_grep_match_equivalent_files_batches() {
+    let repo_dir = temp_team_dir("split-read-parity");
+    fs::create_dir_all(repo_dir.join("src")).expect("create src");
+    fs::write(repo_dir.join("note.txt"), "alpha\nbeta\n").expect("write note");
+    fs::write(repo_dir.join("src/lib.rs"), "fn beta() {}\n").expect("write source");
+
+    let cases = [
+        (
+            "read",
+            json!({ "path": "note.txt", "offset": 2, "limit": 1 }),
+            json!({ "operations": [{ "op": "read", "path": "note.txt", "offset": 2, "limit": 1 }] }),
+        ),
+        (
+            "ls",
+            json!({ "path": ".", "depth": 2, "limit": 20 }),
+            json!({ "operations": [{ "op": "list", "path": ".", "depth": 2, "limit": 20 }] }),
+        ),
+        (
+            "grep",
+            json!({ "path": ".", "pattern": "beta", "limit": 20 }),
+            json!({ "operations": [{ "op": "search", "path": ".", "pattern": "beta", "limit": 20 }] }),
+        ),
+    ];
+
+    for (tool, split_input, batched_input) in cases {
+        let split =
+            run_builtin_file_tool(FileToolProfile::Split, tool, split_input, &repo_dir).await;
+        let batched =
+            run_builtin_file_tool(FileToolProfile::Batched, "files", batched_input, &repo_dir)
+                .await;
+
+        assert_eq!(
+            first_tool_result(&split.0),
+            first_tool_result(&batched.0),
+            "{tool} must project the same workspace-engine result as files"
+        );
+    }
+
+    fs::remove_dir_all(repo_dir).expect("remove workspace");
+}
+
+#[tokio::test]
+async fn split_write_and_edit_match_equivalent_files_mutations() {
+    let batched_dir = temp_team_dir("batched-mutation-parity");
+    let split_dir = temp_team_dir("split-mutation-parity");
+    fs::write(batched_dir.join("note.txt"), "before\n").expect("write batched note");
+    fs::write(split_dir.join("note.txt"), "before\n").expect("write split note");
+
+    run_builtin_file_tool(
+        FileToolProfile::Batched,
+        "files",
+        json!({ "operations": [{ "op": "set", "path": "note.txt", "content": "alpha beta\n" }] }),
+        &batched_dir,
+    )
+    .await;
+    run_builtin_file_tool(
+        FileToolProfile::Split,
+        "write",
+        json!({ "filePath": "note.txt", "content": "alpha beta\n" }),
+        &split_dir,
+    )
+    .await;
+    assert_eq!(
+        fs::read(batched_dir.join("note.txt")).expect("read batched write"),
+        fs::read(split_dir.join("note.txt")).expect("read split write")
+    );
+
+    run_builtin_file_tool(
+        FileToolProfile::Batched,
+        "files",
+        json!({ "operations": [{ "op": "replace", "path": "note.txt", "old": "beta", "new": "gamma" }] }),
+        &batched_dir,
+    )
+    .await;
+    let (split_agent, _) = run_builtin_file_tool(
+        FileToolProfile::Split,
+        "edit",
+        json!({
+            "file_path": "note.txt",
+            "old_string": "beta",
+            "new_string": "gamma"
+        }),
+        &split_dir,
+    )
+    .await;
+    assert_eq!(
+        fs::read(batched_dir.join("note.txt")).expect("read batched edit"),
+        fs::read(split_dir.join("note.txt")).expect("read split edit")
+    );
+    let detail = split_agent
+        .transcript()
+        .items()
+        .iter()
+        .find_map(|item| item.detail("call-edit"))
+        .expect("edit details");
+    assert!(detail["diff"].as_str().is_some_and(|diff| !diff.is_empty()));
+    assert!(
+        detail["patch"]
+            .as_str()
+            .is_some_and(|patch| !patch.is_empty())
+    );
+    assert_eq!(detail["first_changed_line"], json!(1));
+
+    fs::remove_dir_all(batched_dir).expect("remove batched workspace");
+    fs::remove_dir_all(split_dir).expect("remove split workspace");
+}
+
+#[tokio::test]
+async fn every_split_file_tool_enforces_its_workspace_policy() {
+    let repo_dir = temp_team_dir("split-policy-root");
+    let outside_dir = temp_team_dir("split-policy-outside");
+    fs::write(outside_dir.join("secret.txt"), "outside-secret\n").expect("write secret");
+    let outside = outside_dir.to_string_lossy().into_owned();
+    let secret = outside_dir
+        .join("secret.txt")
+        .to_string_lossy()
+        .into_owned();
+    let denied_write = outside_dir.join("new.txt").to_string_lossy().into_owned();
+    let cases = [
+        ("read", json!({ "path": secret }), "read roots"),
+        ("ls", json!({ "path": outside.clone() }), "read roots"),
+        (
+            "grep",
+            json!({ "path": outside.clone(), "pattern": "secret" }),
+            "read roots",
+        ),
+        (
+            "glob",
+            json!({ "path": outside, "pattern": "**/*.txt" }),
+            "read roots",
+        ),
+        (
+            "write",
+            json!({ "path": denied_write, "content": "denied" }),
+            "write roots",
+        ),
+        (
+            "edit",
+            json!({
+                "path": outside_dir.join("secret.txt"),
+                "edits": [{ "old_string": "outside-secret", "new_string": "changed" }]
+            }),
+            "write roots",
+        ),
+    ];
+
+    for (tool, input, expected) in cases {
+        let (agent, _) =
+            run_builtin_file_tool(FileToolProfile::Split, tool, input, &repo_dir).await;
+        let (content, is_error) = first_tool_result(&agent);
+        assert!(is_error, "{tool} should be denied: {content}");
+        assert!(
+            content.contains(expected),
+            "unexpected {tool} denial: {content}"
+        );
+    }
+
+    fs::remove_dir_all(repo_dir).expect("remove workspace");
+    fs::remove_dir_all(outside_dir).expect("remove outside directory");
+}
+
+#[tokio::test]
+async fn split_read_only_batch_preserves_provider_call_order() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            multi_tool_use_stream(
+                &model.id,
+                &[
+                    ("call-read", "read", r#"{"path":"note.txt"}"#),
+                    ("call-glob", "glob", r#"{"pattern":"**/*.txt"}"#),
+                    ("call-ls", "ls", r#"{"path":"."}"#),
+                ],
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let repo_dir = temp_team_dir("split-parallel-order");
+    fs::write(repo_dir.join("note.txt"), "alpha\n").expect("write note");
+    let runtime = Runtime::builder()
+        .with_file_tools(FileToolProfile::Split)
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("inspect in parallel")])
+        .await
+        .expect("send");
+
+    let result_ids = agent.history()[2]
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(result_ids, ["call-read", "call-glob", "call-ls"]);
+    fs::remove_dir_all(repo_dir).expect("remove workspace");
 }
 
 #[tokio::test]
@@ -4808,6 +5073,62 @@ fn multi_tool_use_stream(model: &str, calls: &[(&str, &str, &str)]) -> StreamScr
 
     events.push(ProviderEvent::MessageStopped);
     ok_stream(events)
+}
+
+async fn run_builtin_file_tool(
+    profile: FileToolProfile,
+    tool_name: &str,
+    input: serde_json::Value,
+    workspace: &Path,
+) -> (Agent, ScriptedProvider) {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                &format!("call-{tool_name}"),
+                tool_name,
+                &input.to_string(),
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let runtime = Runtime::builder()
+        .with_file_tools(profile)
+        .with_provider_instance(provider.clone())
+        .build()
+        .expect("build file-tool runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(workspace),
+                ..Default::default()
+            },
+        )
+        .expect("spawn file-tool agent");
+    agent
+        .send(vec![ContentBlock::text(format!("run {tool_name}"))])
+        .await
+        .expect("run file tool");
+    (agent, provider)
+}
+
+fn first_tool_result(agent: &Agent) -> (String, bool) {
+    agent
+        .history()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => Some((content.to_display_string(), *is_error)),
+            _ => None,
+        })
+        .expect("tool result")
 }
 
 fn tool_names(request: &Request<'_>) -> std::collections::HashSet<String> {

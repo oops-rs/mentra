@@ -2,6 +2,7 @@ mod authorization;
 /// Bash command validation — safety checks before shell execution.
 pub mod bash_validation;
 mod builtin;
+mod coding;
 mod context;
 mod descriptor;
 mod files;
@@ -30,7 +31,22 @@ pub use model::{
 pub(crate) use runtime::ToolRuntime;
 
 use builtin::{BackgroundRunTool, CheckBackgroundTool, LoadSkillTool, ShellTool};
+use coding::{EditTool, GlobTool, GrepTool, ListTool, ReadTool, WriteTool};
 use files::FilesTool;
+
+/// Selects which builtin file-tool surface a runtime exposes.
+///
+/// [`Batched`](Self::Batched) preserves the historical `files` tool exactly.
+/// [`Split`](Self::Split) exposes model-conventional `read`, `ls`, `grep`,
+/// `glob`, `write`, and `edit` tools. [`Both`](Self::Both) exposes both
+/// surfaces over the same workspace engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileToolProfile {
+    #[default]
+    Batched,
+    Split,
+    Both,
+}
 
 #[derive(Clone)]
 struct RegisteredTool {
@@ -92,11 +108,30 @@ impl ToolRegistry {
         self.register_tool(LoadSkillTool);
     }
 
-    pub(crate) fn register_builtin_tools(&mut self) {
+    pub(crate) fn register_builtin_tools(&mut self, file_tools: FileToolProfile) {
         self.register_tool(ShellTool);
         self.register_tool(BackgroundRunTool);
         self.register_tool(CheckBackgroundTool);
-        self.register_tool(FilesTool);
+        self.configure_file_tools(file_tools);
+    }
+
+    pub(crate) fn configure_file_tools(&mut self, profile: FileToolProfile) {
+        for name in ["files", "read", "ls", "grep", "glob", "write", "edit"] {
+            self.tools.remove(name);
+        }
+
+        if matches!(profile, FileToolProfile::Batched | FileToolProfile::Both) {
+            self.register_tool(FilesTool);
+        }
+        if matches!(profile, FileToolProfile::Split | FileToolProfile::Both) {
+            self.register_tool(ReadTool);
+            self.register_tool(ListTool);
+            self.register_tool(GrepTool);
+            self.register_tool(GlobTool);
+            self.register_tool(WriteTool);
+            self.register_tool(EditTool);
+        }
+        self.refresh_provider_specs();
     }
 }
 
@@ -111,7 +146,7 @@ mod tests {
     #[test]
     fn builtin_shell_and_files_tools_serialize_as_non_strict_responses_functions() {
         let mut registry = ToolRegistry::default();
-        registry.register_builtin_tools();
+        registry.register_builtin_tools(FileToolProfile::default());
 
         let request = mentra_provider::Request {
             model: Cow::Borrowed("gpt-5"),
@@ -141,6 +176,26 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} tool should be serialized"));
             assert_eq!(tool["type"], "function");
             assert_eq!(tool["strict"], false);
+        }
+    }
+
+    #[test]
+    fn file_tool_profiles_replace_the_eager_builtin_surface() {
+        let mut registry = ToolRegistry::default();
+        registry.register_builtin_tools(FileToolProfile::Batched);
+        assert!(registry.get_tool("files").is_some());
+        assert!(registry.get_tool("read").is_none());
+
+        registry.configure_file_tools(FileToolProfile::Split);
+        assert!(registry.get_tool("files").is_none());
+        for name in ["read", "ls", "grep", "glob", "write", "edit"] {
+            assert!(registry.get_tool(name).is_some(), "missing {name}");
+        }
+
+        registry.configure_file_tools(FileToolProfile::Both);
+        assert!(registry.get_tool("files").is_some());
+        for name in ["read", "ls", "grep", "glob", "write", "edit"] {
+            assert!(registry.get_tool(name).is_some(), "missing {name}");
         }
     }
 }

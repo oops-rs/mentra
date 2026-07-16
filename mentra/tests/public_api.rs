@@ -9,7 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use mentra::{
-    Agent, BuiltinProvider, ContentBlock, ModelInfo, ModelSelector, Runtime,
+    Agent, BuiltinProvider, ContentBlock, FileToolProfile, ModelInfo, ModelSelector, Runtime,
     error::RuntimeError,
     provider::{
         Provider, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
@@ -314,6 +314,27 @@ async fn runtime_exposes_registered_tool_descriptors() {
         Some(AlphaTool.descriptor())
     );
     assert_eq!(runtime.tool_descriptor("missing_tool"), None);
+}
+
+#[test]
+fn runtime_builder_publicly_selects_split_file_tools() {
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let runtime = Runtime::builder()
+        .with_file_tools(FileToolProfile::Split)
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let names = runtime
+        .tools()
+        .into_iter()
+        .map(|tool| tool.provider.name)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for name in ["read", "ls", "grep", "glob", "write", "edit"] {
+        assert!(names.contains(name), "missing split tool {name}");
+    }
+    assert!(!names.contains("files"));
 }
 
 #[tokio::test]

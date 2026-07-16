@@ -1,5 +1,9 @@
+#[path = "workspace/edit.rs"]
+mod edit;
 #[path = "workspace/operations.rs"]
 mod operations;
+
+pub(crate) use edit::{EditOutcome, TextEdit};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -25,17 +29,19 @@ enum EntryKind {
     Missing,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ListTraversal<'a> {
-    root: &'a Path,
-    max_depth: usize,
-    limit: usize,
-}
-
 #[derive(Debug, Clone)]
 enum OriginalState {
     Missing,
     File(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SearchOptions {
+    pub(crate) file_glob: Option<String>,
+    pub(crate) ignore_case: bool,
+    pub(crate) literal: bool,
+    pub(crate) context: usize,
+    pub(crate) multiline: bool,
 }
 
 pub(crate) struct WorkspaceEditor {
@@ -282,78 +288,99 @@ impl WorkspaceEditor {
         Ok(filtered)
     }
 
-    fn collect_list_entries(
+    fn walk_entries<F>(
         &self,
         dir: &Path,
         current_depth: usize,
-        traversal: ListTraversal<'_>,
+        max_depth: usize,
+        action: &str,
         visited: &mut BTreeSet<PathBuf>,
-        entries: &mut Vec<String>,
-    ) -> Result<(), String> {
-        if current_depth > traversal.max_depth || entries.len() >= traversal.limit {
-            return Ok(());
+        visit: &mut F,
+    ) -> Result<bool, String>
+    where
+        F: FnMut(&Path, EntryKind) -> Result<bool, String>,
+    {
+        if current_depth > max_depth {
+            return Ok(true);
         }
         if !self.mark_directory_visited(dir, visited)? {
-            return Ok(());
+            return Ok(true);
         }
 
-        for child_name in self.child_names(dir, "files_list")? {
-            if entries.len() >= traversal.limit {
-                break;
-            }
-
+        for child_name in self.child_names(dir, action)? {
             let child = dir.join(&child_name);
-            match self.entry_kind(&child)? {
-                EntryKind::File => entries.push(format!(
-                    "[file] {}",
-                    self.display_relative_to(traversal.root, &child)
-                )),
-                EntryKind::Dir => {
-                    entries.push(format!(
-                        "[dir] {}",
-                        self.display_relative_to(traversal.root, &child)
-                    ));
-                    self.collect_list_entries(
-                        &child,
-                        current_depth + 1,
-                        traversal,
-                        visited,
-                        entries,
-                    )?;
-                }
-                EntryKind::Missing => {}
+            let kind = self.entry_kind(&child)?;
+            if kind == EntryKind::Missing {
+                continue;
+            }
+            if !visit(&child, kind)? {
+                return Ok(false);
+            }
+            if kind == EntryKind::Dir
+                && !self.walk_entries(
+                    &child,
+                    current_depth + 1,
+                    max_depth,
+                    action,
+                    visited,
+                    visit,
+                )?
+            {
+                return Ok(false);
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn collect_search_matches(
         &self,
-        dir: &Path,
+        root: &Path,
         regex: &Regex,
+        options: &SearchOptions,
         limit: usize,
-        visited: &mut BTreeSet<PathBuf>,
         matches: &mut Vec<String>,
     ) -> Result<(), String> {
-        if !self.mark_directory_visited(dir, visited)? {
-            return Ok(());
-        }
-
-        for child_name in self.child_names(dir, "files_search")? {
-            if matches.len() >= limit {
-                break;
-            }
-
-            let child = dir.join(&child_name);
-            match self.entry_kind(&child)? {
-                EntryKind::File => self.search_file(&child, regex, limit, matches)?,
-                EntryKind::Dir => {
-                    self.collect_search_matches(&child, regex, limit, visited, matches)?
+        let mut visited = BTreeSet::new();
+        self.walk_entries(
+            root,
+            1,
+            usize::MAX,
+            "files_search",
+            &mut visited,
+            &mut |child, kind| {
+                if kind == EntryKind::File
+                    && self.path_matches_glob(root, child, options.file_glob.as_deref())
+                {
+                    self.search_file(child, regex, options, limit, matches)?;
                 }
-                EntryKind::Missing => {}
-            }
-        }
+                Ok(matches.len() < limit)
+            },
+        )?;
+        Ok(())
+    }
+
+    fn collect_glob_matches(
+        &self,
+        root: &Path,
+        pattern: &str,
+        limit: usize,
+        matches: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let mut visited = BTreeSet::new();
+        self.walk_entries(
+            root,
+            1,
+            usize::MAX,
+            "files_glob",
+            &mut visited,
+            &mut |child, kind| {
+                if kind == EntryKind::File && self.path_matches_glob(root, child, Some(pattern)) {
+                    matches.push(self.display_relative_to(root, child));
+                }
+                Ok(matches.len() < limit)
+            },
+        )?;
         Ok(())
     }
 
@@ -379,24 +406,71 @@ impl WorkspaceEditor {
         &self,
         path: &Path,
         regex: &Regex,
+        options: &SearchOptions,
         limit: usize,
         matches: &mut Vec<String>,
     ) -> Result<(), String> {
         let content = self.load_text_file(path)?;
-        for (index, line) in content.lines().enumerate() {
+        let lines = content.lines().collect::<Vec<_>>();
+        let mut matched_lines = BTreeSet::new();
+
+        if options.multiline {
+            let line_starts = line_start_offsets(&content);
+            for found in regex.find_iter(&content) {
+                let start_line = line_index_at(&line_starts, found.start());
+                let end_position = found.end().saturating_sub(1).max(found.start());
+                let end_line = line_index_at(&line_starts, end_position);
+                matched_lines.extend(start_line..=end_line);
+            }
+        } else {
+            matched_lines.extend(
+                lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, line)| regex.is_match(line).then_some(index)),
+            );
+        }
+
+        let mut rendered_lines = BTreeSet::new();
+        for index in &matched_lines {
+            let start = index.saturating_sub(options.context);
+            let end = index
+                .saturating_add(options.context)
+                .saturating_add(1)
+                .min(lines.len());
+            rendered_lines.extend(start..end);
+        }
+
+        for index in rendered_lines {
             if matches.len() >= limit {
                 break;
             }
-            if regex.is_match(line) {
-                matches.push(format!(
-                    "{}:{}: {}",
-                    self.display_path(path),
-                    index + 1,
-                    line
-                ));
-            }
+            let separator = if matched_lines.contains(&index) {
+                ':'
+            } else {
+                '-'
+            };
+            matches.push(format!(
+                "{}:{}{} {}",
+                self.display_path(path),
+                index + 1,
+                separator,
+                cap_search_line(lines[index])
+            ));
         }
         Ok(())
+    }
+
+    fn path_matches_glob(&self, root: &Path, path: &Path, pattern: Option<&str>) -> bool {
+        let Some(pattern) = pattern else {
+            return true;
+        };
+        let relative = self.display_relative_to(root, path);
+        glob_match::glob_match(pattern, &relative)
+            || (!pattern.contains('/')
+                && path
+                    .file_name()
+                    .is_some_and(|name| glob_match::glob_match(pattern, &name.to_string_lossy())))
     }
 
     fn load_text_file(&self, path: &Path) -> Result<String, String> {
@@ -463,6 +537,36 @@ impl WorkspaceEditor {
                 .map(|relative| normalize_display_path(relative.display().to_string()))
                 .unwrap_or_else(|_| self.display_path(path))
         }
+    }
+}
+
+fn line_start_offsets(content: &str) -> Vec<usize> {
+    let mut offsets = vec![0];
+    offsets.extend(
+        content
+            .bytes()
+            .enumerate()
+            .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+    );
+    offsets
+}
+
+fn line_index_at(line_starts: &[usize], byte_offset: usize) -> usize {
+    line_starts
+        .partition_point(|start| *start <= byte_offset)
+        .saturating_sub(1)
+}
+
+fn cap_search_line(line: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut chars = line.chars();
+    let retained = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_none() {
+        retained
+    } else {
+        let mut capped = retained.chars().take(MAX_CHARS - 1).collect::<String>();
+        capped.push('…');
+        capped
     }
 }
 
@@ -543,6 +647,22 @@ fn replace_file(temp_path: &Path, path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn test_editor(label: &str) -> (PathBuf, WorkspaceEditor) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("duration")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("mentra-workspace-{label}-{unique}"));
+        fs::create_dir_all(&root).expect("create test workspace");
+        let editor = WorkspaceEditor::new(
+            "agent".to_string(),
+            RuntimeHandle::new(false),
+            root.clone(),
+            root.clone(),
+        );
+        (root, editor)
+    }
+
     #[test]
     fn normalize_path_rejects_parent_past_root() {
         let mut path = std::env::temp_dir();
@@ -552,5 +672,210 @@ mod tests {
         path.push("escape");
         let error = normalize_path(path).expect_err("path should be rejected");
         assert!(error.contains("escapes the filesystem root"));
+    }
+
+    #[test]
+    fn glob_walks_nested_files_with_workspace_relative_patterns() {
+        let (root, editor) = test_editor("glob");
+        fs::create_dir_all(root.join("src/nested")).expect("create nested directory");
+        fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib");
+        fs::write(root.join("src/nested/mod.rs"), "pub mod nested;\n").expect("write module");
+        fs::write(root.join("src/note.txt"), "not rust\n").expect("write note");
+
+        let output = editor.glob(".".to_string(), "**/*.rs", 20).expect("glob");
+
+        assert!(output.contains("src/lib.rs"));
+        assert!(output.contains("src/nested/mod.rs"));
+        assert!(!output.contains("note.txt"));
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn grep_supports_multiline_regex_and_context() {
+        let (root, editor) = test_editor("multiline-grep");
+        fs::write(
+            root.join("multi.txt"),
+            "before\nBEGIN\nmiddle\nEND\nafter\n",
+        )
+        .expect("write multiline file");
+
+        let output = editor
+            .grep(
+                "multi.txt".to_string(),
+                "BEGIN.*END",
+                SearchOptions {
+                    multiline: true,
+                    context: 1,
+                    ..Default::default()
+                },
+                20,
+            )
+            .expect("grep");
+
+        assert!(output.contains("multi.txt:1- before"));
+        assert!(output.contains("multi.txt:2: BEGIN"));
+        assert!(output.contains("multi.txt:3: middle"));
+        assert!(output.contains("multi.txt:4: END"));
+        assert!(output.contains("multi.txt:5- after"));
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn grep_caps_each_physical_line_at_500_unicode_characters() {
+        let (root, editor) = test_editor("grep-line-cap");
+        fs::write(root.join("long.txt"), format!("{}\n", "界".repeat(600)))
+            .expect("write long line");
+
+        let output = editor
+            .grep("long.txt".to_string(), "界", SearchOptions::default(), 20)
+            .expect("grep");
+        let rendered = output
+            .lines()
+            .find_map(|line| line.strip_prefix("long.txt:1: "))
+            .expect("rendered match");
+
+        assert_eq!(rendered.chars().count(), 500);
+        assert!(rendered.ends_with('…'));
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn edit_restores_bom_and_crlf_and_reports_diff_metadata() {
+        let (root, mut editor) = test_editor("edit-crlf");
+        fs::write(
+            root.join("note.txt"),
+            b"\xEF\xBB\xBFfirst\r\nsecond\r\nthird\r\n",
+        )
+        .expect("write CRLF document");
+
+        let outcome = editor
+            .edit(
+                "note.txt".to_string(),
+                vec![TextEdit {
+                    old_string: "second\n".to_string(),
+                    new_string: "changed\n".to_string(),
+                }],
+                false,
+            )
+            .expect("edit");
+        editor.commit().expect("commit edit");
+
+        assert_eq!(outcome.replacement_count, 1);
+        assert_eq!(outcome.first_changed_line, 2);
+        assert!(outcome.diff.contains("-second"));
+        assert!(outcome.diff.contains("+changed"));
+        assert!(outcome.patch.contains("--- note.txt"));
+        assert_eq!(
+            fs::read(root.join("note.txt")).expect("read edited document"),
+            b"\xEF\xBB\xBFfirst\r\nchanged\r\nthird\r\n"
+        );
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn fuzzy_edit_normalizes_unicode_but_preserves_unchanged_original_lines() {
+        let (root, mut editor) = test_editor("edit-fuzzy");
+        fs::write(
+            root.join("note.txt"),
+            "let label = “Ａ—value”;  \nlet count = 1;\n",
+        )
+        .expect("write fuzzy document");
+
+        editor
+            .edit(
+                "note.txt".to_string(),
+                vec![TextEdit {
+                    old_string: "let label = \"A-value\";\nlet count = 1;".to_string(),
+                    new_string: "let label = \"A-value\";\nlet count = 2;".to_string(),
+                }],
+                false,
+            )
+            .expect("fuzzy edit");
+        editor.commit().expect("commit edit");
+
+        assert_eq!(
+            fs::read_to_string(root.join("note.txt")).expect("read edited document"),
+            "let label = “Ａ—value”;  \nlet count = 2;\n"
+        );
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn multi_edit_matches_against_original_content_and_rejects_overlap() {
+        let (root, mut editor) = test_editor("edit-original");
+        fs::write(root.join("note.txt"), "alpha beta\n").expect("write document");
+
+        editor
+            .edit(
+                "note.txt".to_string(),
+                vec![
+                    TextEdit {
+                        old_string: "alpha".to_string(),
+                        new_string: "beta".to_string(),
+                    },
+                    TextEdit {
+                        old_string: "beta".to_string(),
+                        new_string: "gamma".to_string(),
+                    },
+                ],
+                false,
+            )
+            .expect("non-overlapping edit");
+        editor.commit().expect("commit edit");
+        assert_eq!(
+            fs::read_to_string(root.join("note.txt")).expect("read edited document"),
+            "beta gamma\n"
+        );
+
+        fs::write(root.join("overlap.txt"), "abcdef\n").expect("write overlap document");
+        let error = editor
+            .edit(
+                "overlap.txt".to_string(),
+                vec![
+                    TextEdit {
+                        old_string: "abcd".to_string(),
+                        new_string: "one".to_string(),
+                    },
+                    TextEdit {
+                        old_string: "cdef".to_string(),
+                        new_string: "two".to_string(),
+                    },
+                ],
+                false,
+            )
+            .expect_err("overlap must fail");
+        assert!(error.contains("overlap"));
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn edit_rejects_ambiguous_and_no_op_replacements() {
+        let (root, mut editor) = test_editor("edit-guards");
+        fs::write(root.join("note.txt"), "same same\n").expect("write document");
+
+        let ambiguous = editor
+            .edit(
+                "note.txt".to_string(),
+                vec![TextEdit {
+                    old_string: "same".to_string(),
+                    new_string: "changed".to_string(),
+                }],
+                false,
+            )
+            .expect_err("ambiguous edit must fail");
+        assert!(ambiguous.contains("not unique"));
+
+        let no_op = editor
+            .edit(
+                "note.txt".to_string(),
+                vec![TextEdit {
+                    old_string: "same".to_string(),
+                    new_string: "same".to_string(),
+                }],
+                true,
+            )
+            .expect_err("no-op edit must fail");
+        assert!(no_op.contains("no-op"));
+        fs::remove_dir_all(root).expect("remove test workspace");
     }
 }

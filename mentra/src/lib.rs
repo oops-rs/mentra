@@ -65,6 +65,7 @@ pub use team::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
     TeamProtocolRequestSummary, TeamProtocolStatus,
 };
+pub use tool::FileToolProfile;
 pub use transcript::{
     AgentTranscript, CompactionSummary, DelegationArtifact, DelegationEdge, DelegationKind,
     DelegationStatus, TranscriptItem, TranscriptKind,
