@@ -27,10 +27,11 @@ async fn forward_events(
     response: reqwest::Response,
     tx: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
 ) -> Result<(), ProviderError> {
-    if let Some(headers) = response_headers_event(response.headers()) {
-        if tx.send(Ok(headers)).is_err() {
-            return Ok(());
-        }
+    let receiver_closed = response_headers_event(response.headers())
+        .map(|headers| tx.send(Ok(headers)).is_err())
+        .unwrap_or(false);
+    if receiver_closed {
+        return Ok(());
     }
 
     let mut bytes_stream = response.bytes_stream();
@@ -209,37 +210,42 @@ pub(crate) fn parse_json_event(
 
             let mut events = Vec::new();
 
-            if !state.text_delta_seen.remove(&output_index) {
-                if let Some(text) = item.completed_text().filter(|text| !text.is_empty()) {
-                    events.push(ProviderEvent::ContentBlockDelta {
-                        index: output_index,
-                        delta: ContentBlockDelta::Text(text),
-                    });
-                }
+            let completed_text = if state.text_delta_seen.remove(&output_index) {
+                None
+            } else {
+                item.completed_text().filter(|text| !text.is_empty())
+            };
+            if let Some(text) = completed_text {
+                events.push(ProviderEvent::ContentBlockDelta {
+                    index: output_index,
+                    delta: ContentBlockDelta::Text(text),
+                });
             }
 
-            if !state.function_delta_seen.remove(&output_index) {
-                if let Some(arguments) = item
-                    .completed_arguments()
+            let completed_arguments = if state.function_delta_seen.remove(&output_index) {
+                None
+            } else {
+                item.completed_arguments()
                     .filter(|arguments| !arguments.is_empty())
-                {
-                    events.push(ProviderEvent::ContentBlockDelta {
-                        index: output_index,
-                        delta: ContentBlockDelta::ToolUseInputJson(arguments),
-                    });
-                }
+            };
+            if let Some(arguments) = completed_arguments {
+                events.push(ProviderEvent::ContentBlockDelta {
+                    index: output_index,
+                    delta: ContentBlockDelta::ToolUseInputJson(arguments),
+                });
             }
 
-            if !state.tool_search_delta_seen.remove(&output_index) {
-                if let Some(query) = item
-                    .completed_tool_search_query()
+            let completed_query = if state.tool_search_delta_seen.remove(&output_index) {
+                None
+            } else {
+                item.completed_tool_search_query()
                     .filter(|query| !query.is_empty())
-                {
-                    events.push(ProviderEvent::ContentBlockDelta {
-                        index: output_index,
-                        delta: ContentBlockDelta::HostedToolSearchQuery(query),
-                    });
-                }
+            };
+            if let Some(query) = completed_query {
+                events.push(ProviderEvent::ContentBlockDelta {
+                    index: output_index,
+                    delta: ContentBlockDelta::HostedToolSearchQuery(query),
+                });
             }
 
             events.extend(item.completion_deltas(output_index));
