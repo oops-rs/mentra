@@ -77,9 +77,9 @@ the new neutral representation does not yet provide full Gemini fidelity.
   `SessionEvent` gain public variants. Exhaustive matchers must add the new
   reasoning cases (or a deliberate fallback); existing non-exhaustive usage is
   unchanged.
-- Pin `time` to the newest release compatible with the declared Rust 1.85
-  MSRV; the previous unconstrained `0.3` resolution had silently raised the
-  effective compiler requirement to Rust 1.88.
+- Pin `time` and `url` to Rust 1.85-compatible releases. Their previous
+  semver ranges could resolve to `time` requiring Rust 1.88 and an
+  `url`/IDNA/ICU chain requiring Rust 1.86.
 
 ## 0.9.0
 
