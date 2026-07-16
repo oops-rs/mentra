@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -88,9 +89,8 @@ impl Agent {
             gate: Arc::clone(&self.terminal_tool_gate),
         };
 
-        let transcript_start = self.transcript().len();
         let run_result = self.run(content, options).await;
-        let terminal_result = self.terminal_result_since(transcript_start, &tool_name);
+        let terminal_result = self.terminal_result(&tool_name);
 
         match (run_result, terminal_result) {
             (Ok(_), Some((details, message)))
@@ -109,12 +109,11 @@ impl Agent {
         }
     }
 
-    fn terminal_result_since(
-        &self,
-        transcript_start: usize,
-        tool_name: &str,
-    ) -> Option<(Value, Message)> {
-        let items = self.transcript().items().get(transcript_start..)?;
+    fn terminal_result(&self, tool_name: &str) -> Option<(Value, Message)> {
+        // Generated names include a per-call timestamp and counter, so scanning
+        // the whole transcript remains stale-safe even if auto-compaction
+        // replaced earlier items and changed every numeric index during the run.
+        let items = self.transcript().items();
         let expected_ids = items
             .iter()
             .filter_map(|item| item.message.as_ref())
@@ -207,11 +206,30 @@ fn unique_tool_name(base: &str) -> String {
                 '_'
             }
         })
-        .take(32)
+        .take(14)
         .collect::<String>();
     if base.is_empty() {
         base = "output".to_string();
     }
     let id = NEXT_TERMINAL_TOOL_ID.fetch_add(1, Ordering::Relaxed);
-    format!("mentra_terminal_{base}_{id}")
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    format!("mentra_terminal_{base}_{timestamp:016x}_{id:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_tool_name;
+
+    #[test]
+    fn generated_tool_names_fit_common_provider_limits() {
+        let name = unique_tool_name("a name with punctuation and far too many characters");
+        assert!(name.len() <= 64);
+        assert!(
+            name.chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        );
+    }
 }
