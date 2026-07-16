@@ -7,6 +7,7 @@ mod pending_block;
 mod round_strategy;
 mod runner;
 mod snapshot;
+mod steering;
 mod subagent;
 mod task_state;
 mod team;
@@ -55,6 +56,7 @@ pub use round_strategy::{
     RoundToolResult,
 };
 use runner::TurnRunner;
+pub use steering::{QueueMode, SteeringHandle};
 pub(crate) use subagent::DisposableSubagentTemplate;
 
 static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -78,6 +80,9 @@ pub struct Agent {
     max_rounds: Option<usize>,
     inflight_background_notifications: Vec<BackgroundNotification>,
     inflight_team_messages: Vec<TeamMessage>,
+    steering: SteeringHandle,
+    inflight_steer: Vec<Vec<ContentBlock>>,
+    inflight_follow_up: Vec<Vec<ContentBlock>>,
     teammate_identity: Option<TeammateIdentity>,
     idle_requested: bool,
     current_run_id: Option<String>,
@@ -221,6 +226,9 @@ impl Agent {
             max_rounds,
             inflight_background_notifications: Vec::new(),
             inflight_team_messages: Vec::new(),
+            steering: SteeringHandle::new(),
+            inflight_steer: Vec::new(),
+            inflight_follow_up: Vec::new(),
             teammate_identity,
             idle_requested: false,
             current_run_id: None,
@@ -301,6 +309,9 @@ impl Agent {
             max_rounds: state.record.max_rounds,
             inflight_background_notifications: Vec::new(),
             inflight_team_messages: Vec::new(),
+            steering: SteeringHandle::new(),
+            inflight_steer: Vec::new(),
+            inflight_follow_up: Vec::new(),
             teammate_identity: state.record.teammate_identity,
             idle_requested: state.record.idle_requested,
             current_run_id: None,

@@ -137,6 +137,32 @@ impl<'a> TurnRunner<'a> {
 
             let tool_calls = streamed.pending.ready_tool_calls()?;
             if tool_calls.is_empty() {
+                if self.agent.has_pending_steer() {
+                    if !self.next_request_is_available(rounds)? {
+                        self.agent.note_round_without_task();
+                        return Ok(());
+                    }
+                    if let Some(content) = self.agent.drain_steer() {
+                        self.inject_round_context(content)?;
+                        self.agent.note_round_without_task();
+                        self.agent.persist_agent_record()?;
+                        continue;
+                    }
+                }
+
+                if self.agent.has_pending_follow_up() {
+                    if !self.next_request_is_available(rounds)? {
+                        self.agent.note_round_without_task();
+                        return Ok(());
+                    }
+                    if let Some(content) = self.agent.drain_follow_up() {
+                        self.inject_round_context(content)?;
+                        self.agent.note_round_without_task();
+                        self.agent.persist_agent_record()?;
+                        continue;
+                    }
+                }
+
                 if let Some(strategy) = self.options.round_strategy.clone() {
                     let assistant_message = self
                         .agent
@@ -204,6 +230,16 @@ impl<'a> TurnRunner<'a> {
                 return Ok(());
             }
 
+            if self.agent.has_pending_steer() {
+                if !self.next_request_is_available(rounds)? {
+                    return Ok(());
+                }
+                if let Some(content) = self.agent.drain_steer() {
+                    self.inject_round_context(content)?;
+                    continue;
+                }
+            }
+
             if let Some(strategy) = round_strategy {
                 let flow = self
                     .run_round_strategy(
@@ -219,6 +255,27 @@ impl<'a> TurnRunner<'a> {
                 }
             }
         }
+    }
+
+    /// Returns whether a queued injection can be followed by a provider
+    /// request. This check happens before draining so a graceful stop or a
+    /// hard run limit cannot consume queue entries that no request will see.
+    fn next_request_is_available(&self, rounds: usize) -> Result<bool, RuntimeError> {
+        self.options.check_limits()?;
+        if self.options.stop_requested() || self.options.token_budget_exceeded() {
+            return Ok(false);
+        }
+        if let Some(limit) = self.agent.max_rounds() {
+            if rounds >= limit {
+                return Err(RuntimeError::MaxRoundsExceeded(limit));
+            }
+        }
+        if self.model_requests >= self.options.model_budget() {
+            return Err(RuntimeError::ModelBudgetExceeded(
+                self.options.model_budget(),
+            ));
+        }
+        Ok(true)
     }
 
     /// Invokes the per-run [`RoundStrategy`] at a round boundary and applies its
@@ -283,6 +340,11 @@ impl<'a> TurnRunner<'a> {
     }
 
     async fn stream_turn(&mut self) -> Result<StreamedTurn, RuntimeError> {
+        if self.model_requests >= self.options.model_budget() {
+            return Err(RuntimeError::ModelBudgetExceeded(
+                self.options.model_budget(),
+            ));
+        }
         self.agent.inject_team_inbox()?;
         self.agent.inject_background_notifications()?;
         self.agent.set_status(AgentStatus::AwaitingModel);
@@ -295,12 +357,6 @@ impl<'a> TurnRunner<'a> {
             request_history.push(recalled);
         }
         self.agent.inject_teammate_identity(&mut request_history);
-        if self.model_requests >= self.options.model_budget() {
-            return Err(RuntimeError::ModelBudgetExceeded(
-                self.options.model_budget(),
-            ));
-        }
-
         let request = Request {
             model: self.agent.model.as_str().into(),
             system: self.agent.effective_system_prompt(),

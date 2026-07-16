@@ -60,6 +60,7 @@ impl Agent {
                     .cloned()
                     .filter(|message| message.role == Role::Assistant);
                 let run_delta = self.memory.current_run_delta().unwrap_or_default();
+                self.clear_inflight_steering();
                 self.clear_inflight_team_messages();
                 self.clear_inflight_background_notifications();
                 self.memory.finish_run()?;
@@ -79,6 +80,7 @@ impl Agent {
             }
             Err(error) => {
                 self.idle_requested = false;
+                self.requeue_inflight_steering();
                 self.requeue_inflight_team_messages()?;
                 self.requeue_inflight_background_notifications();
                 self.restore_task_state(tasks_before_run, rounds_before_run, &task_disk_state)?;

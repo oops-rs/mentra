@@ -46,8 +46,9 @@ pub use mentra_provider::{
 pub use provider::{Provider, ProviderRegistry};
 
 pub use agent::{
-    Agent, AgentConfig, ReasoningChange, RoundAdjustment, RoundBoundary, RoundContext,
+    Agent, AgentConfig, QueueMode, ReasoningChange, RoundAdjustment, RoundBoundary, RoundContext,
     RoundDecision, RoundStrategy, RoundToolResult, SpawnedAgentStatus, SpawnedAgentSummary,
+    SteeringHandle,
 };
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
 pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
