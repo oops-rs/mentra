@@ -316,6 +316,11 @@ impl From<&ContentBlock> for AnthropicContentBlock {
     fn from(block: &ContentBlock) -> Self {
         match block {
             ContentBlock::Text { text } => AnthropicContentBlock::Text { text: text.clone() },
+            ContentBlock::Thinking { .. } => AnthropicContentBlock::Text {
+                text: block
+                    .thinking_fallback_text()
+                    .expect("thinking block has fallback text"),
+            },
             ContentBlock::Image { source } => AnthropicContentBlock::Image {
                 source: source.into(),
             },

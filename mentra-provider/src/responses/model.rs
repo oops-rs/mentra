@@ -237,6 +237,11 @@ impl ResponsesInputItem {
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => text_buffer.push_str(text),
+                ContentBlock::Thinking { .. } => text_buffer.push_str(
+                    &block
+                        .thinking_fallback_text()
+                        .expect("thinking block has fallback text"),
+                ),
                 ContentBlock::Image { source } => {
                     Self::flush_text(&mut text_buffer, &message.role, &mut content)?;
                     content.push(ResponsesMessageContentPart::try_from((

@@ -275,11 +275,42 @@ pub struct ImageGenerationCall {
     pub result: Option<ImageGenerationResult>,
 }
 
+/// Provider-specific format carried by a provider-neutral reasoning block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningFormat {
+    AnthropicSigned,
+    OpenAiEncrypted,
+    GeminiThought,
+}
+
+/// Origin required to decide whether opaque reasoning metadata is safe to replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningProvenance {
+    pub provider: crate::ProviderId,
+    pub model: String,
+    pub format: ReasoningFormat,
+}
+
 /// A provider-neutral content block exchanged with models.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentBlock {
     Text {
         text: String,
+    },
+    Thinking {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<ReasoningProvenance>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        redacted: bool,
     },
     Image {
         source: ImageSource,
@@ -310,6 +341,34 @@ impl ContentBlock {
         Self::Text { text: text.into() }
     }
 
+    pub fn thinking(thinking: impl Into<String>) -> Self {
+        Self::Thinking {
+            thinking: thinking.into(),
+            signature: None,
+            encrypted_content: None,
+            id: None,
+            provenance: None,
+            redacted: false,
+        }
+    }
+
+    pub(crate) fn thinking_fallback_text(&self) -> Option<String> {
+        let Self::Thinking {
+            thinking, redacted, ..
+        } = self
+        else {
+            return None;
+        };
+
+        if !thinking.is_empty() {
+            Some(thinking.clone())
+        } else if *redacted {
+            Some("[redacted reasoning]".to_string())
+        } else {
+            Some("[reasoning unavailable]".to_string())
+        }
+    }
+
     pub fn image_bytes(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
         Self::Image {
             source: ImageSource::bytes(media_type, data),
@@ -320,6 +379,80 @@ impl ContentBlock {
         Self::Image {
             source: ImageSource::url(url),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_serde_is_externally_tagged_and_omits_empty_optional_fields() {
+        let block = ContentBlock::Thinking {
+            thinking: "private chain".to_string(),
+            signature: Some("opaque-signature".to_string()),
+            encrypted_content: None,
+            id: None,
+            provenance: Some(ReasoningProvenance {
+                provider: crate::ProviderId::new("anthropic-edge"),
+                model: "claude-test".to_string(),
+                format: ReasoningFormat::AnthropicSigned,
+            }),
+            redacted: false,
+        };
+
+        let json = serde_json::to_value(&block).expect("thinking block should serialize");
+        assert_eq!(json["Thinking"]["thinking"], "private chain");
+        assert_eq!(json["Thinking"]["signature"], "opaque-signature");
+        assert_eq!(json["Thinking"]["provenance"]["provider"], "anthropic-edge");
+        assert_eq!(json["Thinking"]["provenance"]["format"], "anthropic_signed");
+        assert!(json["Thinking"].get("encrypted_content").is_none());
+        assert!(json["Thinking"].get("id").is_none());
+        assert!(json["Thinking"].get("redacted").is_none());
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(json).expect("thinking block should load"),
+            block
+        );
+    }
+
+    #[test]
+    fn thinking_serde_defaults_omitted_payload_fields() {
+        let block: ContentBlock = serde_json::from_value(serde_json::json!({
+            "Thinking": {
+                "provenance": {
+                    "provider": "anthropic",
+                    "model": "claude-test",
+                    "format": "anthropic_signed"
+                }
+            }
+        }))
+        .expect("omitted thinking payload fields should default");
+
+        assert_eq!(
+            block,
+            ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: None,
+                encrypted_content: None,
+                id: None,
+                provenance: Some(ReasoningProvenance {
+                    provider: crate::ProviderId::new("anthropic"),
+                    model: "claude-test".to_string(),
+                    format: ReasoningFormat::AnthropicSigned,
+                }),
+                redacted: false,
+            }
+        );
+    }
+
+    #[test]
+    fn pre_thinking_content_block_json_still_deserializes_unchanged() {
+        let json = serde_json::json!({"Text":{"text":"legacy"}});
+
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(json).expect("legacy block should load"),
+            ContentBlock::text("legacy")
+        );
     }
 }
 

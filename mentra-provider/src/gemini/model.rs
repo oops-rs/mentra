@@ -245,6 +245,11 @@ impl GeminiPart {
     ) -> Result<Self, ProviderError> {
         match block {
             ContentBlock::Text { text } => Ok(GeminiPart::Text { text: text.clone() }),
+            ContentBlock::Thinking { .. } => Ok(GeminiPart::Text {
+                text: block
+                    .thinking_fallback_text()
+                    .expect("thinking block has fallback text"),
+            }),
             ContentBlock::Image { source } => {
                 if !matches!(role, Role::User) {
                     return Err(ProviderError::InvalidRequest(
