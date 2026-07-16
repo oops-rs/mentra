@@ -12,7 +12,27 @@ use crate::tool::{
 };
 
 use super::client::McpStdioClient;
-use super::protocol::McpToolDefinition;
+use super::protocol::{McpToolCallResult, McpToolDefinition};
+
+#[async_trait]
+pub(crate) trait McpToolClient: Send + Sync {
+    async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<Value>,
+    ) -> Result<McpToolCallResult, super::client::McpClientError>;
+}
+
+#[async_trait]
+impl McpToolClient for McpStdioClient {
+    async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<Value>,
+    ) -> Result<McpToolCallResult, super::client::McpClientError> {
+        McpStdioClient::call_tool(self, tool_name, arguments).await
+    }
+}
 
 /// Prefix applied to MCP tool names to namespace them.
 const MCP_TOOL_PREFIX: &str = "mcp__";
@@ -33,7 +53,7 @@ pub fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
 pub struct McpBridgedTool {
     server_name: String,
     tool_def: McpToolDefinition,
-    client: Arc<McpStdioClient>,
+    client: Arc<dyn McpToolClient>,
 }
 
 impl McpBridgedTool {
@@ -42,11 +62,28 @@ impl McpBridgedTool {
         tool_def: McpToolDefinition,
         client: Arc<McpStdioClient>,
     ) -> Self {
+        Self::from_client(server_name, tool_def, client)
+    }
+
+    fn from_client(
+        server_name: String,
+        tool_def: McpToolDefinition,
+        client: Arc<dyn McpToolClient>,
+    ) -> Self {
         Self {
             server_name,
             tool_def,
             client,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        server_name: String,
+        tool_def: McpToolDefinition,
+        client: Arc<dyn McpToolClient>,
+    ) -> Self {
+        Self::from_client(server_name, tool_def, client)
     }
 
     fn full_name(&self) -> String {
