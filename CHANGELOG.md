@@ -24,6 +24,25 @@
   replaced by a text pointer. Volatile stores suppress disk spills to preserve
   their no-durable-trace contract.
 
+### WS5 — Steering and host orchestration
+
+- Add agent-scoped, in-memory `SteeringHandle` queues for live steers and
+  would-stop-only follow-ups, with `OneAtATime`/`All` drain modes, explicit
+  idle `run_queued`, rollback-safe inflight requeue, and deterministic
+  steering-before-strategy precedence.
+- Add object-safe `TaskStore::mutate` and serialize builtin task mutations with
+  SQLite Immediate transactions or the Volatile store lock. Expose typed
+  `Runtime::task_board`/`Agent::task_board` façades that reuse the intrinsic
+  access checks, status transitions, and DAG validation.
+- Add `Agent::run_to_output<T>` using unique owner-scoped terminal tools and
+  exact `tool_use_id` transcript-detail extraction. Generated tools are forced
+  only for their target agent and removed when the run future completes or is
+  dropped.
+- Add cloneable `AgentWaitHandle` and owned snapshot, idle, and teammate-reply
+  wait futures. `AgentSnapshot::run_generation` prevents a previous terminal
+  snapshot from satisfying a wait for the next run.
+- Document the Proposed host-orchestration decision in ADR-0004.
+
 ### Compatibility
 
 - Shell validation defaults to `Off`, preserving existing command-execution
@@ -38,6 +57,16 @@
   applies before this projection boundary.
 - `AgentStore` gains a defaulted `allows_disk_artifacts` capability method, so
   existing store implementations continue to compile unchanged.
+- `TaskStore` gains a defaulted, object-safe `mutate` method, so existing
+  implementations remain source-compatible. Its fallback is load/replace and
+  is not atomic; custom stores must override it for concurrent-writer safety.
+- `AgentSnapshot` gains the public serde-default `run_generation` field.
+  Exhaustive struct literals must add it and exhaustive patterns should use
+  `..`. No existing public enum gains a variant.
+- Default agents have empty steering queues and unchanged run behavior.
+  `wait_for_teammate_reply` intentionally consumes inbox delivery rather than
+  peeking; hosts that previously polled `pending_team_messages` separately can
+  continue doing so unchanged.
 
 ## 0.9.0
 
