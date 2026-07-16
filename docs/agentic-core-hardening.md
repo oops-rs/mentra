@@ -248,8 +248,10 @@ mentra's Rust 1.85 MSRV.
 
 ### Grep gaps to close
 
-No multiline regex today (`search_file` iterates `content.lines()`,
-workspace.rs:381) and no long-line cap (pi caps grep lines at 500 chars).
+The split `grep` path adds multiline matching and a 500-character rendered-line
+cap. The cap is an adapter-selected `SearchOptions` value rather than a new
+default for legacy `files.search`, whose long-line output remains byte-identical
+for existing embedders.
 
 ### Effort
 
