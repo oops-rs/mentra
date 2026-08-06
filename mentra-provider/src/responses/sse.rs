@@ -189,11 +189,16 @@ pub(crate) fn parse_json_event(
             if state.reasoning_provenance.model.is_empty() {
                 state.reasoning_provenance.model = response.model.clone();
             }
+            let model = if response.model.is_empty() {
+                state.reasoning_provenance.model.clone()
+            } else {
+                response.model
+            };
             Ok(vec![
                 ProviderEvent::ResponseCreated,
                 ProviderEvent::MessageStarted {
                     id: response.id,
-                    model: response.model,
+                    model,
                     role: Role::Assistant,
                 },
             ])
@@ -518,7 +523,9 @@ enum ResponsesStreamEvent {
 
 #[derive(Deserialize)]
 struct ResponsesResponseEnvelope {
+    #[serde(default)]
     id: String,
+    #[serde(default)]
     model: String,
     #[serde(default)]
     status: Option<String>,
@@ -947,8 +954,8 @@ mod tests {
     use http::HeaderValue;
 
     use crate::{
-        ContentBlock, ContentBlockDelta, ContentBlockStart, ProviderEvent, ProviderId,
-        ReasoningFormat, ReasoningProvenance, Role, TokenUsage,
+        ContentBlock, ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent,
+        ProviderId, ReasoningFormat, ReasoningProvenance, Role, TokenUsage,
     };
 
     use super::{StreamState, parse_frame, response_headers_event};
@@ -1317,6 +1324,68 @@ mod tests {
                 ProviderEvent::MessageStopped,
             ]
         );
+    }
+
+    #[test]
+    fn surfaces_the_provider_error_from_a_failed_response_without_a_model() {
+        let mut state = StreamState::default();
+
+        let error = parse_frame(
+            br#"data: {"type":"response.failed","response":{"error":{"message":"upstream exploded"}}}"#,
+            &mut state,
+        )
+        .expect_err("failed response should surface the provider error");
+
+        assert!(
+            matches!(&error, ProviderError::MalformedStream(message) if message.contains("upstream exploded")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn terminates_the_message_for_an_incomplete_response_without_a_model() {
+        let mut state = StreamState::default();
+
+        let incomplete = parse_frame(
+            br#"data: {"type":"response.incomplete","response":{"status":"max_output_tokens"}}"#,
+            &mut state,
+        )
+        .expect("incomplete response should parse");
+
+        assert_eq!(
+            incomplete,
+            vec![
+                ProviderEvent::MessageDelta {
+                    stop_reason: Some("max_output_tokens".to_string()),
+                    usage: None,
+                },
+                ProviderEvent::MessageStopped,
+            ]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_requested_model_when_a_created_response_omits_it() {
+        let mut state = StreamState::new(ProviderId::new("openai"), "gpt-requested".to_string());
+
+        let created = parse_frame(
+            br#"data: {"type":"response.created","response":{"id":"resp_1"}}"#,
+            &mut state,
+        )
+        .expect("created event should parse");
+
+        assert_eq!(
+            created,
+            vec![
+                ProviderEvent::ResponseCreated,
+                ProviderEvent::MessageStarted {
+                    id: "resp_1".to_string(),
+                    model: "gpt-requested".to_string(),
+                    role: Role::Assistant,
+                },
+            ]
+        );
+        assert_eq!(state.reasoning_provenance.model, "gpt-requested");
     }
 
     #[test]

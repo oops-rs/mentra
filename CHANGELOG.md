@@ -1,5 +1,17 @@
 # Changelog
 
+## mentra-provider 0.4.1
+
+- Tolerate Responses stream envelopes that omit `id` and `model`. A Codex-style
+  proxy synthesizes its own terminal `response.failed` / `response.incomplete`
+  frames when the upstream errors, and those frames can carry only the error
+  body. Both fields were required, so the frame failed to deserialize and the
+  turn died with `missing field model` — masking the provider error the frame
+  was carrying. The real error now surfaces, and an incomplete response still
+  terminates the message.
+- Fall back to the requested model in `MessageStarted` when a `response.created`
+  frame omits `model`, instead of reporting an empty model string.
+
 ## 0.10.0 / mentra-provider 0.4.0
 
 ### WS1 — Hygiene
