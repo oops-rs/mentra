@@ -91,6 +91,10 @@ pub struct Agent {
     teammate_identity: Option<TeammateIdentity>,
     idle_requested: bool,
     current_run_id: Option<String>,
+    /// Full texts of results this agent received paged, keyed by
+    /// `tool_use_id` — the backing store for `read_tool_result`. Empty and
+    /// unused unless `config.tool_result_paging` is set.
+    paged_tool_results: crate::tool::paging::PagedToolResults,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +242,7 @@ impl Agent {
             teammate_identity,
             idle_requested: false,
             current_run_id: None,
+            paged_tool_results: Default::default(),
         };
         agent
             .runtime
@@ -260,6 +265,7 @@ impl Agent {
         agent
             .runtime
             .register_agent(&agent.id, &agent.name, execution_config, &observer)?;
+        agent.register_tool_result_pager();
         agent.refresh_tasks_from_disk()?;
         Ok(agent)
     }
@@ -322,6 +328,7 @@ impl Agent {
             teammate_identity: state.record.teammate_identity,
             idle_requested: state.record.idle_requested,
             current_run_id: None,
+            paged_tool_results: Default::default(),
         };
         let execution_config = AgentExecutionConfig {
             name: agent.name.clone(),
@@ -340,6 +347,7 @@ impl Agent {
         agent
             .runtime
             .register_agent(&agent.id, &agent.name, execution_config, &observer)?;
+        agent.register_tool_result_pager();
         agent.refresh_tasks_from_disk()?;
         Ok(agent)
     }
@@ -526,11 +534,46 @@ impl Agent {
             return self.teammate_identity.is_some();
         }
 
+        // The pager's reader exists for the model only while there can be
+        // paged results to read. Registration is runtime-wide (the registry
+        // is keyed by tool name), so this per-agent gate — not registration —
+        // is what keeps the tool out of an unpaged agent's roster, even when
+        // a paging agent shares the same runtime.
+        if name == crate::tool::paging::READ_TOOL_RESULT_TOOL {
+            return self.config.tool_result_paging.is_some();
+        }
+
         true
     }
 
     pub(crate) fn runtime_handle(&self) -> RuntimeHandle {
         self.runtime.clone()
+    }
+
+    /// Registers the pager's reader when this agent enables paging. The tool
+    /// itself is stateless — it resolves both the retained results and the
+    /// page size from the calling agent's context — so one registration
+    /// serves every paging agent on the runtime, and re-registering is a
+    /// no-op.
+    fn register_tool_result_pager(&self) {
+        if self.config.tool_result_paging.is_some() {
+            self.runtime.register_tool(crate::tool::ReadToolResultTool);
+        }
+    }
+
+    /// Retains the full text of a result that entered the transcript paged,
+    /// so `read_tool_result` can serve its later windows. In memory only, for
+    /// this agent's lifetime — a result the model never asks to continue
+    /// simply goes away with the agent.
+    pub(crate) fn record_paged_tool_result(&self, tool_use_id: &str, full: &str) {
+        self.paged_tool_results.record(tool_use_id, full);
+    }
+
+    /// Returns a retained full result by `tool_use_id`. Only this agent's own
+    /// paged results are reachable: the store is per-agent, so one agent can
+    /// never read another's.
+    pub(crate) fn paged_tool_result(&self, tool_use_id: &str) -> Option<Arc<str>> {
+        self.paged_tool_results.get(tool_use_id)
     }
 
     pub(crate) fn max_rounds(&self) -> Option<usize> {

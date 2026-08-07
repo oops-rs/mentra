@@ -16,7 +16,10 @@ use crate::{
     },
 };
 
-use super::truncation::{SpillBehavior, ToolOutputLimiter};
+use super::{
+    paging::{READ_TOOL_RESULT_TOOL, ToolResultPager},
+    truncation::{SpillBehavior, ToolOutputLimiter},
+};
 
 const PARALLEL_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -37,6 +40,9 @@ pub(crate) struct ToolRuntime {
     tool_calls: usize,
     working_directory: Option<PathBuf>,
     output_limiter: ToolOutputLimiter,
+    /// `Some` only when this agent enables tool-result paging; `None` leaves
+    /// every result exactly as the limiter produced it.
+    pager: Option<ToolResultPager>,
 }
 
 #[derive(Clone)]
@@ -101,6 +107,7 @@ impl ToolRuntime {
             tool_calls: 0,
             working_directory: None,
             output_limiter,
+            pager: agent.config().tool_result_paging.map(ToolResultPager::new),
         }
     }
 
@@ -138,15 +145,16 @@ impl ToolRuntime {
             for execution in executions {
                 successful_task |= execution.task_succeeded;
                 end_turn |= execution.should_end_turn;
+                let result = self.page_result(agent, &execution.tool_name, execution.result);
                 if execution.terminated {
                     terminator.get_or_insert(execution.tool_name);
                 }
                 if let (Some(value), ContentBlock::ToolResult { tool_use_id, .. }) =
-                    (execution.details, &execution.result)
+                    (execution.details, &result)
                 {
                     details.insert(tool_use_id.clone(), value);
                 }
-                results.push(execution.result);
+                results.push(result);
             }
 
             // A terminating call ends the round as the value of its own
@@ -157,7 +165,8 @@ impl ToolRuntime {
             if let Some(terminator) = terminator {
                 for remaining_batch in batches {
                     for call in remaining_batch.into_calls() {
-                        results.push(not_executed_result(&call, &terminator));
+                        let result = not_executed_result(&call, &terminator);
+                        results.push(self.page_result(agent, &call.name, result));
                     }
                 }
                 break;
@@ -170,6 +179,49 @@ impl ToolRuntime {
             end_turn,
             details,
         })
+    }
+
+    /// Replaces an oversized text result with its first window, retaining the
+    /// full text on the agent for `read_tool_result` to serve.
+    ///
+    /// This is the single point where a result becomes the *model's* view of
+    /// itself: every `AgentEvent::ToolExecutionFinished` has already been
+    /// emitted with the complete block by the time a result reaches here, so
+    /// consumers reconstructing evidence from the event stream observe no
+    /// change at all. Applied to every block that joins the round's committed
+    /// message — including the fixed not-executed and not-found results — so
+    /// no path into the transcript bypasses the bound.
+    fn page_result(&self, agent: &Agent, tool_name: &str, result: ContentBlock) -> ContentBlock {
+        let Some(pager) = self.pager else {
+            return result;
+        };
+        // A window returned by `read_tool_result` is bounded by construction;
+        // paging it again would nest a trailer inside a trailer.
+        if tool_name == READ_TOOL_RESULT_TOOL {
+            return result;
+        }
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content: mentra_provider::ToolResultContent::Text(text),
+            is_error,
+        } = result
+        else {
+            return result;
+        };
+
+        let Some(page) = pager.first_page(&tool_use_id, &text) else {
+            return ContentBlock::ToolResult {
+                tool_use_id,
+                content: mentra_provider::ToolResultContent::Text(text),
+                is_error,
+            };
+        };
+        agent.record_paged_tool_result(&tool_use_id, &text);
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content: mentra_provider::ToolResultContent::Text(page),
+            is_error,
+        }
     }
 
     fn call_execution_category_for_agent(

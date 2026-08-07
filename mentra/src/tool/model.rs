@@ -118,6 +118,18 @@ impl ToolContext<'_> {
         self.agent.tasks()
     }
 
+    /// Returns this agent's tool-result paging configuration, if enabled.
+    pub(crate) fn tool_result_paging(&self) -> Option<crate::agent::ToolResultPagingConfig> {
+        self.agent.config().tool_result_paging
+    }
+
+    /// Returns the full text of one of this agent's paged tool results.
+    /// Scoped to the agent by construction: the retained results live on the
+    /// agent this context borrows, so no cross-agent read is expressible.
+    pub(crate) fn paged_tool_result(&self, tool_use_id: &str) -> Option<Arc<str>> {
+        self.agent.paged_tool_result(tool_use_id)
+    }
+
     pub fn resolve_working_directory(
         &self,
         working_directory: Option<&str>,

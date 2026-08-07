@@ -9,6 +9,7 @@ mod files;
 pub(crate) mod internal;
 mod model;
 mod orchestrator;
+pub(crate) mod paging;
 mod runtime;
 mod truncation;
 
@@ -30,6 +31,7 @@ pub use model::{
 };
 pub(crate) use runtime::ToolRuntime;
 
+pub(crate) use builtin::ReadToolResultTool;
 use builtin::{BackgroundRunTool, CheckBackgroundTool, LoadSkillTool, ShellTool};
 use coding::{EditTool, GlobTool, GrepTool, ListTool, ReadTool, WriteTool};
 use files::FilesTool;
