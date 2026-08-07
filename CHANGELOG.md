@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.11.0
+
+### Automatic tool-result paging
+
+- Add opt-in `AgentConfig.tool_result_paging` (`ToolResultPagingConfig`,
+  default threshold 64 KiB / page 32 KiB). An oversized tool result inserts
+  only its first window into the transcript, cut on a line boundary with an
+  honest trailer naming the follow-up call; `None` (the default) preserves
+  existing behavior byte-identically.
+- Add the built-in `read_tool_result(tool_use_id, start_line)` tool: serves
+  further windows with absolute line numbers from full results retained per
+  agent, registered runtime-wide and offered only to agents with paging
+  enabled. It never re-executes the original tool, never pages its own
+  windows, and cannot express a cross-agent read.
+- `AgentEvent::ToolExecutionFinished` continues to carry the complete,
+  unpaged result: paging shapes the model's view, never the event record,
+  so evidence/ledger consumers observe no change.
+- Paging runs downstream of the universal tool-result limiter; consumers
+  enabling it should raise `max_tool_result_bytes`/`max_tool_result_lines`
+  to whatever a tool may legitimately return and keep the limiter as the
+  anti-abuse backstop. Design and as-built notes: `docs/tool-result-paging.md`.
+
+### Team
+
+- Make team protocol request ids collision-resistant.
+
 ## mentra-provider 0.4.1
 
 - Tolerate Responses stream envelopes that omit `id` and `model`. A Codex-style
