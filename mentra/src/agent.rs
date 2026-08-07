@@ -45,7 +45,7 @@ pub(crate) use team::parse_task_input;
 
 pub use config::{
     AgentConfig, CompactionConfig, ContextCompactionConfig, MemoryConfig, TaskConfig,
-    TeamAutonomyConfig, TeamConfig, ToolProfile, WorkspaceConfig,
+    TeamAutonomyConfig, TeamConfig, ToolProfile, ToolResultPagingConfig, WorkspaceConfig,
 };
 pub use events::{
     AgentEvent, AgentSnapshot, AgentStatus, CompactionDetails, CompactionTrigger,

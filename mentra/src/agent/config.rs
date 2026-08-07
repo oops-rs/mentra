@@ -96,6 +96,37 @@ impl Default for CompactionConfig {
 
 pub type ContextCompactionConfig = CompactionConfig;
 
+/// Bounds how much of an oversized tool result enters the model's view.
+///
+/// A result at or below `threshold_bytes` is inserted byte-identically to a
+/// run without paging. Above it, the transcript receives the first window
+/// (at most `page_bytes`, cut on a line boundary) plus a trailer naming the
+/// `read_tool_result` call that returns the next window; the full result is
+/// retained in memory for the life of the agent so nothing is lost.
+///
+/// Paging is applied *after* the runtime's own tool-result limiter
+/// (`RuntimePolicy::with_max_tool_result_bytes` /
+/// `with_max_tool_result_lines`), so a `threshold_bytes` above those caps
+/// never triggers — the limiter clamps the result first. Enabling paging
+/// therefore means raising the policy caps to whatever a tool may legitimately
+/// return and leaving them as the anti-abuse backstop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultPagingConfig {
+    /// Results at or below this size are inserted whole. Default 64 KiB.
+    pub threshold_bytes: usize,
+    /// Maximum bytes per inserted page/window. Default 32 KiB.
+    pub page_bytes: usize,
+}
+
+impl Default for ToolResultPagingConfig {
+    fn default() -> Self {
+        Self {
+            threshold_bytes: 64 * 1024,
+            page_bytes: 32 * 1024,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     pub base_dir: PathBuf,
@@ -236,6 +267,11 @@ pub struct AgentConfig {
     pub memory: MemoryConfig,
     #[serde(alias = "context_compaction")]
     pub compaction: CompactionConfig,
+    /// `None` (the default) preserves the unpaged behaviour exactly: every
+    /// tool result enters the transcript as produced, and `read_tool_result`
+    /// is absent from the agent's tool roster.
+    #[serde(default)]
+    pub tool_result_paging: Option<ToolResultPagingConfig>,
 }
 
 impl Default for AgentConfig {
@@ -253,6 +289,7 @@ impl Default for AgentConfig {
             workspace: WorkspaceConfig::default(),
             memory: MemoryConfig::default(),
             compaction: CompactionConfig::default(),
+            tool_result_paging: None,
         }
     }
 }
@@ -395,6 +432,56 @@ mod tests {
                 .parallel_tool_calls,
             Some(true)
         );
+    }
+
+    #[test]
+    fn tool_result_paging_is_disabled_by_default() {
+        assert_eq!(AgentConfig::default().tool_result_paging, None);
+    }
+
+    #[test]
+    fn tool_result_paging_defaults_to_64_kib_threshold_and_32_kib_pages() {
+        let paging = ToolResultPagingConfig::default();
+
+        assert_eq!(paging.threshold_bytes, 64 * 1024);
+        assert_eq!(paging.page_bytes, 32 * 1024);
+    }
+
+    #[test]
+    fn agent_config_deserializes_without_tool_result_paging_field() {
+        let config: AgentConfig = serde_json::from_value(json!({
+            "system": null,
+            "tool_choice": serde_json::to_value(ToolChoice::Auto).expect("serialize tool choice"),
+            "temperature": null,
+            "max_output_tokens": 8192,
+            "metadata": {},
+            "provider_request_options": {},
+            "team": TeamConfig::default(),
+            "task": TaskConfig::default(),
+            "workspace": WorkspaceConfig::default(),
+            "memory": MemoryConfig::default(),
+            "context_compaction": ContextCompactionConfig::default()
+        }))
+        .expect("deserialize config persisted before paging existed");
+
+        assert_eq!(config.tool_result_paging, None);
+    }
+
+    #[test]
+    fn agent_config_round_trips_tool_result_paging() {
+        let config = AgentConfig {
+            tool_result_paging: Some(ToolResultPagingConfig {
+                threshold_bytes: 4_096,
+                page_bytes: 1_024,
+            }),
+            ..Default::default()
+        };
+
+        let restored: AgentConfig =
+            serde_json::from_value(serde_json::to_value(&config).expect("serialize config"))
+                .expect("deserialize config");
+
+        assert_eq!(restored.tool_result_paging, config.tool_result_paging);
     }
 
     #[test]

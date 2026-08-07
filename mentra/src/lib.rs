@@ -50,6 +50,7 @@ pub use agent::{
     Agent, AgentConfig, AgentWaitFuture, AgentWaitHandle, FinalOutput, QueueMode, ReasoningChange,
     RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy, RoundToolResult,
     SpawnedAgentStatus, SpawnedAgentSummary, SteeringHandle, TerminalOutputSpec,
+    ToolResultPagingConfig,
 };
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
 pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
