@@ -7,7 +7,8 @@ model read further windows on demand. Small results are delivered exactly as
 today. The feature is opt-in per agent and changes nothing for existing
 consumers until enabled.
 
-Status: proposed (2026-08-07). Not yet implemented.
+Status: implemented (2026-08-07). Sections below marked **as built** record
+where the implementation had to correct this document against the real code.
 
 ---
 
@@ -69,8 +70,9 @@ Three rules:
 
 ### The built-in `read_tool_result` tool
 
-Registered automatically on the agent iff paging is enabled — the same
-agent-scoped registration path the team/subagent built-ins use. Schema:
+Registered on the runtime the first time an agent with paging enabled is
+constructed, and offered to an agent only while that agent has paging
+enabled. Schema:
 
 ```json
 {
@@ -95,6 +97,24 @@ Behaviour:
   price of context growth — but it never re-executes the original tool, so
   side-effectful or expensive tools are not re-triggered by reading.
 
+**As built — registration.** The doc originally called for the "agent-scoped
+registration path the team/subagent built-ins use". That path
+(`RuntimeHandle::register_scoped_tool`) keys the tool registry *by tool
+name*, so it only works for the generated, per-call-unique names
+`run_to_output` produces: two agents registering a fixed-name
+`read_tool_result` would make the second steal the first's ownership and
+silently remove the tool from the first agent's roster. Instead the tool is
+registered runtime-wide and gated per agent in `Agent::can_use_tool`, beside
+the existing `Idle` intrinsic gate — an agent without paging never sees it
+even when it shares a runtime with an agent that has it. Cross-agent reads
+stay impossible because the tool is stateless: it resolves both the retained
+results and the page size from the calling agent's `ToolContext`, so there is
+no other agent's store to name.
+
+**As built — lane.** `read_tool_result` declares an exclusive execution
+category despite reading nothing but memory, because only the exclusive
+lane's `ToolContext` carries the agent whose results it must read.
+
 ### Configuration
 
 ```rust
@@ -116,16 +136,30 @@ pub struct AgentConfig {
 a result slightly over the threshold still arrives mostly whole as one large
 first page would defeat the purpose.
 
+**As built — the pre-existing result limiter.** This document did not account
+for `ToolOutputLimiter`, which already caps every tool result at
+`RuntimePolicy::max_tool_result_bytes` (default **50 KiB**) and
+`max_tool_result_lines` (default 2,000), truncating the tail permanently and
+spilling it to a file. Paging runs *downstream* of that limiter, so the
+64 KiB threshold proposed above never fires under the default policy — the
+limiter clamps first. Enabling paging therefore means raising those caps to
+whatever a tool may legitimately return and leaving them as the anti-abuse
+backstop, which is what the adoption plan below already assumes.
+
 ### Storage
 
 Full results for the current run are retained in an in-memory per-agent map
 `tool_use_id -> Arc<str>` populated at insertion time, dropped when the
-agent is dropped. This is strictly less memory than today's behaviour (today
-the full text lives in the transcript *and* is replayed to the provider on
-every round; with paging it lives in the map once and only pages enter the
-transcript). Persistence across process restarts is a non-goal: the pager
-serves the live run, and mentra's transcript persistence already captures
-what the model actually saw.
+agent is dropped. Only results that were actually paged are retained; a
+result delivered whole is already in the transcript. Persistence across
+process restarts is a non-goal: the pager serves the live run, and mentra's
+transcript persistence already captures what the model actually saw.
+
+**As built — what this saves.** An earlier draft claimed the map is "strictly
+less memory than today's behaviour". It is not: the full text lives in the
+retention map roughly as it would have lived in the transcript. What paging
+saves is *context* — the bytes replayed to the provider on every subsequent
+round — not process memory.
 
 ## Where it hooks in
 
@@ -139,6 +173,13 @@ what the model actually saw.
   `CompactionConfig`.
 - The `read_tool_result` registration follows the existing built-in tool
   pattern.
+
+**As built — one choke point, not four.** Rather than paging at each of the
+four emission sites, the transform runs where `ToolRuntime::execute_calls`
+collects executions into the round's results. Every emission has already
+happened by then, and every block that can reach the committed message
+passes through — including the fixed `not executed` and `Tool not found`
+results, which no longer need to be reasoned about as exceptions.
 
 ## Interactions
 
@@ -175,6 +216,13 @@ what the model actually saw.
 5. Line-boundary cuts: no split UTF-8, no split lines (a single line longer
    than `page_bytes` is the one case that must hard-cut — mark it).
 6. Parallel oversized results page independently.
+
+**As built — the hard-cut tail.** Because `start_line` addresses whole lines,
+the remainder of a hard-cut line has no address and is skipped: the next
+window resumes at the following line. The window says so explicitly
+(`…[line 1 hard-cut at 100 of 201 bytes; the remainder of this line is
+skipped]`) rather than letting the model assume it read the line. Server-side
+line clipping remains the right defence against pathological single lines.
 
 ## Adoption plan
 
