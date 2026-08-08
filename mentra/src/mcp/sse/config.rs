@@ -37,6 +37,12 @@ pub const DEFAULT_MAX_EVENT_BYTES: usize = 4 * 1024 * 1024;
 /// is the earliest attacker-reachable allocation in the connection lifecycle.
 /// Its payload is a single URL, and common proxy header limits sit near 2 KiB.
 pub const DEFAULT_MAX_ENDPOINT_BYTES: usize = 8 * 1024;
+/// Default cap on how many `tools/list` pages are followed.
+///
+/// Cursors are opaque, so a server repeating one cannot be detected by value;
+/// only a page bound stops the walk. A server needing more pages than this to
+/// describe its tools is malfunctioning.
+pub const DEFAULT_MAX_TOOL_PAGES: usize = 1_000;
 
 /// A header value that is never rendered by `Debug` or `Display`.
 ///
@@ -99,6 +105,8 @@ pub struct McpSseLimits {
     pub max_event_bytes: usize,
     /// Bound on the bytes buffered for the `endpoint` event.
     pub max_endpoint_bytes: usize,
+    /// Bound on how many `tools/list` pages are followed.
+    pub max_tool_pages: usize,
 }
 
 impl Default for McpSseLimits {
@@ -111,6 +119,7 @@ impl Default for McpSseLimits {
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
             max_endpoint_bytes: DEFAULT_MAX_ENDPOINT_BYTES,
+            max_tool_pages: DEFAULT_MAX_TOOL_PAGES,
         }
     }
 }

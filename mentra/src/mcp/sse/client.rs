@@ -112,6 +112,9 @@ pub enum McpSseError {
     #[error("MCP SSE endpoint event exceeded the {limit} byte limit")]
     EndpointTooLarge { limit: usize },
 
+    #[error("MCP SSE server kept paginating tools/list past {limit} pages")]
+    TooManyToolPages { limit: usize },
+
     #[error("MCP SSE server returned JSON-RPC error: {0}")]
     JsonRpc(JsonRpcError),
 
@@ -221,9 +224,18 @@ impl McpSseClient {
 
         // The endpoint event must arrive before anything can be sent. Bound the
         // wait: a buffering proxy is a common cause of it never arriving.
+        //
+        // Every failure from here on must abort the reader before returning, or
+        // the task and the connection it holds outlive the failed connect.
         let endpoint = match tokio::time::timeout(config.limits.connect_timeout, endpoint_rx).await
         {
-            Ok(Ok(Ok(raw))) => resolve_endpoint(&stream_url, &raw)?,
+            Ok(Ok(Ok(raw))) => match resolve_endpoint(&stream_url, &raw) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    reader.abort();
+                    return Err(error.into());
+                }
+            },
             Ok(Ok(Err(error))) => {
                 reader.abort();
                 return Err(error);
@@ -252,6 +264,8 @@ impl McpSseClient {
             stream_url,
         };
 
+        // A failure here returns `client` by value, so its `Drop` aborts the
+        // reader; there is no separate cleanup path to keep in sync.
         client.initialize().await?;
         client.discover_tools().await?;
 
@@ -426,6 +440,7 @@ impl McpSseClient {
     async fn discover_tools(&mut self) -> Result<(), McpSseError> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut pages = 0_usize;
 
         loop {
             let params = McpListToolsParams {
@@ -435,6 +450,16 @@ impl McpSseClient {
                 .request("tools/list", Some(params), self.limits.list_tools_timeout)
                 .await?;
             tools.extend(page.tools);
+
+            pages += 1;
+            if pages >= self.limits.max_tool_pages {
+                // A server that keeps handing back a cursor would otherwise
+                // loop forever, growing the tool list without bound. The
+                // cursor is opaque, so a repeat cannot be detected by value.
+                return Err(McpSseError::TooManyToolPages {
+                    limit: self.limits.max_tool_pages,
+                });
+            }
 
             match page.next_cursor {
                 // A missing or empty cursor means the last page.

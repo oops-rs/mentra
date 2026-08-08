@@ -22,6 +22,11 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const LIST_TOOLS_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default timeout for `tools/call`.
 const CALL_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Bound on how many `tools/list` pages are followed.
+///
+/// Cursors are opaque, so a server repeating one cannot be detected by value;
+/// only a page bound stops the walk.
+const MAX_TOOL_PAGES: usize = 1_000;
 
 /// Errors from the MCP stdio client.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +51,9 @@ pub enum McpClientError {
 
     #[error("failed to parse MCP response: {0}")]
     ParseError(String),
+
+    #[error("MCP server kept paginating tools/list past {limit} pages")]
+    TooManyToolPages { limit: usize },
 
     #[error("MCP client is already shut down")]
     Shutdown,
@@ -269,6 +277,7 @@ impl McpStdioClient {
     async fn discover_tools(&mut self) -> Result<(), McpClientError> {
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut pages = 0_usize;
 
         loop {
             let params = McpListToolsParams {
@@ -279,6 +288,16 @@ impl McpStdioClient {
                 .await?;
 
             all_tools.extend(result.tools);
+
+            pages += 1;
+            if pages >= MAX_TOOL_PAGES {
+                // A server that keeps handing back a cursor would otherwise
+                // loop forever, growing the tool list without bound. Cursors
+                // are opaque, so a repeat cannot be detected by value.
+                return Err(McpClientError::TooManyToolPages {
+                    limit: MAX_TOOL_PAGES,
+                });
+            }
 
             match result.next_cursor {
                 Some(next) if !next.is_empty() => cursor = Some(next),

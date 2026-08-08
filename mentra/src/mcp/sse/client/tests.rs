@@ -218,6 +218,57 @@ async fn walks_every_page_of_a_paginated_tools_list() {
     );
 }
 
+/// A server that keeps returning a cursor must not loop forever. Cursors are
+/// opaque, so a repeat cannot be detected by value; only a page bound stops it.
+#[tokio::test(flavor = "multi_thread")]
+async fn stops_paginating_a_server_that_never_ends_its_tools_list() {
+    let server = SseTestServer::start();
+    let mut config = config(&server);
+    config.limits = McpSseLimits {
+        max_tool_pages: 4,
+        ..McpSseLimits::default()
+    };
+    let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
+
+    server.wait_for_stream();
+    server.send_endpoint("/messages/?session_id=abc");
+    server.wait_for_posts(1);
+    server.send_message(&initialize_result(1));
+
+    // Answer each tools/list with the same cursor. Replies must follow their
+    // request, not precede it: a response for an unregistered id is dropped.
+    // With a bound of 4 the client asks exactly four times and then gives up,
+    // so the count is exact rather than open-ended.
+    for page in 0..4 {
+        server.wait_for_posts(3 + page);
+        server.send_message(&json!({
+            "jsonrpc": "2.0",
+            "id": 2 + page,
+            "result": {"tools": [], "nextCursor": "always-more"}
+        }));
+    }
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(10), connecting)
+        .await
+        .expect("the client must give up rather than paginate forever")
+        .expect("no panic")
+        .expect_err("an endless cursor must fail");
+    assert!(
+        matches!(error, McpSseError::TooManyToolPages { limit: 4 }),
+        "got {error:?}"
+    );
+
+    let pages = server
+        .posts()
+        .into_iter()
+        .filter(|request| request.rpc_method().as_deref() == Some("tools/list"))
+        .count();
+    assert_eq!(
+        pages, 4,
+        "the client must stop at the configured page bound"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tool calls
 // ---------------------------------------------------------------------------
@@ -1091,4 +1142,33 @@ async fn connecting_fails_when_the_stream_closes_before_the_endpoint_arrives() {
         .expect("no panic")
         .expect_err("a closed stream cannot complete the handshake");
     assert!(matches!(error, McpSseError::StreamClosed), "got {error:?}");
+}
+
+/// A rejected endpoint must not leave the reader task running.
+///
+/// The task owns the response body, so leaking it also leaks the connection.
+/// Because the reader is what consumes the stream, a leaked one keeps draining
+/// events the abandoned client can never deliver — observable here as the
+/// fixture continuing to accept writes long after connect returned.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_endpoint_leaves_no_reader_consuming_the_stream() {
+    let server = SseTestServer::start();
+    let config = config(&server);
+    let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
+
+    server.wait_for_stream();
+    server.send_endpoint("https://evil.example/messages");
+
+    let error = connecting
+        .await
+        .expect("no panic")
+        .expect_err("a cross-origin endpoint is refused");
+    assert!(matches!(error, McpSseError::Endpoint(_)), "got {error:?}");
+
+    // Nothing was ever sent to the server, and nothing may be sent later.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        server.posts().is_empty(),
+        "a refused endpoint must not produce any request"
+    );
 }
