@@ -45,3 +45,7 @@ path = "cli_runtime.rs"
 [[example]]
 name = "host_orchestration"
 path = "host_orchestration.rs"
+
+[[example]]
+name = "mcp_sse"
+path = "mcp_sse.rs"

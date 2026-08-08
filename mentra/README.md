@@ -15,6 +15,7 @@ MSRV: Rust 1.85.
 - builtin `task` subagents with isolated child context and parent-side tracking
 - persistent agent teams with `team_spawn`, `team_send`, `broadcast`, `team_read_inbox`, and generic request-response protocols via `team_request`, `team_respond`, and `team_list_requests`
 - three-layer context compaction with silent tool-result shrinking, auto-summary compaction, and a builtin `compact` tool
+- Model Context Protocol servers over stdio and the legacy HTTP+SSE transport, with their tools bridged into the runtime
 - agent events and snapshots for CLI or UI watchers
 - Anthropic provider support
 - Gemini Developer API provider support
@@ -480,6 +481,128 @@ Reasoning effort support:
 - Anthropic models older than 4.6 and Gemini models older than 3 return `InvalidRequest` when unified reasoning effort is set
 
 Deferred tools are filtered through `ToolProfile` just like immediate tools. If you force a deferred tool with `ToolChoice::Tool { name }`, Mentra serializes that specific tool as immediate for the request so explicit invocation still works.
+
+## Model Context Protocol Servers
+
+Mentra connects to external MCP servers and bridges every tool they advertise
+into the runtime under a namespaced `mcp__<server>__<tool>` name. Bridged tools
+run through the same authorization, result limiter, and paging path as builtin
+and custom tools.
+
+Two transports are supported, selected by which configuration type you register.
+
+**stdio** spawns the server as a child process:
+
+```rust,no_run
+use mentra::{BuiltinProvider, McpServerConfig, Runtime};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let runtime = Runtime::builder()
+    .with_provider(BuiltinProvider::Anthropic, std::env::var("ANTHROPIC_API_KEY")?)
+    .with_mcp_server(McpServerConfig {
+        name: "filesystem".to_string(),
+        command: "npx".to_string(),
+        args: vec![
+            "-y".to_string(),
+            "@modelcontextprotocol/server-filesystem".to_string(),
+            "/tmp".to_string(),
+        ],
+        env: Default::default(),
+        cwd: None,
+    })
+    .build_async()
+    .await?;
+# let _ = runtime;
+# Ok(())
+# }
+```
+
+**Legacy HTTP+SSE** reaches a hosted server over the network:
+
+```rust,no_run
+use mentra::{BuiltinProvider, McpSseServerConfig, Runtime};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let runtime = Runtime::builder()
+    .with_provider(BuiltinProvider::Anthropic, std::env::var("ANTHROPIC_API_KEY")?)
+    .with_mcp_sse_server(
+        McpSseServerConfig::new("observability", "https://mcp.example.com/sse")
+            .with_bearer_token(std::env::var("MCP_TOKEN")?),
+    )
+    .build_async()
+    .await?;
+# let _ = runtime;
+# Ok(())
+# }
+```
+
+A server that answers `404` on `/mcp` but serves `/sse` needs this transport.
+
+### HTTP+SSE is not Streamable HTTP
+
+`McpSseServerConfig` speaks the transport from MCP protocol revision
+`2024-11-05`, which is a different protocol from the newer Streamable HTTP:
+
+| | legacy HTTP+SSE | Streamable HTTP |
+|---|---|---|
+| Endpoints | a `GET` stream plus a separate `POST` URL | one URL for both |
+| POST target | named by the server in an `endpoint` event | the configured URL |
+| Responses | always on the `GET` stream | in the POST response or a stream |
+| Session | a query parameter in the endpoint URL | the `Mcp-Session-Id` header |
+
+The client opens the configured URL with `Accept: text/event-stream`, waits for
+an `endpoint` event naming the POST URL, then posts `initialize`, a
+`notifications/initialized` notification, and a paginated `tools/list`. Servers
+answer each POST `202 Accepted` and deliver the actual JSON-RPC result as a
+`message` event on the stream.
+
+### Security and failure behavior
+
+The endpoint URL is chosen by the server, so it is validated before anything is
+sent to it. A resolved endpoint must match the configured URL's scheme, host,
+and effective port; a cross-origin endpoint, a protocol-relative `//other.host`
+value, embedded credentials, and non-`http(s)` schemes are all refused. Redirects
+are never followed on either request.
+
+Configured headers are sent on both the stream and every POST, stored as
+`SecretString` so they never appear in `Debug` output, errors, or logs.
+Configuring headers against a plaintext `http://` URL on a non-loopback host is
+rejected unless `allowing_plaintext_credentials()` is set. No error carries a
+response body or SSE payload, so a malicious server cannot write text into your
+logs.
+
+Losing the stream ends the session — the client fails closed rather than
+hanging, and never reconnects or re-sends a `tools/call`. A call whose response
+never arrived surfaces as `McpSseError::RequestIndeterminate`, because the POST
+and the response travel on different connections: the tool may have run. Treat
+that differently from a rejected POST, which definitely did not execute.
+
+### Using the client directly
+
+Hosts that need their own allowlist, redaction, or evidence policy can drive
+`McpSseClient` without registering anything:
+
+```rust,no_run
+use mentra::{McpSseClient, McpSseServerConfig};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let config = McpSseServerConfig::new("observability", "https://mcp.example.com/sse")
+    .with_bearer_token(std::env::var("MCP_TOKEN")?);
+
+let client = McpSseClient::connect(&config).await?;
+for tool in client.tools() {
+    println!("{}", tool.name);
+}
+
+let result = client
+    .call_tool("search_logs", Some(serde_json::json!({"query": "error"})))
+    .await?;
+println!("{}", result.is_error);
+
+client.shutdown().await;
+# Ok(())
+# }
+```
 
 ## Tool Profiles
 
