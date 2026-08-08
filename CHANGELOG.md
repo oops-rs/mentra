@@ -2,6 +2,71 @@
 
 ## Unreleased
 
+## 0.12.0
+
+### Model Context Protocol over HTTP+SSE
+
+- Add a native client for the legacy MCP HTTP+SSE transport (protocol revision
+  `2024-11-05`), for servers that answer `404` on `/mcp` and only serve `/sse`.
+  This is not Streamable HTTP: the client holds a long-lived `GET` stream open,
+  waits for an `endpoint` event naming a separate `POST` URL, and reads JSON-RPC
+  results back off the stream rather than from the `POST` response.
+- Add `McpSseServerConfig`, `McpSseClient`, `McpSseLimits`, `McpSseError`, and
+  `SecretString`, plus `McpManager::connect_sse` and
+  `RuntimeBuilder::with_mcp_sse_server` / `with_mcp_sse_servers`. Bridged SSE
+  tools are namespaced and pass through the same authorization, result limiter,
+  and paging path as builtin and custom tools.
+- `McpSseClient` is usable directly, without registering anything, so a host can
+  apply its own allowlist, redaction, and evidence policy before a model sees a
+  tool.
+- `McpServerConfig` remains the stdio configuration type and gains no transport
+  field; `with_mcp_server`/`with_mcp_servers` are unchanged.
+  `McpBridgedTool::new` is now generic over the transport and still accepts an
+  `Arc<McpStdioClient>`.
+
+### Transport security
+
+- The server names the `POST` endpoint, so it is validated before anything is
+  sent: the resolved URL must match the configured stream URL on scheme, host,
+  and effective port. Cross-origin endpoints, protocol-relative `//host` values,
+  embedded credentials, and non-`http(s)` schemes are refused, and redirects are
+  never followed on either request.
+- Configured headers are sent on both the stream and every `POST`, held as
+  `SecretString` so they cannot reach `Debug` output, errors, or logs.
+  `SecretString` deliberately does not implement `Serialize`, so serializing a
+  config that holds one is a compile error rather than a credential written to
+  disk. Headers over plaintext `http://` to a non-loopback host are rejected
+  unless `allow_plaintext_credentials` is set.
+- No error variant carries a response body or SSE payload, so a malicious server
+  cannot inject text into an operator's logs. SSE events, the `endpoint` event,
+  and diagnostic bodies are separately size-bounded.
+- Losing the stream fails closed. The transport never reconnects and never
+  re-sends a `tools/call`; an accepted-but-unanswered call surfaces as
+  `McpSseError::RequestIndeterminate`, distinct from a rejected `POST`, because
+  the request and its response travel on different connections and the tool may
+  have executed.
+
+### MCP fixes
+
+- Stop the stdio client leaking a pending-map entry when a request times out or
+  its write fails.
+- Stop the stdio client resolving a caller with `null` when the server sends its
+  own request, such as `ping`, reusing that id. Responses are now recognized by
+  carrying a result or an error.
+- Bound `tools/list` pagination on both transports. Cursors are opaque, so a
+  server repeating one is only stoppable by a page bound; previously it looped
+  forever, accumulating tools without limit.
+- Abort the SSE reader task when an endpoint is refused, rather than leaking the
+  task and its connection.
+
+### Breaking
+
+- `McpManager::call_tool` now returns `Result<McpToolCallResult, String>` instead
+  of `Result<McpToolCallResult, McpClientError>`. The two transports report
+  failures with different error enums and the manager only ever renders the
+  message. Callers that matched on `McpClientError` should match on the message
+  or use the transport client directly.
+
 ### Runtime safety
 
 - Keep `RuntimePolicy::workspace_bounded(...)` and `RuntimePolicy::read_only(...)`
