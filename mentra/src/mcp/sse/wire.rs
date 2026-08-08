@@ -36,8 +36,12 @@ pub(crate) struct SseEvent {
 }
 
 /// Errors produced while decoding the SSE byte stream.
+///
+/// Public because it is reachable through
+/// [`McpSseError::Wire`](crate::mcp::McpSseError::Wire); the parser itself
+/// stays internal.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum SseWireError {
+pub enum SseWireError {
     #[error("SSE event exceeded the {limit} byte limit (buffered at least {observed} bytes)")]
     EventTooLarge { limit: usize, observed: usize },
 

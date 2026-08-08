@@ -20,13 +20,29 @@ use super::sse::client::McpSseClient;
 /// Each transport reports failures with its own error type, so this trait
 /// flattens them to a message rather than forcing a shared error enum on the
 /// public clients.
+///
+/// This is a sealed trait: it is public only so that
+/// [`McpBridgedTool::new`] can be generic over the transport, and it is not
+/// implementable outside this crate.
 #[async_trait]
-pub(crate) trait McpToolClient: Send + Sync {
+pub trait McpToolClient: sealed::Sealed + Send + Sync {
+    /// Calls one tool, rendering any transport failure as a message.
     async fn call_tool(
         &self,
         tool_name: &str,
         arguments: Option<Value>,
     ) -> Result<McpToolCallResult, String>;
+}
+
+mod sealed {
+    /// Prevents outside implementations of [`super::McpToolClient`].
+    pub trait Sealed {}
+
+    impl Sealed for super::McpStdioClient {}
+    impl Sealed for super::McpSseClient {}
+
+    #[cfg(test)]
+    impl Sealed for crate::mcp::tests::SuccessfulMcpClient {}
 }
 
 #[async_trait]

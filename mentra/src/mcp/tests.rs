@@ -17,8 +17,8 @@ use crate::{
     },
 };
 
-struct SuccessfulMcpClient {
-    output: String,
+pub(crate) struct SuccessfulMcpClient {
+    pub(crate) output: String,
 }
 
 #[async_trait]

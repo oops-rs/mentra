@@ -817,6 +817,72 @@ async fn refuses_to_follow_a_redirect_on_a_message_post() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn rejects_an_absolute_endpoint_on_the_fixture_origin_with_a_different_port() {
+    let server = SseTestServer::start();
+    let config = config(&server);
+    let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
+
+    server.wait_for_stream();
+    // Same host, different port: still a different origin.
+    let other_port = server
+        .base_url()
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse::<u16>().ok())
+        .map(|port| port.wrapping_add(1))
+        .expect("the fixture URL carries a port");
+    server.send_endpoint(&format!("http://127.0.0.1:{other_port}/messages/"));
+
+    let error = connecting
+        .await
+        .expect("no panic")
+        .expect_err("a different port is a different origin");
+    assert!(matches!(error, McpSseError::Endpoint(_)), "got {error:?}");
+    assert!(server.posts().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accepts_an_absolute_endpoint_on_the_configured_origin() {
+    let server = SseTestServer::start();
+    let base_url = server.base_url().to_string();
+    let config = config(&server);
+    let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
+
+    server.wait_for_stream();
+    // The specification permits an absolute URL as long as the origin matches.
+    server.send_endpoint(&format!("{base_url}/messages/?session_id=abc"));
+
+    server.wait_for_posts(1);
+    server.send_message(&initialize_result(1));
+    server.wait_for_posts(3);
+    server.send_message(&tools_result(2, json!([])));
+
+    let _client = connecting.await.expect("no panic").expect("handshake");
+    assert_eq!(server.posts()[0].target, "/messages/?session_id=abc");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reports_a_post_the_server_never_answers() {
+    let server = SseTestServer::start();
+    let config = config(&server);
+    let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
+
+    server.wait_for_stream();
+    // The server accepts the connection then closes it without responding.
+    server.queue_post_reply(PostReply::Drop);
+    server.send_endpoint("/messages/?session_id=abc");
+
+    let error = connecting
+        .await
+        .expect("no panic")
+        .expect_err("a dropped POST fails the handshake");
+    assert!(
+        matches!(error, McpSseError::Transport(_)),
+        "a dropped connection is a transport failure, got {error:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Teardown
 // ---------------------------------------------------------------------------
