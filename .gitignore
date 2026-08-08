@@ -2,6 +2,7 @@ target
 Cargo.lock
 
 .env
+.envrc
 .worktrees/
 
 .mcp.json
