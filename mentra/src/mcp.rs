@@ -15,6 +15,7 @@ pub mod bridge;
 pub mod client;
 pub mod manager;
 pub mod protocol;
+pub(crate) mod sse;
 
 #[cfg(test)]
 mod tests;
