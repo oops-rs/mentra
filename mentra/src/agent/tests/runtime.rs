@@ -63,7 +63,7 @@ async fn run_respects_tool_budget() {
 }
 
 #[tokio::test]
-async fn policy_can_deny_shell_tool_execution() {
+async fn workspace_bounded_policy_keeps_local_shell_disabled() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
@@ -76,11 +76,9 @@ async fn policy_can_deny_shell_tool_execution() {
 
     let runtime = Runtime::builder()
         .with_provider_instance(provider)
-        .with_policy(
-            RuntimePolicy::permissive()
-                .allow_shell_commands(false)
-                .allow_background_commands(false),
-        )
+        .with_policy(RuntimePolicy::workspace_bounded(
+            std::env::current_dir().expect("current directory"),
+        ))
         .build()
         .expect("build runtime");
     let mut agent = runtime.spawn("agent", model).unwrap();
@@ -126,6 +124,9 @@ async fn enforced_shell_validation_blocks_destructive_command_and_emits_hook() {
         .with_provider_instance(provider)
         .with_policy(
             RuntimePolicy::read_only(std::env::current_dir().expect("current directory"))
+                // This test exercises validation before execution. The
+                // destructive command is expected to stop at that boundary.
+                .allow_shell_commands(true)
                 .shell_validation(ShellValidationMode::Enforce),
         )
         .with_hook(RecordingHook {

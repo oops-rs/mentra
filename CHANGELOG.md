@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Runtime safety
+
+- Keep `RuntimePolicy::workspace_bounded(...)` and `RuntimePolicy::read_only(...)`
+  shell execution disabled by default. Their path roots constrain builtin file
+  tools and the requested working directory; they cannot confine filesystem or
+  network effects of the host `LocalRuntimeExecutor`. Hosts may explicitly
+  enable shell switches after installing an OS-enforced executor through
+  `RuntimeBuilder::with_executor(...)`.
+- Document `RuntimePolicy::permissive()` as full host shell access and separate
+  semantic authorization from OS-enforced containment.
+
 ## 0.11.0
 
 ### Automatic tool-result paging

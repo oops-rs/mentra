@@ -166,6 +166,14 @@ let _ = model;
 
 `Runtime::builder()` registers Mentra's builtin tools, including `shell`, `background_run`, `check_background`, `files`, and the runtime/task/team intrinsics. Shell and background execution remain disabled by default, so coding-agent setups must opt in with a runtime policy. If you want semantic review before tools execute, install a `ToolAuthorizer`.
 
+The builtin local executor is a host executor, not a filesystem or network
+sandbox. `RuntimePolicy::permissive()` therefore grants the model the same host
+access as the Mentra process. Use it only inside a disposable container or
+another boundary you trust. On a normal host, install an OS-enforced custom
+executor with `RuntimeBuilder::with_executor(...)`; authorization and shell
+validation decide whether a command may start, but they do not contain an
+allowed command.
+
 For Responses API transport, xipe-compatible endpoints, and provider-side state
 options, see the workspace
 [`Responses Coding Agent Guide`](../docs/responses-coding-agent.md).
@@ -192,6 +200,7 @@ impl ToolAuthorizer for AllowAllAuthorizer {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder()
         .with_provider(BuiltinProvider::OpenAI, std::env::var("OPENAI_API_KEY")?)
+        // Full host shell access. Use only inside a trusted external sandbox.
         .with_policy(RuntimePolicy::permissive())
         .with_tool_authorizer(AllowAllAuthorizer)
         .build()?;
@@ -209,13 +218,21 @@ Mentra's builtin runtime tools are available by default, but command execution i
 - foreground shell execution is disabled by default
 - background command execution is disabled by default
 - `RuntimePolicy::permissive()` enables both shell and background command execution
+- `RuntimePolicy::workspace_bounded(...)` and `RuntimePolicy::read_only(...)` keep shell execution disabled; their roots constrain builtin file tools and the requested shell working directory, not shell process effects
 - builtin shell commands run through `/bin/sh -c` on Unix and `cmd.exe /C` on Windows
-- runtime policy still enforces hard limits such as working-directory roots, file read/write roots, allowed environment variables, timeouts, output caps, and background task limits
+- the local executor clears unlisted environment variables and enforces timeouts, output caps, and process-tree cleanup on timeout, but it does not restrict filesystem or network access
 - semantic review is opt-in through `RuntimeBuilder::with_tool_authorizer(...)`
 
-Use the default policy when you want a safer runtime surface, and opt into `RuntimePolicy::permissive()` only when you are intentionally building a coding-agent or automation workflow that should be able to act on the local workspace.
+Use the default policy when you want a safer runtime surface. Opt into
+`RuntimePolicy::permissive()` only when an external sandbox already contains the
+entire Mentra process and full host access is intentional.
 
-If you need different command semantics, such as PowerShell on Windows or a sandboxed executor, replace the default local executor with `RuntimeBuilder::with_executor(...)`.
+If you need different command semantics, such as PowerShell on Windows, or
+filesystem/network confinement, replace the default local executor with
+`RuntimeBuilder::with_executor(...)`. A workspace-bounded or read-only policy
+can then explicitly enable foreground and background shell switches; Mentra
+treats that executor as a trusted enforcement boundary and does not fall back
+to the local executor.
 
 ## Tool Authorization
 

@@ -12,9 +12,9 @@ use crate::tool::{
 /// Controls heuristic validation of builtin shell commands.
 ///
 /// Shell validation is a defense-in-depth guardrail and permission-prompt UX
-/// signal. It is heuristic and is not a security boundary; filesystem roots,
-/// environment isolation, process groups, and command timeouts remain the
-/// enforceable runtime boundaries.
+/// signal. It is heuristic and is not a security boundary. Working-directory
+/// checks do not confine a shell process; filesystem and network isolation
+/// require an OS-enforced [`crate::runtime::RuntimeExecutor`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ShellValidationMode {
     /// Classify commands for authorization previews without changing execution.
@@ -141,16 +141,17 @@ impl RuntimePolicy {
         }
     }
 
-    /// Returns a workspace-bounded policy that restricts file access and
-    /// shell execution to the given workspace root.
+    /// Returns a workspace-bounded policy for builtin file tools.
     ///
-    /// This is the recommended policy for production use — it allows shell
-    /// commands and file operations only within the workspace boundary.
+    /// Shell and background execution remain disabled because the builtin
+    /// local executor runs directly on the host and a working-directory check
+    /// cannot confine filesystem or network effects. Hosts that install an
+    /// OS-enforced executor through [`crate::runtime::Runtime::builder`] may
+    /// explicitly opt in with [`Self::allow_shell_commands`] and
+    /// [`Self::allow_background_commands`].
     pub fn workspace_bounded(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
         Self {
-            allow_shell_commands: true,
-            allow_background_commands: true,
             allowed_working_roots: vec![workspace.clone()],
             allowed_read_roots: vec![workspace.clone()],
             allowed_write_roots: vec![workspace],
@@ -160,12 +161,14 @@ impl RuntimePolicy {
         }
     }
 
-    /// Returns a read-only policy that allows file reads and shell commands
-    /// but blocks all file writes.
+    /// Returns a policy that allows builtin file reads but blocks builtin file
+    /// writes and host shell execution.
+    ///
+    /// A host may opt into shell execution only after installing an executor
+    /// that enforces read-only filesystem and network policy at the OS boundary.
     pub fn read_only(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
         Self {
-            allow_shell_commands: true,
             allow_background_commands: false,
             allowed_working_roots: vec![workspace.clone()],
             allowed_read_roots: vec![workspace],
@@ -175,12 +178,18 @@ impl RuntimePolicy {
     }
 
     /// Enables or disables foreground shell command execution.
+    ///
+    /// This switch grants authority to the configured executor; it does not
+    /// sandbox the builtin `LocalRuntimeExecutor`.
     pub fn allow_shell_commands(mut self, allow: bool) -> Self {
         self.allow_shell_commands = allow;
         self
     }
 
     /// Enables or disables background shell command execution.
+    ///
+    /// This switch grants authority to the configured executor; it does not
+    /// sandbox the builtin `LocalRuntimeExecutor`.
     pub fn allow_background_commands(mut self, allow: bool) -> Self {
         self.allow_background_commands = allow;
         self
@@ -516,6 +525,36 @@ mod tests {
             .authorize_command_execution(&cwd, &cwd, true)
             .expect_err("background should be disabled");
         assert!(error.contains("Background command execution is disabled"));
+    }
+
+    #[test]
+    fn bounded_policies_keep_host_shell_execution_disabled() {
+        let workspace = test_path("bounded-repo");
+
+        for policy in [
+            RuntimePolicy::workspace_bounded(&workspace),
+            RuntimePolicy::read_only(&workspace),
+        ] {
+            let error = policy
+                .authorize_command_execution(&workspace, &workspace, false)
+                .expect_err("bounded policy must not authorize the host shell");
+            assert!(error.contains("Shell command execution is disabled"));
+        }
+    }
+
+    #[test]
+    fn bounded_policy_allows_explicit_external_executor_opt_in() {
+        let workspace = test_path("sandboxed-repo");
+        let policy = RuntimePolicy::workspace_bounded(&workspace)
+            .allow_shell_commands(true)
+            .allow_background_commands(true);
+
+        policy
+            .authorize_command_execution(&workspace, &workspace, false)
+            .expect("foreground shell opt-in");
+        policy
+            .authorize_command_execution(&workspace, &workspace, true)
+            .expect("background shell opt-in");
     }
 
     #[test]

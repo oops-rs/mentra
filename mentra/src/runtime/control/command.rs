@@ -55,6 +55,12 @@ pub struct CommandRequest {
     pub max_output_bytes_per_stream: usize,
 }
 
+/// Executes runtime command requests.
+///
+/// Implementations are trusted host components. A sandboxed implementation
+/// should be configured with an immutable filesystem and network policy because
+/// [`CommandRequest`] intentionally carries execution data, not authorization
+/// policy.
 #[async_trait]
 pub trait RuntimeExecutor: Send + Sync {
     async fn run(&self, request: CommandRequest) -> Result<CommandOutput, String>;
@@ -80,6 +86,11 @@ pub trait RuntimeExecutor: Send + Sync {
     }
 }
 
+/// Executes commands directly with the current user's host permissions.
+///
+/// This executor clears unlisted environment variables and enforces output,
+/// timeout, and timeout-cleanup limits. It does not sandbox filesystem or
+/// network access.
 pub struct LocalRuntimeExecutor;
 
 #[async_trait]

@@ -28,6 +28,13 @@ id.
 `shell`, `background_run`, `check_background`, and `files`. Shell execution still
 requires an explicit runtime policy.
 
+`RuntimePolicy::permissive()` uses Mentra's unsandboxed local host executor. The
+example below is appropriate only inside a disposable container or another
+trusted outer sandbox. For a normal host, supply an OS-enforced
+`RuntimeExecutor` with `RuntimeBuilder::with_executor(...)`; a
+`workspace_bounded` or `read_only` policy deliberately keeps shell execution
+disabled until the host opts in after installing that executor.
+
 ```rust,no_run
 use mentra::{
     BuiltinProvider, ContentBlock, ModelSelector, ProviderRequestOptions, ResponsesRequestOptions,
@@ -38,6 +45,7 @@ use mentra::{
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::builder()
         .with_provider(BuiltinProvider::OpenAI, std::env::var("OPENAI_API_KEY")?)
+        // Full host shell access. Use only inside a trusted external sandbox.
         .with_policy(RuntimePolicy::permissive())
         .build()?;
 

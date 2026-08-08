@@ -111,7 +111,9 @@ including:
   setup.
 
 The builtin runtime shell uses `/bin/sh` on Unix hosts and `cmd.exe` on
-Windows hosts. The OpenAI OAuth example keeps `PersistentTokenStoreKind::Auto`
+Windows hosts. It is not a filesystem or network sandbox; use a custom
+`RuntimeExecutor` or an outer container before granting a model shell access on
+a normal host. The OpenAI OAuth example keeps `PersistentTokenStoreKind::Auto`
 platform-native as well: macOS uses Keychain, while Windows and Linux use the
 file-backed store.
 
