@@ -301,9 +301,8 @@ mod tests {
 
     #[cfg(windows)]
     fn stdout_and_stderr_command() -> String {
-        powershell_encoded_command(
-            "$stdout='a' * 32; $stderr='b' * 32; [Console]::Out.Write($stdout); [Console]::Error.Write($stderr)",
-        )
+        "echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa& echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 1>&2"
+            .to_string()
     }
 
     #[cfg(unix)]
@@ -313,9 +312,7 @@ mod tests {
 
     #[cfg(windows)]
     fn missing_secret_command() -> String {
-        powershell_encoded_command(
-            "if ($null -ne $env:SECRET -and $env:SECRET.Length -gt 0) { [Console]::Out.Write($env:SECRET) } else { [Console]::Out.Write('missing') }",
-        )
+        "if defined SECRET (echo unexpected) else (echo missing)".to_string()
     }
 
     #[cfg(unix)]
@@ -325,7 +322,7 @@ mod tests {
 
     #[cfg(windows)]
     fn timeout_command() -> String {
-        powershell_encoded_command("Start-Sleep -Seconds 1")
+        "ping.exe -n 2 127.0.0.1 >nul".to_string()
     }
 
     #[cfg(unix)]
@@ -348,18 +345,6 @@ mod tests {
             .collect()
     }
 
-    #[cfg(windows)]
-    fn powershell_encoded_command(script: &str) -> String {
-        use base64::Engine as _;
-
-        let utf16 = script
-            .encode_utf16()
-            .flat_map(|unit| unit.to_le_bytes())
-            .collect::<Vec<_>>();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
-        format!("powershell.exe -NoProfile -EncodedCommand {encoded}")
-    }
-
     #[tokio::test]
     async fn caps_stdout_and_stderr_independently() {
         let output = LocalRuntimeExecutor
@@ -375,6 +360,8 @@ mod tests {
             .await
             .expect("command output");
 
+        assert!(!output.timed_out, "{output:?}");
+        assert!(output.success, "{output:?}");
         assert_eq!(output.stdout.len(), 8);
         assert_eq!(output.stderr.len(), 8);
         assert!(output.stdout_truncated);
@@ -396,7 +383,9 @@ mod tests {
             .await
             .expect("command output");
 
-        assert_eq!(output.stdout, "missing");
+        assert!(!output.timed_out, "{output:?}");
+        assert!(output.success, "{output:?}");
+        assert_eq!(output.stdout.trim_end(), "missing");
     }
 
     #[tokio::test]
