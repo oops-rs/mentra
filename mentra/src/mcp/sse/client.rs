@@ -172,8 +172,8 @@ struct PendingWaiter {
 /// server's advertised tools, and calls one selected tool. It deliberately does
 /// not register anything with the runtime, so a host can apply its own
 /// allowlists, redaction, and evidence policy over the top. Use
-/// [`RuntimeBuilder::with_mcp_sse_server`](crate::runtime::RuntimeBuilder::with_mcp_sse_server)
-/// when the generic bridging behavior is what you want.
+/// `RuntimeBuilder::with_mcp_sse_server` when the generic bridging behavior is
+/// what you want.
 pub struct McpSseClient {
     http: reqwest::Client,
     /// The `POST` target named by the server, validated to the configured origin.

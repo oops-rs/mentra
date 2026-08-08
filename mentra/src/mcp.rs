@@ -17,11 +17,19 @@
 //!
 //! # Architecture
 //!
-//! - [`protocol`] — JSON-RPC 2.0 and MCP protocol types shared by both transports
-//! - [`client`] — stdio transport client for a single MCP server process
-//! - [`sse`] — legacy HTTP+SSE transport client
-//! - [`bridge`] — wraps MCP tools as Mentra [`ExecutableTool`] instances
-//! - [`manager`] — manages multiple MCP server connections and lifecycle
+//! These links use absolute paths because the module's documentation is merged
+//! with the outer comment on its `pub mod` declaration, which resolves relative
+//! links against the crate root rather than this module.
+//!
+//! - [`protocol`](crate::mcp::protocol) — JSON-RPC 2.0 and MCP protocol types
+//!   shared by both transports
+//! - [`client`](crate::mcp::client) — stdio transport client for a single MCP
+//!   server process
+//! - [`sse`](crate::mcp::sse) — legacy HTTP+SSE transport client
+//! - [`bridge`](crate::mcp::bridge) — wraps MCP tools as Mentra
+//!   [`ExecutableTool`] instances
+//! - [`manager`](crate::mcp::manager) — manages multiple MCP server connections
+//!   and lifecycle
 //!
 //! [`ExecutableTool`]: crate::tool::ExecutableTool
 
