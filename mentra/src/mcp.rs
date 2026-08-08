@@ -32,6 +32,8 @@ pub mod protocol;
 pub mod sse;
 
 #[cfg(test)]
+mod registration_tests;
+#[cfg(test)]
 mod tests;
 
 pub use bridge::{McpBridgedTool, mcp_tool_name, parse_mcp_tool_name};

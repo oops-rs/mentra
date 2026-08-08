@@ -131,6 +131,16 @@ impl McpBridgedTool {
     }
 }
 
+impl std::fmt::Debug for McpBridgedTool {
+    /// Renders the bridged identity without reaching into the client, which
+    /// holds transport credentials.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpBridgedTool")
+            .field("name", &self.full_name())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ToolDefinition for McpBridgedTool {
     fn descriptor(&self) -> RuntimeToolDescriptor {
         let description = self.tool_def.description.clone().unwrap_or_default();

@@ -2,7 +2,7 @@ use std::{any::Any, path::Path, sync::Arc};
 
 use crate::{
     compaction::CompactionEngine,
-    mcp::{McpManager, McpServerConfig},
+    mcp::{McpManager, McpServerConfig, McpSseServerConfig},
     provider::{Provider, ProviderRegistry},
     runtime::{
         RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks, RuntimePolicy, RuntimeStore,
@@ -17,11 +17,31 @@ use mentra_provider::BuiltinProvider;
 use super::Runtime;
 use super::skill::SkillLoader;
 
+/// An MCP server to connect to during build, and how to reach it.
+///
+/// This is internal so that the two public registration methods keep taking
+/// their own configuration types: [`McpServerConfig`] stays the stdio
+/// configuration and callers never gain a transport field to fill in.
+enum McpRegistration {
+    Stdio(Box<McpServerConfig>),
+    Sse(Box<McpSseServerConfig>),
+}
+
+impl McpRegistration {
+    /// The configured server name, used for diagnostics.
+    fn name(&self) -> &str {
+        match self {
+            Self::Stdio(config) => &config.name,
+            Self::Sse(config) => &config.name,
+        }
+    }
+}
+
 /// Builder for constructing a [`Runtime`] with providers, tools, and policies.
 pub struct RuntimeBuilder {
     handle: RuntimeHandle,
     provider_registry: ProviderRegistry,
-    mcp_configs: Vec<McpServerConfig>,
+    mcp_configs: Vec<McpRegistration>,
 }
 
 impl RuntimeBuilder {
@@ -175,15 +195,61 @@ impl RuntimeBuilder {
         Ok(self)
     }
 
-    /// Registers an MCP server to connect to during build.
+    /// Registers an MCP server, reached over stdio, to connect to during build.
     pub fn with_mcp_server(mut self, config: McpServerConfig) -> Self {
-        self.mcp_configs.push(config);
+        self.mcp_configs
+            .push(McpRegistration::Stdio(Box::new(config)));
         self
     }
 
-    /// Registers multiple MCP servers to connect to during build.
+    /// Registers multiple stdio MCP servers to connect to during build.
     pub fn with_mcp_servers(mut self, configs: impl IntoIterator<Item = McpServerConfig>) -> Self {
-        self.mcp_configs.extend(configs);
+        self.mcp_configs.extend(
+            configs
+                .into_iter()
+                .map(|config| McpRegistration::Stdio(Box::new(config))),
+        );
+        self
+    }
+
+    /// Registers an MCP server reached over the legacy HTTP+SSE transport.
+    ///
+    /// Every tool the server advertises is bridged into the runtime under a
+    /// namespaced name. Use [`McpSseClient`](crate::mcp::McpSseClient) directly
+    /// when a host needs to apply its own allowlist before anything is
+    /// registered.
+    ///
+    /// ```rust,no_run
+    /// use mentra::{BuiltinProvider, McpSseServerConfig, Runtime};
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = Runtime::builder()
+    ///     .with_provider(BuiltinProvider::Anthropic, "sk-...")
+    ///     .with_mcp_sse_server(
+    ///         McpSseServerConfig::new("observability", "https://mcp.example.com/sse")
+    ///             .with_bearer_token("<token>"),
+    ///     )
+    ///     .build_async()
+    ///     .await?;
+    /// # let _ = runtime;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_mcp_sse_server(mut self, config: McpSseServerConfig) -> Self {
+        self.mcp_configs
+            .push(McpRegistration::Sse(Box::new(config)));
+        self
+    }
+
+    /// Registers multiple HTTP+SSE MCP servers to connect to during build.
+    pub fn with_mcp_sse_servers(
+        mut self,
+        configs: impl IntoIterator<Item = McpSseServerConfig>,
+    ) -> Self {
+        self.mcp_configs.extend(
+            configs
+                .into_iter()
+                .map(|config| McpRegistration::Sse(Box::new(config))),
+        );
         self
     }
 
@@ -294,17 +360,28 @@ impl RuntimeBuilder {
         if !self.mcp_configs.is_empty() {
             let mut manager = McpManager::new();
             for config in &self.mcp_configs {
-                match manager.connect(config).await {
+                let connected = match config {
+                    McpRegistration::Stdio(config) => manager
+                        .connect(config)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    McpRegistration::Sse(config) => manager
+                        .connect_sse(config)
+                        .await
+                        .map_err(|error| error.to_string()),
+                };
+
+                match connected {
                     Ok(bridged_tools) => {
                         for tool in bridged_tools {
                             self.handle.register_tool(tool);
                         }
                     }
-                    Err(e) => {
+                    Err(error) => {
                         // Log the error but don't fail the build — degraded mode.
                         eprintln!(
-                            "Warning: MCP server '{}' failed to connect: {}",
-                            config.name, e
+                            "Warning: MCP server '{}' failed to connect: {error}",
+                            config.name()
                         );
                     }
                 }
