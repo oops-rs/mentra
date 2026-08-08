@@ -1,5 +1,8 @@
 //! MCP stdio client — spawns a child process and communicates via JSON-RPC over stdin/stdout.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,6 +103,13 @@ impl McpStdioClient {
                     continue;
                 }
                 if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                    // A response carries a result or an error. A server-initiated
+                    // request such as `ping` also has an id, and without this
+                    // check it would resolve the caller holding that id with a
+                    // null result.
+                    if resp.result.is_none() && resp.error.is_none() {
+                        continue;
+                    }
                     let id = match &resp.id {
                         JsonRpcId::Number(n) => *n,
                         _ => continue,
@@ -181,20 +191,24 @@ impl McpStdioClient {
 
         {
             let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all(line.as_bytes())
-                .await
-                .map_err(|_| McpClientError::ProcessExited)?;
-            stdin
-                .flush()
-                .await
-                .map_err(|_| McpClientError::ProcessExited)?;
+            if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+                // The request never reached the server, so drop its
+                // registration rather than leaving it to time out.
+                self.pending.lock().await.remove(&id);
+                return Err(McpClientError::ProcessExited);
+            }
         }
 
-        let result = tokio::time::timeout(timeout_duration, rx)
-            .await
-            .map_err(|_| McpClientError::Timeout(timeout_duration))?
-            .map_err(|_| McpClientError::ProcessExited)??;
+        let result = match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(result)) => result?,
+            Ok(Err(_)) => return Err(McpClientError::ProcessExited),
+            Err(_) => {
+                // Remove the registration so a timed-out request cannot leak an
+                // entry for the lifetime of the connection.
+                self.pending.lock().await.remove(&id);
+                return Err(McpClientError::Timeout(timeout_duration));
+            }
+        };
 
         serde_json::from_value(result)
             .map_err(|e| McpClientError::ParseError(format!("deserialize response: {e}")))
@@ -282,12 +296,28 @@ impl McpStdioClient {
         tool_name: &str,
         arguments: Option<JsonValue>,
     ) -> Result<McpToolCallResult, McpClientError> {
+        self.call_tool_with_timeout(tool_name, arguments, CALL_TOOL_TIMEOUT)
+            .await
+    }
+
+    /// Call a tool on this server, bounding the wait explicitly.
+    pub async fn call_tool_with_timeout(
+        &self,
+        tool_name: &str,
+        arguments: Option<JsonValue>,
+        timeout: Duration,
+    ) -> Result<McpToolCallResult, McpClientError> {
         let params = McpToolCallParams {
             name: tool_name.to_string(),
             arguments,
         };
-        self.call("tools/call", Some(params), CALL_TOOL_TIMEOUT)
-            .await
+        self.call("tools/call", Some(params), timeout).await
+    }
+
+    /// The number of requests still awaiting a response.
+    #[cfg(test)]
+    pub(crate) async fn pending_len(&self) -> usize {
+        self.pending.lock().await.len()
     }
 
     /// Shut down the MCP server process gracefully.

@@ -192,6 +192,128 @@ async fn a_misconfigured_sse_server_fails_before_any_connection_is_opened() {
     );
 }
 
+/// `build_async` must actually register the MCP tools it connects, and a
+/// runtime built without any MCP server must not gain namespaced tools.
+///
+/// Without this, disabling the whole registration arm in `build_async` leaves
+/// the suite green: the runtime still builds, it just silently advertises
+/// nothing. That failure is invisible until an agent cannot find its tools.
+#[tokio::test(flavor = "multi_thread")]
+async fn build_async_registers_the_tools_of_a_connected_sse_server() {
+    use crate::Runtime;
+
+    let server = SseTestServer::start();
+    let config = McpSseServerConfig::new("obs", server.sse_url());
+
+    let building = tokio::spawn(async move {
+        Runtime::empty_builder()
+            .with_provider_instance(StubProvider)
+            .with_mcp_sse_server(config)
+            .build_async()
+            .await
+    });
+
+    server.wait_for_stream();
+    server.send_endpoint("/messages/?session_id=abc");
+    server.wait_for_posts(1);
+    server.send_message(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "serverInfo": {"name": "fixture", "version": "4.5.6"}
+        }
+    }));
+    server.wait_for_posts(3);
+    server.send_message(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"tools": [
+            {"name": "search_logs", "inputSchema": {"type": "object"}},
+            {"name": "list_alerts", "inputSchema": {"type": "object"}}
+        ]}
+    }));
+
+    let runtime = building
+        .await
+        .expect("no panic")
+        .expect("the runtime should build");
+
+    let registered: Vec<String> = runtime
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .filter(|name| name.starts_with("mcp__"))
+        .collect();
+
+    assert_eq!(
+        registered.len(),
+        2,
+        "build_async must register every tool the server advertised, got {registered:?}"
+    );
+    assert!(registered.contains(&mcp_tool_name("obs", "search_logs")));
+    assert!(registered.contains(&mcp_tool_name("obs", "list_alerts")));
+
+    assert!(
+        runtime
+            .tool_descriptor(&mcp_tool_name("obs", "search_logs"))
+            .is_some(),
+        "a registered MCP tool must be resolvable by name"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn build_async_registers_no_mcp_tools_without_a_configured_server() {
+    use crate::Runtime;
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(StubProvider)
+        .build_async()
+        .await
+        .expect("the runtime should build");
+
+    let registered: Vec<String> = runtime
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .filter(|name| name.starts_with("mcp__"))
+        .collect();
+
+    assert!(
+        registered.is_empty(),
+        "no MCP server was configured, got {registered:?}"
+    );
+}
+
+/// A provider that satisfies the builder's "at least one provider" check.
+///
+/// The registration tests never send a request, so it only needs to exist.
+#[derive(Clone)]
+struct StubProvider;
+
+#[async_trait::async_trait]
+impl crate::provider::Provider for StubProvider {
+    fn descriptor(&self) -> crate::provider::ProviderDescriptor {
+        crate::provider::ProviderDescriptor::new(crate::BuiltinProvider::Anthropic)
+    }
+
+    async fn list_models(&self) -> Result<Vec<crate::ModelInfo>, crate::provider::ProviderError> {
+        Ok(vec![crate::ModelInfo::new(
+            "stub-model",
+            crate::BuiltinProvider::Anthropic,
+        )])
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::provider::Request<'_>,
+    ) -> Result<crate::provider::ProviderEventStream, crate::provider::ProviderError> {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Ok(rx)
+    }
+}
+
 /// An SSE-backed tool must reach the model through exactly the same result
 /// limiter and paging path as a stdio tool or a custom tool. This runs a real
 /// fixture server behind a bridged tool inside a scripted runtime and compares
