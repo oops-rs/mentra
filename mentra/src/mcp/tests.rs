@@ -7,7 +7,6 @@ use crate::{
     ContentBlock,
     mcp::{
         bridge::{McpBridgedTool, McpToolClient, mcp_tool_name, parse_mcp_tool_name},
-        client::McpClientError,
         protocol::*,
     },
     runtime::RuntimePolicy,
@@ -28,7 +27,7 @@ impl McpToolClient for SuccessfulMcpClient {
         &self,
         _tool_name: &str,
         _arguments: Option<Value>,
-    ) -> Result<McpToolCallResult, McpClientError> {
+    ) -> Result<McpToolCallResult, String> {
         Ok(McpToolCallResult {
             content: vec![McpToolCallContent {
                 kind: "text".to_string(),
@@ -69,6 +68,41 @@ fn mcp_tool_name_namespacing() {
         mcp_tool_name("my-server", "do_thing"),
         "mcp__my-server__do_thing"
     );
+}
+
+/// The bridge accepts either transport's client without a signature change at
+/// the call site, which is what keeps `McpBridgedTool::new` source compatible
+/// for existing stdio callers.
+#[test]
+fn bridging_compiles_for_both_transport_clients() {
+    fn accepts_stdio(client: Arc<crate::mcp::McpStdioClient>) -> McpBridgedTool {
+        McpBridgedTool::new(
+            "stdio-server".to_string(),
+            McpToolDefinition {
+                name: "read".to_string(),
+                description: None,
+                input_schema: None,
+            },
+            client,
+        )
+    }
+
+    fn accepts_sse(client: Arc<crate::mcp::McpSseClient>) -> McpBridgedTool {
+        McpBridgedTool::new(
+            "sse-server".to_string(),
+            McpToolDefinition {
+                name: "search".to_string(),
+                description: None,
+                input_schema: None,
+            },
+            client,
+        )
+    }
+
+    // Building a real client of either transport needs a live server, so this
+    // asserts the signatures rather than the behavior.
+    let _ = accepts_stdio;
+    let _ = accepts_sse;
 }
 
 #[test]

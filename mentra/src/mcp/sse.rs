@@ -5,9 +5,9 @@
 //! separate URL that the server names. It is distinct from Streamable HTTP;
 //! see [`client`] for the differences and the full lifecycle.
 
-pub(crate) mod client;
-pub(crate) mod config;
-pub(crate) mod endpoint;
+pub mod client;
+pub mod config;
+pub mod endpoint;
 #[cfg(test)]
 pub(crate) mod testing;
 pub(crate) mod wire;

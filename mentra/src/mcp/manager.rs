@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::bridge::{McpBridgedTool, mcp_tool_name};
+use super::bridge::{McpBridgedTool, McpToolClient, mcp_tool_name};
 use super::client::{McpClientError, McpStdioClient};
 use super::protocol::{McpServerConfig, McpToolDefinition};
+use super::sse::client::{McpSseClient, McpSseError};
+use super::sse::config::McpSseServerConfig;
 
 /// Status of an MCP server connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,9 +39,64 @@ pub struct McpServerSummary {
     pub error: Option<String>,
 }
 
+/// A connected client, whichever transport it speaks.
+///
+/// The manager needs more than [`McpToolClient`] provides — it reports server
+/// versions and shuts connections down — so the transports are held in an enum
+/// rather than behind that trait.
+enum TransportClient {
+    Stdio(Arc<McpStdioClient>),
+    Sse(Arc<McpSseClient>),
+}
+
+impl TransportClient {
+    /// The server version reported by the `initialize` handshake.
+    fn server_version(&self) -> Option<String> {
+        match self {
+            Self::Stdio(client) => client.server_info().map(|info| info.version.clone()),
+            Self::Sse(client) => client.server_info().map(|info| info.version.clone()),
+        }
+    }
+
+    /// Closes the connection.
+    async fn shutdown(&self) {
+        match self {
+            Self::Stdio(client) => client.shutdown().await,
+            Self::Sse(client) => client.shutdown().await,
+        }
+    }
+
+    /// Calls a tool, flattening the transport's error to a message.
+    async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<serde_json::Value>,
+    ) -> Result<super::protocol::McpToolCallResult, String> {
+        match self {
+            Self::Stdio(client) => McpToolClient::call_tool(&**client, tool_name, arguments).await,
+            Self::Sse(client) => McpToolClient::call_tool(&**client, tool_name, arguments).await,
+        }
+    }
+
+    /// Bridges every advertised tool into a runtime tool.
+    fn bridge(&self, server_name: &str, tools: &[McpToolDefinition]) -> Vec<McpBridgedTool> {
+        tools
+            .iter()
+            .map(|tool| match self {
+                Self::Stdio(client) => {
+                    McpBridgedTool::new(server_name.to_string(), tool.clone(), client.clone())
+                }
+                Self::Sse(client) => {
+                    McpBridgedTool::new(server_name.to_string(), tool.clone(), client.clone())
+                }
+            })
+            .collect()
+    }
+}
+
 /// Tracks a connected MCP server.
 struct ConnectedServer {
-    client: Arc<McpStdioClient>,
+    client: TransportClient,
     tools: Vec<McpToolDefinition>,
 }
 
@@ -57,7 +114,7 @@ impl McpManager {
         }
     }
 
-    /// Connect to an MCP server and discover its tools.
+    /// Connect to an MCP server over stdio and discover its tools.
     /// Returns the bridged tools ready for registration.
     pub async fn connect(
         &mut self,
@@ -70,26 +127,44 @@ impl McpManager {
             self.errors.insert(config.name.clone(), e.to_string());
         })?;
 
-        let client = Arc::new(client);
         let tools = client.tools().to_vec();
+        let client = TransportClient::Stdio(Arc::new(client));
 
-        let bridged: Vec<McpBridgedTool> = tools
-            .iter()
-            .map(|tool_def| {
-                McpBridgedTool::new(config.name.clone(), tool_def.clone(), client.clone())
-            })
-            .collect();
+        Ok(self.register(config.name.clone(), client, tools))
+    }
 
-        self.servers.insert(
-            config.name.clone(),
-            ConnectedServer {
-                client,
-                tools: tools.clone(),
-            },
-        );
-        self.errors.remove(&config.name);
+    /// Connect to an MCP server over the legacy HTTP+SSE transport and discover
+    /// its tools.
+    ///
+    /// Returns the bridged tools ready for registration, exactly as
+    /// [`connect`](Self::connect) does for stdio.
+    pub async fn connect_sse(
+        &mut self,
+        config: &McpSseServerConfig,
+    ) -> Result<Vec<McpBridgedTool>, McpSseError> {
+        self.disconnect(&config.name).await;
 
-        Ok(bridged)
+        let client = McpSseClient::connect(config).await.inspect_err(|error| {
+            self.errors.insert(config.name.clone(), error.to_string());
+        })?;
+
+        let tools = client.tools().to_vec();
+        let client = TransportClient::Sse(Arc::new(client));
+
+        Ok(self.register(config.name.clone(), client, tools))
+    }
+
+    /// Records a connected server and bridges its tools.
+    fn register(
+        &mut self,
+        name: String,
+        client: TransportClient,
+        tools: Vec<McpToolDefinition>,
+    ) -> Vec<McpBridgedTool> {
+        let bridged = client.bridge(&name, &tools);
+        self.errors.remove(&name);
+        self.servers.insert(name, ConnectedServer { client, tools });
+        bridged
     }
 
     /// Disconnect a server by name.
@@ -115,7 +190,7 @@ impl McpManager {
             .map(|(name, server)| McpServerSummary {
                 name: name.clone(),
                 status: McpServerStatus::Connected,
-                server_version: server.client.server_info().map(|info| info.version.clone()),
+                server_version: server.client.server_version(),
                 tool_count: server.tools.len(),
                 error: None,
             })
@@ -151,16 +226,20 @@ impl McpManager {
             .collect()
     }
 
-    /// Call a tool on a specific server.
+    /// Call a tool on a specific server, whichever transport it speaks.
+    ///
+    /// Each transport reports failures with its own error type, so this returns
+    /// the message rather than widening the error into a shared enum.
     pub async fn call_tool(
         &self,
         server_name: &str,
         tool_name: &str,
         arguments: Option<serde_json::Value>,
-    ) -> Result<super::protocol::McpToolCallResult, McpClientError> {
-        let server = self.servers.get(server_name).ok_or_else(|| {
-            McpClientError::ParseError(format!("MCP server '{}' not connected", server_name))
-        })?;
+    ) -> Result<super::protocol::McpToolCallResult, String> {
+        let server = self
+            .servers
+            .get(server_name)
+            .ok_or_else(|| format!("MCP server '{server_name}' not connected"))?;
 
         server.client.call_tool(tool_name, arguments).await
     }

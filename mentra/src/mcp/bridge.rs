@@ -13,14 +13,20 @@ use crate::tool::{
 
 use super::client::McpStdioClient;
 use super::protocol::{McpToolCallResult, McpToolDefinition};
+use super::sse::client::McpSseClient;
 
+/// The transport-independent surface [`McpBridgedTool`] needs from a client.
+///
+/// Each transport reports failures with its own error type, so this trait
+/// flattens them to a message rather than forcing a shared error enum on the
+/// public clients.
 #[async_trait]
 pub(crate) trait McpToolClient: Send + Sync {
     async fn call_tool(
         &self,
         tool_name: &str,
         arguments: Option<Value>,
-    ) -> Result<McpToolCallResult, super::client::McpClientError>;
+    ) -> Result<McpToolCallResult, String>;
 }
 
 #[async_trait]
@@ -29,8 +35,23 @@ impl McpToolClient for McpStdioClient {
         &self,
         tool_name: &str,
         arguments: Option<Value>,
-    ) -> Result<McpToolCallResult, super::client::McpClientError> {
-        McpStdioClient::call_tool(self, tool_name, arguments).await
+    ) -> Result<McpToolCallResult, String> {
+        McpStdioClient::call_tool(self, tool_name, arguments)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait]
+impl McpToolClient for McpSseClient {
+    async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<Value>,
+    ) -> Result<McpToolCallResult, String> {
+        McpSseClient::call_tool(self, tool_name, arguments)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -57,11 +78,14 @@ pub struct McpBridgedTool {
 }
 
 impl McpBridgedTool {
-    pub fn new(
-        server_name: String,
-        tool_def: McpToolDefinition,
-        client: Arc<McpStdioClient>,
-    ) -> Self {
+    /// Wraps one tool from a connected MCP server.
+    ///
+    /// The client is generic over the transport, so this accepts an
+    /// `Arc<McpStdioClient>` and an `Arc<McpSseClient>` alike.
+    pub fn new<C>(server_name: String, tool_def: McpToolDefinition, client: Arc<C>) -> Self
+    where
+        C: McpToolClient + 'static,
+    {
         Self::from_client(server_name, tool_def, client)
     }
 
@@ -128,7 +152,7 @@ impl ToolExecutor for McpBridgedTool {
             .client
             .call_tool(&self.tool_def.name, arguments)
             .await
-            .map_err(|e| format!("MCP tool call failed: {e}"))?;
+            .map_err(|error| format!("MCP tool call failed: {error}"))?;
 
         // Concatenate text content blocks into the result string.
         let mut output = String::new();

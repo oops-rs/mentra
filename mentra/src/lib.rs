@@ -54,7 +54,10 @@ pub use agent::{
 };
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
 pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
-pub use mcp::{McpClientError, McpManager, McpServerConfig, McpServerStatus, McpServerSummary};
+pub use mcp::{
+    McpClientError, McpManager, McpServerConfig, McpServerStatus, McpServerSummary, McpSseClient,
+    McpSseConfigError, McpSseError, McpSseLimits, McpSseServerConfig,
+};
 pub use runtime::{
     AgentStore, AuditStore, HybridRuntimeStore, LeaseStore, NewTask, PermissionRuleStore, RunStore,
     Runtime, RuntimePolicy, ShellValidationMode, TaskBoard, TaskBoardError, TaskPatch, TaskStore,
