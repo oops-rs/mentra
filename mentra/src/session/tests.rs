@@ -1,4 +1,7 @@
-#![allow(clippy::unwrap_used)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "tests use unwrap to fail immediately on invalid fixtures"
+)]
 
 use crate::session::event::*;
 use crate::session::permission::*;

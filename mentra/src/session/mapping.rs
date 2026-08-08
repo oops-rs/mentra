@@ -287,7 +287,6 @@ fn truncate_input_summary(input: &str, max_len: usize) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use serde_json::json;
 

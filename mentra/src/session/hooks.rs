@@ -63,7 +63,10 @@ impl RuntimeHook for SessionHookBridge {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "tests use unwrap to fail immediately on invalid fixtures"
+)]
 mod tests {
     use tokio::sync::broadcast;
 

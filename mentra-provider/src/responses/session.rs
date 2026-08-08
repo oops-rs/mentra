@@ -1278,15 +1278,28 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
     }
 
     #[tokio::test]
-    #[allow(clippy::result_large_err)]
     async fn websocket_transport_sends_response_create_frame() {
         use futures_util::{SinkExt, StreamExt};
         use http::HeaderValue;
         use tokio_tungstenite::accept_hdr_async;
         use tokio_tungstenite::tungstenite::Message as WsMessage;
         use tokio_tungstenite::tungstenite::handshake::server::{
-            Request as WsHandshakeRequest, Response as WsHandshakeResponse,
+            ErrorResponse, Request as WsHandshakeRequest, Response as WsHandshakeResponse,
         };
+
+        #[expect(
+            clippy::result_large_err,
+            reason = "tokio-tungstenite fixes the handshake callback error type"
+        )]
+        fn add_turn_state_header(
+            _request: &WsHandshakeRequest,
+            mut response: WsHandshakeResponse,
+        ) -> Result<WsHandshakeResponse, ErrorResponse> {
+            response
+                .headers_mut()
+                .insert("x-codex-turn-state", HeaderValue::from_static("ws-state"));
+            Ok(response)
+        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1296,17 +1309,9 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept websocket");
-            let mut ws = accept_hdr_async(
-                stream,
-                |_request: &WsHandshakeRequest, mut response: WsHandshakeResponse| {
-                    response
-                        .headers_mut()
-                        .insert("x-codex-turn-state", HeaderValue::from_static("ws-state"));
-                    Ok(response)
-                },
-            )
-            .await
-            .expect("upgrade websocket");
+            let mut ws = accept_hdr_async(stream, add_turn_state_header)
+                .await
+                .expect("upgrade websocket");
             let frame = ws
                 .next()
                 .await
