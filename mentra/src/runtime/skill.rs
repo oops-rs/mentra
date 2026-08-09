@@ -16,6 +16,23 @@ pub(crate) struct SkillLoader {
 struct SkillEntry {
     description: String,
     body: String,
+    path: PathBuf,
+}
+
+/// A loaded skill, without its body.
+///
+/// Name and description are what a host needs to show a skill set to a person
+/// — in a client UI, as protocol commands, in a run's log, or in a test
+/// asserting the expected skills loaded. The body stays behind `load_skill`,
+/// which is what keeps skills cheap in context: descriptions are always
+/// present, bodies arrive only when asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    /// The `SKILL.md` this came from. With several roots registered, this is
+    /// how a host tells which one won.
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -79,10 +96,42 @@ impl SkillLoader {
             }
 
             let description = meta.description.unwrap_or_default().trim().to_string();
-            skills.insert(name, SkillEntry { description, body });
+            skills.insert(
+                name,
+                SkillEntry {
+                    description,
+                    body,
+                    path: file,
+                },
+            );
         }
 
         Ok(Self { skills })
+    }
+
+    /// Folds in skills from a lower-precedence root.
+    ///
+    /// A name already defined here wins, so roots registered earlier shadow
+    /// later ones — the same rule `PATH` uses, and the one that lets a project
+    /// override a personal skill by name. Within a single root a repeated name
+    /// is still [`SkillLoadError::DuplicateSkillName`], because there it is a
+    /// mistake rather than an intent.
+    pub(crate) fn merge_weaker(&mut self, weaker: SkillLoader) {
+        for (name, entry) in weaker.skills {
+            self.skills.entry(name).or_insert(entry);
+        }
+    }
+
+    /// Every loaded skill, name-ordered, without bodies.
+    pub(crate) fn infos(&self) -> Vec<SkillInfo> {
+        self.skills
+            .iter()
+            .map(|(name, entry)| SkillInfo {
+                name: name.clone(),
+                description: entry.description.clone(),
+                path: entry.path.clone(),
+            })
+            .collect()
     }
 
     pub(crate) fn get_descriptions(&self) -> String {
@@ -276,6 +325,74 @@ mod tests {
 
         assert!(matches!(error, SkillLoadError::InvalidFrontmatter { .. }));
         assert!(error.to_string().contains("invalid skill frontmatter"));
+    }
+
+    #[test]
+    fn a_weaker_root_only_fills_in_names_the_stronger_one_lacks() {
+        let strong = temp_skills_dir("merge-strong");
+        write_skill(&strong, "review", "---\nname: review\n---\nProject rules\n");
+        let weak = temp_skills_dir("merge-weak");
+        write_skill(&weak, "review", "---\nname: review\n---\nPersonal rules\n");
+        write_skill(&weak, "deploy", "---\nname: deploy\n---\nPersonal deploy\n");
+
+        let mut loader = SkillLoader::from_dir(&strong).expect("strong root loads");
+        loader.merge_weaker(SkillLoader::from_dir(&weak).expect("weak root loads"));
+
+        assert!(
+            loader
+                .get_content("review")
+                .expect("review present")
+                .contains("Project rules"),
+            "the stronger root must win a name collision"
+        );
+        assert!(
+            loader.get_content("deploy").is_ok(),
+            "a name only the weaker root defines must still load"
+        );
+    }
+
+    #[test]
+    fn merging_reports_which_file_each_skill_came_from() {
+        let strong = temp_skills_dir("merge-infos-strong");
+        write_skill(
+            &strong,
+            "review",
+            "---\nname: review\ndescription: D1\n---\nA\n",
+        );
+        let weak = temp_skills_dir("merge-infos-weak");
+        write_skill(
+            &weak,
+            "deploy",
+            "---\nname: deploy\ndescription: D2\n---\nB\n",
+        );
+
+        let mut loader = SkillLoader::from_dir(&strong).expect("loads");
+        loader.merge_weaker(SkillLoader::from_dir(&weak).expect("loads"));
+        let infos = loader.infos();
+
+        assert_eq!(infos.len(), 2);
+        // Name-ordered, so `deploy` precedes `review`.
+        assert_eq!(infos[0].name, "deploy");
+        assert_eq!(infos[0].description, "D2");
+        assert!(infos[0].path.starts_with(&weak));
+        assert_eq!(infos[1].name, "review");
+        assert_eq!(infos[1].description, "D1");
+        assert!(infos[1].path.starts_with(&strong));
+    }
+
+    #[test]
+    fn infos_omit_bodies() {
+        let root = temp_skills_dir("infos-no-body");
+        write_skill(
+            &root,
+            "one",
+            "---\nname: one\ndescription: short\n---\nSECRET BODY\n",
+        );
+
+        let infos = SkillLoader::from_dir(&root).expect("loads").infos();
+
+        let rendered = format!("{infos:?}");
+        assert!(!rendered.contains("SECRET BODY"));
     }
 
     fn temp_skills_dir(label: &str) -> PathBuf {

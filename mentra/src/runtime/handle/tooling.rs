@@ -100,17 +100,39 @@ impl RuntimeHandle {
             .is_none_or(|owner| owner == agent_id)
     }
 
+    /// Adds a skill root, keeping any name already registered.
+    ///
+    /// Additive rather than replacing: registering a second root used to
+    /// discard the first silently, which made "project skills layered over
+    /// personal ones" impossible to express.
     pub fn register_skill_loader(&self, loader: SkillLoader) {
-        *self
+        let mut slot = self
             .tooling
             .skill_loader
             .write()
-            .expect("skill loader poisoned") = Some(loader);
+            .expect("skill loader poisoned");
+        match slot.as_mut() {
+            Some(existing) => existing.merge_weaker(loader),
+            None => *slot = Some(loader),
+        }
+        drop(slot);
+
         self.tooling
             .tool_registry
             .write()
             .expect("tool registry poisoned")
             .register_skill_tool();
+    }
+
+    /// Every loaded skill, name-ordered, without bodies.
+    pub fn skills(&self) -> Vec<crate::runtime::SkillInfo> {
+        self.tooling
+            .skill_loader
+            .read()
+            .expect("skill loader poisoned")
+            .as_ref()
+            .map(SkillLoader::infos)
+            .unwrap_or_default()
     }
 
     pub fn tools(&self) -> Arc<[crate::tool::ProviderToolSpec]> {

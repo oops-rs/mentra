@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use crate::{
     agent::{Agent, AgentConfig, AgentSpawnOptions, AgentStatus},
     provider::{Provider, ProviderRegistry},
-    runtime::{builder::RuntimeBuilder, skill::SkillLoadError},
+    runtime::builder::RuntimeBuilder,
     session::{
         Session, SessionEvent, SessionId, SessionMetadata,
         permission::{PendingPermissionStore, SessionToolAuthorizer},
@@ -37,6 +37,7 @@ pub use error::{ErrorCategory, RuntimeError};
 pub(crate) use handle::RuntimeHandle;
 pub use hybrid_store::HybridRuntimeStore;
 pub(crate) use intrinsic::RuntimeIntrinsicTool;
+pub use skill::{SkillInfo, SkillLoadError};
 pub use store::{
     AgentStore, AuditStore, LeaseStore, PermissionRuleStore, RunStore, RuntimeStore,
     SqliteRuntimeStore, TaskStore,
@@ -124,10 +125,40 @@ impl Runtime {
     }
 
     /// Registers a skills directory and enables the builtin `load_skill` tool.
+    ///
+    /// Additive: calling this again adds a second root rather than replacing
+    /// the first, and a name already registered wins. Register the most
+    /// specific root first.
     pub fn register_skills_dir(&self, path: impl AsRef<Path>) -> Result<(), SkillLoadError> {
         self.handle
             .register_skill_loader(skill::SkillLoader::from_dir(path)?);
         Ok(())
+    }
+
+    /// Registers several skills directories at once, strongest first.
+    ///
+    /// Equivalent to calling [`register_skills_dir`](Self::register_skills_dir)
+    /// for each in order: a skill defined in an earlier root shadows the same
+    /// name in a later one, so a project root can override a personal one.
+    /// Within a single root a repeated name is still an error.
+    ///
+    /// Registration stops at the first unreadable root, leaving the roots
+    /// before it registered.
+    pub fn register_skills_dirs<I, P>(&self, paths: I) -> Result<(), SkillLoadError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        for path in paths {
+            self.register_skills_dir(path)?;
+        }
+        Ok(())
+    }
+
+    /// Every loaded skill, name-ordered, with its description and source path
+    /// but not its body.
+    pub fn skills(&self) -> Vec<SkillInfo> {
+        self.handle.skills()
     }
 
     /// Returns a lead-privileged task-board view for `namespace`.
