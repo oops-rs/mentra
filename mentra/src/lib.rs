@@ -74,8 +74,8 @@ pub use team::{
 };
 pub use tool::FileToolProfile;
 pub use transcript::{
-    AgentTranscript, CompactionSummary, DelegationArtifact, DelegationEdge, DelegationKind,
-    DelegationStatus, TranscriptItem, TranscriptKind,
+    AgentTranscript, BranchError, CompactionSummary, DelegationArtifact, DelegationEdge,
+    DelegationKind, DelegationStatus, EntryId, TranscriptItem, TranscriptKind,
 };
 
 pub mod error {

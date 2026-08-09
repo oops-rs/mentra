@@ -159,4 +159,12 @@ pub enum SessionEvent {
         message: String,
         recoverable: bool,
     },
+    /// The session returned to an earlier entry; subsequent turns continue
+    /// from there along a new path.
+    Branched {
+        entry_id: String,
+        /// How many entries left the active path. They remain in the
+        /// transcript and stay reachable.
+        abandoned_entries: usize,
+    },
 }

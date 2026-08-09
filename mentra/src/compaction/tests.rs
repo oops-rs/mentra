@@ -13,6 +13,19 @@ use crate::{
     },
 };
 
+/// Asserts an entry survived compaction unchanged in identity and content.
+///
+/// `parent_id` is deliberately excluded: it records where an entry sits on the
+/// active path, and compaction genuinely moves salvaged entries. Holding the
+/// old link would leave it pointing at an entry the replacement transcript no
+/// longer contains. Identity (`id`), content, and `details` must not move.
+fn assert_same_entry(actual: &TranscriptItem, expected: &TranscriptItem, context: &str) {
+    assert_eq!(actual.id, expected.id, "{context} (identity)");
+    assert_eq!(actual.kind, expected.kind, "{context} (kind)");
+    assert_eq!(actual.message, expected.message, "{context} (message)");
+    assert_eq!(actual.details(), expected.details(), "{context} (details)");
+}
+
 fn tool_exchange_item(text: &str) -> TranscriptItem {
     TranscriptItem::tool_exchange(
         Message::user(ContentBlock::text(text)),
@@ -425,25 +438,27 @@ async fn compact_preserves_salvaged_details_and_lets_discarded_details_go_with_t
         .iter()
         .find(|item| item.is_real_user_turn())
         .expect("salvaged user turn present in the replacement transcript");
-    assert_eq!(
-        replayed_user, &salvaged_user,
-        "the salvaged user turn must survive bit-for-bit, details included"
+    assert_same_entry(
+        replayed_user,
+        &salvaged_user,
+        "the salvaged user turn must survive bit-for-bit, details included",
     );
 
     let replayed_delegation = replacement
         .iter()
         .find(|item| item.is_delegation_result())
         .expect("salvaged delegation result present in the replacement transcript");
-    assert_eq!(
-        replayed_delegation, &salvaged_delegation,
-        "the salvaged delegation result must survive bit-for-bit, details included"
+    assert_same_entry(
+        replayed_delegation,
+        &salvaged_delegation,
+        "the salvaged delegation result must survive bit-for-bit, details included",
     );
 
     // The untouched tail survives verbatim too.
-    assert_eq!(
-        replacement.last(),
-        Some(&tail_result),
-        "the untouched tail item must survive bit-for-bit, details included"
+    assert_same_entry(
+        replacement.last().expect("a tail item"),
+        &tail_result,
+        "the untouched tail item must survive bit-for-bit, details included",
     );
 
     // Discarded items are honestly gone: their details never resurface
@@ -465,8 +480,13 @@ async fn compact_preserves_salvaged_details_and_lets_discarded_details_go_with_t
         .lines()
         .map(|line| serde_json::from_str(line).expect("valid TranscriptItem json"))
         .collect();
+    // Compared against the linked transcript rather than the raw vec the test
+    // assembled: appending to a transcript is what establishes an entry's
+    // parent, so only the linked form is what was ever snapshotted.
+    let linked = AgentTranscript::new(items.clone());
     assert_eq!(
-        snapshot_items, items,
+        snapshot_items,
+        linked.items(),
         "the pre-compaction snapshot must preserve every original item bit-for-bit, \
          including ones the compaction goes on to discard"
     );

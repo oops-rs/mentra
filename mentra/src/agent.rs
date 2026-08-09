@@ -414,6 +414,34 @@ impl Agent {
         self.memory.transcript()
     }
 
+    /// The transcript entry the next turn will continue from.
+    pub fn leaf(&self) -> Option<&crate::transcript::EntryId> {
+        self.transcript().leaf()
+    }
+
+    /// Returns to an earlier entry, so the next turn explores a new path from
+    /// there.
+    ///
+    /// The abandoned entries stay in the transcript, reachable through
+    /// [`children`](Self::children) — nothing is deleted, so the path just
+    /// left can be returned to the same way. Returns how many entries left
+    /// the active path.
+    pub fn branch_from(
+        &mut self,
+        entry: &crate::transcript::EntryId,
+    ) -> Result<usize, RuntimeError> {
+        self.memory.branch_from(entry)
+    }
+
+    /// The entries recorded as continuing from `entry`. More than one means
+    /// the conversation branched there.
+    pub fn children(
+        &self,
+        entry: &crate::transcript::EntryId,
+    ) -> Vec<&crate::transcript::TranscriptItem> {
+        self.transcript().children(entry)
+    }
+
     fn append_transcript_item(&mut self, item: TranscriptItem) -> Result<(), RuntimeError> {
         self.memory.append_transcript_item(item)
     }

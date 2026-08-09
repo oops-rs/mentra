@@ -1863,6 +1863,7 @@ async fn full_scenario_prompt_shell_file_events_end_to_end() {
             SessionEvent::CompactionStarted { .. } => "compaction_started",
             SessionEvent::CompactionCompleted { .. } => "compaction_completed",
             SessionEvent::MemoryUpdated { .. } => "memory_updated",
+            SessionEvent::Branched { .. } => "branched",
             SessionEvent::Notice { .. } => "notice",
             SessionEvent::RetryAttempt { .. } => "retry_attempt",
             SessionEvent::Error { .. } => "error",

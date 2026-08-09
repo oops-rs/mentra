@@ -4,7 +4,7 @@ use crate::{
     Message,
     error::RuntimeError,
     runtime::RuntimeStore,
-    transcript::{AgentTranscript, TranscriptItem, transcript_item_from_message},
+    transcript::{AgentTranscript, EntryId, TranscriptItem, transcript_item_from_message},
 };
 
 use super::{
@@ -143,6 +143,18 @@ impl AgentMemory {
             interrupted: true,
             interrupted_run_id: Some(run.run_id),
         })
+    }
+
+    /// Moves the transcript leaf back to `id` and re-derives history.
+    pub fn branch_from(&mut self, id: &EntryId) -> Result<usize, RuntimeError> {
+        let moved = self
+            .state
+            .transcript
+            .branch_from(id)
+            .map_err(|error| RuntimeError::Store(error.to_string()))?;
+        self.sync_history_cache();
+        self.persist()?;
+        Ok(moved)
     }
 
     pub fn transcript(&self) -> &AgentTranscript {

@@ -1,27 +1,176 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::{ContentBlock, Message, Role};
 
+static NEXT_ENTRY_SUFFIX: AtomicU64 = AtomicU64::new(0);
+
+/// Identifier for one transcript entry.
+///
+/// Entries form a tree through [`TranscriptItem::parent_id`]; this is how a
+/// conversation can return to an earlier point and continue along a different
+/// path without copying history.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct EntryId(String);
+
+impl EntryId {
+    pub fn new() -> Self {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let suffix = NEXT_ENTRY_SUFFIX.fetch_add(1, Ordering::Relaxed);
+        Self(format!("entry-{stamp:x}-{suffix:x}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for EntryId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for EntryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Why a branch operation could not be performed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BranchError {
+    #[error("no entry '{0}' on the current path")]
+    UnknownEntry(EntryId),
+}
+
+/// An agent's conversation, as a tree of entries with one active path.
+///
+/// [`items`](Self::items) is that active path, root to leaf — the messages
+/// the model actually sees, and the only view most code needs. Entries left
+/// behind by [`branch_from`](Self::branch_from) move to
+/// [`archived`](Self::archived) rather than being deleted, so a branch is a
+/// move of the leaf pointer rather than a copy of history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(from = "AgentTranscriptWire")]
 pub struct AgentTranscript {
     items: Vec<TranscriptItem>,
+    /// Entries off the active path. Reachable through
+    /// [`children`](Self::children) so an abandoned branch can be inspected
+    /// or returned to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archive: Vec<TranscriptItem>,
+}
+
+/// Deserialization shape, so transcripts written before entries had ids load
+/// unchanged and get their parent links filled in on the way through.
+#[derive(Deserialize)]
+struct AgentTranscriptWire {
+    #[serde(default)]
+    items: Vec<TranscriptItem>,
+    #[serde(default)]
+    archive: Vec<TranscriptItem>,
+}
+
+impl From<AgentTranscriptWire> for AgentTranscript {
+    fn from(wire: AgentTranscriptWire) -> Self {
+        let mut transcript = Self {
+            items: wire.items,
+            archive: wire.archive,
+        };
+        transcript.link_active_path();
+        transcript
+    }
 }
 
 impl AgentTranscript {
     pub fn new(items: Vec<TranscriptItem>) -> Self {
-        Self { items }
+        let mut transcript = Self {
+            items,
+            archive: Vec::new(),
+        };
+        transcript.link_active_path();
+        transcript
     }
 
     pub fn from_messages(messages: Vec<Message>) -> Self {
-        Self {
-            items: messages
+        Self::new(
+            messages
                 .into_iter()
                 .map(transcript_item_from_message)
                 .collect(),
+        )
+    }
+
+    /// Fills in parent links the active path implies.
+    ///
+    /// The active path is a root-to-leaf chain by construction, so an entry's
+    /// parent is the entry before it. Only missing links are written, which
+    /// leaves a tree loaded from disk alone and repairs a transcript written
+    /// before entries had ids.
+    fn link_active_path(&mut self) {
+        for index in 1..self.items.len() {
+            if self.items[index].parent_id.is_none() {
+                self.items[index].parent_id = Some(self.items[index - 1].id.clone());
+            }
         }
+    }
+
+    /// The entry the next append will hang from.
+    pub fn leaf(&self) -> Option<&EntryId> {
+        self.items.last().map(|item| &item.id)
+    }
+
+    /// Entries that are not on the active path.
+    pub fn archived(&self) -> &[TranscriptItem] {
+        &self.archive
+    }
+
+    /// Looks up an entry anywhere in the tree.
+    pub fn entry(&self, id: &EntryId) -> Option<&TranscriptItem> {
+        self.items
+            .iter()
+            .chain(self.archive.iter())
+            .find(|item| &item.id == id)
+    }
+
+    /// The entries recorded as continuing from `id`, in creation order.
+    ///
+    /// More than one means the conversation branched there: each is the start
+    /// of a different path explored from the same point.
+    pub fn children(&self, id: &EntryId) -> Vec<&TranscriptItem> {
+        self.items
+            .iter()
+            .chain(self.archive.iter())
+            .filter(|item| item.parent_id.as_ref() == Some(id))
+            .collect()
+    }
+
+    /// Moves the leaf back to `id`, so subsequent appends continue from there.
+    ///
+    /// Entries after `id` are moved off the active path, not deleted: they
+    /// stay reachable through [`children`](Self::children), which is what
+    /// makes this a branch rather than a truncation. Returns how many entries
+    /// left the path.
+    pub fn branch_from(&mut self, id: &EntryId) -> Result<usize, BranchError> {
+        let Some(position) = self.items.iter().position(|item| &item.id == id) else {
+            return Err(BranchError::UnknownEntry(id.clone()));
+        };
+
+        let abandoned = self.items.split_off(position + 1);
+        let count = abandoned.len();
+        self.archive.extend(abandoned);
+        Ok(count)
     }
 
     pub fn items(&self) -> &[TranscriptItem] {
@@ -36,7 +185,9 @@ impl AgentTranscript {
         self.items.is_empty()
     }
 
-    pub fn push(&mut self, item: TranscriptItem) {
+    /// Appends an entry as a child of the current leaf.
+    pub fn push(&mut self, mut item: TranscriptItem) {
+        item.parent_id = self.leaf().cloned();
         self.items.push(item);
     }
 
@@ -58,6 +209,16 @@ impl AgentTranscript {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptItem {
+    /// Identity of this entry within the transcript tree.
+    #[serde(default)]
+    pub id: EntryId,
+    /// The entry this one continues from. `None` marks a root.
+    ///
+    /// Set by [`AgentTranscript::push`] rather than by the constructors: an
+    /// entry's parent is a property of where it is appended, not of what it
+    /// contains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<EntryId>,
     pub kind: TranscriptKind,
     pub message: Option<Message>,
     /// Opaque per-call host metadata attached via [`TranscriptItem::with_details`]
@@ -75,6 +236,8 @@ pub struct TranscriptItem {
 impl TranscriptItem {
     pub fn user_turn(message: Message) -> Self {
         Self {
+            id: EntryId::new(),
+            parent_id: None,
             kind: TranscriptKind::UserTurn,
             message: Some(message),
             details: None,
@@ -83,6 +246,8 @@ impl TranscriptItem {
 
     pub fn assistant_turn(message: Message) -> Self {
         Self {
+            id: EntryId::new(),
+            parent_id: None,
             kind: TranscriptKind::AssistantTurn,
             message: Some(message),
             details: None,
@@ -91,6 +256,8 @@ impl TranscriptItem {
 
     pub fn tool_exchange(message: Message, tool_use_id: Option<String>, is_error: bool) -> Self {
         Self {
+            id: EntryId::new(),
+            parent_id: None,
             kind: TranscriptKind::ToolExchange {
                 tool_use_id,
                 is_error,
@@ -102,6 +269,8 @@ impl TranscriptItem {
 
     pub fn canonical_context(message: Message) -> Self {
         Self {
+            id: EntryId::new(),
+            parent_id: None,
             kind: TranscriptKind::CanonicalContext,
             message: Some(message),
             details: None,
@@ -114,6 +283,8 @@ impl TranscriptItem {
         edge: Option<DelegationEdge>,
     ) -> Self {
         Self {
+            id: EntryId::new(),
+            parent_id: None,
             kind: TranscriptKind::DelegationRequest { delegation, edge },
             message: Some(message),
             details: None,
@@ -126,6 +297,8 @@ impl TranscriptItem {
         edge: Option<DelegationEdge>,
     ) -> Self {
         Self {
+            id: EntryId::new(),
+            parent_id: None,
             kind: TranscriptKind::DelegationResult { delegation, edge },
             message: Some(message),
             details: None,
@@ -137,6 +310,8 @@ impl TranscriptItem {
             message: Some(Message::user(ContentBlock::text(
                 summary.render_for_handoff(),
             ))),
+            id: EntryId::new(),
+            parent_id: None,
             kind: TranscriptKind::CompactionSummary { summary },
             details: None,
         }

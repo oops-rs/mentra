@@ -16,6 +16,7 @@ use crate::{
         },
         types::{SessionId, SessionMetadata, SessionStatus},
     },
+    transcript::{EntryId, TranscriptItem},
 };
 
 /// Type alias for the receiver end of the session event broadcast channel.
@@ -319,6 +320,34 @@ impl Session {
     /// Returns the agent's canonical transcript for UI reconstruction.
     pub fn replay(&self) -> &AgentTranscript {
         self.agent.transcript()
+    }
+
+    /// The entry the next turn will continue from.
+    pub fn leaf(&self) -> Option<&EntryId> {
+        self.agent.leaf()
+    }
+
+    /// Returns to an earlier entry so the next turn takes a different path.
+    ///
+    /// This is how "undo that exchange and try something else" works without
+    /// starting a new session: the entries after `entry` leave the active
+    /// path but stay in the transcript, so the abandoned line of work is
+    /// still addressable through [`children`](Self::children). Emits
+    /// [`SessionEvent::Branched`] with the number of entries that moved.
+    pub fn branch_from(&mut self, entry: &EntryId) -> Result<usize, RuntimeError> {
+        let moved = self.agent.branch_from(entry)?;
+        self.emit(SessionEvent::Branched {
+            entry_id: entry.to_string(),
+            abandoned_entries: moved,
+        });
+        self.touch_updated_at();
+        Ok(moved)
+    }
+
+    /// The entries recorded as continuing from `entry`, in creation order.
+    /// More than one means the conversation branched there.
+    pub fn children(&self, entry: &EntryId) -> Vec<&TranscriptItem> {
+        self.agent.children(entry)
     }
 
     /// Resumes the agent from an interrupted or failed state, emitting session
