@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+### Conversations branch
+
+- Transcript entries carry `id` and `parent_id`, making a conversation a tree
+  with one active path. `Session::branch_from` returns to an earlier entry so
+  the next turn takes a different path; entries left behind move off the
+  active path but stay in the transcript, reachable through
+  `Session::children`, so an abandoned line of work can be returned to.
+  Branching is a move of the leaf, not a copy of history.
+- `AgentTranscript::items` still returns the active path root-to-leaf, so
+  existing callers are unaffected. New: `leaf`, `entry`, `children`,
+  `archived`, `branch_from`, plus `EntryId` and `BranchError`.
+- `SessionEvent::Branched` reports the move and how many entries left the path.
+- Transcripts written before entries had ids deserialize unchanged and have
+  their chain linked on load, so branching works on existing sessions.
+- Compaction preserves a salvaged entry's identity and content but re-derives
+  its parent link, because compaction genuinely moves the entry.
+
+### Skills
+
+- `register_skills_dir` is additive. Registering a second root used to discard
+  the first silently; roots now layer, with an earlier root shadowing a later
+  one by name. `register_skills_dirs` takes several at once, strongest first.
+  A repeated name *within* one root is still an error.
+- `Runtime::skills` lists what loaded — name, description, and source path —
+  so a host can show a skill set, expose it as commands, or assert on it in a
+  test. Bodies stay behind `load_skill`.
+- `SkillLoadError` is re-exported from `runtime` and the crate root. It was
+  public inside a private module, so callers could not name it, store it, or
+  match on `DuplicateSkillName`.
+
+### Compaction
+
+- `CompactionSummary` carries `files_touched`, seeded from the previous
+  summary and unioned with newly extracted paths. Previously the file list
+  lived only in the summarization prompt, so it decayed out of context after a
+  few rounds and the agent silently stopped knowing what it had edited.
+- A turn pinned by a tool call and its result is now summarized as a unit
+  instead of refused. Compaction used to return `Ok(None)` when that pair was
+  the whole transcript, leaving an over-budget turn unrecoverable at exactly
+  the moment compaction was needed. A bare user turn is excluded: replacing
+  the user's only instruction with a summary of itself discards the thing the
+  turn exists to convey.
+
+### Fixes
+
+- `SessionEvent::ToolCompleted` names its tool. The field was always empty,
+  because `ContentBlock::ToolResult` carries only `tool_use_id` — making
+  completion, where failures surface, the one lifecycle event a client could
+  not attribute without keeping its own id-to-name map.
+
 ## 0.12.0
 
 ### Model Context Protocol over HTTP+SSE
