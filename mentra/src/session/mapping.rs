@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     ContentBlock,
     agent::{AgentEvent, CompactionDetails, SpawnedAgentStatus, SpawnedAgentSummary},
@@ -7,6 +9,36 @@ use crate::{
     tool::{ToolExecutionCategory, ToolSideEffectLevel},
 };
 
+/// Remembers the tool name of each in-flight call.
+///
+/// A call announces its name when it is queued and when it starts, but the
+/// result arrives as a [`ContentBlock::ToolResult`], which carries only
+/// `tool_use_id`. Without this, completion — the event a client most wants to
+/// attribute, since it is where failures surface — would be the one point in
+/// the lifecycle that cannot name its tool.
+///
+/// The index belongs to the session rather than to a turn, so a call queued
+/// before an interruption still resolves when the turn resumes.
+#[derive(Debug, Default)]
+pub(crate) struct ToolNameIndex {
+    names: HashMap<String, String>,
+}
+
+impl ToolNameIndex {
+    fn remember(&mut self, id: &str, name: &str) {
+        if id.is_empty() || name.is_empty() {
+            return;
+        }
+        self.names.insert(id.to_string(), name.to_string());
+    }
+
+    /// Resolves a call and forgets it. A call completes once, so keeping the
+    /// entry would grow the map for the life of the session.
+    fn resolve(&mut self, id: &str) -> Option<String> {
+        self.names.remove(id)
+    }
+}
+
 /// Maps an `AgentEvent` to zero or more `SessionEvent` values.
 ///
 /// Some agent events map one-to-one, others produce multiple session events
@@ -14,10 +46,11 @@ use crate::{
 pub(crate) fn map_agent_event(
     event: &AgentEvent,
     seq: &mut EventSeq,
+    tool_names: &mut ToolNameIndex,
 ) -> Vec<(EventSeq, SessionEvent)> {
     let mut out = Vec::new();
 
-    let mapped = map_event_inner(event);
+    let mapped = map_event_inner(event, tool_names);
     for session_event in mapped {
         let current_seq = *seq;
         *seq += 1;
@@ -27,7 +60,7 @@ pub(crate) fn map_agent_event(
     out
 }
 
-fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
+fn map_event_inner(event: &AgentEvent, tool_names: &mut ToolNameIndex) -> Vec<SessionEvent> {
     match event {
         AgentEvent::TextDelta { delta, full_text } => {
             vec![SessionEvent::AssistantTokenDelta {
@@ -44,6 +77,7 @@ fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
         }
 
         AgentEvent::ToolUseReady { call, .. } => {
+            tool_names.remember(&call.id, &call.name);
             let input_str = call.input.to_string();
             let summary = derive_tool_summary(&call.name, &input_str);
             vec![SessionEvent::ToolQueued {
@@ -56,13 +90,16 @@ fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
         }
 
         AgentEvent::ToolExecutionStarted { call } => {
+            // Also remembered here: a subscriber is not guaranteed to have
+            // seen the queue event, and a call can start without one.
+            tool_names.remember(&call.id, &call.name);
             vec![SessionEvent::ToolStarted {
                 tool_call_id: call.id.clone(),
                 tool_name: call.name.clone(),
             }]
         }
 
-        AgentEvent::ToolExecutionFinished { result } => map_tool_result(result),
+        AgentEvent::ToolExecutionFinished { result } => map_tool_result(result, tool_names),
 
         AgentEvent::ToolExecutionProgress { id, name, progress } => {
             vec![SessionEvent::ToolProgress {
@@ -126,7 +163,7 @@ fn map_event_inner(event: &AgentEvent) -> Vec<SessionEvent> {
     }
 }
 
-fn map_tool_result(block: &ContentBlock) -> Vec<SessionEvent> {
+fn map_tool_result(block: &ContentBlock, tool_names: &mut ToolNameIndex) -> Vec<SessionEvent> {
     if let ContentBlock::ToolResult {
         tool_use_id,
         content,
@@ -136,7 +173,9 @@ fn map_tool_result(block: &ContentBlock) -> Vec<SessionEvent> {
         let summary = truncate_input_summary(&content.to_display_string(), 200);
         vec![SessionEvent::ToolCompleted {
             tool_call_id: tool_use_id.clone(),
-            tool_name: String::new(), // tool name not available on ToolResult
+            // Empty only for a result whose call this session never saw, which
+            // the index cannot help with — not for every call, as before.
+            tool_name: tool_names.resolve(tool_use_id).unwrap_or_default(),
             summary,
             is_error: *is_error,
         }]
@@ -293,6 +332,119 @@ mod tests {
     use super::*;
     use crate::tool::ToolCall;
 
+    fn tool_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: json!({}),
+        }
+    }
+
+    fn tool_result(id: &str) -> AgentEvent {
+        AgentEvent::ToolExecutionFinished {
+            result: ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                content: mentra_provider::ToolResultContent::text("done"),
+                is_error: false,
+            },
+        }
+    }
+
+    #[test]
+    fn tool_completion_names_the_tool_that_was_queued() {
+        let mut seq = 0;
+        let mut names = ToolNameIndex::default();
+
+        map_agent_event(
+            &AgentEvent::ToolUseReady {
+                index: 0,
+                call: tool_call("tc-1", "files"),
+            },
+            &mut seq,
+            &mut names,
+        );
+        let mapped = map_agent_event(&tool_result("tc-1"), &mut seq, &mut names);
+
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::ToolCompleted { tool_call_id, tool_name, .. }
+                if tool_call_id == "tc-1" && tool_name == "files"
+        ));
+    }
+
+    #[test]
+    fn a_call_that_only_started_is_still_named_on_completion() {
+        let mut seq = 0;
+        let mut names = ToolNameIndex::default();
+
+        map_agent_event(
+            &AgentEvent::ToolExecutionStarted {
+                call: tool_call("tc-2", "shell"),
+            },
+            &mut seq,
+            &mut names,
+        );
+        let mapped = map_agent_event(&tool_result("tc-2"), &mut seq, &mut names);
+
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::ToolCompleted { tool_name, .. } if tool_name == "shell"
+        ));
+    }
+
+    #[test]
+    fn concurrent_calls_do_not_borrow_each_others_names() {
+        let mut seq = 0;
+        let mut names = ToolNameIndex::default();
+
+        for (id, name) in [("tc-a", "files"), ("tc-b", "shell")] {
+            map_agent_event(
+                &AgentEvent::ToolUseReady {
+                    index: 0,
+                    call: tool_call(id, name),
+                },
+                &mut seq,
+                &mut names,
+            );
+        }
+
+        // Completions arrive in the opposite order to the queueing.
+        let second = map_agent_event(&tool_result("tc-b"), &mut seq, &mut names);
+        let first = map_agent_event(&tool_result("tc-a"), &mut seq, &mut names);
+
+        assert!(matches!(
+            &second[0].1,
+            SessionEvent::ToolCompleted { tool_name, .. } if tool_name == "shell"
+        ));
+        assert!(matches!(
+            &first[0].1,
+            SessionEvent::ToolCompleted { tool_name, .. } if tool_name == "files"
+        ));
+    }
+
+    #[test]
+    fn a_result_for_an_unseen_call_still_maps_with_an_empty_name() {
+        let mut seq = 0;
+        let mut names = ToolNameIndex::default();
+
+        let mapped = map_agent_event(&tool_result("never-queued"), &mut seq, &mut names);
+
+        assert!(matches!(
+            &mapped[0].1,
+            SessionEvent::ToolCompleted { tool_call_id, tool_name, .. }
+                if tool_call_id == "never-queued" && tool_name.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_completed_call_is_forgotten() {
+        let mut names = ToolNameIndex::default();
+        names.remember("tc-1", "files");
+
+        assert_eq!(names.resolve("tc-1").as_deref(), Some("files"));
+        assert_eq!(names.resolve("tc-1"), None, "the entry must not linger");
+    }
+
     #[test]
     fn text_delta_maps_to_assistant_token_delta() {
         let event = AgentEvent::TextDelta {
@@ -300,7 +452,7 @@ mod tests {
             full_text: "hi".to_string(),
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -316,7 +468,7 @@ mod tests {
             full_text: "private chain".to_string(),
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -337,7 +489,7 @@ mod tests {
             },
         };
         let mut seq = 10;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -358,7 +510,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -385,7 +537,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 2);
         assert!(matches!(
             &mapped[0].1,
@@ -402,7 +554,7 @@ mod tests {
     fn run_started_maps_to_empty() {
         let event = AgentEvent::RunStarted;
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert!(mapped.is_empty());
         assert_eq!(seq, 0);
     }
@@ -506,7 +658,7 @@ mod tests {
             progress: "50% complete".to_string(),
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -529,7 +681,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         if let SessionEvent::ToolQueued { summary, .. } = &mapped[0].1 {
             assert_eq!(summary, "read: /src/main.rs");
@@ -551,7 +703,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -578,7 +730,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -604,7 +756,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -633,7 +785,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -660,7 +812,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -687,7 +839,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -716,7 +868,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -743,7 +895,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,
@@ -766,7 +918,7 @@ mod tests {
             },
         };
         let mut seq = 0;
-        let mapped = map_agent_event(&event, &mut seq);
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             &mapped[0].1,

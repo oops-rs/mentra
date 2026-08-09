@@ -10,7 +10,7 @@ use crate::{
     runtime::{PermissionRuleStore, is_transient_runtime_error},
     session::{
         event::{EventSeq, PermissionOutcome, SessionEvent, TaskKind, TaskLifecycleStatus},
-        mapping::map_agent_event,
+        mapping::{ToolNameIndex, map_agent_event},
         permission::{
             PendingPermissionStore, PermissionDecision, RememberedRule, RuleKey, RuleStore,
         },
@@ -155,6 +155,9 @@ pub struct Session {
     agent: Agent,
     event_tx: broadcast::Sender<SessionEvent>,
     next_seq: EventSeq,
+    /// Shared with the per-turn event tap so a tool call queued in one turn
+    /// still resolves its name when the result arrives in another.
+    tool_names: Arc<StdMutex<ToolNameIndex>>,
     #[allow(dead_code)]
     pub(crate) pending_permissions: PendingPermissionStore,
     permission_handle: SessionPermissionHandle,
@@ -200,6 +203,7 @@ impl Session {
             agent,
             event_tx,
             next_seq: 0,
+            tool_names: Arc::new(StdMutex::new(ToolNameIndex::default())),
             pending_permissions,
             permission_handle,
         }
@@ -455,11 +459,13 @@ impl Session {
         let event_tx = self.event_tx.clone();
         let next_seq = Arc::new(StdMutex::new(self.next_seq));
         let next_seq_for_tap = Arc::clone(&next_seq);
+        let tool_names = Arc::clone(&self.tool_names);
         let event_tap = self.agent.register_event_tap(move |agent_event| {
             let mut seq = next_seq_for_tap
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let mapped = map_agent_event(agent_event, &mut seq);
+            let mut names = tool_names.lock().unwrap_or_else(|error| error.into_inner());
+            let mapped = map_agent_event(agent_event, &mut seq, &mut names);
             for (_seq, session_event) in mapped {
                 let _ = event_tx.send(session_event);
             }
