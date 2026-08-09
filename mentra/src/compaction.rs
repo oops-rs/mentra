@@ -270,11 +270,25 @@ impl CompactionEngine for StandardCompactionEngine {
             return Ok(None);
         }
 
-        let preserve_from = required_tail_start_for_continuation(request.transcript.items());
-        if preserve_from == 0 {
-            return Ok(None);
-        }
-        let compacted_prefix = &request.transcript.items()[..preserve_from];
+        let items = request.transcript.items();
+        let protected_tail_start = required_tail_start_for_continuation(items);
+
+        // When the protected tail *is* the whole transcript there is nothing
+        // older to summarize, and compaction used to give up — leaving an
+        // over-budget turn with no way out. It can be summarized as a unit,
+        // but only when the thing pinning the tail is a tool call and its
+        // result: those must travel together, and summarizing both at once
+        // orphans nothing.
+        //
+        // A bare user turn is deliberately excluded. Replacing the user's
+        // actual instruction with a summary of itself, before the model has
+        // even read it, loses the very thing the turn exists to convey.
+        let split_turn = protected_tail_start == 0 && ends_in_tool_exchange(items);
+        let (compacted_prefix, tail_start) = if split_turn {
+            (items, items.len())
+        } else {
+            (&items[..protected_tail_start], protected_tail_start)
+        };
         if compacted_prefix.is_empty() {
             return Ok(None);
         }
@@ -285,7 +299,7 @@ impl CompactionEngine for StandardCompactionEngine {
             let _ = cleanup_old_transcripts(&request.transcript_dir, max).await;
         }
         let supports_remote = provider.capabilities().supports_history_compaction;
-        let (mode, summary) = match request.mode {
+        let (mode, mut summary) = match request.mode {
             CompactionMode::LocalOnly => (
                 CompactionExecutionMode::Local,
                 summarize_locally(provider, &request, compacted_prefix).await?,
@@ -346,6 +360,14 @@ impl CompactionEngine for StandardCompactionEngine {
             + extracted.verification_outcomes.len()
             + extracted.permission_decisions.len();
 
+        // Union with whatever the previous compaction recorded, so the set
+        // grows monotonically instead of being re-derived from a prefix that
+        // no longer contains the older tool exchanges.
+        summary.files_touched = accumulate_files(
+            carried_files(items),
+            extracted.files_touched.iter().map(String::as_str),
+        );
+
         let mut replacement = Vec::new();
         replacement.extend(preserved_user_turns.iter().cloned());
         for item in &preserved_delegation_results {
@@ -354,7 +376,7 @@ impl CompactionEngine for StandardCompactionEngine {
             }
         }
         replacement.push(TranscriptItem::compaction_summary(summary.clone()));
-        replacement.extend_from_slice(&request.transcript.items()[preserve_from..]);
+        replacement.extend_from_slice(&items[tail_start..]);
 
         let items_after = replacement.len();
         let tokens_after = approx_token_count_items(&replacement);
@@ -382,7 +404,7 @@ impl CompactionEngine for StandardCompactionEngine {
             transcript: AgentTranscript::new(replacement),
             summary,
             replaced_items: compacted_prefix.len(),
-            preserved_items: request.transcript.len().saturating_sub(preserve_from),
+            preserved_items: request.transcript.len().saturating_sub(tail_start),
             preserved_user_turns: preserved_user_turns.len(),
             preserved_delegation_results: preserved_delegation_results.len(),
             diagnostics,
@@ -568,6 +590,42 @@ fn project_compaction_item(item: &TranscriptItem) -> CompactionInputItem {
             content: summary.render_for_handoff(),
         },
     }
+}
+
+/// Whether the transcript ends with a tool exchange, i.e. the pinned tail is
+/// a tool call and its result rather than a plain turn.
+fn ends_in_tool_exchange(items: &[TranscriptItem]) -> bool {
+    items
+        .last()
+        .is_some_and(|item| matches!(item.kind, TranscriptKind::ToolExchange { .. }))
+}
+
+/// The file list recorded by the newest compaction already in `items`.
+///
+/// `extract_context` only scans tool exchanges, and a compaction summary is
+/// not one, so without this the previous round's findings would be invisible
+/// to the next.
+fn carried_files(items: &[TranscriptItem]) -> Vec<String> {
+    items
+        .iter()
+        .rev()
+        .find_map(|item| match &item.kind {
+            TranscriptKind::CompactionSummary { summary } => Some(summary.files_touched.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Unions two file lists, preserving first-seen order and dropping repeats.
+fn accumulate_files<'a>(carried: Vec<String>, fresh: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen: HashSet<String> = carried.iter().cloned().collect();
+    let mut files = carried;
+    for path in fresh {
+        if seen.insert(path.to_string()) {
+            files.push(path.to_string());
+        }
+    }
+    files
 }
 
 fn select_recent_user_turns(items: &[TranscriptItem], token_budget: usize) -> Vec<TranscriptItem> {

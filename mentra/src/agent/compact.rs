@@ -80,11 +80,12 @@ impl Agent {
             return Ok(None);
         }
 
-        let preserve_from = preserve_from.min(self.history().len());
-        let summary_target = &self.transcript().items()[..preserve_from];
-        if summary_target.is_empty() {
-            return Ok(None);
-        }
+        // A `preserve_from` of zero used to end the attempt here. Zero means
+        // the protected tail is the whole transcript — a single turn that is
+        // itself over budget — which is precisely when compaction is most
+        // needed. The engine has a split-turn path for it, so let it decide
+        // rather than silently doing nothing.
+        debug_assert!(preserve_from <= self.history().len());
 
         let base_revision = self.memory.revision();
         let Some(proposal) = self

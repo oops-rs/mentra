@@ -265,6 +265,16 @@ pub struct CompactionSummary {
     pub open_questions: Vec<String>,
     #[serde(default)]
     pub next_steps: Vec<String>,
+    /// Files the agent has read or modified, accumulated across every
+    /// compaction in this transcript's history.
+    ///
+    /// Carried structurally rather than left to the model's prose: a summary
+    /// is itself summarized by the next compaction, so a file list that lived
+    /// only in `progress` decayed out of context after two or three rounds,
+    /// silently. The agent would simply stop knowing it edited something an
+    /// hour ago.
+    #[serde(default)]
+    pub files_touched: Vec<String>,
 }
 
 impl CompactionSummary {
@@ -280,6 +290,7 @@ impl CompactionSummary {
         append_list(&mut lines, "Artifacts", &self.artifacts);
         append_list(&mut lines, "Open questions", &self.open_questions);
         append_list(&mut lines, "Next steps", &self.next_steps);
+        append_list(&mut lines, "Files touched", &self.files_touched);
         lines.join("\n")
     }
 

@@ -484,3 +484,175 @@ fn temp_dir(label: &str) -> PathBuf {
         "mentra-compaction-test-{label}-{timestamp}-{unique}"
     ))
 }
+
+/// Builds a request around `items` with generous, non-interfering budgets.
+fn request_for(items: Vec<TranscriptItem>, label: &str, model: &ModelInfo) -> CompactionRequest {
+    CompactionRequest {
+        model: model.id.clone(),
+        transcript: AgentTranscript::new(items),
+        transcript_dir: temp_dir(label),
+        summary_max_input_chars: 100_000,
+        summary_max_output_tokens: 512,
+        preserve_recent_user_tokens: 20_000,
+        preserve_recent_delegation_results: 8,
+        provider_request_options: ProviderRequestOptions::default(),
+        mode: CompactionMode::LocalOnly,
+        max_persisted_transcripts: None,
+    }
+}
+
+fn fixed_provider(model: &ModelInfo) -> Arc<dyn Provider> {
+    Arc::new(FixedSummaryProvider {
+        model: model.clone(),
+    })
+}
+
+#[tokio::test]
+async fn a_turn_pinned_by_a_tool_result_is_summarized_instead_of_refused() {
+    let model = ModelInfo::new("test-model", "test-provider");
+
+    // The whole transcript is one assistant tool call and its result: the
+    // continuation rule pins both, so there is nothing older to compact.
+    // This used to return `Ok(None)`, leaving an over-budget turn stuck.
+    let items = vec![
+        TranscriptItem::assistant_turn(Message::assistant(ContentBlock::ToolUse {
+            id: "only-1".to_string(),
+            name: "huge_tool".to_string(),
+            input: json!({}),
+        })),
+        TranscriptItem::tool_exchange(
+            Message::user(ContentBlock::text("an enormous tool result")),
+            Some("only-1".to_string()),
+            false,
+        ),
+    ];
+
+    let outcome = StandardCompactionEngine
+        .compact(
+            fixed_provider(&model),
+            request_for(items, "m5-split-turn", &model),
+        )
+        .await
+        .expect("compaction should not error")
+        .expect("an over-budget turn must still compact");
+
+    assert_eq!(outcome.replaced_items, 2, "both halves of the pair go");
+    assert_eq!(outcome.preserved_items, 0, "nothing is pinned any more");
+
+    // Crucially, the tool result is not left without its call.
+    let kinds: Vec<&TranscriptKind> = outcome
+        .transcript
+        .items()
+        .iter()
+        .map(|item| &item.kind)
+        .collect();
+    assert!(
+        !kinds
+            .iter()
+            .any(|kind| matches!(kind, TranscriptKind::ToolExchange { .. })),
+        "a tool result must never survive without the call that produced it"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, TranscriptKind::CompactionSummary { .. })),
+        "the pair is replaced by a summary"
+    );
+}
+
+#[tokio::test]
+async fn a_lone_user_turn_is_never_replaced_by_a_summary_of_itself() {
+    let model = ModelInfo::new("test-model", "test-provider");
+    let items = vec![user_turn_item("please do the thing")];
+
+    let outcome = StandardCompactionEngine
+        .compact(
+            fixed_provider(&model),
+            request_for(items, "m5-lone-user", &model),
+        )
+        .await
+        .expect("compaction should not error");
+
+    assert!(
+        outcome.is_none(),
+        "summarizing the user's only instruction would discard the very thing \
+         the turn exists to convey"
+    );
+}
+
+#[tokio::test]
+async fn files_touched_accumulate_across_successive_compactions() {
+    let model = ModelInfo::new("test-model", "test-provider");
+
+    // A previous compaction already recorded a file that no surviving tool
+    // exchange mentions any more.
+    let earlier = CompactionSummary {
+        files_touched: vec!["src/old.rs".to_string()],
+        ..CompactionSummary::default()
+    };
+
+    let items = vec![
+        TranscriptItem::compaction_summary(earlier),
+        tool_exchange_item("edited src/new.rs just now"),
+        TranscriptItem::assistant_turn(Message::assistant(ContentBlock::text("ack"))),
+        user_turn_item("carry on"),
+    ];
+
+    let outcome = StandardCompactionEngine
+        .compact(
+            fixed_provider(&model),
+            request_for(items, "m5-cumulative-files", &model),
+        )
+        .await
+        .expect("compaction should not error")
+        .expect("an outcome");
+
+    assert!(
+        outcome
+            .summary
+            .files_touched
+            .contains(&"src/old.rs".to_string()),
+        "a file recorded by an earlier compaction must survive the next one; \
+         got {:?}",
+        outcome.summary.files_touched
+    );
+    assert!(
+        outcome
+            .summary
+            .files_touched
+            .contains(&"src/new.rs".to_string()),
+        "newly touched files must be added; got {:?}",
+        outcome.summary.files_touched
+    );
+}
+
+#[test]
+fn accumulating_files_keeps_first_seen_order_and_drops_repeats() {
+    let merged = accumulate_files(
+        vec!["a.rs".to_string(), "b.rs".to_string()],
+        ["b.rs", "c.rs"].into_iter(),
+    );
+
+    assert_eq!(merged, vec!["a.rs", "b.rs", "c.rs"]);
+}
+
+#[test]
+fn carried_files_reads_the_newest_summary_only() {
+    let older = CompactionSummary {
+        files_touched: vec!["stale.rs".to_string()],
+        ..CompactionSummary::default()
+    };
+    let newer = CompactionSummary {
+        files_touched: vec!["fresh.rs".to_string()],
+        ..CompactionSummary::default()
+    };
+    let items = vec![
+        TranscriptItem::compaction_summary(older),
+        TranscriptItem::compaction_summary(newer),
+    ];
+
+    // The newest summary is already cumulative, so reading only it is
+    // sufficient — and reading every summary would resurrect files an
+    // earlier round deliberately carried forward or dropped.
+    assert_eq!(carried_files(&items), vec!["fresh.rs".to_string()]);
+}
