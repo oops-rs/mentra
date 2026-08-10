@@ -230,16 +230,14 @@ impl PendingAssistantTurn {
                 input_json,
                 complete,
             } = block
+                && *complete
+                && let Ok(input) = serde_json::from_str(input_json)
             {
-                if *complete {
-                    if let Ok(input) = serde_json::from_str(input_json) {
-                        tool_calls.push(ToolCall {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input,
-                        });
-                    }
-                }
+                tool_calls.push(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input,
+                });
             }
         }
 

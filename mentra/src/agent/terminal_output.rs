@@ -132,10 +132,10 @@ impl Agent {
         });
 
         for tool_use_id in result_ids {
-            if expected_ids.contains(tool_use_id) {
-                if let Some(details) = last.detail(tool_use_id) {
-                    return Some((details.clone(), message));
-                }
+            if expected_ids.contains(tool_use_id)
+                && let Some(details) = last.detail(tool_use_id)
+            {
+                return Some((details.clone(), message));
             }
         }
         None

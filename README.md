@@ -160,6 +160,7 @@ Thanks for helping improve Mentra.
 Before sending changes, run the same checks as CI:
 
 ```bash
+cargo +1.88.0 check --workspace --all-targets
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -167,7 +168,7 @@ cargo test --workspace
 
 ## Supported Rust Version
 
-Mentra currently targets Rust 1.85 or newer.
+Mentra currently targets Rust 1.88 or newer.
 
 ## License
 

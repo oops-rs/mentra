@@ -2,7 +2,7 @@
 
 Mentra is an agent runtime for building tool-using LLM applications.
 
-MSRV: Rust 1.85.
+MSRV: Rust 1.88.
 
 ## Current Features
 

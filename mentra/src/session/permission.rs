@@ -126,10 +126,10 @@ impl RuleStore {
             }
             match &rule.key.pattern {
                 Some(glob) => {
-                    if let Some(json) = input_json {
-                        if glob_match::glob_match(glob, json) {
-                            pattern_match = Some(rule.allow);
-                        }
+                    if let Some(json) = input_json
+                        && glob_match::glob_match(glob, json)
+                    {
+                        pattern_match = Some(rule.allow);
                     }
                 }
                 None => {

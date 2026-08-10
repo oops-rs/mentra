@@ -20,6 +20,12 @@ requirements. Workspace resolver v3, a workspace-wide `rust-version = "1.85"`,
 and a fresh lockless Rust 1.85 CI job select compatible transitive releases for
 Mentra without imposing exact versions on downstream dependency graphs.
 
+Repository-wide MSRV update (2026-08-11): current `time` 0.3 releases now
+require Rust 1.88, so Mentra raised its workspace floor to Rust 1.88 instead of
+continuing to resolve an older release. The lockless MSRV job now checks Rust
+1.88, while resolver v3 continues to protect that declared floor as other
+dependencies evolve.
+
 ## Workstream overview
 
 | # | Workstream | Effort | Risk | ADR needed |

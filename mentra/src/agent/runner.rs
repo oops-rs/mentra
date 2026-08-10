@@ -87,10 +87,10 @@ impl<'a> TurnRunner<'a> {
             if self.options.token_budget_exceeded() {
                 return Ok(());
             }
-            if let Some(limit) = self.agent.max_rounds() {
-                if rounds >= limit {
-                    return Err(RuntimeError::MaxRoundsExceeded(limit));
-                }
+            if let Some(limit) = self.agent.max_rounds()
+                && rounds >= limit
+            {
+                return Err(RuntimeError::MaxRoundsExceeded(limit));
             }
 
             rounds += 1;
@@ -265,10 +265,10 @@ impl<'a> TurnRunner<'a> {
         if self.options.stop_requested() || self.options.token_budget_exceeded() {
             return Ok(false);
         }
-        if let Some(limit) = self.agent.max_rounds() {
-            if rounds >= limit {
-                return Err(RuntimeError::MaxRoundsExceeded(limit));
-            }
+        if let Some(limit) = self.agent.max_rounds()
+            && rounds >= limit
+        {
+            return Err(RuntimeError::MaxRoundsExceeded(limit));
         }
         if self.model_requests >= self.options.model_budget() {
             return Err(RuntimeError::ModelBudgetExceeded(

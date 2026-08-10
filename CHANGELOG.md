@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### The minimum supported Rust version is now 1.88
+
+- Mentra now requires Rust 1.88. This lets fresh dependency resolution select
+  current `time` 0.3 releases without falling back to older MSRV-compatible
+  versions and makes Rust 1.88 language features available throughout the
+  workspace.
+- CI checks the declared floor with Rust 1.88.0 and runs formatting, Clippy,
+  and tests with Rust 1.97.1.
+
 ### The legacy-SSE client never retries at the transport layer
 
 - The shared HTTP client now sets `reqwest::retry::never()`. Reqwest retries

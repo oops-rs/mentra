@@ -16,7 +16,7 @@ env:
 
 jobs:
   msrv:
-    name: Minimum supported Rust (1.85)
+    name: Minimum supported Rust (1.88)
     runs-on: ubuntu-latest
 
     steps:
@@ -26,7 +26,7 @@ jobs:
       - name: Install minimum Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85.0"
+          toolchain: "1.88.0"
 
       - name: Check workspace against the MSRV
         run: cargo check --workspace --all-targets
@@ -49,7 +49,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.97.1"
           components: rustfmt, clippy
 
       - name: Cache Rust build artifacts

@@ -500,33 +500,32 @@ where
             };
             if state_mode == crate::ResponsesStateMode::Hybrid
                 && request.previous_response_id().is_some()
+                && let Some(rejection) = previous_response_state_rejection(&error)
             {
-                if let Some(rejection) = previous_response_state_rejection(&error) {
-                    if rejection == PreviousResponseStateRejection::ParameterUnsupported {
-                        self.endpoint_capabilities
-                            .mark_http_previous_response_id_unsupported(
-                                reasoning_provenance.model.clone(),
-                            );
-                    }
-                    self.state.clear_latest_response_id();
-                    request.clear_previous_response_id();
-                    let response = self
-                        .send_http_responses_request(&request, compression, credentials, session)
-                        .await?;
-                    if !response.status().is_success() {
-                        return Err(ProviderError::Http {
-                            status: response.status(),
-                            body: response.text().await.unwrap_or_default(),
-                        });
-                    }
-                    return Ok(
-                        self.track_response_state(spawn_event_stream_with_provenance(
-                            response,
-                            reasoning_provenance.provider,
-                            reasoning_provenance.model,
-                        )),
-                    );
+                if rejection == PreviousResponseStateRejection::ParameterUnsupported {
+                    self.endpoint_capabilities
+                        .mark_http_previous_response_id_unsupported(
+                            reasoning_provenance.model.clone(),
+                        );
                 }
+                self.state.clear_latest_response_id();
+                request.clear_previous_response_id();
+                let response = self
+                    .send_http_responses_request(&request, compression, credentials, session)
+                    .await?;
+                if !response.status().is_success() {
+                    return Err(ProviderError::Http {
+                        status: response.status(),
+                        body: response.text().await.unwrap_or_default(),
+                    });
+                }
+                return Ok(
+                    self.track_response_state(spawn_event_stream_with_provenance(
+                        response,
+                        reasoning_provenance.provider,
+                        reasoning_provenance.model,
+                    )),
+                );
             }
             return Err(error);
         }
