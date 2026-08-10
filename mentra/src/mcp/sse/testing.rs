@@ -39,6 +39,10 @@ pub(crate) enum PostReply {
     Redirect { location: String },
     /// Close the connection without answering.
     Drop,
+    /// Read the complete request, then withhold the response headers.
+    StallBeforeHeaders,
+    /// Send a successful response head, then withhold its declared body.
+    StallAfterHeaders,
 }
 
 /// A request captured by the fixture.
@@ -93,6 +97,8 @@ struct Shared {
     replies: Mutex<Vec<PostReply>>,
     stream_opened: (Mutex<bool>, Condvar),
     posts_seen: (Mutex<usize>, Condvar),
+    post_headers_sent: (Mutex<usize>, Condvar),
+    stalled_posts_released: (Mutex<bool>, Condvar),
     connections: AtomicUsize,
 }
 
@@ -130,6 +136,8 @@ impl SseTestServer {
             replies: Mutex::new(Vec::new()),
             stream_opened: (Mutex::new(false), Condvar::new()),
             posts_seen: (Mutex::new(0), Condvar::new()),
+            post_headers_sent: (Mutex::new(0), Condvar::new()),
+            stalled_posts_released: (Mutex::new(false), Condvar::new()),
             connections: AtomicUsize::new(0),
         });
         let (commands, command_rx) = mpsc::channel();
@@ -207,6 +215,30 @@ impl SseTestServer {
                 *lock.lock().expect("lock the post counter")
             );
         }
+    }
+
+    /// Blocks until at least `count` `POST` response heads have been flushed.
+    pub(crate) fn wait_for_post_response_headers(&self, count: usize) {
+        let (lock, condvar) = &self.shared.post_headers_sent;
+        let mut seen = lock.lock().expect("lock the POST response-head counter");
+        while *seen < count {
+            let (guard, timeout) = condvar
+                .wait_timeout(seen, Duration::from_secs(10))
+                .expect("wait for POST response headers");
+            seen = guard;
+            assert!(
+                !timeout.timed_out(),
+                "expected {count} POST response heads, saw {}",
+                *lock.lock().expect("lock the POST response-head counter")
+            );
+        }
+    }
+
+    /// Releases every fixture connection deliberately stalled while replying.
+    pub(crate) fn release_stalled_posts(&self) {
+        let (lock, condvar) = &self.shared.stalled_posts_released;
+        *lock.lock().expect("lock the stalled-POST gate") = true;
+        condvar.notify_all();
     }
 
     /// Writes raw bytes to the SSE stream as one chunk.
@@ -287,7 +319,7 @@ fn serve_connection(
             }
         };
 
-        if !write_post_reply(&mut stream, reply) {
+        if !write_post_reply(&mut stream, reply, &shared) {
             return;
         }
     }
@@ -351,7 +383,15 @@ fn serve_stream(
 }
 
 /// Writes one `POST` reply, reporting whether the connection may be reused.
-fn write_post_reply(stream: &mut TcpStream, reply: PostReply) -> bool {
+fn write_post_reply(stream: &mut TcpStream, reply: PostReply, shared: &Shared) -> bool {
+    let stall_before_headers = matches!(&reply, PostReply::StallBeforeHeaders);
+    let stall_after_headers = matches!(&reply, PostReply::StallAfterHeaders);
+
+    if stall_before_headers {
+        wait_for_stalled_post_release(shared);
+        return false;
+    }
+
     let response = match reply {
         PostReply::Accepted => "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n".to_string(),
         PostReply::Ok => "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_string(),
@@ -363,12 +403,38 @@ fn write_post_reply(stream: &mut TcpStream, reply: PostReply) -> bool {
             "HTTP/1.1 307 Temporary Redirect\r\nlocation: {location}\r\ncontent-length: 0\r\n\r\n"
         ),
         PostReply::Drop => return false,
+        PostReply::StallAfterHeaders => "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\n".to_string(),
+        PostReply::StallBeforeHeaders => unreachable!("handled before building the response"),
     };
 
     if stream.write_all(response.as_bytes()).is_err() {
         return false;
     }
-    stream.flush().is_ok()
+    if stream.flush().is_err() {
+        return false;
+    }
+
+    let (lock, condvar) = &shared.post_headers_sent;
+    *lock.lock().expect("lock the POST response-head counter") += 1;
+    condvar.notify_all();
+
+    if stall_after_headers {
+        wait_for_stalled_post_release(shared);
+        return false;
+    }
+
+    true
+}
+
+/// Waits until the test explicitly releases a deliberately stalled reply.
+fn wait_for_stalled_post_release(shared: &Shared) {
+    let (lock, condvar) = &shared.stalled_posts_released;
+    let mut released = lock.lock().expect("lock the stalled-POST gate");
+    while !*released {
+        released = condvar
+            .wait(released)
+            .expect("wait for the stalled POST to be released");
+    }
 }
 
 /// Reads one HTTP request, honoring keep-alive by returning `None` at EOF.

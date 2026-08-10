@@ -36,23 +36,24 @@
 //! `tools/call`, because an MCP tool may have side effects and a transparent
 //! retry would execute it twice with no caller involvement.
 //!
-//! A `tools/call` whose `POST` was accepted but whose response never arrived is
-//! reported as [`McpSseError::RequestIndeterminate`] rather than as a plain
-//! failure, so a caller can tell "may have run" apart from "definitely did not".
+//! A `tools/call` whose `POST` may have reached the server but whose response
+//! never arrived is reported as [`McpSseError::RequestIndeterminate`] rather
+//! than as a plain failure, so a caller can tell "may have run" apart from
+//! "definitely did not".
 
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -127,8 +128,8 @@ pub enum McpSseError {
     #[error("the MCP SSE stream closed before the request completed")]
     StreamClosed,
 
-    /// The request was sent but no response arrived before the stream ended or
-    /// the deadline passed.
+    /// The request may have reached the server, but no response arrived before
+    /// the stream ended or the deadline passed.
     ///
     /// The call may have executed. The `POST` and the response travel on
     /// different connections, so a server can accept and run a tool while the
@@ -137,9 +138,9 @@ pub enum McpSseError {
     /// mail, charge a card, or write a file.
     ///
     /// This is distinct from [`McpSseError::HttpStatus`] on a `POST`, which
-    /// means the server rejected the message and it definitely did not run.
+    /// means the transport endpoint explicitly rejected the message.
     #[error(
-        "the MCP SSE server accepted the '{method}' request but never answered it; \
+        "the MCP SSE server may have received the '{method}' request but never answered it; \
          the call may have executed and must not be retried automatically"
     )]
     RequestIndeterminate { method: String },
@@ -167,6 +168,24 @@ struct Pending {
 struct PendingWaiter {
     reply: oneshot::Sender<PendingReply>,
     method: String,
+}
+
+/// Removes one pending waiter if its request future is dropped.
+///
+/// Request futures are cancellation points while sending the POST, draining
+/// its response body, and waiting on the SSE stream. A synchronous mutex keeps
+/// this cleanup available to `Drop`, where awaiting a Tokio mutex is
+/// impossible. The critical sections only mutate the in-memory map and never
+/// perform I/O.
+struct PendingRegistration {
+    pending: Arc<Mutex<Pending>>,
+    id: u64,
+}
+
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        lock_pending(&self.pending).waiters.remove(&self.id);
+    }
 }
 
 /// A connected MCP server speaking the legacy HTTP+SSE transport.
@@ -309,7 +328,7 @@ impl McpSseClient {
     /// Closes the stream and fails every request still in flight.
     pub async fn shutdown(&self) {
         self.reader.abort();
-        let mut pending = self.pending.lock().await;
+        let mut pending = lock_pending(&self.pending);
         pending.closed = true;
         drain_pending(&mut pending);
     }
@@ -330,11 +349,11 @@ impl McpSseClient {
         let request = JsonRpcRequest::new(id, method, params);
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        {
+        let _registration = {
             // Register before sending. The server answers the POST before it
             // processes the message, so the response can reach the stream
             // before the POST future resolves.
-            let mut pending = self.pending.lock().await;
+            let mut pending = lock_pending(&self.pending);
             if pending.closed {
                 return Err(McpSseError::StreamClosed);
             }
@@ -345,45 +364,42 @@ impl McpSseClient {
                     method: method.to_string(),
                 },
             );
-        }
-
-        if let Err(error) = self.post(&request).await {
-            // A failed POST is the one case where the request definitely did
-            // not reach the server, so the registration is dropped rather than
-            // left to time out — and the caller gets a definite failure.
-            self.forget(id).await;
-            return Err(error);
-        }
-
-        let result = match tokio::time::timeout(timeout, reply_rx).await {
-            Ok(Ok(result)) => result?,
-            // The reader dropped the sender, which only happens on teardown.
-            Ok(Err(_)) => return Err(indeterminate(method)),
-            Err(_) => {
-                // Remove the registration so a timed-out request cannot leak an
-                // entry for the lifetime of the connection.
-                self.forget(id).await;
-                return Err(if method == "tools/call" {
-                    indeterminate(method)
-                } else {
-                    McpSseError::Timeout(timeout)
-                });
+            PendingRegistration {
+                pending: Arc::clone(&self.pending),
+                id,
             }
+        };
+
+        // One deadline covers the complete operation. In particular, a peer
+        // cannot evade `call_tool_timeout` by accepting the TCP connection and
+        // withholding either the HTTP response head or its declared body.
+        let operation = async {
+            self.post(&request)
+                .await
+                .map_err(|error| classify_post_failure(method, error))?;
+
+            match reply_rx.await {
+                Ok(result) => result,
+                // The reader dropped the sender, which only happens on
+                // teardown. A tools/call may already have executed.
+                Err(_) => Err(indeterminate(method)),
+            }
+        };
+        let result = match tokio::time::timeout(timeout, operation).await {
+            Ok(result) => result?,
+            Err(_) => return Err(request_timeout(method, timeout)),
         };
 
         serde_json::from_value(result)
             .map_err(|error| McpSseError::ParseError(format!("deserialize response: {error}")))
     }
 
-    /// Removes a registration whose request will never be answered.
-    async fn forget(&self, id: u64) {
-        self.pending.lock().await.waiters.remove(&id);
-    }
-
     /// Sends a JSON-RPC notification, which expects no response.
-    async fn notify(&self, method: &str) -> Result<(), McpSseError> {
+    async fn notify(&self, method: &str, timeout: Duration) -> Result<(), McpSseError> {
         let notification = serde_json::json!({"jsonrpc": "2.0", "method": method});
-        self.post(&notification).await
+        tokio::time::timeout(timeout, self.post(&notification))
+            .await
+            .map_err(|_| McpSseError::Timeout(timeout))?
     }
 
     /// `POST`s one JSON-RPC message to the validated endpoint.
@@ -433,7 +449,8 @@ impl McpSseClient {
             .await?;
         self.server_info = Some(result.server_info);
 
-        self.notify("notifications/initialized").await
+        self.notify("notifications/initialized", self.limits.initialize_timeout)
+            .await
     }
 
     /// Walks the paginated `tools/list` cursor to the end.
@@ -541,7 +558,7 @@ async fn read_stream(
                     // would silently redirect in-flight traffic.
                     notify_endpoint(&mut endpoint_tx, Ok(event.data));
                 }
-                "message" => deliver_message(&pending, &event.data).await,
+                "message" => deliver_message(&pending, &event.data),
                 // Unknown event names, including the `ping` frames older
                 // sse-starlette versions emit, are ignored rather than fatal.
                 _ => {}
@@ -551,13 +568,13 @@ async fn read_stream(
 
     // Whatever ended the stream, no further response can arrive.
     notify_endpoint(&mut endpoint_tx, Err(McpSseError::StreamClosed));
-    let mut pending = pending.lock().await;
+    let mut pending = lock_pending(&pending);
     pending.closed = true;
     drain_pending(&mut pending);
 }
 
 /// Routes one `message` frame to the caller waiting on its id.
-async fn deliver_message(pending: &Arc<Mutex<Pending>>, data: &str) {
+fn deliver_message(pending: &Arc<Mutex<Pending>>, data: &str) {
     let Ok(response) = serde_json::from_str::<JsonRpcResponse>(data) else {
         // Malformed JSON, or a server-initiated request such as `ping`. Neither
         // is a response, so neither is correlated. Dropping it keeps a hostile
@@ -576,7 +593,7 @@ async fn deliver_message(pending: &Arc<Mutex<Pending>>, data: &str) {
 
     // Removing the entry means the first response wins and a repeated id
     // cannot deliver a second result for an already-observed call.
-    let Some(waiter) = pending.lock().await.waiters.remove(&id) else {
+    let Some(waiter) = lock_pending(pending).waiters.remove(&id) else {
         return;
     };
 
@@ -599,10 +616,9 @@ fn notify_endpoint(
 
 /// Fails every pending request.
 ///
-/// A request that is still registered was sent — the only path that removes a
-/// registration without a response is a failed `POST`. So a `tools/call` here
-/// may have executed, and saying so is what lets a caller avoid re-running a
-/// non-idempotent action.
+/// A request that is still registered may already have been sent. A
+/// `tools/call` here may therefore have executed, and saying so is what lets a
+/// caller avoid re-running a non-idempotent action.
 fn drain_pending(pending: &mut Pending) {
     for (_, waiter) in pending.waiters.drain() {
         let _ = waiter.reply.send(Err(indeterminate(&waiter.method)));
@@ -623,6 +639,39 @@ fn indeterminate(method: &str) -> McpSseError {
     }
 }
 
+/// Converts a POST failure into the method-level certainty the caller needs.
+///
+/// Once a `tools/call` POST future has begun, a transport error does not prove
+/// that the server failed to receive its body. An observed redirect or
+/// non-success HTTP status is still definite because the server explicitly
+/// refused that request before accepting it for MCP processing.
+fn classify_post_failure(method: &str, error: McpSseError) -> McpSseError {
+    if method == "tools/call" && matches!(error, McpSseError::Transport(_)) {
+        indeterminate(method)
+    } else {
+        error
+    }
+}
+
+/// Reports expiration of the whole request operation.
+fn request_timeout(method: &str, timeout: Duration) -> McpSseError {
+    if method == "tools/call" {
+        indeterminate(method)
+    } else {
+        McpSseError::Timeout(timeout)
+    }
+}
+
+/// Acquires the pending map even if another task panicked while holding it.
+///
+/// Losing the map on poison would strand unrelated requests forever. No map
+/// mutation runs user code, so recovering the contained value is safe.
+fn lock_pending(pending: &Mutex<Pending>) -> MutexGuard<'_, Pending> {
+    pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Builds the HTTP client shared by the stream and the message endpoint.
 fn build_http_client(limits: &McpSseLimits) -> Result<reqwest::Client, McpSseError> {
     reqwest::Client::builder()
@@ -635,7 +684,8 @@ fn build_http_client(limits: &McpSseLimits) -> Result<reqwest::Client, McpSseErr
         .connect_timeout(limits.connect_timeout)
         // Deliberately no `.timeout()`: that is a total deadline covering the
         // response body, which would kill the long-lived stream on a fixed
-        // interval. Request deadlines are enforced against the pending map.
+        // interval. The request and notification paths apply their own total
+        // deadlines around each finite POST operation.
         .build()
         .map_err(|error| McpSseError::Transport(error.to_string()))
 }

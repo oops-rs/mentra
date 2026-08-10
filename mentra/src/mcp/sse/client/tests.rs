@@ -934,6 +934,229 @@ async fn reports_a_post_the_server_never_answers() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn bounds_the_initialize_request_post() {
+    let server = SseTestServer::start();
+    let mut config = config(&server);
+    config.limits = McpSseLimits {
+        initialize_timeout: std::time::Duration::from_millis(150),
+        ..McpSseLimits::default()
+    };
+    let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
+
+    server.wait_for_stream();
+    server.queue_post_reply(PostReply::StallBeforeHeaders);
+    server.send_endpoint("/messages/?session_id=abc");
+    server.wait_for_posts(1);
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), connecting)
+        .await
+        .expect("the configured initialize deadline must include its POST response head")
+        .expect("no panic")
+        .expect_err("the initialize POST never receives response headers");
+    server.release_stalled_posts();
+
+    assert!(matches!(error, McpSseError::Timeout(_)), "got {error:?}");
+    assert_eq!(
+        server.posts().len(),
+        1,
+        "an initialize timeout must not send a second request"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bounds_the_initialized_notification_post() {
+    let server = SseTestServer::start();
+    let mut config = config(&server);
+    config.limits = McpSseLimits {
+        initialize_timeout: std::time::Duration::from_millis(150),
+        ..McpSseLimits::default()
+    };
+    let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
+
+    server.wait_for_stream();
+    server.send_endpoint("/messages/?session_id=abc");
+    server.wait_for_posts(1);
+    server.queue_post_reply(PostReply::StallBeforeHeaders);
+    server.send_message(&initialize_result(1));
+    server.wait_for_posts(2);
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), connecting)
+        .await
+        .expect("the configured initialize deadline must bound the notification POST")
+        .expect("no panic")
+        .expect_err("a notification POST that never answers must fail connect");
+    server.release_stalled_posts();
+
+    assert!(matches!(error, McpSseError::Timeout(_)), "got {error:?}");
+    assert_eq!(
+        server.posts().len(),
+        2,
+        "tools/list must not start after the initialized notification timed out"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bounds_the_entire_tool_call_when_post_headers_never_arrive() {
+    let server = SseTestServer::start();
+    let mut config = config(&server);
+    config.limits = McpSseLimits {
+        call_tool_timeout: std::time::Duration::from_millis(150),
+        ..McpSseLimits::default()
+    };
+    let client = std::sync::Arc::new(connect(&server, config).await);
+
+    server.queue_post_reply(PostReply::StallBeforeHeaders);
+    let calling = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move { client.call_tool("charge_card", None).await })
+    };
+    server.wait_for_posts(4);
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), calling)
+        .await
+        .expect("the configured call deadline must include the POST response head")
+        .expect("no panic")
+        .expect_err("the server withheld its response head");
+    assert!(
+        matches!(error, McpSseError::RequestIndeterminate { .. }),
+        "the server read the request body, so delivery is ambiguous: {error:?}"
+    );
+    assert_eq!(
+        server
+            .posts()
+            .iter()
+            .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+            .count(),
+        1,
+        "the ambiguous tool call must never be replayed"
+    );
+
+    // The timeout removes only this request's correlation state. Once the
+    // fixture releases the abandoned POST connection, the SSE session remains
+    // able to correlate a later, explicitly requested call.
+    server.release_stalled_posts();
+    let calling = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move { client.call_tool("search", None).await })
+    };
+    server.wait_for_posts(5);
+    server.send_message(&json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": {"content": [{"type": "text", "text": "still usable"}], "isError": false}
+    }));
+    assert_eq!(
+        calling
+            .await
+            .expect("no panic")
+            .expect("a later explicit call should succeed")
+            .content[0]
+            .text
+            .as_deref(),
+        Some("still usable")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bounds_the_entire_tool_call_while_draining_the_post_body() {
+    let server = SseTestServer::start();
+    let mut config = config(&server);
+    config.limits = McpSseLimits {
+        call_tool_timeout: std::time::Duration::from_millis(150),
+        ..McpSseLimits::default()
+    };
+    let client = connect(&server, config).await;
+
+    server.queue_post_reply(PostReply::StallAfterHeaders);
+    let calling =
+        tokio::spawn(async move { (client.call_tool("charge_card", None).await, client) });
+    server.wait_for_posts(4);
+    server.wait_for_post_response_headers(4);
+
+    let (result, _client) = tokio::time::timeout(std::time::Duration::from_secs(2), calling)
+        .await
+        .expect("the configured call deadline must include response-body drain")
+        .expect("no panic");
+    server.release_stalled_posts();
+
+    let error = result.expect_err("the declared response body never arrived");
+    assert!(
+        matches!(error, McpSseError::RequestIndeterminate { .. }),
+        "the tool may have run before the POST response body stalled: {error:?}"
+    );
+    assert_eq!(
+        server
+            .posts()
+            .iter()
+            .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+            .count(),
+        1,
+        "the ambiguous tool call must never be replayed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_dropped_after_its_body_is_read_is_indeterminate() {
+    let server = SseTestServer::start();
+    let client = connect(&server, config(&server)).await;
+
+    server.queue_post_reply(PostReply::Drop);
+    let error = client
+        .call_tool("charge_card", None)
+        .await
+        .expect_err("the fixture drops the POST connection after reading its body");
+
+    assert!(
+        matches!(error, McpSseError::RequestIndeterminate { .. }),
+        "a transport failure cannot prove non-delivery: {error:?}"
+    );
+    assert_eq!(
+        server
+            .posts()
+            .iter()
+            .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+            .count(),
+        1,
+        "the dropped tool call must never be replayed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_tool_call_future_removes_its_pending_waiter() {
+    let server = SseTestServer::start();
+    let client = std::sync::Arc::new(connect(&server, config(&server)).await);
+
+    server.queue_post_reply(PostReply::StallBeforeHeaders);
+    let calling = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move { client.call_tool("charge_card", None).await })
+    };
+    server.wait_for_posts(4);
+    calling.abort();
+    assert!(
+        calling
+            .await
+            .expect_err("the call task was cancelled")
+            .is_cancelled()
+    );
+
+    assert!(
+        super::lock_pending(&client.pending).waiters.is_empty(),
+        "cancelling the future must remove its pending correlation entry"
+    );
+    assert_eq!(
+        server
+            .posts()
+            .iter()
+            .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+            .count(),
+        1,
+        "cancellation must not cause an automatic replay"
+    );
+    server.release_stalled_posts();
+}
+
 // ---------------------------------------------------------------------------
 // Teardown
 // ---------------------------------------------------------------------------
