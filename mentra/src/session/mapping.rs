@@ -315,11 +315,15 @@ pub(crate) fn derive_tool_summary(tool_name: &str, input_json: &str) -> String {
     format!("{tool_name}({})", truncate_input_summary(input_json, 60))
 }
 
-fn truncate_input_summary(input: &str, max_len: usize) -> String {
-    if input.len() <= max_len {
+fn truncate_input_summary(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
         input.to_string()
     } else {
-        let mut truncated = input[..max_len].to_string();
+        let end = (0..=max_bytes)
+            .rev()
+            .find(|&index| input.is_char_boundary(index))
+            .unwrap_or_default();
+        let mut truncated = input[..end].to_string();
         truncated.push_str("...");
         truncated
     }
@@ -646,6 +650,14 @@ mod tests {
         let summary = derive_tool_summary("shell", &input);
         assert!(summary.len() < 200);
         assert!(summary.ends_with("..."));
+    }
+
+    #[test]
+    fn input_summary_truncates_before_a_utf8_boundary() {
+        let prefix = "x".repeat(199);
+        let input = format!("{prefix}—tail");
+
+        assert_eq!(truncate_input_summary(&input, 200), format!("{prefix}..."));
     }
 
     // --- ToolExecutionProgress mapping test ---
