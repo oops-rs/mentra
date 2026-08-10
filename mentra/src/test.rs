@@ -16,6 +16,7 @@ use crate::{
         ProviderEventStream, ProviderId, Request, Response, Role,
         provider_event_stream_from_response,
     },
+    runtime::PreExecutionHook,
     runtime::SqliteRuntimeStore,
     tool::ToolAuthorizer,
 };
@@ -81,6 +82,7 @@ pub struct MockRuntimeBuilder {
     store: Option<SqliteRuntimeStore>,
     policy: RuntimePolicy,
     tool_authorizer: Option<Box<dyn ToolAuthorizer>>,
+    pre_hook: Option<Box<dyn PreExecutionHook>>,
 }
 
 impl Default for MockRuntimeBuilder {
@@ -93,6 +95,7 @@ impl Default for MockRuntimeBuilder {
             store: None,
             policy: RuntimePolicy::permissive(),
             tool_authorizer: None,
+            pre_hook: None,
         }
     }
 }
@@ -126,6 +129,17 @@ impl MockRuntimeBuilder {
     /// and [`SessionEvent::PermissionRequested`](crate::SessionEvent) is never
     /// emitted — which makes "does this host ask before it writes?" impossible
     /// to test against a mock.
+    /// Installs a pre-execution hook, so a scripted run can exercise the
+    /// interception path.
+    ///
+    /// The sibling of [`with_tool_authorizer`](Self::with_tool_authorizer):
+    /// without one, nothing ever consults a hook, so a host can test that its
+    /// own hook logic is correct but not that the runtime actually calls it.
+    pub fn with_pre_hook(mut self, hook: impl PreExecutionHook + 'static) -> Self {
+        self.pre_hook = Some(Box::new(hook));
+        self
+    }
+
     pub fn with_tool_authorizer(mut self, authorizer: impl ToolAuthorizer + 'static) -> Self {
         self.tool_authorizer = Some(Box::new(authorizer));
         self
@@ -176,6 +190,10 @@ impl MockRuntimeBuilder {
             .with_store(store)
             .with_policy(self.policy)
             .with_provider_instance(provider.clone());
+
+        if let Some(hook) = self.pre_hook {
+            builder = builder.with_pre_hook(hook);
+        }
 
         if let Some(authorizer) = self.tool_authorizer {
             builder = builder.with_tool_authorizer(authorizer);
@@ -516,6 +534,57 @@ mod tests {
         assert!(
             *asked.lock().unwrap(),
             "an authorizer installed on the mock must reach the session's permission flow"
+        );
+    }
+
+    /// Denies one named tool, so a scripted run can prove the runtime really
+    /// consults the hook rather than that the hook's own logic is correct.
+    struct DenyTool(&'static str);
+
+    #[async_trait]
+    impl crate::runtime::PreExecutionHook for DenyTool {
+        fn pre_tool_execution(
+            &self,
+            context: &crate::runtime::PreExecutionContext,
+        ) -> Result<crate::runtime::HookDecision, RuntimeError> {
+            if context.tool_name == self.0 {
+                Ok(crate::runtime::HookDecision::Deny(
+                    "not this one".to_string(),
+                ))
+            } else {
+                Ok(crate::runtime::HookDecision::Allow)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mock_runtime_can_exercise_the_interception_path() {
+        let mock = MockRuntime::builder()
+            .with_pre_hook(DenyTool("files"))
+            .tool_calls(vec![MockToolCall::new(
+                "files",
+                json!({"operations": [{"op": "list", "path": "."}]}),
+            )])
+            .text("done")
+            .build()
+            .unwrap();
+
+        let mut session = mock.runtime().create_session("test", mock.model()).unwrap();
+
+        let _ = session.append_turn(vec![ContentBlock::text("go")]).await;
+
+        let blocked = session.replay().items().iter().any(|item| {
+            item.message.as_ref().is_some_and(|message| {
+                message.content.iter().any(|block| {
+                    matches!(block, ContentBlock::ToolResult { content, .. }
+                        if content.to_string().contains("not this one"))
+                })
+            })
+        });
+
+        assert!(
+            blocked,
+            "a hook installed on the mock must actually be consulted by the runtime"
         );
     }
 }

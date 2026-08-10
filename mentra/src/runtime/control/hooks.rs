@@ -327,6 +327,29 @@ pub trait PreExecutionHook: Send + Sync {
     ) -> Result<HookDecision, RuntimeError>;
 }
 
+/// Forwards to the hook inside.
+///
+/// Lets a caller hold a hook it chose at runtime — one of several, or none —
+/// and still hand it to anything taking `impl PreExecutionHook`, without each
+/// caller writing this impl itself. The same courtesy `ToolAuthorizer` gets.
+impl<T: PreExecutionHook + ?Sized> PreExecutionHook for Box<T> {
+    fn pre_tool_execution(
+        &self,
+        context: &PreExecutionContext,
+    ) -> Result<HookDecision, RuntimeError> {
+        (**self).pre_tool_execution(context)
+    }
+}
+
+impl<T: PreExecutionHook + ?Sized> PreExecutionHook for Arc<T> {
+    fn pre_tool_execution(
+        &self,
+        context: &PreExecutionContext,
+    ) -> Result<HookDecision, RuntimeError> {
+        (**self).pre_tool_execution(context)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct PreExecutionHooks {
     hooks: Vec<Arc<dyn PreExecutionHook>>,
