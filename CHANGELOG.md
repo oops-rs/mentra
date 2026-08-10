@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.0
+
+### A write root can have a hole in it
+
+- `RuntimePolicy::with_denied_write_root` refuses a write under the given path
+  even when an allow-root would otherwise permit it. Allow-roots alone could
+  not express "the workspace is writable except for this part of it", and the
+  case that matters is `.git/hooks`: a file written there runs on the next
+  commit, so an agent able to write it executes code outside anything the
+  policy governs.
+- The deny check runs first, and both sides normalize, so a traversal or a
+  symlink into a denied root is refused the same as the plain spelling.
+- **Scope, stated plainly:** this binds the builtin file tools, not the shell.
+  A redirect inside `sh -c` still reaches the path, because the runtime does
+  not parse shell. It closes the obvious route; it is not a boundary.
+
 ## 0.16.0
 
 ### Branching is two-way
