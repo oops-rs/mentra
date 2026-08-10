@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.14.0
+
+### A session turn can carry run options
+
+- `Session::append_turn_with_options` and `resume_turn_with_options` take
+  `RunOptions`, so a turn driven through a session can be cancelled, given a
+  deadline, or bounded by a tool budget. Previously only `Agent::run` accepted
+  them and `Session` hardcoded `RunOptions::default()`, which left a host with
+  a stop button no way to build one without dropping to `Agent` and giving up
+  the session event stream and permission handle ([#10](https://github.com/oops-rs/mentra/issues/10)).
+- `append_turn` and `resume_turn` are unchanged, now delegating with default
+  options. Both paths share one internal helper, so a prompted turn and a
+  resumed turn cannot report their status, turn count, or events differently.
+- `CancellationToken` implements `Debug`, so a host embedding one in its own
+  options struct can still derive `Debug` on it ([#11](https://github.com/oops-rs/mentra/issues/11)).
+
+### Mock runtimes can exercise permissions
+
+- `MockRuntimeBuilder::with_tool_authorizer` installs an authorizer on the
+  scripted runtime. Without one the session authorizer allows every call
+  unconditionally and `PermissionRequested` never fires, so the permission
+  flow — the one whose failure mode is a hang rather than an error — could not
+  be tested against a mock at all. Consumers were hand-building a runtime
+  around a scripted provider instead ([#12](https://github.com/oops-rs/mentra/issues/12)).
+- `ToolAuthorizer` is implemented for `Box<T>` and `Arc<T>`, so an authorizer
+  chosen at runtime can be passed to anything taking `impl ToolAuthorizer`.
+
 ## 0.13.0
 
 ### Conversations branch
