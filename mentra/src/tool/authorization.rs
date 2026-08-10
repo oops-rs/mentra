@@ -84,3 +84,37 @@ pub trait ToolAuthorizer: Send + Sync {
         None
     }
 }
+
+/// Forwards to the authorizer inside.
+///
+/// Lets a caller hold an authorizer it chose at runtime — one of several, or
+/// none — and still hand it to anything taking `impl ToolAuthorizer`, without
+/// each caller writing this impl itself.
+#[async_trait]
+impl<T: ToolAuthorizer + ?Sized> ToolAuthorizer for Box<T> {
+    async fn authorize(
+        &self,
+        request: &ToolAuthorizationRequest,
+    ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+        (**self).authorize(request).await
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        (**self).timeout()
+    }
+}
+
+/// Forwards to the authorizer inside, for a shared one.
+#[async_trait]
+impl<T: ToolAuthorizer + ?Sized> ToolAuthorizer for std::sync::Arc<T> {
+    async fn authorize(
+        &self,
+        request: &ToolAuthorizationRequest,
+    ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+        (**self).authorize(request).await
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        (**self).timeout()
+    }
+}

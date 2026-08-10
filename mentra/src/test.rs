@@ -17,6 +17,7 @@ use crate::{
         provider_event_stream_from_response,
     },
     runtime::SqliteRuntimeStore,
+    tool::ToolAuthorizer,
 };
 
 #[derive(Debug)]
@@ -79,6 +80,7 @@ pub struct MockRuntimeBuilder {
     runtime_identifier: String,
     store: Option<SqliteRuntimeStore>,
     policy: RuntimePolicy,
+    tool_authorizer: Option<Box<dyn ToolAuthorizer>>,
 }
 
 impl Default for MockRuntimeBuilder {
@@ -90,6 +92,7 @@ impl Default for MockRuntimeBuilder {
             runtime_identifier,
             store: None,
             policy: RuntimePolicy::permissive(),
+            tool_authorizer: None,
         }
     }
 }
@@ -113,6 +116,18 @@ impl MockRuntimeBuilder {
     /// Replaces the runtime policy used by the scripted runtime.
     pub fn with_policy(mut self, policy: RuntimePolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Installs a tool authorizer, so a scripted run can exercise the
+    /// permission flow.
+    ///
+    /// Without one the session authorizer allows every call unconditionally
+    /// and [`SessionEvent::PermissionRequested`](crate::SessionEvent) is never
+    /// emitted — which makes "does this host ask before it writes?" impossible
+    /// to test against a mock.
+    pub fn with_tool_authorizer(mut self, authorizer: impl ToolAuthorizer + 'static) -> Self {
+        self.tool_authorizer = Some(Box::new(authorizer));
         self
     }
 
@@ -156,12 +171,17 @@ impl MockRuntimeBuilder {
             SqliteRuntimeStore::new(store_path)
         });
 
-        let runtime = Runtime::builder()
+        let mut builder = Runtime::builder()
             .with_runtime_identifier(self.runtime_identifier)
             .with_store(store)
             .with_policy(self.policy)
-            .with_provider_instance(provider.clone())
-            .build()?;
+            .with_provider_instance(provider.clone());
+
+        if let Some(authorizer) = self.tool_authorizer {
+            builder = builder.with_tool_authorizer(authorizer);
+        }
+
+        let runtime = builder.build()?;
 
         Ok(MockRuntime {
             runtime,
@@ -440,5 +460,62 @@ mod tests {
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(tool_names, vec!["echo_tool"]);
+    }
+
+    /// An authorizer that prompts for everything, so the session authorizer
+    /// has something to raise.
+    struct AlwaysPrompts;
+
+    #[async_trait]
+    impl crate::tool::ToolAuthorizer for AlwaysPrompts {
+        async fn authorize(
+            &self,
+            _request: &crate::tool::ToolAuthorizationRequest,
+        ) -> Result<crate::tool::ToolAuthorizationDecision, RuntimeError> {
+            Ok(crate::tool::ToolAuthorizationDecision::prompt("ask first"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mock_runtime_can_exercise_the_permission_path() {
+        let mock = MockRuntime::builder()
+            .with_tool_authorizer(AlwaysPrompts)
+            // A builtin, so the call really reaches the tool layer and
+            // therefore the authorizer.
+            .tool_calls(vec![MockToolCall::new(
+                "files",
+                json!({"operations": [{"op": "list", "path": "."}]}),
+            )])
+            .text("done")
+            .build()
+            .unwrap();
+
+        let mut session = mock.runtime().create_session("test", mock.model()).unwrap();
+
+        let mut events = session.subscribe();
+        let permissions = session.permission_handle();
+        let asked = Arc::new(Mutex::new(false));
+        let saw = Arc::clone(&asked);
+
+        // Answer whatever is asked, so the turn is not left blocked forever.
+        let watcher = tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                if let crate::SessionEvent::PermissionRequested { request_id, .. } = event {
+                    *saw.lock().unwrap() = true;
+                    let _ = permissions.resolve_permission(
+                        &request_id,
+                        crate::session::PermissionDecision::deny(),
+                    );
+                }
+            }
+        });
+
+        let _ = session.append_turn(vec![ContentBlock::text("go")]).await;
+        watcher.abort();
+
+        assert!(
+            *asked.lock().unwrap(),
+            "an authorizer installed on the mock must reach the session's permission flow"
+        );
     }
 }
