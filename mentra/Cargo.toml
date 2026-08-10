@@ -1,6 +1,6 @@
 [package]
 name = "mentra"
-version = "0.14.0"
+version = "0.14.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "An agent runtime for tool-using LLM applications"
@@ -20,7 +20,7 @@ test-utils = []
 [dependencies]
 mentra-provider = { version = "0.4.0", path = "../mentra-provider" }
 tokio = { version = "1.50.0", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.12.23", default-features = false, features = [
     "json",
     "rustls-tls",
     "stream",
