@@ -543,7 +543,7 @@ mod tests {
 
     #[async_trait]
     impl crate::runtime::PreExecutionHook for DenyTool {
-        fn pre_tool_execution(
+        async fn pre_tool_execution(
             &self,
             context: &crate::runtime::PreExecutionContext,
         ) -> Result<crate::runtime::HookDecision, RuntimeError> {

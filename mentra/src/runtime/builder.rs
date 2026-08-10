@@ -421,14 +421,16 @@ impl RuntimeBuilder {
 mod tests {
     use super::*;
     use crate::runtime::control::{HookDecision, PreExecutionContext};
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Counts how many times it was consulted, so a hook that was silently
     /// dropped during registration shows up as a count that never moves.
     struct Counting(Arc<AtomicUsize>);
 
+    #[async_trait]
     impl PreExecutionHook for Counting {
-        fn pre_tool_execution(
+        async fn pre_tool_execution(
             &self,
             _context: &PreExecutionContext,
         ) -> Result<HookDecision, RuntimeError> {
@@ -437,8 +439,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn registering_a_second_pre_hook_keeps_the_first() {
+    #[tokio::test]
+    async fn registering_a_second_pre_hook_keeps_the_first() {
         let first = Arc::new(AtomicUsize::new(0));
         let second = Arc::new(AtomicUsize::new(0));
 
@@ -451,8 +453,14 @@ mod tests {
             tool_name: "shell".to_string(),
             tool_call_id: "tc-1".to_string(),
             input_json: "{}".to_string(),
+            working_directory: std::path::PathBuf::from("/repo"),
         };
-        builder.handle.pre_hooks().run(&context).expect("hooks run");
+        builder
+            .handle
+            .pre_hooks()
+            .run(&context)
+            .await
+            .expect("hooks run");
 
         // The first registration used to be discarded by the second, which is
         // a security-relevant silent failure for a veto seam.

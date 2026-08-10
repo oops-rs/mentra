@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -295,6 +296,12 @@ pub struct PreExecutionContext {
     pub tool_name: String,
     pub tool_call_id: String,
     pub input_json: String,
+    /// What a relative path in `input_json` resolves against.
+    ///
+    /// A hook inspecting `{"path": "../../etc/hosts"}` cannot judge it without
+    /// knowing where it starts from, and guessing the workspace root is only
+    /// right until it isn't.
+    pub working_directory: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,8 +327,19 @@ pub enum HookDecision {
     },
 }
 
+/// Consulted before a tool runs, and able to stop or rewrite the call.
+///
+/// Async because it is invoked from inside a turn: a hook that reads a file,
+/// spawns a process, or asks a service would otherwise block a runtime worker
+/// for its whole duration. A synchronous signature left every implementor to
+/// discover that `tokio::task::block_in_place` panics on a current_thread
+/// runtime and to branch on `Handle::runtime_flavor()` themselves.
+///
+/// The same shape as [`ToolAuthorizer`](crate::tool::ToolAuthorizer), which
+/// sits at the adjacent seam doing the same kind of work.
+#[async_trait]
 pub trait PreExecutionHook: Send + Sync {
-    fn pre_tool_execution(
+    async fn pre_tool_execution(
         &self,
         context: &PreExecutionContext,
     ) -> Result<HookDecision, RuntimeError>;
@@ -332,21 +350,23 @@ pub trait PreExecutionHook: Send + Sync {
 /// Lets a caller hold a hook it chose at runtime — one of several, or none —
 /// and still hand it to anything taking `impl PreExecutionHook`, without each
 /// caller writing this impl itself. The same courtesy `ToolAuthorizer` gets.
+#[async_trait]
 impl<T: PreExecutionHook + ?Sized> PreExecutionHook for Box<T> {
-    fn pre_tool_execution(
+    async fn pre_tool_execution(
         &self,
         context: &PreExecutionContext,
     ) -> Result<HookDecision, RuntimeError> {
-        (**self).pre_tool_execution(context)
+        (**self).pre_tool_execution(context).await
     }
 }
 
+#[async_trait]
 impl<T: PreExecutionHook + ?Sized> PreExecutionHook for Arc<T> {
-    fn pre_tool_execution(
+    async fn pre_tool_execution(
         &self,
         context: &PreExecutionContext,
     ) -> Result<HookDecision, RuntimeError> {
-        (**self).pre_tool_execution(context)
+        (**self).pre_tool_execution(context).await
     }
 }
 
@@ -374,12 +394,12 @@ impl PreExecutionHooks {
     /// and otherwise the last `Modify` (if any) is what the tool should run
     /// with. Each hook sees the input as its predecessors left it, so
     /// modifications compose and no hook can route a call around a later one.
-    pub fn run(&self, context: &PreExecutionContext) -> Result<HookDecision, RuntimeError> {
+    pub async fn run(&self, context: &PreExecutionContext) -> Result<HookDecision, RuntimeError> {
         let mut current = context.clone();
         let mut modified = None;
 
         for hook in &self.hooks {
-            match hook.pre_tool_execution(&current)? {
+            match hook.pre_tool_execution(&current).await? {
                 HookDecision::Allow => continue,
                 deny @ HookDecision::Deny(_) => return Ok(deny),
                 HookDecision::Modify { input_json, reason } => {
@@ -436,12 +456,14 @@ mod tests {
             tool_name: tool_name.to_string(),
             tool_call_id: "call-1".to_string(),
             input_json: "{}".to_string(),
+            working_directory: PathBuf::from("/repo"),
         }
     }
 
     struct AllowHook;
+    #[async_trait]
     impl PreExecutionHook for AllowHook {
-        fn pre_tool_execution(
+        async fn pre_tool_execution(
             &self,
             _context: &PreExecutionContext,
         ) -> Result<HookDecision, RuntimeError> {
@@ -450,8 +472,9 @@ mod tests {
     }
 
     struct DenyHook;
+    #[async_trait]
     impl PreExecutionHook for DenyHook {
-        fn pre_tool_execution(
+        async fn pre_tool_execution(
             &self,
             _context: &PreExecutionContext,
         ) -> Result<HookDecision, RuntimeError> {
@@ -462,8 +485,9 @@ mod tests {
     struct ToolNameDenyHook {
         blocked_tool: String,
     }
+    #[async_trait]
     impl PreExecutionHook for ToolNameDenyHook {
-        fn pre_tool_execution(
+        async fn pre_tool_execution(
             &self,
             context: &PreExecutionContext,
         ) -> Result<HookDecision, RuntimeError> {
@@ -478,45 +502,45 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_pre_hooks_allows() {
+    #[tokio::test]
+    async fn empty_pre_hooks_allows() {
         let hooks = PreExecutionHooks::new();
-        let result = hooks.run(&make_context("shell")).unwrap();
+        let result = hooks.run(&make_context("shell")).await.unwrap();
         assert_eq!(result, HookDecision::Allow);
     }
 
-    #[test]
-    fn all_allow_hooks_allows() {
+    #[tokio::test]
+    async fn all_allow_hooks_allows() {
         let hooks = PreExecutionHooks::new()
             .with_hook(AllowHook)
             .with_hook(AllowHook);
-        let result = hooks.run(&make_context("files")).unwrap();
+        let result = hooks.run(&make_context("files")).await.unwrap();
         assert_eq!(result, HookDecision::Allow);
     }
 
-    #[test]
-    fn first_deny_wins() {
+    #[tokio::test]
+    async fn first_deny_wins() {
         let hooks = PreExecutionHooks::new()
             .with_hook(AllowHook)
             .with_hook(DenyHook)
             .with_hook(AllowHook);
-        let result = hooks.run(&make_context("any_tool")).unwrap();
+        let result = hooks.run(&make_context("any_tool")).await.unwrap();
         assert_eq!(result, HookDecision::Deny("denied by DenyHook".to_string()));
     }
 
-    #[test]
-    fn conditional_deny_by_tool_name() {
+    #[tokio::test]
+    async fn conditional_deny_by_tool_name() {
         let hooks = PreExecutionHooks::new().with_hook(ToolNameDenyHook {
             blocked_tool: "shell".to_string(),
         });
 
-        let shell_result = hooks.run(&make_context("shell")).unwrap();
+        let shell_result = hooks.run(&make_context("shell")).await.unwrap();
         assert_eq!(
             shell_result,
             HookDecision::Deny("tool 'shell' is blocked".to_string())
         );
 
-        let files_result = hooks.run(&make_context("files")).unwrap();
+        let files_result = hooks.run(&make_context("files")).await.unwrap();
         assert_eq!(files_result, HookDecision::Allow);
     }
 }
@@ -527,8 +551,9 @@ mod pre_execution_tests {
 
     struct Fixed(HookDecision);
 
+    #[async_trait]
     impl PreExecutionHook for Fixed {
-        fn pre_tool_execution(
+        async fn pre_tool_execution(
             &self,
             _context: &PreExecutionContext,
         ) -> Result<HookDecision, RuntimeError> {
@@ -540,8 +565,9 @@ mod pre_execution_tests {
     /// modification proves it observed the first.
     struct Appending(&'static str);
 
+    #[async_trait]
     impl PreExecutionHook for Appending {
-        fn pre_tool_execution(
+        async fn pre_tool_execution(
             &self,
             context: &PreExecutionContext,
         ) -> Result<HookDecision, RuntimeError> {
@@ -558,35 +584,36 @@ mod pre_execution_tests {
             tool_name: "shell".to_string(),
             tool_call_id: "tc-1".to_string(),
             input_json: "start".to_string(),
+            working_directory: PathBuf::from("/repo"),
         }
     }
 
-    #[test]
-    fn no_hooks_allows() {
+    #[tokio::test]
+    async fn no_hooks_allows() {
         let hooks = PreExecutionHooks::new();
-        assert_eq!(hooks.run(&context()).unwrap(), HookDecision::Allow);
+        assert_eq!(hooks.run(&context()).await.unwrap(), HookDecision::Allow);
     }
 
-    #[test]
-    fn a_deny_short_circuits_the_rest() {
+    #[tokio::test]
+    async fn a_deny_short_circuits_the_rest() {
         let hooks = PreExecutionHooks::new()
             .with_hook(Fixed(HookDecision::Deny("no".to_string())))
             .with_hook(Appending("-never"));
 
         assert_eq!(
-            hooks.run(&context()).unwrap(),
+            hooks.run(&context()).await.unwrap(),
             HookDecision::Deny("no".to_string()),
             "a hook after a denial must not get to overwrite the answer"
         );
     }
 
-    #[test]
-    fn modifications_compose_in_order() {
+    #[tokio::test]
+    async fn modifications_compose_in_order() {
         let hooks = PreExecutionHooks::new()
             .with_hook(Appending("-one"))
             .with_hook(Appending("-two"));
 
-        let HookDecision::Modify { input_json, .. } = hooks.run(&context()).unwrap() else {
+        let HookDecision::Modify { input_json, .. } = hooks.run(&context()).await.unwrap() else {
             panic!("expected a modification");
         };
         assert_eq!(
@@ -595,16 +622,44 @@ mod pre_execution_tests {
         );
     }
 
-    #[test]
-    fn a_later_hook_can_still_deny_a_modified_call() {
+    #[tokio::test]
+    async fn a_later_hook_can_still_deny_a_modified_call() {
         let hooks = PreExecutionHooks::new()
             .with_hook(Appending("-one"))
             .with_hook(Fixed(HookDecision::Deny("still no".to_string())));
 
         assert_eq!(
-            hooks.run(&context()).unwrap(),
+            hooks.run(&context()).await.unwrap(),
             HookDecision::Deny("still no".to_string()),
             "modify must not be a way around a hook that runs later"
+        );
+    }
+
+    /// Awaits before answering, which is the whole reason the trait is async:
+    /// under the old sync signature this had to be `block_in_place`, and that
+    /// panics on a current_thread runtime.
+    struct Awaits;
+
+    #[async_trait]
+    impl PreExecutionHook for Awaits {
+        async fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            Ok(HookDecision::Deny("after awaiting".to_string()))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_hook_may_await_even_on_a_current_thread_runtime() {
+        let hooks = PreExecutionHooks::new().with_hook(Awaits);
+
+        assert_eq!(
+            hooks.run(&context()).await.unwrap(),
+            HookDecision::Deny("after awaiting".to_string()),
+            "a hook doing real work must not need a multi-thread runtime"
         );
     }
 }

@@ -351,14 +351,15 @@ impl ToolRuntime {
             })
     }
 
-    fn run_pre_hooks(&self, call: &ToolCall) -> Result<HookDecision, RuntimeError> {
+    async fn run_pre_hooks(&mut self, call: &ToolCall) -> Result<HookDecision, RuntimeError> {
         let context = PreExecutionContext {
             agent_id: self.agent_id.clone(),
             tool_name: call.name.clone(),
             tool_call_id: call.id.clone(),
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
+            working_directory: self.working_directory(),
         };
-        self.runtime.pre_hooks().run(&context)
+        self.runtime.pre_hooks().run(&context).await
     }
 
     /// Runs the pre-execution hooks and applies whatever they decided.
@@ -369,8 +370,11 @@ impl ToolRuntime {
     ///
     /// Shared by the serial and parallel paths so the two cannot disagree
     /// about what a hook's answer means.
-    fn apply_pre_hooks(&self, call: &mut ToolCall) -> Result<Option<String>, RuntimeError> {
-        match self.run_pre_hooks(call)? {
+    async fn apply_pre_hooks(
+        &mut self,
+        call: &mut ToolCall,
+    ) -> Result<Option<String>, RuntimeError> {
+        match self.run_pre_hooks(call).await? {
             HookDecision::Allow => Ok(None),
             HookDecision::Deny(reason) => Ok(Some(reason)),
             HookDecision::Modify { input_json, .. } => {
@@ -703,7 +707,7 @@ impl ToolRuntime {
             }
 
             // Pre-execution hook check
-            match self.apply_pre_hooks(&mut call)? {
+            match self.apply_pre_hooks(&mut call).await? {
                 None => {}
                 Some(reason) => {
                     self.emit_tool_execution_blocked(&call, &reason);
@@ -862,7 +866,7 @@ impl ToolRuntime {
         }
 
         // Pre-execution hook check
-        match self.apply_pre_hooks(&mut call) {
+        match self.apply_pre_hooks(&mut call).await {
             Ok(None) => {}
             Ok(Some(reason)) => {
                 self.emit_tool_execution_blocked(&call, &reason);

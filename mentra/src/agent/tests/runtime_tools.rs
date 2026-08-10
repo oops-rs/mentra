@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde_json::json;
 use std::{
     fs,
@@ -5374,8 +5375,9 @@ async fn wait_for_snapshot_task_owner(agent: &Agent, task_id: u64, owner: &str) 
 async fn pre_execution_hook_blocks_tool_call() {
     // Define a hook that blocks "echo_tool"
     struct BlockEchoHook;
+    #[async_trait]
     impl PreExecutionHook for BlockEchoHook {
-        fn pre_tool_execution(
+        async fn pre_tool_execution(
             &self,
             context: &PreExecutionContext,
         ) -> Result<HookDecision, RuntimeError> {
