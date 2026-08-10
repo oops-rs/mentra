@@ -151,7 +151,7 @@ impl AgentMemory {
             .state
             .transcript
             .branch_from(id)
-            .map_err(|error| RuntimeError::Store(error.to_string()))?;
+            .map_err(RuntimeError::Branch)?;
         self.sync_history_cache();
         self.persist()?;
         Ok(moved)

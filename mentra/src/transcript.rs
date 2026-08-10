@@ -50,8 +50,16 @@ impl std::fmt::Display for EntryId {
 /// Why a branch operation could not be performed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BranchError {
-    #[error("no entry '{0}' on the current path")]
+    #[error("no entry '{0}' anywhere in the transcript")]
     UnknownEntry(EntryId),
+    /// An archived entry whose parent chain does not reach a root.
+    ///
+    /// Impossible in a well-formed tree: every entry either is a root or names
+    /// a parent that exists. Reported rather than papered over, because
+    /// installing a partial path would silently hand the model a conversation
+    /// missing its beginning.
+    #[error("entry '{entry}' has a broken parent chain: '{missing}' is not in the transcript")]
+    BrokenChain { entry: EntryId, missing: EntryId },
 }
 
 /// An agent's conversation, as a tree of entries with one active path.
@@ -60,14 +68,16 @@ pub enum BranchError {
 /// the model actually sees, and the only view most code needs. Entries left
 /// behind by [`branch_from`](Self::branch_from) move to
 /// [`archived`](Self::archived) rather than being deleted, so a branch is a
-/// move of the leaf pointer rather than a copy of history.
+/// move of the leaf pointer rather than a copy of history — and moving it back
+/// is how an abandoned branch is returned to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(from = "AgentTranscriptWire")]
 pub struct AgentTranscript {
     items: Vec<TranscriptItem>,
     /// Entries off the active path. Reachable through
-    /// [`children`](Self::children) so an abandoned branch can be inspected
-    /// or returned to.
+    /// [`children`](Self::children), and returnable-to through
+    /// [`branch_from`](Self::branch_from), which accepts an archived entry and
+    /// rebuilds its path from the `parent_id` links.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     archive: Vec<TranscriptItem>,
 }
@@ -156,21 +166,85 @@ impl AgentTranscript {
             .collect()
     }
 
-    /// Moves the leaf back to `id`, so subsequent appends continue from there.
+    /// Moves the leaf to `id`, so subsequent appends continue from there.
     ///
-    /// Entries after `id` are moved off the active path, not deleted: they
-    /// stay reachable through [`children`](Self::children), which is what
-    /// makes this a branch rather than a truncation. Returns how many entries
-    /// left the path.
+    /// `id` may be anywhere in the tree: on the active path, which shortens it,
+    /// or on a branch abandoned earlier, which returns to it. Either way no
+    /// entry is deleted — whatever leaves the active path moves to
+    /// [`archived`](Self::archived) and stays reachable through
+    /// [`children`](Self::children). Returns how many entries left the path.
+    ///
+    /// Returning to an abandoned branch is what makes this a tree rather than
+    /// an undo stack: "try something else" and "actually, go back" are the same
+    /// operation in opposite directions.
     pub fn branch_from(&mut self, id: &EntryId) -> Result<usize, BranchError> {
-        let Some(position) = self.items.iter().position(|item| &item.id == id) else {
-            return Err(BranchError::UnknownEntry(id.clone()));
-        };
+        if let Some(position) = self.items.iter().position(|item| &item.id == id) {
+            let abandoned = self.items.split_off(position + 1);
+            let count = abandoned.len();
+            self.archive.extend(abandoned);
+            return Ok(count);
+        }
 
-        let abandoned = self.items.split_off(position + 1);
-        let count = abandoned.len();
-        self.archive.extend(abandoned);
+        if !self.archive.iter().any(|item| &item.id == id) {
+            return Err(BranchError::UnknownEntry(id.clone()));
+        }
+
+        // The target is on an abandoned branch. Its path is reconstructible
+        // because every entry names its parent, so walk to the root and make
+        // that chain the active path.
+        let path = self.path_to(id)?;
+        let restored: Vec<TranscriptItem> = path
+            .iter()
+            .map(|id| {
+                self.take_anywhere(id)
+                    .expect("path_to only names entries that exist")
+            })
+            .collect();
+
+        let count = self.items.len();
+        let previous = std::mem::replace(&mut self.items, restored);
+        self.archive.extend(previous);
+
         Ok(count)
+    }
+
+    /// The ids from the root down to `id`, inclusive.
+    fn path_to(&self, id: &EntryId) -> Result<Vec<EntryId>, BranchError> {
+        let mut path = Vec::new();
+        let mut cursor = Some(id.clone());
+
+        while let Some(current) = cursor {
+            let Some(item) = self.entry(&current) else {
+                return Err(BranchError::BrokenChain {
+                    entry: id.clone(),
+                    missing: current,
+                });
+            };
+            cursor = item.parent_id.clone();
+            path.push(current);
+
+            // A parent link that cycles would loop forever. It cannot happen
+            // through `push`, which only ever points at an existing leaf, but
+            // a transcript loaded from disk is data rather than a promise.
+            if path.len() > self.items.len() + self.archive.len() {
+                return Err(BranchError::BrokenChain {
+                    entry: id.clone(),
+                    missing: id.clone(),
+                });
+            }
+        }
+
+        path.reverse();
+        Ok(path)
+    }
+
+    /// Removes an entry from whichever vector holds it.
+    fn take_anywhere(&mut self, id: &EntryId) -> Option<TranscriptItem> {
+        if let Some(index) = self.items.iter().position(|item| &item.id == id) {
+            return Some(self.items.remove(index));
+        }
+        let index = self.archive.iter().position(|item| &item.id == id)?;
+        Some(self.archive.remove(index))
     }
 
     pub fn items(&self) -> &[TranscriptItem] {
@@ -605,5 +679,146 @@ mod tests {
         assert!(projected.contains("answer"), "content must still project");
         assert!(!projected.contains("secret"));
         assert!(!projected.contains("shh"));
+    }
+
+    /// Builds a transcript of `n` user turns whose text is its index, so a
+    /// path can be described by the numbers it contains.
+    fn numbered(count: usize) -> AgentTranscript {
+        let mut transcript = AgentTranscript::default();
+        for index in 0..count {
+            transcript.push(TranscriptItem::user_turn(Message::user(
+                ContentBlock::text(index.to_string()),
+            )));
+        }
+        transcript
+    }
+
+    /// The active path, as the numbers its entries carry.
+    fn path(transcript: &AgentTranscript) -> Vec<String> {
+        transcript
+            .items()
+            .iter()
+            .filter_map(|item| item.message.as_ref())
+            .map(|message| message.text())
+            .collect()
+    }
+
+    #[test]
+    fn branching_back_shortens_the_active_path() {
+        let mut transcript = numbered(4);
+        let second = transcript.items()[1].id.clone();
+
+        let moved = transcript.branch_from(&second).expect("branches");
+
+        assert_eq!(moved, 2, "two entries left the path");
+        assert_eq!(path(&transcript), vec!["0", "1"]);
+        assert_eq!(transcript.archived().len(), 2);
+    }
+
+    #[test]
+    fn an_abandoned_branch_can_be_returned_to() {
+        let mut transcript = numbered(3);
+        let original_leaf = transcript.leaf().expect("a leaf").clone();
+        let first = transcript.items()[0].id.clone();
+
+        // Leave the original line of work, then explore a different one.
+        transcript.branch_from(&first).expect("branches away");
+        transcript.push(TranscriptItem::user_turn(Message::user(
+            ContentBlock::text("elsewhere"),
+        )));
+        assert_eq!(path(&transcript), vec!["0", "elsewhere"]);
+
+        // Going back is the half that never worked: the entry is archived, so
+        // the old code could not find it at all.
+        let moved = transcript
+            .branch_from(&original_leaf)
+            .expect("returns to the abandoned branch");
+
+        // One, not two: entry "0" is on both paths, so only "elsewhere"
+        // actually left. The count is entries that stopped being active, which
+        // is what a caller wants to report, not the length of the old path.
+        assert_eq!(moved, 1, "only the entry unique to the old path left it");
+        assert_eq!(
+            path(&transcript),
+            vec!["0", "1", "2"],
+            "the original path comes back whole and in order"
+        );
+    }
+
+    #[test]
+    fn alternating_between_two_branches_converges() {
+        let mut transcript = numbered(2);
+        let fork = transcript.items()[0].id.clone();
+        let left = transcript.leaf().expect("a leaf").clone();
+
+        transcript.branch_from(&fork).expect("branches away");
+        transcript.push(TranscriptItem::user_turn(Message::user(
+            ContentBlock::text("right"),
+        )));
+        let right = transcript.leaf().expect("a leaf").clone();
+
+        // Three round trips: a scheme that copied entries rather than moving
+        // them would grow the transcript on every switch.
+        let total = transcript.items().len() + transcript.archived().len();
+        for _ in 0..3 {
+            transcript.branch_from(&left).expect("goes left");
+            assert_eq!(path(&transcript), vec!["0", "1"]);
+            transcript.branch_from(&right).expect("goes right");
+            assert_eq!(path(&transcript), vec!["0", "right"]);
+        }
+
+        assert_eq!(
+            transcript.items().len() + transcript.archived().len(),
+            total,
+            "switching branches moves entries, never copies them"
+        );
+    }
+
+    #[test]
+    fn an_unknown_entry_is_still_refused() {
+        let mut transcript = numbered(2);
+        let stranger = EntryId::new();
+
+        assert_eq!(
+            transcript.branch_from(&stranger),
+            Err(BranchError::UnknownEntry(stranger))
+        );
+    }
+
+    #[test]
+    fn a_returned_to_branch_survives_a_round_trip_through_json() {
+        let mut transcript = numbered(3);
+        let leaf = transcript.leaf().expect("a leaf").clone();
+        let first = transcript.items()[0].id.clone();
+
+        transcript.branch_from(&first).expect("branches away");
+        transcript.push(TranscriptItem::user_turn(Message::user(
+            ContentBlock::text("elsewhere"),
+        )));
+
+        let text = serde_json::to_string(&transcript).expect("serializes");
+        let mut reloaded: AgentTranscript = serde_json::from_str(&text).expect("deserializes");
+
+        // The archive has to survive persistence, or a branch is returnable-to
+        // only until the process restarts.
+        reloaded
+            .branch_from(&leaf)
+            .expect("a reloaded transcript can still return to its branch");
+        assert_eq!(path(&reloaded), vec!["0", "1", "2"]);
+    }
+
+    #[test]
+    fn a_child_of_an_abandoned_entry_is_still_reachable() {
+        let mut transcript = numbered(3);
+        let first = transcript.items()[0].id.clone();
+        let second = transcript.items()[1].id.clone();
+
+        transcript.branch_from(&first).expect("branches away");
+
+        // `children` is what a UI offers as "you have another line of work
+        // here", so what it names must be what `branch_from` accepts.
+        let children = transcript.children(&first);
+        assert!(children.iter().any(|item| item.id == second));
+        assert!(transcript.branch_from(&second).is_ok());
     }
 }

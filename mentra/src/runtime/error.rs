@@ -56,6 +56,8 @@ pub enum RuntimeError {
     OperationDenied(String),
     #[error("runtime store error: {0}")]
     Store(String),
+    #[error("cannot branch: {0}")]
+    Branch(#[source] crate::transcript::BranchError),
     #[error("lease unavailable: {0}")]
     LeaseUnavailable(String),
     #[error("operation cancelled")]
@@ -116,7 +118,10 @@ impl RuntimeError {
             | Self::InvalidToolUseInput { .. }
             | Self::MalformedProviderEvent(_)
             | Self::InvalidTask(_)
-            | Self::InvalidTeam(_) => ErrorCategory::Terminal,
+            | Self::InvalidTeam(_)
+            // Naming an entry that is not there is a caller mistake; retrying
+            // with the same id gets the same answer.
+            | Self::Branch(_) => ErrorCategory::Terminal,
 
             // Persistence and store errors: state may be inconsistent.
             Self::FailedToPersistTranscript(_)
