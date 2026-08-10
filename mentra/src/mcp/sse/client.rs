@@ -139,8 +139,6 @@ pub enum McpSseError {
     /// starting. Callers must not retry automatically: an MCP tool can send
     /// mail, charge a card, or write a file.
     ///
-    /// This is distinct from [`McpSseError::HttpStatus`] on a `POST`, which
-    /// means the transport endpoint explicitly rejected the message.
     #[error(
         "the MCP SSE server may have received the '{method}' request but never answered it; \
          the call may have executed and must not be retried automatically"
@@ -647,12 +645,14 @@ fn indeterminate(method: &str) -> McpSseError {
 
 /// Converts a POST failure into the method-level certainty the caller needs.
 ///
-/// Once a `tools/call` POST future has begun, a transport error does not prove
-/// that the server failed to receive its body. An observed redirect or
-/// non-success HTTP status is still definite because the server explicitly
-/// refused that request before accepting it for MCP processing.
+/// Once a `tools/call` POST future has begun, neither a transport error nor an
+/// HTTP response proves that the application did not process its body first.
+/// HTTP status describes the response, not an atomic absence of server-side
+/// effects, so every POST failure is indeterminate for a potentially mutating
+/// tool call. Handshake methods retain the underlying diagnostic because they
+/// are safe to establish again in a new session.
 fn classify_post_failure(method: &str, error: McpSseError) -> McpSseError {
-    if method == "tools/call" && matches!(error, McpSseError::Transport(_)) {
+    if method == "tools/call" {
         indeterminate(method)
     } else {
         error

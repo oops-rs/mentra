@@ -1173,6 +1173,63 @@ async fn a_tool_call_dropped_after_its_body_is_read_is_indeterminate() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_answered_with_an_http_error_is_indeterminate() {
+    let server = SseTestServer::start();
+    let client = connect(&server, config(&server)).await;
+
+    server.queue_post_reply(PostReply::Status {
+        code: 503,
+        body: "failed after dispatch".to_string(),
+    });
+    let error = client
+        .call_tool("charge_card", None)
+        .await
+        .expect_err("a non-success POST status fails the call");
+
+    assert!(
+        matches!(error, McpSseError::RequestIndeterminate { .. }),
+        "HTTP status cannot prove that the server did no work: {error:?}"
+    );
+    assert_eq!(
+        server
+            .posts()
+            .iter()
+            .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+            .count(),
+        1,
+        "the failed tool call must never be replayed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_answered_with_a_redirect_is_indeterminate_and_not_followed() {
+    let server = SseTestServer::start();
+    let client = connect(&server, config(&server)).await;
+
+    server.queue_post_reply(PostReply::Redirect {
+        location: "http://evil.example/messages".to_string(),
+    });
+    let error = client
+        .call_tool("charge_card", None)
+        .await
+        .expect_err("a redirected POST fails the call");
+
+    assert!(
+        matches!(error, McpSseError::RequestIndeterminate { .. }),
+        "a redirect response cannot prove that the original server did no work: {error:?}"
+    );
+    assert_eq!(
+        server
+            .posts()
+            .iter()
+            .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+            .count(),
+        1,
+        "the client must neither follow nor replay the redirected tool call"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cancelling_a_tool_call_future_removes_its_pending_waiter() {
     let server = SseTestServer::start();
     let client = std::sync::Arc::new(connect(&server, config(&server)).await);
