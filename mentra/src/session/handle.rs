@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
@@ -7,7 +9,7 @@ use crate::{
     AgentTranscript, ContentBlock, Message,
     agent::{Agent, AgentEvent, AgentEventTapGuard},
     error::RuntimeError,
-    runtime::{PermissionRuleStore, is_transient_runtime_error},
+    runtime::{PermissionRuleStore, RunOptions, is_transient_runtime_error},
     session::{
         event::{EventSeq, PermissionOutcome, SessionEvent, TaskKind, TaskLifecycleStatus},
         mapping::{ToolNameIndex, map_agent_event},
@@ -285,36 +287,30 @@ impl Session {
         &mut self,
         content: Vec<ContentBlock>,
     ) -> Result<Message, RuntimeError> {
+        self.append_turn_with_options(content, RunOptions::default())
+            .await
+    }
+
+    /// Submits a user turn with explicit execution limits and cancellation
+    /// settings.
+    ///
+    /// The session-level counterpart to [`Agent::run`]. A host that drives a
+    /// conversation through a `Session` — for the event stream and the
+    /// permission handle — needs the same control over a turn that
+    /// [`Agent::run`] gives, without dropping to the agent and losing both.
+    /// Cancelling through [`RunOptions::cancellation`] fails the turn and rolls
+    /// it back; [`RunOptions::stop`] ends it gracefully at the next round
+    /// boundary, keeping the committed transcript.
+    pub async fn append_turn_with_options(
+        &mut self,
+        content: Vec<ContentBlock>,
+        options: RunOptions,
+    ) -> Result<Message, RuntimeError> {
         let user_text = extract_user_text(&content);
         self.emit(SessionEvent::UserMessage { text: user_text });
-        self.update_status(SessionStatus::Active);
 
-        let (event_tap, forwarded_seq) = self.install_agent_event_forwarder();
-        let result = self.agent.send(content).await;
-        drop(event_tap);
-        self.sync_forwarded_seq(&forwarded_seq);
-
-        match result {
-            Ok(message) => {
-                self.emit(SessionEvent::AssistantMessageCompleted {
-                    text: message.text(),
-                });
-                self.metadata.turn_count += 1;
-                self.update_status(SessionStatus::Idle);
-                self.touch_updated_at();
-                Ok(message)
-            }
-            Err(error) => {
-                let recoverable = is_transient_runtime_error(&error);
-                self.emit(SessionEvent::Error {
-                    message: error.to_string(),
-                    recoverable,
-                });
-                self.update_status(SessionStatus::Failed(error.to_string()));
-                self.touch_updated_at();
-                Err(error)
-            }
-        }
+        self.run_turn(|agent| Box::pin(agent.run(content, options)))
+            .await
     }
 
     /// Returns the agent's canonical transcript for UI reconstruction.
@@ -353,10 +349,37 @@ impl Session {
     /// Resumes the agent from an interrupted or failed state, emitting session
     /// events as the turn runs.
     pub async fn resume_turn(&mut self) -> Result<Message, RuntimeError> {
+        self.resume_turn_with_options(RunOptions::default()).await
+    }
+
+    /// Resumes an interrupted or failed turn with explicit execution limits and
+    /// cancellation settings.
+    pub async fn resume_turn_with_options(
+        &mut self,
+        options: RunOptions,
+    ) -> Result<Message, RuntimeError> {
+        self.run_turn(|agent| Box::pin(agent.resume_with_options(options)))
+            .await
+    }
+
+    /// Runs one turn on the agent, wrapped in the bookkeeping every turn needs:
+    /// status transitions, the event tap that forwards agent events onto the
+    /// session stream, the turn counter, and the terminal event.
+    ///
+    /// Both entry points share this so a turn started by a prompt and a turn
+    /// resumed after a failure can never report themselves differently.
+    async fn run_turn<F>(&mut self, run: F) -> Result<Message, RuntimeError>
+    where
+        F: for<'a> FnOnce(
+            &'a mut Agent,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Message, RuntimeError>> + Send + 'a>,
+        >,
+    {
         self.update_status(SessionStatus::Active);
 
         let (event_tap, forwarded_seq) = self.install_agent_event_forwarder();
-        let result = self.agent.resume().await;
+        let result = run(&mut self.agent).await;
         drop(event_tap);
         self.sync_forwarded_seq(&forwarded_seq);
 

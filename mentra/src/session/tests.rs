@@ -236,7 +236,7 @@ fn all_session_event_variants_serialize_with_type_tag() {
 
 use crate::{
     ContentBlock,
-    runtime::{AgentStore, SqliteRuntimeStore},
+    runtime::{AgentStore, CancellationToken, RunOptions, SqliteRuntimeStore},
     test::MockRuntime,
 };
 
@@ -328,6 +328,60 @@ async fn replay_returns_transcript_after_turn() {
         !transcript.items().is_empty(),
         "Transcript should have items after a turn"
     );
+}
+
+#[tokio::test]
+async fn a_cancelled_session_turn_fails_instead_of_running() {
+    let mock = MockRuntime::builder()
+        .text("never reached")
+        .build()
+        .unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("test-session", mock.model())
+        .unwrap();
+
+    // Tripped before the turn starts, so the outcome does not depend on
+    // winning a race with the provider.
+    let cancellation = CancellationToken::default();
+    cancellation.cancel();
+
+    let result = session
+        .append_turn_with_options(
+            vec![ContentBlock::text("go")],
+            RunOptions {
+                cancellation: Some(cancellation),
+                ..RunOptions::default()
+            },
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "a cancelled turn must fail rather than run to completion"
+    );
+    assert!(
+        matches!(session.metadata().status, SessionStatus::Failed(_)),
+        "the session must report the cancelled turn, not sit in Active"
+    );
+}
+
+#[tokio::test]
+async fn run_options_default_to_the_same_turn_append_turn_runs() {
+    let mock = MockRuntime::builder().text("hello").build().unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("test-session", mock.model())
+        .unwrap();
+
+    let message = session
+        .append_turn_with_options(vec![ContentBlock::text("hi")], RunOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(message.text(), "hello");
+    assert_eq!(session.metadata().turn_count, 1);
+    assert_eq!(session.metadata().status, SessionStatus::Idle);
 }
 
 #[tokio::test]
