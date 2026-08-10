@@ -475,10 +475,20 @@ Current provider support:
 
 Reasoning effort support:
 
-- OpenAI and OpenRouter: Mentra forwards `provider_request_options.reasoning.effort` as Responses API reasoning effort
-- Anthropic: Mentra maps unified reasoning effort to adaptive thinking on Claude 4.6 models
-- Gemini: Mentra maps unified reasoning effort to `thinkingLevel` on Gemini 3 models
-- Anthropic models older than 4.6 and Gemini models older than 3 return `InvalidRequest` when unified reasoning effort is set
+- The shared levels are `low`, `medium`, `high`, `xhigh`, and `max`; omitting
+  effort leaves the provider default unchanged.
+- OpenAI and OpenRouter: Mentra forwards all five levels as
+  `reasoning.effort` on the Responses API.
+- Anthropic: Mentra writes the requested level to `output_config.effort` and
+  enables adaptive thinking on models that support it. Opus 4.5 accepts
+  `low`/`medium`/`high` effort without adaptive thinking; availability of
+  `xhigh` and `max` depends on the Claude model.
+- Gemini: Mentra maps the shared `low`, `medium`, and `high` levels to
+  `thinkingLevel` on Gemini 3 models, subject to that model's accepted values.
+  `xhigh` and `max` return `InvalidRequest` instead of being silently
+  downgraded.
+- Anthropic models without effort support and Gemini models older than 3 return
+  `InvalidRequest` when unified reasoning effort is set.
 
 Deferred tools are filtered through `ToolProfile` just like immediate tools. If you force a deferred tool with `ToolChoice::Tool { name }`, Mentra serializes that specific tool as immediate for the request so explicit invocation still works.
 

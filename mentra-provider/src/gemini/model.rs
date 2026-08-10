@@ -434,7 +434,7 @@ impl GeminiGenerationConfig {
                 }
 
                 Some(GeminiThinkingConfig {
-                    thinking_level: effort.into(),
+                    thinking_level: effort.try_into()?,
                 })
             } else {
                 None
@@ -470,12 +470,20 @@ enum GeminiThinkingLevel {
     High,
 }
 
-impl From<ReasoningEffort> for GeminiThinkingLevel {
-    fn from(value: ReasoningEffort) -> Self {
+impl TryFrom<ReasoningEffort> for GeminiThinkingLevel {
+    type Error = ProviderError;
+
+    fn try_from(value: ReasoningEffort) -> Result<Self, Self::Error> {
         match value {
-            ReasoningEffort::Low => Self::Low,
-            ReasoningEffort::Medium => Self::Medium,
-            ReasoningEffort::High => Self::High,
+            ReasoningEffort::Low => Ok(Self::Low),
+            ReasoningEffort::Medium => Ok(Self::Medium),
+            ReasoningEffort::High => Ok(Self::High),
+            ReasoningEffort::XHigh => Err(ProviderError::InvalidRequest(
+                "Gemini does not support reasoning effort 'xhigh'".to_string(),
+            )),
+            ReasoningEffort::Max => Err(ProviderError::InvalidRequest(
+                "Gemini does not support reasoning effort 'max'".to_string(),
+            )),
         }
     }
 }
@@ -758,33 +766,39 @@ mod tests {
     }
 
     #[test]
-    fn serializes_reasoning_effort_for_gemini_3_models() {
-        let request = Request {
-            model: Cow::Borrowed("gemini-3-flash-preview"),
-            system: None,
-            messages: Cow::Owned(vec![Message::user(ContentBlock::text("hi"))]),
-            tools: Cow::Owned(vec![]),
-            tool_choice: Some(ToolChoice::Auto),
-            temperature: None,
-            max_output_tokens: None,
-            metadata: Cow::Owned(BTreeMap::new()),
-            provider_request_options: ProviderRequestOptions {
-                reasoning: Some(ReasoningOptions {
-                    effort: Some(ReasoningEffort::High),
-                    summary: None,
-                }),
-                ..Default::default()
-            },
-        };
+    fn serializes_shared_reasoning_effort_for_gemini_3_models() {
+        for (effort, expected) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+        ] {
+            let request = Request {
+                model: Cow::Borrowed("gemini-3-flash-preview"),
+                system: None,
+                messages: Cow::Owned(vec![Message::user(ContentBlock::text("hi"))]),
+                tools: Cow::Owned(vec![]),
+                tool_choice: Some(ToolChoice::Auto),
+                temperature: None,
+                max_output_tokens: None,
+                metadata: Cow::Owned(BTreeMap::new()),
+                provider_request_options: ProviderRequestOptions {
+                    reasoning: Some(ReasoningOptions {
+                        effort: Some(effort),
+                        summary: None,
+                    }),
+                    ..Default::default()
+                },
+            };
 
-        let payload =
-            serde_json::to_value(GeminiGenerateContentRequest::try_from(request).unwrap())
-                .expect("request should serialize");
+            let payload =
+                serde_json::to_value(GeminiGenerateContentRequest::try_from(request).unwrap())
+                    .expect("request should serialize");
 
-        assert_eq!(
-            payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
-            "high"
-        );
+            assert_eq!(
+                payload["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                expected
+            );
+        }
     }
 
     #[test]
@@ -815,6 +829,42 @@ mod tests {
                 assert!(message.contains("Gemini 3"));
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_extended_reasoning_effort_for_gemini() {
+        for (effort, expected) in [
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            let request = Request {
+                model: Cow::Borrowed("gemini-3-flash-preview"),
+                system: None,
+                messages: Cow::Owned(vec![Message::user(ContentBlock::text("hi"))]),
+                tools: Cow::Owned(vec![]),
+                tool_choice: Some(ToolChoice::Auto),
+                temperature: None,
+                max_output_tokens: None,
+                metadata: Cow::Owned(BTreeMap::new()),
+                provider_request_options: ProviderRequestOptions {
+                    reasoning: Some(ReasoningOptions {
+                        effort: Some(effort),
+                        summary: None,
+                    }),
+                    ..Default::default()
+                },
+            };
+
+            let error = GeminiGenerateContentRequest::try_from(request)
+                .err()
+                .expect("extended Gemini effort should fail");
+            match error {
+                ProviderError::InvalidRequest(message) => {
+                    assert!(message.contains(expected));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
         }
     }
 

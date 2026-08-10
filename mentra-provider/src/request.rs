@@ -21,10 +21,14 @@ pub struct ReasoningOptions {
 /// Shared reasoning effort levels supported by Mentra's public API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
 }
 
 /// Shared reasoning summary levels used by Responses-family providers.
@@ -379,6 +383,25 @@ const MEMORY_SUMMARIZE_SYSTEM_PROMPT: &str = concat!(
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn reasoning_effort_uses_the_five_public_spellings() {
+        for (effort, expected) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            let serialized = serde_json::to_string(&effort).expect("effort should serialize");
+            assert_eq!(serialized, format!("\"{expected}\""));
+            assert_eq!(
+                serde_json::from_str::<ReasoningEffort>(&serialized)
+                    .expect("effort should deserialize"),
+                effort
+            );
+        }
+    }
 
     #[test]
     fn compaction_request_into_model_request_serializes_input_as_prompt_text() {

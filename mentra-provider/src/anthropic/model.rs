@@ -59,7 +59,7 @@ pub(crate) struct AnthropicRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    effort: Option<AnthropicReasoningEffort>,
+    output_config: Option<AnthropicOutputConfig>,
 }
 
 /// A system prompt block with optional cache control.
@@ -191,19 +191,36 @@ impl AnthropicRequest {
         value: Request<'_>,
         target_provider: &ProviderId,
     ) -> Result<Self, ProviderError> {
-        if value
+        let reasoning_effort = value
             .provider_request_options
             .reasoning
             .as_ref()
-            .and_then(|reasoning| reasoning.effort)
-            .is_some()
-            && !supports_anthropic_adaptive_thinking(&value.model)
-        {
-            return Err(ProviderError::InvalidRequest(format!(
-                "Anthropic reasoning effort requires a Claude 4.6 model, got '{}'",
-                value.model
-            )));
-        }
+            .and_then(|reasoning| reasoning.effort);
+
+        let effort_capabilities = reasoning_effort
+            .map(|effort| {
+                let capabilities =
+                    anthropic_effort_capabilities(&value.model).ok_or_else(|| {
+                        ProviderError::InvalidRequest(format!(
+                            "Anthropic reasoning effort is not supported by model '{}'",
+                            value.model
+                        ))
+                    })?;
+                if matches!(effort, ReasoningEffort::Max) && !capabilities.max {
+                    return Err(ProviderError::InvalidRequest(format!(
+                        "Anthropic max reasoning effort is not supported by model '{}'",
+                        value.model
+                    )));
+                }
+                if matches!(effort, ReasoningEffort::XHigh) && !capabilities.xhigh {
+                    return Err(ProviderError::InvalidRequest(format!(
+                        "Anthropic xhigh reasoning effort is not supported by model '{}'",
+                        value.model
+                    )));
+                }
+                Ok(capabilities)
+            })
+            .transpose()?;
 
         let target_model = value.model.to_string();
 
@@ -229,16 +246,10 @@ impl AnthropicRequest {
                 .provider_request_options
                 .anthropic
                 .disable_parallel_tool_use,
-            thinking: value
-                .provider_request_options
-                .reasoning
-                .as_ref()
-                .filter(|reasoning| reasoning.effort.is_some())
+            thinking: effort_capabilities
+                .filter(|capabilities| capabilities.adaptive_thinking)
                 .map(|_| AnthropicThinkingConfig::adaptive()),
-            effort: value
-                .provider_request_options
-                .reasoning
-                .and_then(|reasoning| reasoning.effort.map(Into::into)),
+            output_config: reasoning_effort.map(AnthropicOutputConfig::new),
         })
     }
 }
@@ -256,11 +267,27 @@ impl AnthropicThinkingConfig {
 }
 
 #[derive(Serialize)]
+struct AnthropicOutputConfig {
+    effort: AnthropicReasoningEffort,
+}
+
+impl AnthropicOutputConfig {
+    fn new(effort: ReasoningEffort) -> Self {
+        Self {
+            effort: effort.into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum AnthropicReasoningEffort {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
 }
 
 impl From<ReasoningEffort> for AnthropicReasoningEffort {
@@ -269,13 +296,67 @@ impl From<ReasoningEffort> for AnthropicReasoningEffort {
             ReasoningEffort::Low => Self::Low,
             ReasoningEffort::Medium => Self::Medium,
             ReasoningEffort::High => Self::High,
+            ReasoningEffort::XHigh => Self::XHigh,
+            ReasoningEffort::Max => Self::Max,
         }
     }
 }
 
-fn supports_anthropic_adaptive_thinking(model: &str) -> bool {
+#[derive(Clone, Copy)]
+struct AnthropicEffortCapabilities {
+    adaptive_thinking: bool,
+    max: bool,
+    xhigh: bool,
+}
+
+impl AnthropicEffortCapabilities {
+    const BASIC: Self = Self {
+        adaptive_thinking: false,
+        max: false,
+        xhigh: false,
+    };
+    const ADAPTIVE_WITH_MAX: Self = Self {
+        adaptive_thinking: true,
+        max: true,
+        xhigh: false,
+    };
+    const ALL: Self = Self {
+        adaptive_thinking: true,
+        max: true,
+        xhigh: true,
+    };
+}
+
+fn anthropic_effort_capabilities(model: &str) -> Option<AnthropicEffortCapabilities> {
     let model = model.strip_prefix("models/").unwrap_or(model);
-    model.contains("claude-opus-4-6") || model.contains("claude-sonnet-4-6")
+    if matches_anthropic_model(model, "claude-opus-4-5") {
+        Some(AnthropicEffortCapabilities::BASIC)
+    } else if matches_anthropic_model(model, "claude-mythos-preview")
+        || matches_anthropic_model(model, "claude-opus-4-6")
+        || matches_anthropic_model(model, "claude-sonnet-4-6")
+    {
+        Some(AnthropicEffortCapabilities::ADAPTIVE_WITH_MAX)
+    } else if matches_anthropic_model(model, "claude-opus-4-7")
+        || matches_anthropic_model(model, "claude-opus-4-8")
+        || matches_anthropic_model(model, "claude-opus-5")
+        || matches_anthropic_model(model, "claude-sonnet-5")
+        || matches_anthropic_model(model, "claude-fable-5")
+        || matches_anthropic_model(model, "claude-mythos-5")
+    {
+        Some(AnthropicEffortCapabilities::ALL)
+    } else {
+        None
+    }
+}
+
+fn matches_anthropic_model(model: &str, canonical: &str) -> bool {
+    model == canonical
+        || model
+            .strip_prefix(canonical)
+            .and_then(|suffix| suffix.strip_prefix('-'))
+            .is_some_and(|snapshot| {
+                snapshot.len() == 8 && snapshot.bytes().all(|byte| byte.is_ascii_digit())
+            })
 }
 
 #[derive(Serialize)]
@@ -716,6 +797,26 @@ mod tests {
         }
     }
 
+    fn request_with_effort(model: &str, effort: ReasoningEffort) -> Request<'static> {
+        Request {
+            model: Cow::Owned(model.to_string()),
+            system: None,
+            messages: Cow::Owned(vec![]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: Some(512),
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                reasoning: Some(ReasoningOptions {
+                    effort: Some(effort),
+                    summary: None,
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
     fn anthropic_thinking(
         thinking: &str,
         signature: Option<&str>,
@@ -1034,58 +1135,155 @@ mod tests {
     }
 
     #[test]
-    fn serializes_reasoning_effort_as_adaptive_thinking() {
-        let request = Request {
-            model: Cow::Borrowed("claude-sonnet-4-6"),
-            system: None,
-            messages: Cow::Owned(vec![]),
-            tools: Cow::Owned(vec![]),
-            tool_choice: Some(ToolChoice::Auto),
-            temperature: None,
-            max_output_tokens: Some(512),
-            metadata: Cow::Owned(BTreeMap::new()),
-            provider_request_options: ProviderRequestOptions {
-                reasoning: Some(ReasoningOptions {
-                    effort: Some(ReasoningEffort::Medium),
-                    summary: None,
-                }),
-                ..Default::default()
-            },
-        };
+    fn nests_reasoning_effort_under_output_config_with_adaptive_thinking() {
+        let request = request_with_effort("claude-sonnet-4-6", ReasoningEffort::Medium);
 
         let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
             .expect("request should serialize");
 
         assert_eq!(payload["thinking"]["type"], "adaptive");
-        assert_eq!(payload["effort"], "medium");
+        assert_eq!(payload["output_config"]["effort"], "medium");
+        assert!(payload.get("effort").is_none());
     }
 
     #[test]
-    fn rejects_reasoning_effort_for_older_anthropic_models() {
-        let request = Request {
-            model: Cow::Borrowed("claude-sonnet-4-5"),
-            system: None,
-            messages: Cow::Owned(vec![]),
-            tools: Cow::Owned(vec![]),
-            tool_choice: Some(ToolChoice::Auto),
-            temperature: None,
-            max_output_tokens: Some(512),
-            metadata: Cow::Owned(BTreeMap::new()),
-            provider_request_options: ProviderRequestOptions {
-                reasoning: Some(ReasoningOptions {
-                    effort: Some(ReasoningEffort::Low),
-                    summary: None,
-                }),
-                ..Default::default()
-            },
-        };
+    fn opus_4_5_serializes_effort_without_adaptive_thinking() {
+        let request = request_with_effort("claude-opus-4-5-20251101", ReasoningEffort::Medium);
+
+        let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["output_config"]["effort"], "medium");
+        assert!(payload.get("thinking").is_none());
+        assert!(payload.get("effort").is_none());
+    }
+
+    #[test]
+    fn mythos_preview_supports_max_with_adaptive_thinking() {
+        let request = request_with_effort("claude-mythos-preview", ReasoningEffort::Max);
+
+        let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert_eq!(payload["output_config"]["effort"], "max");
+        assert_eq!(payload["thinking"]["type"], "adaptive");
+        assert!(payload.get("effort").is_none());
+    }
+
+    #[test]
+    fn omits_anthropic_reasoning_fields_without_an_effort() {
+        let request = request_with_message(
+            "claude-sonnet-4-6",
+            Message::user(ContentBlock::text("hello")),
+        );
+
+        let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+            .expect("request should serialize");
+
+        assert!(payload.get("thinking").is_none());
+        assert!(payload.get("output_config").is_none());
+        assert!(payload.get("effort").is_none());
+    }
+
+    #[test]
+    fn serializes_all_anthropic_effort_tiers_exactly() {
+        let cases = [
+            (ReasoningEffort::Low, "low", "claude-opus-4-5"),
+            (ReasoningEffort::Medium, "medium", "claude-opus-4-5"),
+            (ReasoningEffort::High, "high", "claude-opus-4-5"),
+            (ReasoningEffort::XHigh, "xhigh", "claude-opus-5"),
+            (ReasoningEffort::Max, "max", "claude-sonnet-4-6"),
+        ];
+
+        for (effort, expected, model) in cases {
+            let request = request_with_effort(model, effort);
+            let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+                .expect("request should serialize");
+
+            assert_eq!(payload["output_config"]["effort"], expected);
+            assert!(payload.get("effort").is_none());
+        }
+    }
+
+    #[test]
+    fn supports_xhigh_on_documented_anthropic_models() {
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-mythos-5",
+        ] {
+            let request = request_with_effort(model, ReasoningEffort::XHigh);
+            let payload = serde_json::to_value(AnthropicRequest::try_from(request).unwrap())
+                .expect("request should serialize");
+
+            assert_eq!(payload["output_config"]["effort"], "xhigh");
+        }
+    }
+
+    #[test]
+    fn rejects_xhigh_for_claude_4_6() {
+        let request = request_with_effort("claude-opus-4-6", ReasoningEffort::XHigh);
 
         let error = AnthropicRequest::try_from(request)
             .err()
             .expect("request should fail");
         match error {
             ProviderError::InvalidRequest(message) => {
-                assert!(message.contains("Claude 4.6"));
+                assert!(message.contains("xhigh"));
+                assert!(message.contains("claude-opus-4-6"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_max_and_xhigh_for_opus_4_5() {
+        for effort in [ReasoningEffort::Max, ReasoningEffort::XHigh] {
+            let request = request_with_effort("claude-opus-4-5", effort);
+
+            let error = AnthropicRequest::try_from(request)
+                .err()
+                .expect("request should fail");
+            match error {
+                ProviderError::InvalidRequest(message) => {
+                    assert!(message.contains("not supported"));
+                    assert!(message.contains("claude-opus-4-5"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_reasoning_effort_for_unsupported_anthropic_models() {
+        let request = request_with_effort("claude-sonnet-4-5", ReasoningEffort::Low);
+
+        let error = AnthropicRequest::try_from(request)
+            .err()
+            .expect("request should fail");
+        match error {
+            ProviderError::InvalidRequest(message) => {
+                assert!(message.contains("not supported"));
+                assert!(message.contains("claude-sonnet-4-5"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_reasoning_effort_for_unknown_anthropic_models() {
+        let request = request_with_effort("claude-opus-6", ReasoningEffort::Low);
+
+        let error = AnthropicRequest::try_from(request)
+            .err()
+            .expect("request should fail");
+        match error {
+            ProviderError::InvalidRequest(message) => {
+                assert!(message.contains("not supported"));
+                assert!(message.contains("claude-opus-6"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

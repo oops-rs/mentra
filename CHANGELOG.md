@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Reasoning effort follows each provider's wire contract
+
+- **Breaking:** `ReasoningEffort` now exposes `low`, `medium`, `high`, `xhigh`,
+  and `max`. Expanding the formerly exhaustive public enum requires
+  `mentra-provider` 0.5 and its `mentra` re-export requires 0.18; the enum is now
+  non-exhaustive so future provider tiers need not force another break.
+  Responses-family providers forward all five levels through
+  `reasoning.effort`.
+- Anthropic requests put effort under `output_config.effort` and enable
+  adaptive thinking where the selected model supports it; Opus 4.5 keeps
+  thinking unchanged. Gemini continues to support the three shared levels
+  Mentra exposes there and rejects `xhigh` or `max` rather than silently
+  lowering the requested effort.
+
 ### The minimum supported Rust version is now 1.88
 
 - Mentra now requires Rust 1.88. This lets fresh dependency resolution select

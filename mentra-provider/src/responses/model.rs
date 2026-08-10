@@ -232,6 +232,9 @@ enum ResponsesReasoningEffort {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
 }
 
 impl From<ReasoningEffort> for ResponsesReasoningEffort {
@@ -240,6 +243,8 @@ impl From<ReasoningEffort> for ResponsesReasoningEffort {
             ReasoningEffort::Low => Self::Low,
             ReasoningEffort::Medium => Self::Medium,
             ReasoningEffort::High => Self::High,
+            ReasoningEffort::XHigh => Self::XHigh,
+            ReasoningEffort::Max => Self::Max,
         }
     }
 }
@@ -1332,30 +1337,38 @@ mod tests {
     }
 
     #[test]
-    fn serializes_reasoning_effort_option() {
-        let request = Request {
-            model: Cow::Borrowed("gpt-5"),
-            system: None,
-            messages: Cow::Owned(vec![]),
-            tools: Cow::Owned(vec![]),
-            tool_choice: Some(ToolChoice::Auto),
-            temperature: None,
-            max_output_tokens: None,
-            metadata: Cow::Owned(BTreeMap::new()),
-            provider_request_options: ProviderRequestOptions {
-                reasoning: Some(ReasoningOptions {
-                    effort: Some(ReasoningEffort::High),
-                    summary: None,
-                }),
-                ..Default::default()
-            },
-        };
+    fn serializes_all_reasoning_effort_options() {
+        for (effort, expected) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            let request = Request {
+                model: Cow::Borrowed("gpt-5.6-luna"),
+                system: None,
+                messages: Cow::Owned(vec![]),
+                tools: Cow::Owned(vec![]),
+                tool_choice: Some(ToolChoice::Auto),
+                temperature: None,
+                max_output_tokens: None,
+                metadata: Cow::Owned(BTreeMap::new()),
+                provider_request_options: ProviderRequestOptions {
+                    reasoning: Some(ReasoningOptions {
+                        effort: Some(effort),
+                        summary: None,
+                    }),
+                    ..Default::default()
+                },
+            };
 
-        let payload = serde_json::to_value(ResponsesRequest::try_from(request).unwrap())
-            .expect("request should serialize");
+            let payload = serde_json::to_value(ResponsesRequest::try_from(request).unwrap())
+                .expect("request should serialize");
 
-        assert_eq!(payload["reasoning"]["effort"], "high");
-        assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+            assert_eq!(payload["reasoning"]["effort"], expected);
+            assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+        }
     }
 
     #[test]
