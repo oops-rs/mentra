@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### The legacy-SSE client never retries at the transport layer
+
+- The shared HTTP client now sets `reqwest::retry::never()`. Reqwest retries
+  selected protocol-level rejections on its own once the negotiated protocol
+  can signal them (HTTP/2 `REFUSED_STREAM` and kin), and a `tools/call` POST
+  may already have executed when such a signal arrives — so an automatic
+  resend would replay a side-effecting call with no caller involvement.
+  Today's feature graph negotiates HTTP/1.1 only, where no such signal
+  exists; the pin makes the existing no-replay guarantee structural instead
+  of an accident of enabled features. The reqwest floor moves to `0.12.23`,
+  where the retry API was introduced.
+
 ## 0.17.0
 
 ### A write root can have a hole in it

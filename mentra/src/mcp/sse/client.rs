@@ -687,6 +687,16 @@ fn build_http_client(limits: &McpSseLimits) -> Result<reqwest::Client, McpSseErr
         // send it in the clear. The request body is never stripped at all, so a
         // followed redirect would also hand tool arguments to the new target.
         .redirect(reqwest::redirect::Policy::none())
+        // Reqwest retries selected protocol-level rejections on its own once
+        // the negotiated protocol can signal them (HTTP/2 REFUSED_STREAM and
+        // kin). A tools/call POST may already have executed by the time such
+        // a signal arrives, so an automatic resend would replay a
+        // side-effecting call with no caller involvement — the exact
+        // double-execution this client's request path refuses. Today's
+        // feature set negotiates HTTP/1.1 only, where no such signal exists;
+        // this pin keeps the no-replay guarantee structural rather than an
+        // accident of the current feature graph.
+        .retry(reqwest::retry::never())
         .connect_timeout(limits.connect_timeout)
         // Deliberately no `.timeout()`: that is a total deadline covering the
         // response body, which would kill the long-lived stream on a fixed
