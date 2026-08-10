@@ -451,9 +451,10 @@ fn read_request(stream: &mut TcpStream) -> Option<CapturedRequest> {
         };
         buffer.extend_from_slice(&chunk[..read]);
 
-        if header_end.is_none()
-            && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
-        {
+        if header_end.is_none() {
+            let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
             let end = index + 4;
             header_end = Some(end);
             content_length = String::from_utf8_lossy(&buffer[..end])
