@@ -6,6 +6,15 @@ use super::{McpSseClient, McpSseError};
 use crate::mcp::sse::config::{McpSseLimits, McpSseServerConfig};
 use crate::mcp::sse::testing::{PostReply, SseTestServer, StreamOpening};
 
+const REMOTE_CANARY: &str = "REMOTE_CANARY_MUST_NOT_SURFACE";
+
+fn assert_remote_canary_absent(error: &McpSseError) {
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+    assert!(!display.contains(REMOTE_CANARY), "got {display}");
+    assert!(!debug.contains(REMOTE_CANARY), "got {debug}");
+}
+
 /// The `initialize` result every handshake test replies with.
 fn initialize_result(id: u64) -> serde_json::Value {
     json!({
@@ -318,7 +327,7 @@ async fn surfaces_a_tool_result_flagged_as_an_error() {
     server.send_message(&json!({
         "jsonrpc": "2.0",
         "id": 3,
-        "result": {"content": [{"type": "text", "text": "upstream down"}], "isError": true}
+        "result": {"content": [{"type": "text", "text": REMOTE_CANARY}], "isError": true}
     }));
 
     let (result, _client) = calling.await.expect("no panic");
@@ -327,7 +336,7 @@ async fn surfaces_a_tool_result_flagged_as_an_error() {
         result.is_error,
         "isError must be preserved rather than turned into a transport failure"
     );
-    assert_eq!(result.content[0].text.as_deref(), Some("upstream down"));
+    assert_eq!(result.content[0].text.as_deref(), Some(REMOTE_CANARY));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -341,12 +350,43 @@ async fn surfaces_a_json_rpc_error_response() {
     server.send_message(&json!({
         "jsonrpc": "2.0",
         "id": 3,
-        "error": {"code": -32602, "message": "Unknown tool"}
+        "error": {
+            "code": -32602,
+            "message": REMOTE_CANARY,
+            "data": {"forged": REMOTE_CANARY}
+        }
     }));
 
     let (result, _client) = calling.await.expect("no panic");
     let error = result.expect_err("a JSON-RPC error is a failure");
-    assert!(matches!(error, McpSseError::JsonRpc(_)), "got {error:?}");
+    let McpSseError::JsonRpc(rpc) = &error else {
+        panic!("got {error:?}");
+    };
+    assert_eq!(rpc.code, -32602);
+    assert_eq!(rpc.message, "server message omitted");
+    assert!(rpc.data.is_none(), "server data must be discarded");
+    assert_remote_canary_absent(&error);
+    assert!(error.to_string().contains("-32602"), "got {error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_decode_errors_do_not_retain_server_text() {
+    let server = SseTestServer::start();
+    let client = connect(&server, config(&server)).await;
+
+    let calling = tokio::spawn(async move { (client.call_tool("search", None).await, client) });
+
+    server.wait_for_posts(4);
+    server.send_message(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {"content": REMOTE_CANARY, "isError": false}
+    }));
+
+    let (result, _client) = calling.await.expect("no panic");
+    let error = result.expect_err("the response shape is invalid");
+    assert!(matches!(error, McpSseError::ParseError(_)), "got {error:?}");
+    assert_remote_canary_absent(&error);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -458,13 +498,18 @@ async fn rejects_an_endpoint_pointing_at_another_origin() {
     let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
 
     server.wait_for_stream();
-    server.send_endpoint("https://evil.example/messages");
+    server.send_endpoint("https://remote-canary-must-not-surface.invalid/messages");
 
     let error = connecting
         .await
         .expect("no panic")
         .expect_err("a cross-origin endpoint must be refused");
     assert!(matches!(error, McpSseError::Endpoint(_)), "got {error:?}");
+    assert_remote_canary_absent(&error);
+    assert!(
+        !format!("{error:?}").contains("remote-canary-must-not-surface"),
+        "got {error:?}"
+    );
 
     assert!(
         server.posts().is_empty(),
@@ -754,6 +799,11 @@ async fn rejects_a_stream_response_that_is_not_an_event_stream() {
         .expect_err("a JSON response is not a stream");
     assert!(
         matches!(error, McpSseError::UnexpectedContentType { .. }),
+        "got {error:?}"
+    );
+    assert!(!error.to_string().contains("remote-canary"), "got {error}");
+    assert!(
+        !format!("{error:?}").contains("remote-canary"),
         "got {error:?}"
     );
 }

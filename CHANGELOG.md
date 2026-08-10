@@ -51,6 +51,10 @@
   because `ContentBlock::ToolResult` carries only `tool_use_id` — making
   completion, where failures surface, the one lifecycle event a client could
   not attribute without keeping its own id-to-name map.
+- Legacy MCP HTTP+SSE errors no longer retain server-controlled JSON-RPC
+  messages or data, endpoint origins or schemes, response content types, or
+  response-decode diagnostics. JSON-RPC codes and fixed failure classifications
+  remain available, while intentional MCP tool-result content is unchanged.
 
 ## 0.12.0
 

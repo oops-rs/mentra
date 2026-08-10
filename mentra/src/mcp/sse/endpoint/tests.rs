@@ -296,11 +296,33 @@ fn rejects_an_unparseable_stream_url() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_cross_origin_error_names_both_origins_for_diagnosis() {
-    let error = resolve("https://evil.example/steal").expect_err("cross-origin is rejected");
+fn the_cross_origin_error_does_not_retain_either_origin() {
+    let error =
+        resolve("https://remote-canary.invalid/steal").expect_err("cross-origin is rejected");
     let rendered = error.to_string();
-    assert!(rendered.contains("evil.example"), "got {rendered}");
-    assert!(rendered.contains("good-host.example"), "got {rendered}");
+    let debug = format!("{error:?}");
+    for origin in ["remote-canary.invalid", "good-host.example"] {
+        assert!(!rendered.contains(origin), "got {rendered}");
+        assert!(!debug.contains(origin), "got {debug}");
+    }
+}
+
+#[test]
+fn unsupported_scheme_errors_do_not_retain_the_scheme() {
+    let error = resolve("remote-canary:payload").expect_err("the scheme is unsupported");
+    let rendered = error.to_string();
+    let debug = format!("{error:?}");
+    assert!(!rendered.contains("remote-canary"), "got {rendered}");
+    assert!(!debug.contains("remote-canary"), "got {debug}");
+}
+
+#[test]
+fn malformed_endpoint_errors_do_not_retain_the_payload() {
+    let error = resolve("http://[remote-canary.invalid").expect_err("the endpoint is malformed");
+    let rendered = error.to_string();
+    let debug = format!("{error:?}");
+    assert!(!rendered.contains("remote-canary"), "got {rendered}");
+    assert!(!debug.contains("remote-canary"), "got {debug}");
 }
 
 #[test]

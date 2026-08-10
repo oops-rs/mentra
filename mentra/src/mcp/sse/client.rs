@@ -74,11 +74,13 @@ const MAX_DIAGNOSTIC_BODY_BYTES: usize = 8 * 1024;
 
 /// Errors from the MCP SSE client.
 ///
-/// No variant carries a response body, an SSE payload, a tool argument, or a
-/// tool result. Server text is never interpolated into an error, because a
-/// malicious server would otherwise be able to write arbitrary content —
-/// including forged log lines and terminal escape sequences — into an
-/// operator's logs.
+/// No variant produced from a server response carries a response body, an SSE
+/// payload, a server-controlled free-form metadata value, a JSON-RPC message or
+/// data value, a tool argument, or a tool result. Server text is never
+/// interpolated into an error, because a malicious server would otherwise be
+/// able to write arbitrary content — including forged log lines and terminal
+/// escape sequences — into an operator's logs or a model's context. Fixed
+/// metadata such as an HTTP status or JSON-RPC code remains available.
 #[derive(Debug, thiserror::Error)]
 pub enum McpSseError {
     #[error("invalid MCP SSE configuration: {0}")]
@@ -391,7 +393,7 @@ impl McpSseClient {
         };
 
         serde_json::from_value(result)
-            .map_err(|error| McpSseError::ParseError(format!("deserialize response: {error}")))
+            .map_err(|_| McpSseError::ParseError("response shape did not match MCP".to_string()))
     }
 
     /// Sends a JSON-RPC notification, which expects no response.
@@ -598,7 +600,11 @@ fn deliver_message(pending: &Arc<Mutex<Pending>>, data: &str) {
     };
 
     let reply = match response.error {
-        Some(error) => Err(McpSseError::JsonRpc(error)),
+        Some(error) => Err(McpSseError::JsonRpc(JsonRpcError {
+            code: error.code,
+            message: "server message omitted".to_string(),
+            data: None,
+        })),
         None => Ok(response.result.unwrap_or(JsonValue::Null)),
     };
     let _ = waiter.reply.send(reply);
@@ -740,7 +746,7 @@ fn check_stream_response(response: &reqwest::Response) -> Result<(), McpSseError
         .starts_with("text/event-stream")
     {
         return Err(McpSseError::UnexpectedContentType {
-            content_type: content_type.to_string(),
+            content_type: "[server value omitted]".to_string(),
         });
     }
 

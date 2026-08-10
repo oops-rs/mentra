@@ -335,7 +335,7 @@ fn serve_stream(
     let head = match opening {
         StreamOpening::Accept => "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream; charset=utf-8\r\ntransfer-encoding: chunked\r\n\r\n".to_string(),
         StreamOpening::WrongContentType => {
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}".to_string()
+            "HTTP/1.1 200 OK\r\ncontent-type: application/x-remote-canary\r\ncontent-length: 2\r\n\r\n{}".to_string()
         }
         StreamOpening::Status { code, body } => format!(
             "HTTP/1.1 {code} Status\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\r\n{body}",

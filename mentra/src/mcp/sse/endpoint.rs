@@ -53,8 +53,8 @@ pub enum EndpointError {
 /// This runs before any connection is opened so that a bad configuration fails
 /// at the boundary rather than mid-handshake.
 pub(crate) fn validate_stream_url(raw: &str) -> Result<Url, EndpointError> {
-    let url =
-        Url::parse(raw.trim()).map_err(|error| EndpointError::Malformed(error.to_string()))?;
+    let url = Url::parse(raw.trim())
+        .map_err(|_| EndpointError::Malformed("invalid URL syntax".to_string()))?;
     check_scheme(&url)?;
     check_no_credentials(&url)?;
     if url.host_str().is_none() {
@@ -77,7 +77,7 @@ pub(crate) fn resolve_endpoint(stream_url: &Url, raw: &str) -> Result<Url, Endpo
 
     let endpoint = stream_url
         .join(trimmed)
-        .map_err(|error| EndpointError::Malformed(error.to_string()))?;
+        .map_err(|_| EndpointError::Malformed("invalid URL syntax".to_string()))?;
 
     check_scheme(&endpoint)?;
     check_no_credentials(&endpoint)?;
@@ -95,7 +95,7 @@ fn check_scheme(url: &Url) -> Result<(), EndpointError> {
         return Ok(());
     }
     Err(EndpointError::UnsupportedScheme {
-        scheme: url.scheme().to_string(),
+        scheme: "[value omitted]".to_string(),
     })
 }
 
@@ -128,17 +128,7 @@ fn check_same_origin(stream_url: &Url, endpoint: &Url) -> Result<(), EndpointErr
     }
 
     Err(EndpointError::CrossOrigin {
-        endpoint: describe_origin(endpoint),
-        configured: describe_origin(stream_url),
+        endpoint: "[server-supplied origin omitted]".to_string(),
+        configured: "[configured origin]".to_string(),
     })
-}
-
-/// Renders an origin for diagnostics, omitting path, query, and credentials.
-fn describe_origin(url: &Url) -> String {
-    let scheme = url.scheme();
-    let host = url.host_str().unwrap_or("<no host>");
-    match url.port_or_known_default() {
-        Some(port) => format!("{scheme}://{host}:{port}"),
-        None => format!("{scheme}://{host}"),
-    }
 }

@@ -5,6 +5,8 @@ use serde_json::json;
 use crate::mcp::sse::testing::SseTestServer;
 use crate::mcp::{McpManager, McpSseServerConfig, mcp_tool_name};
 
+const REMOTE_CANARY: &str = "REMOTE_CANARY_MUST_NOT_SURFACE";
+
 /// Scripts a fixture through the handshake, advertising the given tools.
 ///
 /// Returns the manager alongside the bridged tools: the manager owns the
@@ -173,6 +175,54 @@ async fn a_failed_sse_connection_is_recorded_as_an_error() {
         .expect("an errored server should still be listed");
     assert_eq!(summary.status, crate::mcp::McpServerStatus::Error);
     assert!(summary.error.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manager_error_summaries_do_not_retain_json_rpc_text() {
+    let server = SseTestServer::start();
+    let config = McpSseServerConfig::new("obs", server.sse_url());
+    let connecting = tokio::spawn(async move {
+        let mut manager = McpManager::new();
+        let error = manager
+            .connect_sse(&config)
+            .await
+            .expect_err("the initialize error must fail the connection");
+        (error, manager)
+    });
+
+    server.wait_for_stream();
+    server.send_endpoint("/messages/?session_id=abc");
+    server.wait_for_posts(1);
+    server.send_message(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": -32001,
+            "message": REMOTE_CANARY,
+            "data": {"forged": REMOTE_CANARY}
+        }
+    }));
+
+    let (error, manager) = connecting.await.expect("no panic");
+    assert!(
+        matches!(error, crate::mcp::McpSseError::JsonRpc(ref rpc) if rpc.code == -32001),
+        "got {error:?}"
+    );
+
+    let summary = manager
+        .list_servers()
+        .into_iter()
+        .find(|summary| summary.name == "obs")
+        .expect("the failed server should be listed");
+    let rendered = format!("{summary:?}");
+    assert!(!rendered.contains(REMOTE_CANARY), "got {rendered}");
+    assert!(
+        summary
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("-32001")),
+        "the safe summary should preserve the JSON-RPC code: {rendered}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -421,6 +471,78 @@ async fn sse_tool_output_is_limited_exactly_like_a_custom_tool() {
             false,
         )
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridged_sse_errors_do_not_put_json_rpc_text_in_model_context() {
+    use crate::{
+        ContentBlock,
+        test::{MockRuntime, MockToolCall},
+        tool::ToolDefinition,
+    };
+
+    let server = SseTestServer::start();
+    let (bridged, _manager) = connect_sse(
+        &server,
+        json!([{"name": "fail", "inputSchema": {"type": "object"}}]),
+    )
+    .await;
+    let bridged_name = bridged[0].descriptor().name.to_string();
+
+    let mock = MockRuntime::builder()
+        .tool_calls([MockToolCall::new(&bridged_name, json!({})).with_id("sse-error")])
+        .text("done")
+        .build()
+        .expect("build mock runtime");
+    for tool in bridged {
+        mock.runtime().register_tool(tool);
+    }
+
+    let mut agent = mock
+        .runtime()
+        .spawn("mcp-sse-error-redaction-test", mock.model())
+        .expect("spawn agent");
+    let running = tokio::spawn(async move {
+        agent
+            .send(vec![ContentBlock::text("call the failing tool")])
+            .await
+    });
+
+    server.wait_for_posts(4);
+    server.send_message(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {
+            "code": -32602,
+            "message": REMOTE_CANARY,
+            "data": {"forged": REMOTE_CANARY}
+        }
+    }));
+
+    let response = running
+        .await
+        .expect("no panic")
+        .expect("the agent should continue after the tool error");
+    assert_eq!(response.text(), "done");
+
+    let requests = mock.recorded_requests().await;
+    let (content, is_error) = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } if tool_use_id == "sse-error" => Some((content.as_str(), *is_error)),
+            _ => None,
+        })
+        .expect("the provider should receive the bridged error");
+
+    assert!(is_error);
+    assert!(!content.contains(REMOTE_CANARY), "got {content}");
+    assert!(content.contains("-32602"), "got {content}");
 }
 
 /// A custom tool returning a fixed string, used as the limiter baseline.
