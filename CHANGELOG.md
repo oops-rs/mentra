@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.15.0
+
+### The pre-execution hook seam is usable
+
+- `PreExecutionHook`, `PreExecutionContext`, `PreExecutionHooks`, and
+  `HookDecision` are exported from `runtime`. `RuntimeBuilder::with_pre_hook`
+  was already public, but its trait bound was not — a public method nobody
+  outside the crate could satisfy, so the interception point was unreachable
+  ([#13](https://github.com/oops-rs/mentra/issues/13)).
+- `with_pre_hook` and `with_hook` **append** instead of replacing. Both
+  documented themselves as appending while building a fresh collection each
+  call, so registering a second hook silently discarded the first — for a veto
+  seam, a guard that is missing without saying so
+  ([#14](https://github.com/oops-rs/mentra/issues/14)).
+- `HookDecision::Modify { input_json, reason }` lets a hook rewrite a tool's
+  input rather than only refusing it: redacting a secret from an argument,
+  normalizing a path, narrowing an over-broad command. Denying those costs a
+  round trip and often does not converge, because the model is told "no"
+  without being told what would have been acceptable.
+
+  Modifications compose — each hook sees the input as its predecessors left it
+  — and a later hook can still deny what an earlier one rewrote, so `Modify` is
+  never a route around a hook that runs afterwards. A `Modify` carrying invalid
+  JSON blocks the call rather than falling back to the original, because
+  running the original would silently ignore a hook that believed it had
+  intervened.
+- `PreExecutionHook` is implemented for `Box<T>` and `Arc<T>`, as
+  `ToolAuthorizer` already was.
+
+### Mock runtimes can exercise interception
+
+- `MockRuntimeBuilder::with_pre_hook`, the sibling of the `with_tool_authorizer`
+  added in 0.14. Without it a host could prove its own hook logic correct but
+  not that the runtime ever consulted it — which is the half that breaks.
+
 ## 0.14.0
 
 ### A session turn can carry run options
