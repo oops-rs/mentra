@@ -151,6 +151,11 @@ URLs continue to target `/v1/responses`.
   authoritative, provider state is used when available, and stale
   `previous_response_id` HTTP failures retry without provider state. If an HTTP
   endpoint explicitly reports that the parameter is unsupported, Mentra
-  remembers that capability per model and uses replay for later Hybrid calls.
+  remembers that capability per model and uses replay for later Hybrid calls
+  made through the same `ResponsesProvider`. An unknown endpoint may therefore
+  receive one discovery request per provider instance. A host that already
+  knows the parameter is unsupported can construct the provider with
+  `ResponsesProvider::without_hybrid_http_previous_response_id` to use replay
+  from the first Hybrid HTTP call.
 - Stateful is useful only when the endpoint requires provider-side chaining and
   you want failures to surface instead of replaying.

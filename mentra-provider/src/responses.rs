@@ -68,6 +68,7 @@ pub struct ResponsesProvider<C> {
     client: reqwest::Client,
     session_state: Arc<ResponsesSessionState>,
     endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
+    hybrid_http_previous_response_id: bool,
 }
 
 impl<C> ResponsesProvider<C>
@@ -91,11 +92,25 @@ where
             client,
             session_state: Arc::new(ResponsesSessionState::default()),
             endpoint_capabilities: Arc::new(ResponsesEndpointCapabilities::default()),
+            hybrid_http_previous_response_id: true,
         }
     }
 
     pub fn definition(&self) -> &ProviderDefinition {
         &self.definition
+    }
+
+    /// Disables opportunistic `previous_response_id` chaining for Hybrid HTTP
+    /// requests made by this provider.
+    ///
+    /// Use this when the endpoint is already known not to accept that optional
+    /// Responses parameter. Hybrid requests retain their complete local replay,
+    /// so disabling the optimization avoids a known-failing discovery request.
+    /// Stateful requests, explicit response ids, and WebSocket transport keep
+    /// their existing behavior.
+    pub fn without_hybrid_http_previous_response_id(mut self) -> Self {
+        self.hybrid_http_previous_response_id = false;
+        self
     }
 
     pub fn session(&self) -> ResponsesSession<C> {
@@ -105,6 +120,7 @@ where
             self.client.clone(),
             Arc::clone(&self.session_state),
             Arc::clone(&self.endpoint_capabilities),
+            self.hybrid_http_previous_response_id,
         )
     }
 
@@ -326,5 +342,14 @@ mod tests {
             definition.base_url.as_deref(),
             Some(DEFAULT_OPENROUTER_BASE_URL)
         );
+    }
+
+    #[test]
+    fn disabling_hybrid_http_state_on_a_clone_does_not_reconfigure_the_original() {
+        let original = openai("test-key");
+        let disabled = original.clone().without_hybrid_http_previous_response_id();
+
+        assert!(original.hybrid_http_previous_response_id);
+        assert!(!disabled.hybrid_http_previous_response_id);
     }
 }

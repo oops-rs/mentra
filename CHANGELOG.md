@@ -16,6 +16,17 @@
 
 ## 0.17.0
 
+### Known endpoint limitations avoid unsupported state probes
+
+- `ResponsesProvider::without_hybrid_http_previous_response_id` lets a host
+  declare that an endpoint does not accept the optional
+  `previous_response_id` parameter. Hybrid HTTP requests keep using the full
+  local replay but no longer spend an initial failing request discovering a
+  capability the host already knows is absent.
+- Hybrid's automatic fallback still distinguishes stale response ids from an
+  unsupported parameter and remembers observed unsupported models for later
+  sessions created by that provider instance.
+
 ### A write root can have a hole in it
 
 - `RuntimePolicy::with_denied_write_root` refuses a write under the given path

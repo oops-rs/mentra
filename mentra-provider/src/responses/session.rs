@@ -50,6 +50,7 @@ pub struct ResponsesSession<C> {
     client: reqwest::Client,
     state: Arc<ResponsesSessionState>,
     endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
+    hybrid_http_previous_response_id: bool,
 }
 
 #[derive(Default)]
@@ -174,6 +175,7 @@ where
         client: reqwest::Client,
         state: Arc<ResponsesSessionState>,
         endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
+        hybrid_http_previous_response_id: bool,
     ) -> Self {
         Self {
             definition,
@@ -181,6 +183,7 @@ where
             client,
             state,
             endpoint_capabilities,
+            hybrid_http_previous_response_id,
         }
     }
 
@@ -435,9 +438,10 @@ where
             && state_mode.uses_provider_state()
             && !(state_mode == crate::ResponsesStateMode::Hybrid
                 && transport == ResponsesTransport::HttpSse
-                && self
-                    .endpoint_capabilities
-                    .http_previous_response_id_is_unsupported(&requested_model))
+                && (!self.hybrid_http_previous_response_id
+                    || self
+                        .endpoint_capabilities
+                        .http_previous_response_id_is_unsupported(&requested_model)))
         {
             request
                 .provider_request_options
@@ -1329,6 +1333,56 @@ mod tests {
         assert!(second.contains("x-codex-turn-state: state-1\r\n"));
         assert_eq!(session.turn_state().as_deref(), Some("state-2"));
         assert_eq!(session.latest_response_id().as_deref(), Some("resp_2"));
+    }
+
+    #[tokio::test]
+    async fn predeclared_unsupported_endpoint_skips_the_first_hybrid_http_probe() {
+        let (base_url, handle) = spawn_two_turn_state_server();
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let provider = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .without_hybrid_http_previous_response_id();
+
+        for message in ["first", "second"] {
+            let session = provider.session();
+            let request = Request {
+                model: Cow::Borrowed("gpt-5"),
+                system: None,
+                messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                    message,
+                ))]),
+                tools: Cow::Owned(Vec::new()),
+                tool_choice: None,
+                temperature: None,
+                max_output_tokens: None,
+                metadata: Cow::Owned(BTreeMap::new()),
+                provider_request_options: ProviderRequestOptions::default(),
+            };
+
+            consume_stream(
+                session
+                    .stream_response(request)
+                    .await
+                    .expect("hybrid replay should not probe unsupported provider state"),
+            )
+            .await;
+        }
+
+        let (first, second) = handle.join().expect("server should capture requests");
+        let first_payload: serde_json::Value =
+            serde_json::from_str(request_body(&first)).expect("first body should be json");
+        let second_payload: serde_json::Value =
+            serde_json::from_str(request_body(&second)).expect("second body should be json");
+        assert!(first_payload.get("previous_response_id").is_none());
+        assert!(second_payload.get("previous_response_id").is_none());
+        assert_eq!(
+            provider.session().latest_response_id().as_deref(),
+            Some("resp_2")
+        );
     }
 
     #[tokio::test]

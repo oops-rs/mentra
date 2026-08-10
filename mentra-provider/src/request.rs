@@ -71,6 +71,10 @@ pub enum ResponsesStateMode {
     /// Send the complete local transcript and do not attach provider-side state.
     ReplayOnly,
     /// Keep local replay as the source of truth while opportunistically chaining provider state.
+    ///
+    /// An unknown HTTP endpoint may receive one capability probe before Hybrid
+    /// learns that `previous_response_id` is unsupported. Hosts that already
+    /// know this can disable the probe on [`crate::responses::ResponsesProvider`].
     #[default]
     Hybrid,
     /// Require provider-side state chaining once a previous response id is available.
