@@ -6,9 +6,7 @@ use crate::{
     provider::{Provider, ProviderRegistry},
     runtime::{
         RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks, RuntimePolicy, RuntimeStore,
-        control::{PreExecutionHook, PreExecutionHooks},
-        error::RuntimeError,
-        skill::SkillLoadError,
+        control::PreExecutionHook, error::RuntimeError, skill::SkillLoadError,
     },
     tool::{ExecutableTool, FileToolProfile, ToolAuthorizer},
 };
@@ -150,27 +148,27 @@ impl RuntimeBuilder {
         }
     }
 
-    /// Appends a single runtime hook.
+    /// Appends a single runtime hook, keeping any already registered.
     pub fn with_hook<H>(self, hook: H) -> Self
     where
         H: RuntimeHook + 'static,
     {
+        let hooks = self.handle.hooks().clone().with_hook(hook);
         Self {
-            handle: self.handle.with_hooks(RuntimeHooks::new().with_hook(hook)),
+            handle: self.handle.with_hooks(hooks),
             provider_registry: self.provider_registry,
             mcp_configs: self.mcp_configs,
         }
     }
 
-    /// Appends a single pre-execution hook.
+    /// Appends a single pre-execution hook, keeping any already registered.
     pub fn with_pre_hook<H>(self, hook: H) -> Self
     where
         H: PreExecutionHook + 'static,
     {
+        let pre_hooks = self.handle.pre_hooks().clone().with_hook(hook);
         Self {
-            handle: self
-                .handle
-                .with_pre_hooks(PreExecutionHooks::new().with_hook(hook)),
+            handle: self.handle.with_pre_hooks(pre_hooks),
             provider_registry: self.provider_registry,
             mcp_configs: self.mcp_configs,
         }
@@ -416,5 +414,53 @@ impl RuntimeBuilder {
                 provider_registry,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::control::{HookDecision, PreExecutionContext};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts how many times it was consulted, so a hook that was silently
+    /// dropped during registration shows up as a count that never moves.
+    struct Counting(Arc<AtomicUsize>);
+
+    impl PreExecutionHook for Counting {
+        fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(HookDecision::Allow)
+        }
+    }
+
+    #[test]
+    fn registering_a_second_pre_hook_keeps_the_first() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+
+        let builder = RuntimeBuilder::new(false)
+            .with_pre_hook(Counting(Arc::clone(&first)))
+            .with_pre_hook(Counting(Arc::clone(&second)));
+
+        let context = PreExecutionContext {
+            agent_id: "a1".to_string(),
+            tool_name: "shell".to_string(),
+            tool_call_id: "tc-1".to_string(),
+            input_json: "{}".to_string(),
+        };
+        builder.handle.pre_hooks().run(&context).expect("hooks run");
+
+        // The first registration used to be discarded by the second, which is
+        // a security-relevant silent failure for a veto seam.
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            1,
+            "the first hook must still run"
+        );
+        assert_eq!(second.load(Ordering::SeqCst), 1);
     }
 }

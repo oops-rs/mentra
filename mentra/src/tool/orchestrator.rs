@@ -361,6 +361,37 @@ impl ToolRuntime {
         self.runtime.pre_hooks().run(&context)
     }
 
+    /// Runs the pre-execution hooks and applies whatever they decided.
+    ///
+    /// `Ok(None)` means proceed — possibly with `call.input` rewritten by a
+    /// hook. `Ok(Some(reason))` means the call must not run and `reason` is
+    /// what the model should be told.
+    ///
+    /// Shared by the serial and parallel paths so the two cannot disagree
+    /// about what a hook's answer means.
+    fn apply_pre_hooks(&self, call: &mut ToolCall) -> Result<Option<String>, RuntimeError> {
+        match self.run_pre_hooks(call)? {
+            HookDecision::Allow => Ok(None),
+            HookDecision::Deny(reason) => Ok(Some(reason)),
+            HookDecision::Modify { input_json, .. } => {
+                // A hook that rewrites the input but hands back something that
+                // is not JSON has failed at its own job. Refusing is the safe
+                // reading: running the *original* would silently ignore a hook
+                // that believed it had intervened.
+                match serde_json::from_str(&input_json) {
+                    Ok(input) => {
+                        call.input = input;
+                        Ok(None)
+                    }
+                    Err(error) => Ok(Some(format!(
+                        "pre-execution hook returned invalid JSON for '{}': {error}",
+                        call.name
+                    ))),
+                }
+            }
+        }
+    }
+
     fn emit_tool_execution_blocked(&self, call: &ToolCall, reason: &str) {
         let _ = self
             .runtime
@@ -631,7 +662,7 @@ impl ToolRuntime {
         let mut results = (0..len).map(|_| None).collect::<Vec<_>>();
         let mut join_set = JoinSet::new();
 
-        for (index, call) in calls.iter().cloned().enumerate() {
+        for (index, mut call) in calls.iter().cloned().enumerate() {
             if let Err(error) = self.note_tool_started(agent, &call) {
                 join_set.abort_all();
                 return Err(error);
@@ -672,9 +703,9 @@ impl ToolRuntime {
             }
 
             // Pre-execution hook check
-            match self.run_pre_hooks(&call)? {
-                HookDecision::Allow => {}
-                HookDecision::Deny(reason) => {
+            match self.apply_pre_hooks(&mut call)? {
+                None => {}
+                Some(reason) => {
                     self.emit_tool_execution_blocked(&call, &reason);
                     let result = ContentBlock::ToolResult {
                         tool_use_id: call.id.clone(),
@@ -780,7 +811,7 @@ impl ToolRuntime {
     async fn execute_registered_tool(
         &mut self,
         agent: &mut Agent,
-        call: ToolCall,
+        mut call: ToolCall,
     ) -> CompletedToolExecution {
         let Some((tool, descriptor)) = self.registered_tool(&call.name) else {
             let result = ContentBlock::ToolResult {
@@ -831,9 +862,9 @@ impl ToolRuntime {
         }
 
         // Pre-execution hook check
-        match self.run_pre_hooks(&call) {
-            Ok(HookDecision::Allow) => {}
-            Ok(HookDecision::Deny(reason)) => {
+        match self.apply_pre_hooks(&mut call) {
+            Ok(None) => {}
+            Ok(Some(reason)) => {
                 self.emit_tool_execution_blocked(&call, &reason);
                 let result = ContentBlock::ToolResult {
                     tool_use_id: call.id.clone(),

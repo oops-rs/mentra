@@ -141,6 +141,10 @@ impl RuntimeHandle {
         &self.execution.pre_hooks
     }
 
+    pub(crate) fn hooks(&self) -> &RuntimeHooks {
+        &self.execution.hooks
+    }
+
     pub(crate) fn with_provider_registry(
         &self,
         provider_registry: Arc<RwLock<ProviderRegistry>>,

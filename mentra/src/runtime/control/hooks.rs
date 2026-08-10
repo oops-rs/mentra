@@ -301,6 +301,23 @@ pub struct PreExecutionContext {
 pub enum HookDecision {
     Allow,
     Deny(String),
+    /// Run the tool with this input instead of the one the model produced.
+    ///
+    /// For the cases a veto answers badly: redacting a secret out of an
+    /// argument, normalizing a path against the right root, narrowing an
+    /// over-broad command. Denying those costs a round trip and often does not
+    /// converge, because the model is told "no" without being told what would
+    /// have been acceptable.
+    ///
+    /// The replacement is re-checked by every remaining hook, so a later hook
+    /// still sees — and can still refuse — what an earlier one produced. A hook
+    /// cannot use `Modify` to smuggle a call past a hook that runs after it.
+    Modify {
+        /// The tool's new input, as JSON.
+        input_json: String,
+        /// Why, for the audit trail.
+        reason: Option<String>,
+    },
 }
 
 pub trait PreExecutionHook: Send + Sync {
@@ -328,14 +345,28 @@ impl PreExecutionHooks {
         self
     }
 
+    /// Runs every hook in order, threading any modification through the rest.
+    ///
+    /// Returns the surviving decision: a `Deny` from any hook short-circuits,
+    /// and otherwise the last `Modify` (if any) is what the tool should run
+    /// with. Each hook sees the input as its predecessors left it, so
+    /// modifications compose and no hook can route a call around a later one.
     pub fn run(&self, context: &PreExecutionContext) -> Result<HookDecision, RuntimeError> {
+        let mut current = context.clone();
+        let mut modified = None;
+
         for hook in &self.hooks {
-            match hook.pre_tool_execution(context)? {
+            match hook.pre_tool_execution(&current)? {
                 HookDecision::Allow => continue,
                 deny @ HookDecision::Deny(_) => return Ok(deny),
+                HookDecision::Modify { input_json, reason } => {
+                    current.input_json = input_json.clone();
+                    modified = Some(HookDecision::Modify { input_json, reason });
+                }
             }
         }
-        Ok(HookDecision::Allow)
+
+        Ok(modified.unwrap_or(HookDecision::Allow))
     }
 
     #[allow(dead_code)]
@@ -464,5 +495,93 @@ mod tests {
 
         let files_result = hooks.run(&make_context("files")).unwrap();
         assert_eq!(files_result, HookDecision::Allow);
+    }
+}
+
+#[cfg(test)]
+mod pre_execution_tests {
+    use super::*;
+
+    struct Fixed(HookDecision);
+
+    impl PreExecutionHook for Fixed {
+        fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Rewrites the input to whatever it last saw, prefixed — so a second
+    /// modification proves it observed the first.
+    struct Appending(&'static str);
+
+    impl PreExecutionHook for Appending {
+        fn pre_tool_execution(
+            &self,
+            context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            Ok(HookDecision::Modify {
+                input_json: format!("{}{}", context.input_json, self.0),
+                reason: None,
+            })
+        }
+    }
+
+    fn context() -> PreExecutionContext {
+        PreExecutionContext {
+            agent_id: "a1".to_string(),
+            tool_name: "shell".to_string(),
+            tool_call_id: "tc-1".to_string(),
+            input_json: "start".to_string(),
+        }
+    }
+
+    #[test]
+    fn no_hooks_allows() {
+        let hooks = PreExecutionHooks::new();
+        assert_eq!(hooks.run(&context()).unwrap(), HookDecision::Allow);
+    }
+
+    #[test]
+    fn a_deny_short_circuits_the_rest() {
+        let hooks = PreExecutionHooks::new()
+            .with_hook(Fixed(HookDecision::Deny("no".to_string())))
+            .with_hook(Appending("-never"));
+
+        assert_eq!(
+            hooks.run(&context()).unwrap(),
+            HookDecision::Deny("no".to_string()),
+            "a hook after a denial must not get to overwrite the answer"
+        );
+    }
+
+    #[test]
+    fn modifications_compose_in_order() {
+        let hooks = PreExecutionHooks::new()
+            .with_hook(Appending("-one"))
+            .with_hook(Appending("-two"));
+
+        let HookDecision::Modify { input_json, .. } = hooks.run(&context()).unwrap() else {
+            panic!("expected a modification");
+        };
+        assert_eq!(
+            input_json, "start-one-two",
+            "each hook must see the input as its predecessors left it"
+        );
+    }
+
+    #[test]
+    fn a_later_hook_can_still_deny_a_modified_call() {
+        let hooks = PreExecutionHooks::new()
+            .with_hook(Appending("-one"))
+            .with_hook(Fixed(HookDecision::Deny("still no".to_string())));
+
+        assert_eq!(
+            hooks.run(&context()).unwrap(),
+            HookDecision::Deny("still no".to_string()),
+            "modify must not be a way around a hook that runs later"
+        );
     }
 }
