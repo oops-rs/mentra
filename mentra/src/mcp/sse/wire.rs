@@ -122,7 +122,12 @@ impl SseParser {
 
     /// Rejects an event whose buffered bytes exceed the configured limit.
     fn check_bounds(&self) -> Result<(), SseWireError> {
-        let observed = self.line.len() + self.data.len();
+        let observed = self
+            .event
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(self.data.len())
+            .saturating_add(self.line.len());
         if observed > self.max_event_bytes {
             return Err(SseWireError::EventTooLarge {
                 limit: self.max_event_bytes,

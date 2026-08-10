@@ -265,6 +265,46 @@ fn rejects_an_event_that_only_exceeds_the_limit_across_several_data_lines() {
 }
 
 #[test]
+fn counts_the_stored_event_name_toward_the_event_limit() {
+    let mut parser = SseParser::new(64);
+    let event_name = "x".repeat(57);
+
+    parser
+        .feed(format!("event: {event_name}\n").as_bytes())
+        .expect("the event line exactly fills the limit");
+    let error = parser
+        .feed(b"data: xx")
+        .expect_err("stored event name and current data line must share the limit");
+
+    assert_eq!(
+        error,
+        SseWireError::EventTooLarge {
+            limit: 64,
+            observed: 65,
+        }
+    );
+}
+
+#[test]
+fn accepts_an_event_whose_total_buffered_size_exactly_matches_the_limit() {
+    let mut parser = SseParser::new(64);
+    let event_name = "x".repeat(57);
+    let payload = format!("event: {event_name}\ndata: x\n\n");
+
+    let events = parser
+        .feed(payload.as_bytes())
+        .expect("an event at the exact byte limit should parse");
+
+    assert_eq!(
+        events,
+        vec![SseEvent {
+            event: event_name,
+            data: "x".to_string(),
+        }]
+    );
+}
+
+#[test]
 fn accounts_size_per_event_rather_than_per_stream() {
     let mut parser = SseParser::new(64);
     // Each event is small; many of them in sequence must not trip the limit.
