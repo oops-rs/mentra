@@ -149,6 +149,8 @@ URLs continue to target `/v1/responses`.
   pure local transcript replay.
 - Hybrid is the recommended coding-agent default: local transcript remains
   authoritative, provider state is used when available, and stale
-  `previous_response_id` HTTP failures retry without provider state.
+  `previous_response_id` HTTP failures retry without provider state. If an HTTP
+  endpoint explicitly reports that the parameter is unsupported, Mentra
+  remembers that capability per model and uses replay for later Hybrid calls.
 - Stateful is useful only when the endpoint requires provider-side chaining and
   you want failures to surface instead of replaying.

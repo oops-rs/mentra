@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
@@ -48,6 +49,7 @@ pub struct ResponsesSession<C> {
     credential_source: Arc<C>,
     client: reqwest::Client,
     state: Arc<ResponsesSessionState>,
+    endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
 }
 
 #[derive(Default)]
@@ -141,6 +143,27 @@ impl ResponsesSessionState {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct ResponsesEndpointCapabilities {
+    http_previous_response_id_unsupported_models: StdMutex<HashSet<String>>,
+}
+
+impl ResponsesEndpointCapabilities {
+    fn http_previous_response_id_is_unsupported(&self, model: &str) -> bool {
+        self.http_previous_response_id_unsupported_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(model)
+    }
+
+    fn mark_http_previous_response_id_unsupported(&self, model: impl Into<String>) {
+        self.http_previous_response_id_unsupported_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(model.into());
+    }
+}
+
 impl<C> ResponsesSession<C>
 where
     C: CredentialSource + 'static,
@@ -150,12 +173,14 @@ where
         credential_source: Arc<C>,
         client: reqwest::Client,
         state: Arc<ResponsesSessionState>,
+        endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
     ) -> Self {
         Self {
             definition,
             credential_source,
             client,
             state,
+            endpoint_capabilities,
         }
     }
 
@@ -408,6 +433,11 @@ where
             .previous_response_id
             .is_none()
             && state_mode.uses_provider_state()
+            && !(state_mode == crate::ResponsesStateMode::Hybrid
+                && transport == ResponsesTransport::HttpSse
+                && self
+                    .endpoint_capabilities
+                    .http_previous_response_id_is_unsupported(&requested_model))
         {
             request
                 .provider_request_options
@@ -466,26 +496,33 @@ where
             };
             if state_mode == crate::ResponsesStateMode::Hybrid
                 && request.previous_response_id().is_some()
-                && previous_response_state_rejected(&error)
             {
-                self.state.clear_latest_response_id();
-                request.clear_previous_response_id();
-                let response = self
-                    .send_http_responses_request(&request, compression, credentials, session)
-                    .await?;
-                if !response.status().is_success() {
-                    return Err(ProviderError::Http {
-                        status: response.status(),
-                        body: response.text().await.unwrap_or_default(),
-                    });
+                if let Some(rejection) = previous_response_state_rejection(&error) {
+                    if rejection == PreviousResponseStateRejection::ParameterUnsupported {
+                        self.endpoint_capabilities
+                            .mark_http_previous_response_id_unsupported(
+                                reasoning_provenance.model.clone(),
+                            );
+                    }
+                    self.state.clear_latest_response_id();
+                    request.clear_previous_response_id();
+                    let response = self
+                        .send_http_responses_request(&request, compression, credentials, session)
+                        .await?;
+                    if !response.status().is_success() {
+                        return Err(ProviderError::Http {
+                            status: response.status(),
+                            body: response.text().await.unwrap_or_default(),
+                        });
+                    }
+                    return Ok(
+                        self.track_response_state(spawn_event_stream_with_provenance(
+                            response,
+                            reasoning_provenance.provider,
+                            reasoning_provenance.model,
+                        )),
+                    );
                 }
-                return Ok(
-                    self.track_response_state(spawn_event_stream_with_provenance(
-                        response,
-                        reasoning_provenance.provider,
-                        reasoning_provenance.model,
-                    )),
-                );
             }
             return Err(error);
         }
@@ -667,19 +704,76 @@ fn responses_endpoint_path_for_base(base_url: Option<&str>) -> &'static str {
     }
 }
 
-fn previous_response_state_rejected(error: &ProviderError) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreviousResponseStateRejection {
+    ReferenceUnavailable,
+    ParameterUnsupported,
+}
+
+fn previous_response_parameter_is_unsupported(body: &str) -> bool {
+    let normalized = body
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+
+    words.windows(3).any(|window| {
+        matches!(
+            window,
+            [
+                "unsupported" | "unknown" | "unrecognized",
+                "parameter",
+                "previous_response_id"
+            ]
+        )
+    }) || words.windows(5).any(|window| {
+        matches!(
+            window,
+            [
+                "parameter",
+                "previous_response_id",
+                "is",
+                "not",
+                "supported"
+            ] | [
+                "previous_response_id",
+                "parameter",
+                "is",
+                "not",
+                "supported"
+            ]
+        )
+    }) || words
+        .windows(4)
+        .any(|window| matches!(window, ["previous_response_id", "is", "not", "supported"]))
+}
+
+fn previous_response_state_rejection(
+    error: &ProviderError,
+) -> Option<PreviousResponseStateRejection> {
     let ProviderError::Http { status, body } = error else {
-        return false;
+        return None;
     };
     if !(*status == reqwest::StatusCode::BAD_REQUEST || *status == reqwest::StatusCode::NOT_FOUND) {
-        return false;
+        return None;
     }
 
     let body = body.to_ascii_lowercase();
-    body.contains("previous_response_id")
+    if previous_response_parameter_is_unsupported(&body) {
+        return Some(PreviousResponseStateRejection::ParameterUnsupported);
+    }
+
+    (body.contains("previous_response_id")
         || body.contains("previous response")
         || (body.contains("response") && body.contains("not found"))
-        || (body.contains("response") && body.contains("expired"))
+        || (body.contains("response") && body.contains("expired")))
+    .then_some(PreviousResponseStateRejection::ReferenceUnavailable)
 }
 
 #[async_trait::async_trait]
@@ -837,13 +931,15 @@ mod tests {
         captured.split("\r\n\r\n").nth(1).unwrap_or_default()
     }
 
-    fn spawn_hybrid_fallback_server() -> (String, thread::JoinHandle<(String, String)>) {
+    fn spawn_hybrid_fallback_server(
+        rejection_body: &'static str,
+        successful_requests: usize,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("read listener addr");
         let handle = thread::spawn(move || {
             let (mut first_stream, _) = listener.accept().expect("accept first request");
             let first = read_http_request(&mut first_stream);
-            let first_body = r#"{"error":{"message":"previous_response_id not found"}}"#;
             let first_response = format!(
                 concat!(
                     "HTTP/1.1 400 Bad Request\r\n",
@@ -852,39 +948,52 @@ mod tests {
                     "content-length: {}\r\n\r\n",
                     "{}"
                 ),
-                first_body.len(),
-                first_body
+                rejection_body.len(),
+                rejection_body
             );
             first_stream
                 .write_all(first_response.as_bytes())
                 .expect("write first response");
             drop(first_stream);
 
-            let (mut second_stream, _) = listener.accept().expect("accept second request");
-            let second = read_http_request(&mut second_stream);
-            let second_body = concat!(
-                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fresh\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n",
-                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fresh\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n"
-            );
-            let second_response = format!(
-                concat!(
-                    "HTTP/1.1 200 OK\r\n",
-                    "connection: close\r\n",
-                    "content-type: text/event-stream\r\n",
-                    "content-length: {}\r\n\r\n",
-                    "{}"
-                ),
-                second_body.len(),
-                second_body
-            );
-            second_stream
-                .write_all(second_response.as_bytes())
-                .expect("write second response");
+            let mut captured = vec![first];
+            for response_index in 1..=successful_requests {
+                let (mut stream, _) = listener.accept().expect("accept successful request");
+                captured.push(read_http_request(&mut stream));
+                let response_id = format!("resp_fresh_{response_index}");
+                let response_body = format!(
+                    concat!(
+                        "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"{}\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}}}\n\n",
+                        "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{}\",\"model\":\"gpt-5\",\"status\":\"completed\"}}}}\n\n"
+                    ),
+                    response_id, response_id
+                );
+                let response = format!(
+                    concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "connection: close\r\n",
+                        "content-type: text/event-stream\r\n",
+                        "content-length: {}\r\n\r\n",
+                        "{}"
+                    ),
+                    response_body.len(),
+                    response_body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write successful response");
+            }
 
-            (first, second)
+            captured
         });
 
         (format!("http://{addr}/"), handle)
+    }
+
+    async fn consume_stream(mut stream: ProviderEventStream) {
+        while let Some(event) = stream.recv().await {
+            event.expect("stream event should decode");
+        }
     }
 
     fn spawn_two_turn_state_server() -> (String, thread::JoinHandle<(String, String)>) {
@@ -1452,7 +1561,10 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
 
     #[tokio::test]
     async fn hybrid_state_falls_back_to_replay_when_previous_response_id_is_rejected() {
-        let (base_url, handle) = spawn_hybrid_fallback_server();
+        let (base_url, handle) = spawn_hybrid_fallback_server(
+            r#"{"error":{"message":"previous_response_id not found"}}"#,
+            2,
+        );
 
         let mut definition = super::super::openai_definition();
         definition.base_url = Some(base_url);
@@ -1477,22 +1589,151 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             provider_request_options: ProviderRequestOptions::default(),
         };
 
-        let mut stream = session
-            .stream_response(request)
+        let stream = session
+            .stream_response(request.clone())
             .await
             .expect("hybrid fallback should retry without provider state");
-        while let Some(event) = stream.recv().await {
-            event.expect("stream event should decode");
-        }
+        consume_stream(stream).await;
 
-        let (first, second) = handle.join().expect("server should capture requests");
+        let stream = session
+            .stream_response(request)
+            .await
+            .expect("fresh provider state should remain usable");
+        consume_stream(stream).await;
+
+        let captured = handle.join().expect("server should capture requests");
         let first_payload: serde_json::Value =
-            serde_json::from_str(request_body(&first)).expect("first body should be json");
+            serde_json::from_str(request_body(&captured[0])).expect("first body should be json");
         let second_payload: serde_json::Value =
-            serde_json::from_str(request_body(&second)).expect("second body should be json");
+            serde_json::from_str(request_body(&captured[1])).expect("second body should be json");
+        let third_payload: serde_json::Value =
+            serde_json::from_str(request_body(&captured[2])).expect("third body should be json");
         assert_eq!(first_payload["previous_response_id"], "resp_stale");
         assert!(second_payload.get("previous_response_id").is_none());
-        assert_eq!(session.latest_response_id().as_deref(), Some("resp_fresh"));
+        assert_eq!(third_payload["previous_response_id"], "resp_fresh_1");
+        assert_eq!(
+            session.latest_response_id().as_deref(),
+            Some("resp_fresh_2")
+        );
+    }
+
+    #[test]
+    fn classifies_previous_response_state_rejections_conservatively() {
+        let unsupported = ProviderError::Http {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: r#"{"detail":"Unsupported parameter: previous_response_id"}"#.to_string(),
+        };
+        assert_eq!(
+            previous_response_state_rejection(&unsupported),
+            Some(PreviousResponseStateRejection::ParameterUnsupported)
+        );
+
+        let stale = ProviderError::Http {
+            status: reqwest::StatusCode::NOT_FOUND,
+            body: r#"{"error":{"message":"previous_response_id expired"}}"#.to_string(),
+        };
+        assert_eq!(
+            previous_response_state_rejection(&stale),
+            Some(PreviousResponseStateRejection::ReferenceUnavailable)
+        );
+
+        let unrelated = ProviderError::Http {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: r#"{"detail":"Unsupported parameter: temperature"}"#.to_string(),
+        };
+        assert_eq!(previous_response_state_rejection(&unrelated), None);
+
+        let echoed_previous_response_id = ProviderError::Http {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: r#"{"detail":"Unsupported parameter: temperature","request":{
+                    "previous_response_id":"resp_1"}}"#
+                .to_string(),
+        };
+        assert_eq!(
+            previous_response_state_rejection(&echoed_previous_response_id),
+            Some(PreviousResponseStateRejection::ReferenceUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_state_remembers_when_previous_response_id_is_unsupported() {
+        let (base_url, handle) = spawn_hybrid_fallback_server(
+            r#"{"detail":"Unsupported parameter: previous_response_id"}"#,
+            4,
+        );
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let provider = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        );
+        let session = provider.session();
+        session.state.set_latest_response_id("resp_stale");
+
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        let stream = session
+            .stream_response(request.clone())
+            .await
+            .expect("hybrid fallback should retry without unsupported provider state");
+        consume_stream(stream).await;
+
+        let next_session = provider.session();
+        let stream = next_session
+            .stream_response(request.clone())
+            .await
+            .expect("same-model replay should skip unsupported provider state");
+        consume_stream(stream).await;
+
+        let mut other_model_request = request.clone();
+        other_model_request.model = Cow::Borrowed("gpt-5-mini");
+        let stream = next_session
+            .stream_response(other_model_request)
+            .await
+            .expect("another model should keep opportunistic provider state");
+        consume_stream(stream).await;
+
+        let mut stateful_request = request;
+        stateful_request
+            .provider_request_options
+            .responses
+            .state_mode = crate::ResponsesStateMode::Stateful;
+        let stream = next_session
+            .stream_response(stateful_request)
+            .await
+            .expect("stateful mode should ignore the hybrid capability cache");
+        consume_stream(stream).await;
+
+        let captured = handle.join().expect("server should capture requests");
+        let payloads = captured
+            .iter()
+            .map(|request| {
+                serde_json::from_str::<serde_json::Value>(request_body(request))
+                    .expect("request body should be json")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(payloads[0]["previous_response_id"], "resp_stale");
+        assert!(payloads[1].get("previous_response_id").is_none());
+        assert!(payloads[2].get("previous_response_id").is_none());
+        assert_eq!(payloads[3]["previous_response_id"], "resp_fresh_2");
+        assert_eq!(payloads[4]["previous_response_id"], "resp_fresh_3");
+        assert_eq!(
+            next_session.latest_response_id().as_deref(),
+            Some("resp_fresh_4")
+        );
     }
 
     #[tokio::test]

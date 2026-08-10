@@ -26,6 +26,7 @@ use crate::embedding::EmbeddingProvider;
 use crate::embedding::EmbeddingRequest;
 use crate::embedding::EmbeddingResponse;
 
+use self::session::ResponsesEndpointCapabilities;
 use self::session::ResponsesSession;
 use self::session::ResponsesSessionState;
 
@@ -66,6 +67,7 @@ pub struct ResponsesProvider<C> {
     credential_source: Arc<C>,
     client: reqwest::Client,
     session_state: Arc<ResponsesSessionState>,
+    endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
 }
 
 impl<C> ResponsesProvider<C>
@@ -88,6 +90,7 @@ where
             credential_source,
             client,
             session_state: Arc::new(ResponsesSessionState::default()),
+            endpoint_capabilities: Arc::new(ResponsesEndpointCapabilities::default()),
         }
     }
 
@@ -101,6 +104,7 @@ where
             Arc::clone(&self.credential_source),
             self.client.clone(),
             Arc::clone(&self.session_state),
+            Arc::clone(&self.endpoint_capabilities),
         )
     }
 
