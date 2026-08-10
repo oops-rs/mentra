@@ -8,9 +8,21 @@ use crate::runtime::error::RuntimeError;
 
 const DEFAULT_PROVIDER_RETRY_BUDGET: usize = 5;
 
+/// A shared flag a caller trips to stop a run.
+///
+/// `Debug` prints whether it has been tripped, so a host that embeds one in
+/// its own options struct can still derive `Debug` on that struct.
 #[derive(Clone, Default)]
 pub struct CancellationToken {
     cancelled: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for CancellationToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
 }
 
 pub type CancellationFlag = CancellationToken;
@@ -181,5 +193,19 @@ impl RunOptions {
 
     pub(crate) fn model_budget(&self) -> usize {
         self.model_budget.unwrap_or(usize::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cancellation_token_shows_whether_it_was_tripped() {
+        let token = CancellationToken::default();
+        assert!(format!("{token:?}").contains("cancelled: false"));
+
+        token.cancel();
+        assert!(format!("{token:?}").contains("cancelled: true"));
     }
 }
