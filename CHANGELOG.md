@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.16.0
+
+### Branching is two-way
+
+- `AgentTranscript::branch_from` accepts an entry from anywhere in the tree,
+  not just the active path. An abandoned branch can now be **returned to**: the
+  active path is rebuilt by walking `parent_id` to the root, and whatever was
+  active moves to the archive in its place. Previously the entries `branch_from`
+  itself archived became unreachable, so "try something else" worked and
+  "actually, go back" did not ([#15](https://github.com/oops-rs/mentra/issues/15)).
+- Switching branches moves entries between the two vectors and never copies, so
+  alternating between two lines of work leaves the transcript the same size.
+- `BranchError::BrokenChain` reports a parent chain that does not reach a root,
+  including a cycle — impossible through `push`, but a transcript loaded from
+  disk is data rather than a promise, and a partial path would hand the model a
+  conversation missing its beginning.
+- `RuntimeError::Branch` carries `BranchError` instead of flattening it into
+  `Store(String)`, so "you named an entry that is not there" is distinguishable
+  from "the store failed".
+
+### Pre-execution hooks are async
+
+- **Breaking.** `PreExecutionHook::pre_tool_execution` is `async`, matching
+  `ToolAuthorizer` at the adjacent seam. The sync signature blocked a runtime
+  worker for the hook's whole duration, and had no safe general workaround:
+  `tokio::task::block_in_place` panics on a current_thread runtime, so every
+  implementor had to branch on `Handle::runtime_flavor()` and fall back to
+  stalling the runtime ([#16](https://github.com/oops-rs/mentra/issues/16)).
+- `PreExecutionContext` gains `working_directory`, so a hook judging a relative
+  path in tool input knows what it resolves against.
+
+### MCP configuration cannot be lost silently
+
+- `RuntimeBuilder::build` **errors** when MCP servers are registered rather than
+  discarding them. It could not connect them, and said so only in a doc comment
+  ([#17](https://github.com/oops-rs/mentra/issues/17)).
+- `Runtime::mcp_servers()` reports how each configured server fared, so a host
+  can tell a user which are live. Degraded mode is unchanged — one unreachable
+  server still does not sink a session — but the outcome is now readable rather
+  than printed to stderr and lost.
+- `McpServerConfig` derives `PartialEq`/`Eq`; `McpSseServerConfig::validate` is
+  public so a host can pre-flight a configuration at its own boundary.
+
 ## 0.15.0
 
 ### The pre-execution hook seam is usable
