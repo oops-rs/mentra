@@ -367,6 +367,37 @@ async fn a_cancelled_session_turn_fails_instead_of_running() {
 }
 
 #[tokio::test]
+async fn a_session_turn_honors_a_token_budget() {
+    let mock = MockRuntime::builder()
+        .text("first")
+        .text("second")
+        .build()
+        .unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("test-session", mock.model())
+        .unwrap();
+
+    // A budget of 1 is spent by the first round's reported usage, so the run
+    // stops gracefully at the next boundary rather than continuing. Pinned
+    // because `Session` passes `RunOptions` through and nothing else proves
+    // the budget survives that hop.
+    let message = session
+        .append_turn_with_options(
+            vec![ContentBlock::text("go")],
+            RunOptions {
+                token_budget: Some(1),
+                ..RunOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(message.text(), "first");
+    assert_eq!(session.metadata().status, SessionStatus::Idle);
+}
+
+#[tokio::test]
 async fn run_options_default_to_the_same_turn_append_turn_runs() {
     let mock = MockRuntime::builder().text("hello").build().unwrap();
     let mut session = mock

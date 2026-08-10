@@ -79,6 +79,7 @@ pub struct RuntimePolicy {
     allowed_working_roots: Vec<PathBuf>,
     allowed_read_roots: Vec<PathBuf>,
     allowed_write_roots: Vec<PathBuf>,
+    denied_write_roots: Vec<PathBuf>,
     allowed_env_vars: Vec<String>,
     shell_validation_mode: ShellValidationMode,
     pub(crate) background_task_limit: Option<usize>,
@@ -98,6 +99,7 @@ impl Default for RuntimePolicy {
             allowed_working_roots: Vec::new(),
             allowed_read_roots: Vec::new(),
             allowed_write_roots: Vec::new(),
+            denied_write_roots: Vec::new(),
             allowed_env_vars: default_allowed_env_vars(),
             shell_validation_mode: ShellValidationMode::Off,
             background_task_limit: Some(8),
@@ -219,6 +221,25 @@ impl RuntimePolicy {
     /// Adds an extra root allowed for builtin file writes.
     pub fn with_allowed_write_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.allowed_write_roots.push(path.into());
+        self
+    }
+
+    /// Carves a hole in the write roots: a path under `path` is refused even
+    /// when an allow-root would otherwise permit it.
+    ///
+    /// For the places inside a workspace that an agent should not be able to
+    /// change because changing them changes what runs — `.git/hooks` being the
+    /// canonical one, since a file written there executes on the next commit.
+    /// Allow-roots alone cannot express it: the whole workspace is writable and
+    /// these are inside the workspace.
+    ///
+    /// **This binds mentra's builtin file tools, not the shell.** A command
+    /// like `sh -c 'echo … > .git/hooks/pre-commit'` still reaches the path,
+    /// because the runtime does not parse shell and cannot know where a
+    /// redirect points. Treat this as hygiene that closes the obvious route,
+    /// never as a boundary — the boundary belongs to the OS.
+    pub fn with_denied_write_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.denied_write_roots.push(path.into());
         self
     }
 
@@ -352,6 +373,17 @@ impl RuntimePolicy {
     ) -> Result<PathBuf, String> {
         let resolved = resolve_authorized_path(base_dir, path)?;
 
+        // Checked before the allow list, because a denial is only meaningful
+        // inside a root that would otherwise permit the write. Both sides
+        // normalize through `normalize_policy_root`, so `.git/hooks/../hooks`
+        // and a symlink into a denied root resolve to the same answer.
+        if path_is_under_any(resolved.as_path(), self.denied_write_roots.as_slice()) {
+            return Err(format!(
+                "Path '{}' is inside a runtime policy denied write root",
+                resolved.display()
+            ));
+        }
+
         if path_is_allowed(
             resolved.as_path(),
             base_dir,
@@ -393,6 +425,18 @@ impl RuntimePolicy {
 
         Ok(())
     }
+}
+
+/// Whether `path` sits under any of `roots`, comparing resolved forms.
+fn path_is_under_any(path: &Path, roots: &[PathBuf]) -> bool {
+    if roots.is_empty() {
+        return false;
+    }
+    let candidate = normalize_policy_root(path);
+    roots
+        .iter()
+        .map(|root| normalize_policy_root(root))
+        .any(|root| candidate.starts_with(root))
 }
 
 fn path_is_allowed(path: &Path, default_root: &Path, extra_roots: &[PathBuf]) -> bool {
@@ -644,6 +688,92 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_root_inside_an_allowed_one_refuses_the_write() {
+        let root = unique_temp_dir("policy-deny-root");
+        let hooks = root.join(".git").join("hooks");
+        fs::create_dir_all(&hooks).expect("create hooks dir");
+
+        let policy = RuntimePolicy::default()
+            .with_allowed_write_root(&root)
+            .with_denied_write_root(&hooks);
+
+        // The whole point: the workspace is writable and this is inside it, so
+        // allow-roots alone could never express the carve-out.
+        let error = policy
+            .authorize_file_write(&root, &hooks.join("pre-commit"))
+            .expect_err("a denied root must win over the allow root containing it");
+        assert!(error.contains("denied write root"), "got: {error}");
+
+        // A sibling under the same allow root is untouched.
+        policy
+            .authorize_file_write(&root, &root.join("src.rs"))
+            .expect("an ordinary write is unaffected");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_traversal_into_a_denied_root_is_refused() {
+        let root = unique_temp_dir("policy-deny-traverse");
+        let hooks = root.join(".git").join("hooks");
+        fs::create_dir_all(&hooks).expect("create hooks dir");
+
+        let policy = RuntimePolicy::default()
+            .with_allowed_write_root(&root)
+            .with_denied_write_root(&hooks);
+
+        // Spelled to look like it lands elsewhere. Both sides normalize, so
+        // the spelling does not decide the answer.
+        let sneaky = root.join(".git").join("hooks").join("..").join("hooks");
+        let error = policy
+            .authorize_file_write(&root, &sneaky.join("pre-push"))
+            .expect_err("a path that resolves into a denied root is still denied");
+        assert!(error.contains("denied write root"), "got: {error}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_into_a_denied_root_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("policy-deny-symlink");
+        let hooks = root.join(".git").join("hooks");
+        fs::create_dir_all(&hooks).expect("create hooks dir");
+        let link = root.join("shortcut");
+        symlink(&hooks, &link).expect("create symlink");
+
+        let policy = RuntimePolicy::default()
+            .with_allowed_write_root(&root)
+            .with_denied_write_root(&hooks);
+
+        let error = policy
+            .authorize_file_write(&root, &link.join("pre-commit"))
+            .expect_err("a symlink is not a way around a denied root");
+        assert!(error.contains("denied write root"), "got: {error}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_denied_roots_changes_nothing() {
+        let root = unique_temp_dir("policy-deny-empty");
+        fs::create_dir_all(&root).expect("create root");
+
+        let policy = RuntimePolicy::default().with_allowed_write_root(&root);
+
+        policy
+            .authorize_file_write(&root, &root.join(".git").join("hooks").join("pre-commit"))
+            .expect("with no deny list the allow root decides alone");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
