@@ -232,7 +232,10 @@ impl McpSseServerConfig {
     ///
     /// Runs before any connection is opened so a bad configuration fails at the
     /// boundary rather than mid-handshake.
-    pub(crate) fn validate(&self) -> Result<Url, McpSseConfigError> {
+    /// Checks the URL, header names, and credential handling without
+    /// connecting, so a host can reject a bad configuration at its own
+    /// boundary rather than discovering it mid-build.
+    pub fn validate(&self) -> Result<Url, McpSseConfigError> {
         if self.name.trim().is_empty() {
             return Err(McpSseConfigError::EmptyName);
         }

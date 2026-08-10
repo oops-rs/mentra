@@ -12,8 +12,8 @@ use crate::{
 };
 use mentra_provider::BuiltinProvider;
 
-use super::Runtime;
 use super::skill::SkillLoader;
+use super::{McpServerSummary, Runtime};
 
 /// An MCP server to connect to during build, and how to reach it.
 ///
@@ -355,6 +355,7 @@ impl RuntimeBuilder {
         }
 
         // Connect to MCP servers and register their tools.
+        let mut outcomes = Vec::new();
         if !self.mcp_configs.is_empty() {
             let mut manager = McpManager::new();
             for config in &self.mcp_configs {
@@ -371,16 +372,30 @@ impl RuntimeBuilder {
 
                 match connected {
                     Ok(bridged_tools) => {
+                        let tools = bridged_tools.len();
                         for tool in bridged_tools {
                             self.handle.register_tool(tool);
                         }
+                        outcomes.push(McpServerSummary {
+                            name: config.name().to_string(),
+                            tools,
+                            error: None,
+                        });
                     }
                     Err(error) => {
-                        // Log the error but don't fail the build — degraded mode.
+                        // Degraded mode: one unreachable server must not sink a
+                        // session. Recorded rather than only printed, so a host
+                        // can say which servers are live instead of a user
+                        // wondering why a tool is missing.
                         eprintln!(
                             "Warning: MCP server '{}' failed to connect: {error}",
                             config.name()
                         );
+                        outcomes.push(McpServerSummary {
+                            name: config.name().to_string(),
+                            tools: 0,
+                            error: Some(error),
+                        });
                     }
                 }
             }
@@ -395,25 +410,38 @@ impl RuntimeBuilder {
                 .handle
                 .with_provider_registry(provider_registry.clone()),
             provider_registry,
+            mcp_servers: outcomes,
         })
     }
 
-    /// Builds the runtime synchronously (no MCP server connections).
+    /// Builds the runtime synchronously.
     ///
-    /// MCP server configs are ignored — use [`build_async`](Self::build_async)
-    /// when MCP servers are configured.
+    /// Connecting to an MCP server means spawning a process and completing a
+    /// handshake, which cannot happen here — so registering one and then
+    /// calling this is refused rather than silently honored halfway. Use
+    /// [`build_async`](Self::build_async) when MCP servers are configured.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         if self.provider_registry.is_empty() {
-            Err(RuntimeError::ProviderNotFound(None))
-        } else {
-            let provider_registry = Arc::new(std::sync::RwLock::new(self.provider_registry));
-            Ok(Runtime {
-                handle: self
-                    .handle
-                    .with_provider_registry(provider_registry.clone()),
-                provider_registry,
-            })
+            return Err(RuntimeError::ProviderNotFound(None));
         }
+
+        if !self.mcp_configs.is_empty() {
+            let names: Vec<&str> = self.mcp_configs.iter().map(McpRegistration::name).collect();
+            return Err(RuntimeError::OperationDenied(format!(
+                "MCP servers are registered ({}) but `build` cannot connect them; \
+                 use `build_async`",
+                names.join(", ")
+            )));
+        }
+
+        let provider_registry = Arc::new(std::sync::RwLock::new(self.provider_registry));
+        Ok(Runtime {
+            handle: self
+                .handle
+                .with_provider_registry(provider_registry.clone()),
+            provider_registry,
+            mcp_servers: Vec::new(),
+        })
     }
 }
 
@@ -423,6 +451,30 @@ mod tests {
     use crate::runtime::control::{HookDecision, PreExecutionContext};
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The least a builder will accept: a provider must exist before any
+    /// other check runs.
+    struct StubProvider;
+
+    #[async_trait]
+    impl crate::provider::Provider for StubProvider {
+        fn descriptor(&self) -> crate::provider::ProviderDescriptor {
+            crate::provider::ProviderDescriptor::new(BuiltinProvider::OpenAI)
+        }
+
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<crate::ModelInfo>, crate::provider::ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn stream(
+            &self,
+            _request: crate::provider::Request<'_>,
+        ) -> Result<crate::provider::ProviderEventStream, crate::provider::ProviderError> {
+            unreachable!("no turn is run in these tests")
+        }
+    }
 
     /// Counts how many times it was consulted, so a hook that was silently
     /// dropped during registration shows up as a count that never moves.
@@ -470,5 +522,40 @@ mod tests {
             "the first hook must still run"
         );
         assert_eq!(second.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn build_refuses_to_discard_registered_mcp_servers() {
+        let error = RuntimeBuilder::new(false)
+            .with_provider_instance(StubProvider)
+            .with_mcp_server(McpServerConfig {
+                name: "github".to_string(),
+                command: "npx".to_string(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            })
+            .build()
+            .err()
+            .expect("a sync build cannot connect a server, so it must say so");
+
+        // The old behavior was to build cleanly and drop the server, which a
+        // caller only discovered when a tool it had configured was missing.
+        let message = error.to_string();
+        assert!(
+            message.contains("github") && message.contains("build_async"),
+            "the refusal must name the server and the way forward: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_runtime_with_no_mcp_servers_reports_none() {
+        let runtime = RuntimeBuilder::new(false)
+            .with_provider_instance(StubProvider)
+            .build_async()
+            .await
+            .expect("builds");
+
+        assert!(runtime.mcp_servers().is_empty());
     }
 }

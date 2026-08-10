@@ -58,6 +58,29 @@ pub use volatile_store::VolatileRuntimeStore;
 pub struct Runtime {
     handle: RuntimeHandle,
     provider_registry: Arc<std::sync::RwLock<ProviderRegistry>>,
+    pub(crate) mcp_servers: Vec<McpServerSummary>,
+}
+
+/// How one configured MCP server fared during
+/// [`build_async`](RuntimeBuilder::build_async).
+///
+/// A server that fails to connect leaves the runtime in degraded mode rather
+/// than failing the build — one unreachable server should not sink a session.
+/// This is how a host finds out which ones are actually live, so it can say so
+/// instead of leaving a user to wonder why a tool is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerSummary {
+    pub name: String,
+    /// Tools this server contributed. Zero when it failed.
+    pub tools: usize,
+    /// Why it did not connect, when it did not.
+    pub error: Option<String>,
+}
+
+impl McpServerSummary {
+    pub fn connected(&self) -> bool {
+        self.error.is_none()
+    }
 }
 
 /// Read-only summary of a persisted agent record for a runtime identifier.
@@ -159,6 +182,16 @@ impl Runtime {
     /// but not its body.
     pub fn skills(&self) -> Vec<SkillInfo> {
         self.handle.skills()
+    }
+
+    /// How each configured MCP server fared while the runtime was built.
+    ///
+    /// Empty when none were configured, or when the runtime came from
+    /// [`build`](RuntimeBuilder::build), which refuses to be given any.
+    /// A failed server is present with its error rather than absent: a host
+    /// telling a user which tools they have needs to name what is missing.
+    pub fn mcp_servers(&self) -> &[McpServerSummary] {
+        &self.mcp_servers
     }
 
     /// Returns a lead-privileged task-board view for `namespace`.

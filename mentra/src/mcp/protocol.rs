@@ -163,7 +163,7 @@ pub struct McpToolCallResult {
 // ---------------------------------------------------------------------------
 
 /// Configuration for a single MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Display name for the server.
     pub name: String,
