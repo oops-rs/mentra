@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### The Responses websocket transport is a feature
+
+- `tokio-tungstenite` was an unconditional dependency of mentra-provider,
+  linked by every dependant for a transport most can never reach: HTTP+SSE is
+  the Responses family's default and what every non-OpenAI preset uses, and
+  the websocket path runs only when a caller explicitly sets
+  `ProviderRequestOptions.responses.transport` to `WebSocket`. The transport
+  now sits behind a `responses-websocket` feature, default-on in both
+  mentra-provider and mentra so an upgrade takes nothing away; a host that
+  never selects it can disable default features and drop the websocket client
+  (and futures-util's `sink` adapter, which moved into the feature with the
+  only code that drives it) from its tree.
+- A build without the feature does not fall back to HTTP. Selecting the
+  websocket transport is an explicit choice, and answering it over a transport
+  the caller did not ask for would hide a misconfigured build behind a working
+  one — so `stream_response` returns a typed
+  `ProviderError::UnsupportedCapability` naming the feature to rebuild with,
+  pinned by a test that runs only in no-feature builds.
+- mentra's own dependency on mentra-provider now sets
+  `default-features = false` and forwards the feature explicitly, so turning
+  it off at the mentra level actually bites instead of being re-defaulted one
+  crate down.
+
 ### A run that ends on a bound now says so
 
 - The two graceful bounds — `RunOptions::stop` and `RunOptions::token_budget`
