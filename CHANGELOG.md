@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### A typed turn can keep its tools
+
+- A turn that answers into a schema used to hold exactly one tool: the
+  generated terminal tool, forced. Right for shaping what the conversation
+  already holds, and a two-turn ceremony for everything else — every
+  read-then-shape workflow ran one turn to gather and a second to answer, and
+  a caller who asked a one-turn typed run to "review the files" got an empty
+  answer from a model that could open nothing, reported as success.
+  `TerminalOutputSpec::with_tools()` is the opt-in third way: the ordinary
+  toolset rides beside the terminal tool, no choice is forced, and the run
+  works as many rounds as it needs before ending the turn with the terminal
+  call. The default is unchanged.
+- A terminal call still ends the round it appears in. Calls scheduled after
+  it get an explicit `is_error` "not executed" result rather than vanishing,
+  and a second terminal call in the same round is one of those skipped calls —
+  first answer wins, by the machinery that already existed.
+- While a working typed turn runs, `tool_choice` is `Auto` regardless of the
+  agent's configured choice: forcing the terminal tool would end the turn
+  before any work happened, and a configured `Tool { .. }` would keep the turn
+  from ever reaching the call that ends it.
+- One reporting change reaches the default mode: a typed run whose provider
+  answered nothing at all is now reported as the missing terminal call it is,
+  rather than as `EmptyAssistantResponse` — the same fact, answered for the
+  question the typed path actually asks.
+
 ### The Responses websocket transport is a feature
 
 - `tokio-tungstenite` was an unconditional dependency of mentra-provider,

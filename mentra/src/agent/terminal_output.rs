@@ -31,6 +31,15 @@ pub struct TerminalOutputSpec {
     pub tool_name: String,
     pub description: String,
     pub schema: Value,
+    /// Whether the run keeps its ordinary tools while it answers.
+    ///
+    /// `false` — what [`new`](Self::new) gives you — is a *shaping* turn: the
+    /// generated terminal tool is the only tool the run holds, so it can only
+    /// put a shape on what the conversation already contains. `true` — see
+    /// [`with_tools`](Self::with_tools) — is a *working* turn: the run keeps
+    /// the agent's whole toolset and ends by calling the terminal tool.
+    /// [`Agent::run_to_output`] describes what each costs.
+    pub keeps_tools: bool,
 }
 
 impl TerminalOutputSpec {
@@ -43,8 +52,42 @@ impl TerminalOutputSpec {
             tool_name: tool_name.into(),
             description: description.into(),
             schema,
+            keeps_tools: false,
         }
     }
+
+    /// Lets the run work before it answers, instead of only shaping what it
+    /// already has.
+    ///
+    /// A shaping turn cannot read a file, run a command, or reach an MCP
+    /// server, so asking one for anything it has not already been told
+    /// produces a well-formed answer from a model that looked at nothing —
+    /// and reports it as a success. The way out has been to spend two turns
+    /// on every read-then-answer workflow: one to gather, one to shape. This
+    /// spends one. The run holds its ordinary tools alongside the terminal
+    /// tool, works as many rounds as it needs, and ends the turn by calling
+    /// the terminal tool with the answer.
+    ///
+    /// The cost is that nothing forces the ending: see
+    /// [`Agent::run_to_output`] for what a run that never calls the tool
+    /// returns instead.
+    pub fn with_tools(mut self) -> Self {
+        self.keeps_tools = true;
+        self
+    }
+}
+
+/// What an in-flight [`Agent::run_to_output`] tells the rest of the agent
+/// about the turn it is running: which generated tool ends it, and whether
+/// the ordinary toolset is on the request beside that tool.
+///
+/// Read on every round by [`Agent::tools`] and [`Agent::tool_choice`], which
+/// is why it holds the mode rather than the name alone — the two answers have
+/// to agree about which turn this is, and a name cannot say.
+#[derive(Debug, Clone)]
+pub(super) struct TerminalToolGate {
+    pub(super) tool_name: String,
+    pub(super) keeps_tools: bool,
 }
 
 /// Typed value and committed tool-result message produced by [`Agent::run_to_output`].
@@ -57,13 +100,45 @@ pub struct FinalOutput<T> {
 impl Agent {
     /// Runs until a generated, agent-scoped terminal tool returns a typed value.
     ///
-    /// The helper does not use provider-level `response_format`. It exposes only
-    /// one forced terminal tool during this run, preserves the tool input as
-    /// transcript `details`, and extracts it by the exact `tool_use_id` from the
-    /// newly committed final transcript item. Internally a terminal run commits
-    /// successfully but `Agent::run` reports [`RuntimeError::EmptyAssistantResponse`]
-    /// because the final message is a user-role tool result; this helper accepts
-    /// that error only when the expected new detail is present.
+    /// The helper does not use provider-level `response_format`. It registers
+    /// one tool whose input schema *is* the requested shape, preserves the
+    /// tool input as transcript `details`, and extracts it by the exact
+    /// `tool_use_id` from the newly committed final transcript item.
+    ///
+    /// What the run may do on its way to that call is
+    /// [`TerminalOutputSpec::keeps_tools`]:
+    ///
+    /// - **Shaping**, the default. The terminal tool is the only tool on the
+    ///   request and the provider is told to call it. The turn cannot read a
+    ///   file, run a command, or reach an MCP server, so the only thing left
+    ///   to decide is the shape of what the conversation already holds, and
+    ///   one round decides it.
+    /// - **Working**, [`TerminalOutputSpec::with_tools`]. The agent's ordinary
+    ///   toolset is on the request beside the terminal tool and no choice is
+    ///   forced — forcing one would preclude the very rounds that are the
+    ///   point. The run gathers for as many rounds as it needs and ends the
+    ///   turn by calling the terminal tool.
+    ///
+    /// Either way the terminal call ends the round it appears in: calls
+    /// scheduled after it in that same round are never executed, and each is
+    /// given an explicit `is_error` result saying so. Where the model emits
+    /// two terminal calls in one round, the first is the answer and the second
+    /// is one of those skipped calls.
+    ///
+    /// Only that call produces a value. A working run that ends any other way
+    /// — on prose, or at the round boundary where [`RunOptions::stop`] or
+    /// [`RunOptions::token_budget`] refuses another round — has nothing to
+    /// return and fails with `MalformedProviderEvent("run completed without
+    /// invoking the expected terminal tool")`, while keeping everything it
+    /// gathered in the transcript. [`RunOptions::ended_early`] says which
+    /// bound, when one was the reason.
+    ///
+    /// A run that ends on a terminal call ends on a user-role tool result, so
+    /// `Agent::run` reports [`RuntimeError::EmptyAssistantResponse`] for the
+    /// missing assistant message. That is bookkeeping about the wrong
+    /// question here, and this helper answers the right one instead: with the
+    /// expected new detail present the run succeeded, and without it the run
+    /// is reported as the missing terminal call it was.
     pub async fn run_to_output<T: DeserializeOwned>(
         &mut self,
         content: impl Into<Vec<ContentBlock>>,
@@ -71,6 +146,7 @@ impl Agent {
         spec: TerminalOutputSpec,
     ) -> Result<FinalOutput<T>, RuntimeError> {
         let tool_name = unique_tool_name(&spec.tool_name);
+        let keeps_tools = spec.keeps_tools;
         let terminal_tool = TerminalOutputTool {
             name: tool_name.clone(),
             description: spec.description,
@@ -81,7 +157,10 @@ impl Agent {
         *self
             .terminal_tool_gate
             .lock()
-            .expect("terminal tool gate poisoned") = Some(tool_name.clone());
+            .expect("terminal tool gate poisoned") = Some(TerminalToolGate {
+            tool_name: tool_name.clone(),
+            keeps_tools,
+        });
         let _guard = TerminalToolGuard {
             runtime: self.runtime.clone(),
             agent_id: self.id.clone(),
@@ -102,10 +181,12 @@ impl Agent {
                 })?;
                 Ok(FinalOutput { value, message })
             }
+            (Ok(_) | Err(RuntimeError::EmptyAssistantResponse), None) => {
+                Err(RuntimeError::MalformedProviderEvent(
+                    "run completed without invoking the expected terminal tool".to_string(),
+                ))
+            }
             (Err(error), _) => Err(error),
-            (Ok(_), None) => Err(RuntimeError::MalformedProviderEvent(
-                "run completed without invoking the expected terminal tool".to_string(),
-            )),
         }
     }
 
@@ -181,13 +262,16 @@ struct TerminalToolGuard {
     runtime: RuntimeHandle,
     agent_id: String,
     tool_name: String,
-    gate: Arc<Mutex<Option<String>>>,
+    gate: Arc<Mutex<Option<TerminalToolGate>>>,
 }
 
 impl Drop for TerminalToolGuard {
     fn drop(&mut self) {
         let mut gate = self.gate.lock().expect("terminal tool gate poisoned");
-        if gate.as_deref() == Some(self.tool_name.as_str()) {
+        if gate
+            .as_ref()
+            .is_some_and(|open| open.tool_name == self.tool_name)
+        {
             *gate = None;
         }
         drop(gate);

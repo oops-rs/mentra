@@ -18,6 +18,10 @@ use crate::{
     provider_event_stream_from_response,
     runtime::RunOptions,
     session::{Session, SessionEvent, SessionStatus},
+    tool::{
+        ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolResult, ToolSideEffectLevel,
+        ToolSpec,
+    },
 };
 
 /// What the model writes when it declines the forced tool and answers in prose.
@@ -410,5 +414,155 @@ async fn a_run_that_never_calls_the_terminal_tool_fails_the_turn() {
             .iter()
             .any(|event| matches!(event, SessionEvent::Error { .. })),
         "expected an Error event, got: {events:?}"
+    );
+}
+
+/// A tool an ordinary turn would hold, for the working typed turn below to
+/// reach.
+struct LookupTool;
+
+impl ToolDefinition for LookupTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("lookup")
+            .description("test tool: returns a fact the report needs")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for LookupTool {
+    async fn execute_mut(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
+        Ok("the answer is 42".to_string())
+    }
+}
+
+/// Plays a model on a *working* typed turn: it looks the terminal tool up by
+/// name in the request rather than being told which to call, works one round,
+/// then answers. Its rounds are counted rather than scripted because the two
+/// differ only in what the model decides to do.
+#[derive(Clone)]
+struct WorkingProvider {
+    model: ModelInfo,
+    calls: Arc<AtomicUsize>,
+}
+
+impl WorkingProvider {
+    fn new() -> Self {
+        Self {
+            model: ModelInfo::new("typed-output-model", BuiltinProvider::Anthropic),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for WorkingProvider {
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(vec![self.model.clone()])
+    }
+
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let terminal = request
+            .tools
+            .iter()
+            .find(|tool| tool.name.starts_with("mentra_terminal_"))
+            .map(|tool| tool.name.clone())
+            .expect("a typed turn always offers its terminal tool");
+        assert!(
+            request.tools.iter().any(|tool| tool.name == "lookup"),
+            "a working typed turn keeps its ordinary tools: {:?}",
+            request.tools
+        );
+        assert_eq!(
+            request.tool_choice,
+            Some(ToolChoice::Auto),
+            "and forces none of them"
+        );
+
+        let (id, name, input) = if call == 0 {
+            ("lookup-call".to_string(), "lookup".to_string(), json!({}))
+        } else {
+            (
+                "terminal-call-0".to_string(),
+                terminal,
+                json!({ "answer": 42, "evidence": ["looked it up"] }),
+            )
+        };
+
+        Ok(provider_event_stream_from_response(Response {
+            id: format!("message-{call}-{}", unique_suffix()),
+            model: self.model.id.clone(),
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse { id, name, input }],
+            stop_reason: Some("tool_use".to_string()),
+            usage: None,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn a_working_typed_turn_puts_its_tool_work_on_the_session_stream() {
+    // The reason to want this mode through a `Session` rather than a bare
+    // agent: the work it does on the way to the answer reaches the same
+    // stream every other turn's work does, in order, and the typed value
+    // still comes back.
+    let provider = WorkingProvider::new();
+    let model = provider.model.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(LookupTool)
+        .build()
+        .expect("build runtime");
+    let mut session = runtime
+        .create_session("typed-output", model)
+        .expect("create session");
+    let mut rx = session.subscribe();
+
+    let output = session
+        .append_turn_to_output::<Report>(
+            vec![ContentBlock::text("look it up, then report")],
+            RunOptions::default(),
+            report_spec().with_tools(),
+        )
+        .await
+        .expect("a working typed turn answers");
+
+    assert_eq!(
+        output.value,
+        Report {
+            answer: 42,
+            evidence: vec!["looked it up".to_string()],
+        }
+    );
+    assert_eq!(session.metadata().turn_count, 1);
+    assert_eq!(session.metadata().status, SessionStatus::Idle);
+
+    let events = drain(&mut rx);
+    let looked_up = position(
+        &events,
+        "ToolQueued for lookup",
+        |event| matches!(event, SessionEvent::ToolQueued { tool_name, .. } if tool_name == "lookup"),
+    );
+    let answered = position(&events, "ToolQueued for the terminal tool", |event| {
+        matches!(event, SessionEvent::ToolQueued { tool_name, .. }
+            if tool_name.starts_with("mentra_terminal_"))
+    });
+    assert!(
+        looked_up < answered,
+        "the turn worked before it answered, got: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Error { .. })),
+        "a successful working typed turn reports no error, got: {events:?}"
     );
 }

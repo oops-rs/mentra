@@ -322,6 +322,14 @@ impl Session {
     /// for the event stream and the permission handle — needs a typed final
     /// answer without dropping to the agent and losing both.
     ///
+    /// Whether the turn may work on its way to that answer or only shape what
+    /// the conversation already holds is the spec's to say, through
+    /// [`TerminalOutputSpec::with_tools`]. A working typed turn is where a
+    /// `Session` earns the most: its tool calls go to the same event stream
+    /// and its permission requests to the same handle as any other turn's, so
+    /// a host gets one turn that reads, asks, and answers in a declared shape
+    /// without giving up either.
+    ///
     /// The turn announces itself on the stream exactly as every other turn
     /// does: a [`SessionEvent::UserMessage`] going in, whatever the agent
     /// emits while it runs, and on success one

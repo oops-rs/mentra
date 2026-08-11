@@ -11,5 +11,6 @@ mod runtime_tools;
 mod runtime_volatile_store;
 mod steering;
 mod support;
+mod terminal_output;
 mod tool_output;
 mod tool_paging;

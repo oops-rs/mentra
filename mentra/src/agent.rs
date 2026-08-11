@@ -60,6 +60,7 @@ pub use round_strategy::{
 use runner::TurnRunner;
 pub use steering::{QueueMode, SteeringHandle};
 pub(crate) use subagent::DisposableSubagentTemplate;
+use terminal_output::TerminalToolGate;
 pub use terminal_output::{FinalOutput, TerminalOutputSpec};
 pub use wait::{AgentWaitFuture, AgentWaitHandle};
 
@@ -81,7 +82,7 @@ pub struct Agent {
     snapshot_tx: watch::Sender<AgentSnapshot>,
     provider: Arc<dyn Provider>,
     hidden_tools: HashSet<String>,
-    terminal_tool_gate: Arc<Mutex<Option<String>>>,
+    terminal_tool_gate: Arc<Mutex<Option<TerminalToolGate>>>,
     max_rounds: Option<usize>,
     inflight_background_notifications: Vec<BackgroundNotification>,
     inflight_team_messages: Vec<TeamMessage>,
@@ -513,8 +514,16 @@ impl Agent {
         self.snapshot_tx.subscribe()
     }
 
+    /// The tools this agent offers the model on the next round.
+    ///
+    /// A shaping typed turn (see [`Agent::run_to_output`]) narrows this to
+    /// exactly one tool — the terminal tool it generated — because the whole
+    /// point of that turn is that the model has nothing to decide but the
+    /// answer's shape. A working typed turn narrows nothing: its terminal tool
+    /// is admitted by [`can_use_tool`](Self::can_use_tool) like any other, so
+    /// it simply joins the ordinary roster.
     pub(crate) fn tools(&self) -> Arc<[crate::tool::ProviderToolSpec]> {
-        let terminal_tool = self
+        let gate = self
             .terminal_tool_gate
             .lock()
             .expect("terminal tool gate poisoned")
@@ -522,13 +531,12 @@ impl Agent {
         self.runtime
             .tools()
             .iter()
-            .filter(|tool| {
-                if let Some(name) = terminal_tool.as_ref() {
-                    name == &tool.name
+            .filter(|tool| match &gate {
+                Some(gate) if !gate.keeps_tools => {
+                    gate.tool_name == tool.name
                         && self.runtime.tool_is_visible_to_agent(&tool.name, &self.id)
-                } else {
-                    self.can_use_tool(&tool.name)
                 }
+                _ => self.can_use_tool(&tool.name),
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -544,8 +552,8 @@ impl Agent {
             .terminal_tool_gate
             .lock()
             .expect("terminal tool gate poisoned")
-            .as_deref()
-            == Some(name)
+            .as_ref()
+            .is_some_and(|gate| gate.tool_name == name)
         {
             return true;
         }
@@ -608,14 +616,28 @@ impl Agent {
         self.max_rounds
     }
 
+    /// What the model is told about choosing a tool on the next round.
+    ///
+    /// A shaping typed turn forces its terminal tool: it is the only tool on
+    /// the request, and the turn exists to produce that one call. A working
+    /// typed turn forces nothing — not the terminal tool, which would end the
+    /// turn before any work happened, and not the agent's own configured
+    /// choice, which would keep the turn from ever reaching the call that ends
+    /// it. Both would defeat the mode, so while one runs the choice is `Auto`.
     pub(crate) fn tool_choice(&self) -> Option<ToolChoice> {
-        if let Some(name) = self
+        let gate = self
             .terminal_tool_gate
             .lock()
             .expect("terminal tool gate poisoned")
-            .clone()
-        {
-            return Some(ToolChoice::Tool { name });
+            .clone();
+        if let Some(gate) = gate {
+            return Some(if gate.keeps_tools {
+                ToolChoice::Auto
+            } else {
+                ToolChoice::Tool {
+                    name: gate.tool_name,
+                }
+            });
         }
 
         match self.config.tool_choice.clone() {
