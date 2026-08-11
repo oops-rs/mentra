@@ -15,7 +15,7 @@ use mentra::{
         Provider, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
         Response, Role, provider_event_stream_from_response,
     },
-    runtime::SqliteRuntimeStore,
+    runtime::VolatileRuntimeStore,
     tool::{ParallelToolContext, ToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec},
 };
 use serde_json::{Value, json};
@@ -135,14 +135,13 @@ struct Harness {
 impl Harness {
     fn new(turns: Vec<Turn>) -> Self {
         let runtime_id = format!("public-api-{}", now_nanos());
-        let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
         let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
         let provider = ScriptedProvider::new(model.provider.clone(), vec![model.clone()]);
         provider.push_turns(turns);
 
         let runtime = Runtime::builder()
             .with_runtime_identifier(runtime_id)
-            .with_store(SqliteRuntimeStore::new(store_path))
+            .with_store(VolatileRuntimeStore::new())
             .with_provider_instance(provider.clone())
             .build()
             .expect("build runtime");
@@ -290,13 +289,12 @@ async fn send_returns_final_message_after_tool_execution() {
 #[tokio::test]
 async fn runtime_exposes_registered_tool_descriptors() {
     let runtime_id = format!("public-api-{}", now_nanos());
-    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
     let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
     let provider = ScriptedProvider::new(model.provider.clone(), vec![model.clone()]);
 
     let runtime = Runtime::empty_builder()
         .with_runtime_identifier(runtime_id)
-        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_store(VolatileRuntimeStore::new())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -396,14 +394,13 @@ async fn empty_assistant_response_preserves_committed_tool_results() {
 #[tokio::test]
 async fn resolve_model_returns_explicit_id_without_listing_models() {
     let runtime_id = format!("public-api-{}", now_nanos());
-    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
     let provider = FailingListModelsProvider {
         kind: BuiltinProvider::Anthropic.into(),
     };
 
     let runtime = Runtime::builder()
         .with_runtime_identifier(runtime_id)
-        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_store(VolatileRuntimeStore::new())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -425,7 +422,6 @@ async fn resolve_model_returns_explicit_id_without_listing_models() {
 #[tokio::test]
 async fn resolve_model_selects_newest_available_then_breaks_ties_by_id() {
     let runtime_id = format!("public-api-{}", now_nanos());
-    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
     let provider = ModelListingProvider {
         kind: BuiltinProvider::OpenAI.into(),
         models: vec![
@@ -437,7 +433,7 @@ async fn resolve_model_selects_newest_available_then_breaks_ties_by_id() {
 
     let runtime = Runtime::builder()
         .with_runtime_identifier(runtime_id)
-        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_store(VolatileRuntimeStore::new())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -456,7 +452,6 @@ async fn resolve_model_selects_newest_available_then_breaks_ties_by_id() {
 #[tokio::test]
 async fn resolve_model_reports_empty_provider_listing() {
     let runtime_id = format!("public-api-{}", now_nanos());
-    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
     let provider = ModelListingProvider {
         kind: BuiltinProvider::Gemini.into(),
         models: Vec::new(),
@@ -464,7 +459,7 @@ async fn resolve_model_reports_empty_provider_listing() {
 
     let runtime = Runtime::builder()
         .with_runtime_identifier(runtime_id)
-        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_store(VolatileRuntimeStore::new())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -483,7 +478,6 @@ async fn resolve_model_reports_empty_provider_listing() {
 #[tokio::test]
 async fn resolve_model_supports_openrouter_provider() {
     let runtime_id = format!("public-api-{}", now_nanos());
-    let store_path = std::env::temp_dir().join(format!("{runtime_id}.sqlite"));
     let provider = ModelListingProvider {
         kind: BuiltinProvider::OpenRouter.into(),
         models: vec![model_with_created_at(
@@ -495,7 +489,7 @@ async fn resolve_model_supports_openrouter_provider() {
 
     let runtime = Runtime::builder()
         .with_runtime_identifier(runtime_id)
-        .with_store(SqliteRuntimeStore::new(store_path))
+        .with_store(VolatileRuntimeStore::new())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");

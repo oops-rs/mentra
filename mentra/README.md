@@ -764,7 +764,9 @@ Enable the `test-utils` feature when you want a deterministic scripted runtime f
 `mentra::test::MockRuntime` wraps a real runtime with:
 
 - a scripted provider
-- a temporary SQLite-backed runtime store
+- a `VolatileRuntimeStore`, so a mock writes nothing to disk and two mocks never
+  share state — pass `MockRuntimeBuilder::with_store` a `SqliteRuntimeStore`
+  when a test needs state that outlives the mock
 - deterministic per-turn helper methods for assistant text, streamed text, tool-call turns, and provider failures
 
 This is the recommended way to test Mentra-based agents and tools without live API keys.

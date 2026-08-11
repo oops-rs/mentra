@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### A scripted runtime no longer leaves a database behind
+
+- `MockRuntime` used to default to a `SqliteRuntimeStore` at
+  `<temp>/mentra-mock-runtime-<nanos>.sqlite`. Nothing ever deleted those
+  files: a full downstream suite left dozens behind per run, and one
+  development machine had accumulated 38,782 of them. The default is now a
+  `VolatileRuntimeStore`, which also drops the transcript and tool-output spill
+  artifacts a scripted run never needed.
+- Naming that file after the wall clock also made it shared state. Two mocks
+  built inside one nanosecond were handed the same database, and since agent
+  ids are unique only within a process, two test binaries running concurrently
+  could mint the same id against it — the second `spawn` then failed with
+  `LeaseUnavailable("... already leased by another runtime")`. Each mock now
+  gets its own store, so the collision is unreachable rather than rare.
+- `MockRuntimeBuilder::with_store` is unchanged, and remains the opt-in for a
+  test that needs state to outlive the mock: reopening the same path from a
+  second runtime, or inspecting the database directly. The caller owns that
+  path's cleanup; the default leaves nothing to clean up.
+- The default runtime identifier gained a process-wide counter alongside its
+  timestamp, for the same reason. Two mocks sharing one caller-supplied store
+  could otherwise share an identifier, and `resume` / `list_persisted_agents`
+  would mix their agents.
+- mentra's own suites got the same treatment where nothing needed disk: the
+  `public_api` harness and the memory-journal tests build volatile stores
+  instead of nanos-named SQLite files. Tests that exercise SQLite itself, or
+  resume across a restart, still use real files by design.
+
 ### Building a runtime no longer opens a store the caller replaced
 
 - `Runtime::builder()` used to prepare recovery on the default SQLite store

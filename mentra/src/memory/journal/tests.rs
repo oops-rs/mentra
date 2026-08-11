@@ -5,18 +5,12 @@ use serde_json::json;
 use crate::{
     AgentTranscript, ContentBlock, Message, TranscriptKind,
     memory::journal::{AgentMemory, AgentMemoryState, CompactionOutcome, PendingTurnState},
-    runtime::SqliteRuntimeStore,
+    runtime::VolatileRuntimeStore,
 };
 
 #[test]
 fn begin_run_commit_and_finish_persist_memory_state() {
-    let store = Arc::new(SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
-        "mentra-memory-test-{}.sqlite",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    ))));
+    let store = Arc::new(VolatileRuntimeStore::new());
     let mut memory = AgentMemory::new("agent-test", store, AgentMemoryState::default());
 
     memory
@@ -50,13 +44,7 @@ fn begin_run_commit_and_finish_persist_memory_state() {
 
 #[test]
 fn rollback_and_compaction_update_memory_state() {
-    let store = Arc::new(SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
-        "mentra-memory-rollback-test-{}.sqlite",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    ))));
+    let store = Arc::new(VolatileRuntimeStore::new());
     let mut memory = AgentMemory::new("agent-test", store, AgentMemoryState::default());
 
     memory
@@ -100,13 +88,7 @@ fn rollback_and_compaction_update_memory_state() {
 // `agent::tests::runtime_resume::resumed_agent_keeps_tool_result_details_after_restart`.
 #[test]
 fn append_message_with_details_attaches_metadata_keyed_by_tool_use_id() {
-    let store = Arc::new(SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
-        "mentra-memory-details-test-{}.sqlite",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    ))));
+    let store = Arc::new(VolatileRuntimeStore::new());
     let mut memory = AgentMemory::new("agent-details", store, AgentMemoryState::default());
 
     memory

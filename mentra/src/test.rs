@@ -1,6 +1,9 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,10 +19,14 @@ use crate::{
         ProviderEventStream, ProviderId, Request, Response, Role,
         provider_event_stream_from_response,
     },
-    runtime::PreExecutionHook,
-    runtime::SqliteRuntimeStore,
+    runtime::{PreExecutionHook, SqliteRuntimeStore, VolatileRuntimeStore},
     tool::ToolAuthorizer,
 };
+
+/// Disambiguates mock runtimes built within one clock tick. The wall clock
+/// alone is not a source of uniqueness: two builds can read the same
+/// nanosecond, and did.
+static NEXT_MOCK_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum MockTurn {
@@ -51,6 +58,13 @@ impl MockToolCall {
     }
 }
 
+/// A runtime whose provider replies from a script, for tests that need a real
+/// runtime without a real model.
+///
+/// State lives in a [`VolatileRuntimeStore`] unless
+/// [`MockRuntimeBuilder::with_store`] says otherwise: a mock writes nothing to
+/// disk, and two mocks never share anything. Dropping one leaves no file to
+/// clean up.
 pub struct MockRuntime {
     runtime: Runtime,
     provider: ScriptedProvider,
@@ -87,7 +101,11 @@ pub struct MockRuntimeBuilder {
 
 impl Default for MockRuntimeBuilder {
     fn default() -> Self {
-        let runtime_identifier = format!("mock-runtime-{}", now_nanos());
+        let runtime_identifier = format!(
+            "mock-runtime-{}-{}",
+            now_nanos(),
+            NEXT_MOCK_RUNTIME_ID.fetch_add(1, Ordering::Relaxed)
+        );
         Self {
             model: ModelInfo::new("mock-model", BuiltinProvider::OpenAI),
             turns: Vec::new(),
@@ -111,6 +129,13 @@ impl MockRuntimeBuilder {
         self
     }
 
+    /// Runs the scripted runtime against a SQLite store instead of the
+    /// volatile default, for a test that needs state to outlive the
+    /// `MockRuntime` — reopening the same path from a second runtime to
+    /// exercise resume, or inspecting the database directly.
+    ///
+    /// The caller owns the path, and therefore owns cleaning it up. The
+    /// default leaves nothing to clean up.
     pub fn with_store(mut self, store: SqliteRuntimeStore) -> Self {
         self.store = Some(store);
         self
@@ -179,17 +204,20 @@ impl MockRuntimeBuilder {
         let provider = ScriptedProvider::new(self.model.provider.clone(), vec![self.model.clone()]);
         provider.push_turns(self.turns);
 
-        let store = self.store.unwrap_or_else(|| {
-            let store_path =
-                std::env::temp_dir().join(format!("mentra-mock-runtime-{}.sqlite", now_nanos()));
-            SqliteRuntimeStore::new(store_path)
-        });
-
         let mut builder = Runtime::builder()
             .with_runtime_identifier(self.runtime_identifier)
-            .with_store(store)
             .with_policy(self.policy)
             .with_provider_instance(provider.clone());
+
+        // A scripted runtime is ephemeral by definition, so its store is too.
+        // The default used to be a SQLite file named after the current
+        // nanosecond in the system temp directory, which left one file behind
+        // per mock and — when two mocks read the same tick — handed both the
+        // same database, where the second one's agent lease was already held.
+        builder = match self.store {
+            Some(store) => builder.with_store(store),
+            None => builder.with_store(VolatileRuntimeStore::new()),
+        };
 
         if let Some(hook) = self.pre_hook {
             builder = builder.with_pre_hook(hook);
@@ -586,5 +614,102 @@ mod tests {
             blocked,
             "a hook installed on the mock must actually be consulted by the runtime"
         );
+    }
+
+    /// How many mock-runtime databases the system temp directory holds right
+    /// now. Counted as a delta rather than asserted at zero, because a machine
+    /// that ran the old default has thousands of them left over and the point
+    /// is that this run adds none.
+    fn mock_runtime_files_in_temp() -> usize {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("mentra-mock-runtime")
+            })
+            .count()
+    }
+
+    /// The default store used to be a SQLite file in the system temp
+    /// directory, one per mock, named after the current nanosecond and never
+    /// deleted. A full downstream suite left dozens behind per run; one dev
+    /// machine had accumulated 38,782.
+    #[tokio::test]
+    async fn a_default_mock_runtime_writes_nothing_to_disk() {
+        let before = mock_runtime_files_in_temp();
+
+        let mock = MockRuntime::builder().text("hello").build().unwrap();
+        let mut agent = spawn_agent(&mock).await;
+        agent
+            .send(vec![ContentBlock::text("hi")])
+            .await
+            .expect("a scripted turn completes without a store on disk");
+
+        assert_eq!(
+            mock_runtime_files_in_temp(),
+            before,
+            "a mock runtime must leave nothing in {}",
+            std::env::temp_dir().display()
+        );
+    }
+
+    /// Two mocks built inside one nanosecond used to be handed the same
+    /// database file. Agent ids are unique only within a process, so two test
+    /// binaries running concurrently could mint the same id against that
+    /// shared file — and the second `spawn` failed with `LeaseUnavailable`,
+    /// the mechanism behind a downstream flake nobody could reproduce.
+    /// Independent stores make the collision unreachable rather than rare.
+    #[tokio::test]
+    async fn mock_runtimes_built_back_to_back_do_not_share_a_store() {
+        let first = MockRuntime::builder()
+            .runtime_identifier("shared-identifier")
+            .text("from the first")
+            .build()
+            .unwrap();
+        let second = MockRuntime::builder()
+            .runtime_identifier("shared-identifier")
+            .text("from the second")
+            .build()
+            .unwrap();
+
+        // Both spawns take an agent lease. Against one shared store, the
+        // second is the one that would be refused.
+        let mut first_agent = spawn_agent(&first).await;
+        let mut second_agent = spawn_agent(&second).await;
+
+        assert_eq!(
+            first_agent
+                .send(vec![ContentBlock::text("hi")])
+                .await
+                .expect("the first mock runs")
+                .text(),
+            "from the first"
+        );
+        assert_eq!(
+            second_agent
+                .send(vec![ContentBlock::text("hi")])
+                .await
+                .expect("the second mock runs")
+                .text(),
+            "from the second"
+        );
+
+        // Same runtime identifier, so anything they shared would show up here.
+        for mock in [&first, &second] {
+            let agents = mock
+                .runtime()
+                .list_persisted_agents("shared-identifier")
+                .expect("lists persisted agents");
+            assert_eq!(
+                agents.len(),
+                1,
+                "each mock keeps its own store, so it sees only its own agent"
+            );
+        }
     }
 }
