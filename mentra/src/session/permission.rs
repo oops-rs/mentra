@@ -30,6 +30,24 @@ pub struct PermissionRequest {
 /// What a refusal says when the deciding layer offered no reason of its own.
 const DENIED_BY_SESSION_APPROVER: &str = "denied by session approver";
 
+/// What a remembered refusal says when the rule it was stored as kept no reason.
+const BLOCKED_BY_REMEMBERED_RULE: &str = "blocked by remembered session rule";
+
+/// What the model reads when a remembered rule refuses a call.
+///
+/// The words the host first refused with come back in front, because they are
+/// the part that says what to do instead; the rest says the answer is standing,
+/// because a model told only that something was blocked asks again, and asking
+/// again is the one thing that cannot change a remembered rule.
+fn remembered_denial(reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!(
+            "{reason} — remembered from an earlier refusal, so asking again will not change it"
+        ),
+        None => BLOCKED_BY_REMEMBERED_RULE.to_string(),
+    }
+}
+
 /// The response to a permission request from the UI layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionDecision {
@@ -108,6 +126,21 @@ pub struct RememberedRule {
     pub key: RuleKey,
     pub allow: bool,
     pub scope: PermissionRuleScope,
+    /// Why the remembered refusal refused, in the words the model will read.
+    ///
+    /// A remembered rule answers every later call itself, without ever
+    /// reaching the approver again, so a rule that keeps the verdict and drops
+    /// the reason lets the host explain itself exactly once: every repeat after
+    /// that reads only that something was blocked. Written from
+    /// [`PermissionDecision::reason`] when the remembered decision is a
+    /// refusal, and left unset for an allow, which explains itself by
+    /// happening. A refusal that kept no reason still reads "blocked by
+    /// remembered session rule" as it always has.
+    ///
+    /// `serde(default)` keeps rules persisted before this field existed
+    /// deserializing unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Thread-safe in-memory store for remembered permission rules.
@@ -141,11 +174,27 @@ impl RuleStore {
     /// Pattern rules are matched against `input_json` using glob syntax and
     /// take precedence over bare (no-pattern) rules. Returns `Some(true)` if
     /// allowed, `Some(false)` if denied, or `None` if no matching rule exists.
+    /// Use [`RuleStore::matching_rule`] when the rule's own reason matters.
     pub fn check(&self, tool_name: &str, input_json: Option<&str>) -> Option<bool> {
+        self.matching_rule(tool_name, input_json)
+            .map(|rule| rule.allow)
+    }
+
+    /// The remembered rule that answers a call, if one does.
+    ///
+    /// Matches exactly as [`RuleStore::check`] does — pattern rules against
+    /// `input_json` by glob, taking precedence over bare (no-pattern) rules —
+    /// and hands back the whole rule, so a refusal can restate the reason it
+    /// was remembered with rather than only its verdict.
+    pub fn matching_rule(
+        &self,
+        tool_name: &str,
+        input_json: Option<&str>,
+    ) -> Option<RememberedRule> {
         let rules = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
-        let mut pattern_match: Option<bool> = None;
-        let mut bare_match: Option<bool> = None;
+        let mut pattern_match: Option<&RememberedRule> = None;
+        let mut bare_match: Option<&RememberedRule> = None;
 
         for rule in rules.values() {
             if rule.key.tool_name != tool_name {
@@ -156,16 +205,16 @@ impl RuleStore {
                     if let Some(json) = input_json
                         && glob_match::glob_match(glob, json)
                     {
-                        pattern_match = Some(rule.allow);
+                        pattern_match = Some(rule);
                     }
                 }
                 None => {
-                    bare_match = Some(rule.allow);
+                    bare_match = Some(rule);
                 }
             }
         }
 
-        pattern_match.or(bare_match)
+        pattern_match.or(bare_match).cloned()
     }
 
     /// Returns all remembered rules as a vector.
@@ -253,14 +302,16 @@ impl ToolAuthorizer for SessionToolAuthorizer {
         request: &ToolAuthorizationRequest,
     ) -> Result<ToolAuthorizationDecision, RuntimeError> {
         let input_json = serde_json::to_string(&request.preview.structured_input).ok();
-        if let Some(allow) = self
+        if let Some(rule) = self
             .rule_store
-            .check(&request.tool_name, input_json.as_deref())
+            .matching_rule(&request.tool_name, input_json.as_deref())
         {
-            return Ok(if allow {
+            return Ok(if rule.allow {
                 ToolAuthorizationDecision::allow()
             } else {
-                ToolAuthorizationDecision::deny("blocked by remembered session rule")
+                // The approver is not consulted again, so the rule is the only
+                // place the original reason can still come from.
+                ToolAuthorizationDecision::deny(remembered_denial(rule.reason.as_deref()))
             });
         }
 
@@ -343,6 +394,24 @@ mod tests {
             _request: &ToolAuthorizationRequest,
         ) -> Result<ToolAuthorizationDecision, RuntimeError> {
             Ok(ToolAuthorizationDecision::prompt("needs manual review"))
+        }
+    }
+
+    /// Refuses in words no remembered rule would use, so a call that reached
+    /// the approver shows up as a wrong string rather than as a test that
+    /// blocks forever waiting for an answer nobody will give.
+    #[derive(Clone)]
+    struct ApproverOfLastResort;
+
+    #[async_trait]
+    impl ToolAuthorizer for ApproverOfLastResort {
+        async fn authorize(
+            &self,
+            _request: &ToolAuthorizationRequest,
+        ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+            Ok(ToolAuthorizationDecision::deny(
+                "the approver was asked again",
+            ))
         }
     }
 
@@ -492,6 +561,104 @@ mod tests {
         );
     }
 
+    /// Answers one authorize call from `store` alone. The approver behind it
+    /// refuses in its own words, so a rule that failed to answer is visible.
+    async fn answered_by_rule(store: RuleStore) -> ToolAuthorizationDecision {
+        let (event_tx, _rx) = broadcast::channel(8);
+        let authorizer = SessionToolAuthorizer::new(
+            Some(Arc::new(ApproverOfLastResort)),
+            event_tx,
+            PendingPermissionStore::new(),
+            store,
+        );
+
+        authorizer
+            .authorize(&sample_request())
+            .await
+            .expect("authorization should resolve")
+    }
+
+    /// A bare `shell` rule for the session, remembered with `reason` or without.
+    fn shell_rule(allow: bool, reason: Option<&str>) -> RememberedRule {
+        RememberedRule {
+            key: RuleKey {
+                tool_name: "shell".to_owned(),
+                pattern: None,
+            },
+            allow,
+            scope: PermissionRuleScope::Session,
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remembered_refusal_restates_the_reason_it_was_remembered_with() {
+        // Nothing asks the approver a second time, so the rule is the only
+        // thing left that knows why the first answer was no.
+        let store = RuleStore::new();
+        store.add_rule(shell_rule(false, Some("this run does not allow writes")));
+
+        let decision = answered_by_rule(store).await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Deny);
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some(
+                "this run does not allow writes — remembered from an earlier refusal, so asking again will not change it"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_remembered_without_a_reason_keeps_the_standing_wording() {
+        let store = RuleStore::new();
+        store.add_rule(shell_rule(false, None));
+
+        let decision = answered_by_rule(store).await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Deny);
+        assert_eq!(decision.reason.as_deref(), Some(BLOCKED_BY_REMEMBERED_RULE));
+    }
+
+    #[tokio::test]
+    async fn a_remembered_allow_answers_without_words() {
+        // Nothing writes a reason onto an allow, but the type permits one, and
+        // an allowed call still explains itself by happening.
+        let store = RuleStore::new();
+        store.add_rule(shell_rule(true, Some("should never be read")));
+
+        let decision = answered_by_rule(store).await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Allow);
+        assert_eq!(decision.reason, None);
+    }
+
+    #[test]
+    fn matching_rule_hands_back_the_reason_of_the_rule_that_won() {
+        // Precedence decides which reason the model reads, so the pattern
+        // rule's words must come back rather than the bare rule's.
+        let store = RuleStore::new();
+        store.add_rule(shell_rule(false, Some("shell is refused in this run")));
+        store.add_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: "shell".to_owned(),
+                pattern: Some("**cargo test**".to_owned()),
+            },
+            allow: false,
+            scope: PermissionRuleScope::Session,
+            reason: Some("the test suite is not run from inside a run".to_owned()),
+        });
+
+        let matched = store
+            .matching_rule("shell", Some(r#"{"command":"cargo test"}"#))
+            .expect("a rule should match");
+
+        assert_eq!(
+            matched.reason.as_deref(),
+            Some("the test suite is not run from inside a run")
+        );
+    }
+
     #[test]
     fn check_matches_tool_name_without_pattern() {
         let store = RuleStore::new();
@@ -502,6 +669,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         });
         // Bare rule (no pattern) matches regardless of input_json content.
         assert_eq!(
@@ -521,6 +689,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         });
         assert_eq!(
             store.check("shell", Some(r#"{"command":"cargo test"}"#)),
@@ -538,6 +707,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         });
         // Pattern rule is ignored when input is None — no bare rule either,
         // so result must be None.
@@ -555,6 +725,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         });
         // Pattern rule: deny when input matches.
         // Use ** so path separators inside the JSON string are matched.
@@ -565,6 +736,7 @@ mod tests {
             },
             allow: false,
             scope: PermissionRuleScope::Session,
+            reason: None,
         });
         // Pattern match should win over the bare allow.
         assert_eq!(
@@ -584,6 +756,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         });
         // Non-matching input yields None (no bare fallback).
         assert_eq!(store.check("shell", Some(r#"{"command":"ls"}"#)), None);

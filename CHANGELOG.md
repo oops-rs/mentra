@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### A remembered refusal says why, every time
+
+- A rule remembered from a denial kept the verdict and its scope but not the
+  reason, so the host explained itself exactly once: the first refusal carried
+  the approver's words, and every call the rule answered afterwards read only
+  "blocked by remembered session rule" — nothing actionable in it, and nothing
+  to stop the model from asking again. `RememberedRule` now carries the
+  refusal's reason, written at remember time, and a remembered denial reads it
+  back: "«the original reason» — remembered from an earlier refusal, so asking
+  again will not change it."
+- Allows stay reasonless on purpose — an allow explains itself by happening.
+  Rules persisted before the field existed load as reasonless and deny with
+  the generic message they always had; the SQLite store grows the nullable
+  column on open by the same migration pattern `project_id` used, and a
+  database written by the new code still opens under old code, whose queries
+  name their columns.
+
 ### A typed turn can keep its tools
 
 - A turn that answers into a schema used to hold exactly one tool: the

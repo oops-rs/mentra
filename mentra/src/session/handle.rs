@@ -111,6 +111,14 @@ impl SessionPermissionHandle {
                 },
                 allow: decision.allow,
                 scope,
+                // Only a refusal has anything left to say: this call's reason
+                // reaches the model as its tool result, and every later call
+                // the rule answers has nothing else to read.
+                reason: if decision.allow {
+                    None
+                } else {
+                    decision.reason.clone()
+                },
             });
 
             let store = self

@@ -737,7 +737,8 @@ impl SqliteRuntimeStore {
                 tool_name TEXT NOT NULL,
                 pattern TEXT,
                 allow INTEGER NOT NULL,
-                scope TEXT NOT NULL
+                scope TEXT NOT NULL,
+                reason TEXT
             );
             CREATE TABLE IF NOT EXISTS long_term_memory (
                 record_id TEXT PRIMARY KEY,
@@ -780,6 +781,13 @@ impl SqliteRuntimeStore {
 
         if !schema_sql.contains("project_id") {
             conn.execute_batch("ALTER TABLE permission_rules ADD COLUMN project_id TEXT;")
+                .map_err(sqlite_error)?;
+        }
+
+        // Rules written before a refusal could carry its reason have no such
+        // column; they gain a nullable one and keep loading as reasonless.
+        if !schema_sql.contains("reason") {
+            conn.execute_batch("ALTER TABLE permission_rules ADD COLUMN reason TEXT;")
                 .map_err(sqlite_error)?;
         }
 
@@ -1279,8 +1287,8 @@ impl PermissionRuleStore for SqliteRuntimeStore {
             let scope_str = to_json(&rule.scope)?;
             tx.execute(
                 r#"
-                INSERT INTO permission_rules (session_id, project_id, tool_name, pattern, allow, scope)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                INSERT INTO permission_rules (session_id, project_id, tool_name, pattern, allow, scope, reason)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
                 params![
                     session_id,
@@ -1289,6 +1297,7 @@ impl PermissionRuleStore for SqliteRuntimeStore {
                     rule.key.pattern,
                     rule.allow as i32,
                     scope_str,
+                    rule.reason,
                 ],
             )
             .map_err(sqlite_error)?;
@@ -1312,15 +1321,15 @@ impl PermissionRuleStore for SqliteRuntimeStore {
         // UNION of session-scoped, project-scoped (if project_id provided),
         // and global-scoped rules.
         let sql = r#"
-            SELECT tool_name, pattern, allow, scope
+            SELECT tool_name, pattern, allow, scope, reason
             FROM permission_rules
             WHERE session_id = ?1 AND scope = ?2
             UNION
-            SELECT tool_name, pattern, allow, scope
+            SELECT tool_name, pattern, allow, scope, reason
             FROM permission_rules
             WHERE project_id IS NOT NULL AND project_id = ?3 AND scope = ?4
             UNION
-            SELECT tool_name, pattern, allow, scope
+            SELECT tool_name, pattern, allow, scope, reason
             FROM permission_rules
             WHERE scope = ?5
         "#;
@@ -1346,6 +1355,7 @@ impl PermissionRuleStore for SqliteRuntimeStore {
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, i32>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
@@ -1353,12 +1363,13 @@ impl PermissionRuleStore for SqliteRuntimeStore {
 
         let mut rules = Vec::new();
         for row in rows {
-            let (tool_name, pattern, allow, scope_str) = row.map_err(sqlite_error)?;
+            let (tool_name, pattern, allow, scope_str, reason) = row.map_err(sqlite_error)?;
             let scope: PermissionRuleScope = from_json(&scope_str)?;
             rules.push(RememberedRule {
                 key: RuleKey { tool_name, pattern },
                 allow: allow != 0,
                 scope,
+                reason,
             });
         }
         Ok(rules)
@@ -2029,6 +2040,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         };
         // Project-scoped rule saved under session-1 with an explicit project_id.
         let project_rule = RememberedRule {
@@ -2038,6 +2050,7 @@ mod tests {
             },
             allow: false,
             scope: PermissionRuleScope::Project,
+            reason: None,
         };
 
         store
@@ -2080,6 +2093,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         }];
 
         store
@@ -2107,6 +2121,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         }];
         // session-b uses a project-scoped rule (not global) so it doesn't show
         // up when loading session-a without a matching project_id.
@@ -2117,6 +2132,7 @@ mod tests {
             },
             allow: false,
             scope: PermissionRuleScope::Project,
+            reason: None,
         }];
 
         store
@@ -2151,6 +2167,7 @@ mod tests {
             },
             allow: true,
             scope: PermissionRuleScope::Session,
+            reason: None,
         }];
 
         store
@@ -2165,6 +2182,7 @@ mod tests {
             },
             allow: false,
             scope: PermissionRuleScope::Session,
+            reason: None,
         }];
 
         store
@@ -2186,5 +2204,79 @@ mod tests {
             .load_rules("nonexistent", None)
             .expect("load unknown session");
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn a_remembered_refusal_keeps_its_reason_across_a_restart() {
+        use crate::session::PermissionRuleScope;
+
+        let store = permission_store();
+        let refusal = RememberedRule {
+            key: RuleKey {
+                tool_name: "shell".to_string(),
+                pattern: None,
+            },
+            allow: false,
+            scope: PermissionRuleScope::Session,
+            reason: Some("this run does not allow writes".to_string()),
+        };
+
+        store
+            .save_rules("session-1", None, &[refusal])
+            .expect("save refusal");
+
+        // A fresh handle on the same file, as a restarted process would open.
+        let reopened = SqliteRuntimeStore::new(store.path());
+        let loaded = reopened
+            .load_rules("session-1", None)
+            .expect("load refusal");
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].reason.as_deref(),
+            Some("this run does not allow writes")
+        );
+    }
+
+    #[test]
+    fn a_rule_stored_before_the_reason_column_loads_without_one() {
+        use crate::session::PermissionRuleScope;
+
+        let store = permission_store();
+        // permission_rules as it stood before a refusal could carry its
+        // reason, written straight to the file the store is about to open.
+        {
+            let conn = Connection::open(store.path()).expect("open a pre-migration database");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE permission_rules (
+                    session_id TEXT NOT NULL,
+                    project_id TEXT,
+                    tool_name TEXT NOT NULL,
+                    pattern TEXT,
+                    allow INTEGER NOT NULL,
+                    scope TEXT NOT NULL
+                );
+                INSERT INTO permission_rules (session_id, project_id, tool_name, pattern, allow, scope)
+                VALUES ('session-1', NULL, 'shell', NULL, 0, '"session"');
+                "#,
+            )
+            .expect("write a rule in the old shape");
+        }
+
+        let loaded = store.load_rules("session-1", None).expect("load rules");
+
+        assert_eq!(
+            loaded.len(),
+            1,
+            "opening the database must not lose the row"
+        );
+        assert_eq!(loaded[0].key.tool_name, "shell");
+        assert!(!loaded[0].allow);
+        assert_eq!(loaded[0].scope, PermissionRuleScope::Session);
+        assert_eq!(
+            loaded[0].reason, None,
+            "a rule remembered before reasons existed has none to restate"
+        );
     }
 }

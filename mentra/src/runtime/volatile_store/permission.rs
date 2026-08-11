@@ -92,6 +92,7 @@ mod tests {
             },
             allow,
             scope,
+            reason: None,
         }
     }
 
@@ -163,5 +164,26 @@ mod tests {
         let loaded = store.load_rules("session-1", None).expect("load rules");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].key.tool_name, "write");
+    }
+
+    #[test]
+    fn a_remembered_refusal_keeps_its_reason() {
+        let store = VolatileRuntimeStore::new();
+        let refusal = RememberedRule {
+            reason: Some("this run does not allow writes".to_string()),
+            ..rule("write", false, PermissionRuleScope::Session)
+        };
+
+        store
+            .save_rules("session-1", None, &[refusal])
+            .expect("save refusal");
+
+        let loaded = store.load_rules("session-1", None).expect("load refusal");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].reason.as_deref(),
+            Some("this run does not allow writes"),
+            "the volatile store answers a remembered refusal the same as the persistent one"
+        );
     }
 }

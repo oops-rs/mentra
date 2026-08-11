@@ -530,6 +530,7 @@ fn rule_store_add_and_check_allow() {
         },
         allow: true,
         scope: PermissionRuleScope::Session,
+        reason: None,
     });
     assert_eq!(store.check("shell", None), Some(true));
 }
@@ -544,6 +545,7 @@ fn rule_store_add_and_check_deny() {
         },
         allow: false,
         scope: PermissionRuleScope::Project,
+        reason: None,
     });
     assert_eq!(store.check("shell", None), Some(false));
 }
@@ -558,6 +560,7 @@ fn rule_store_overwrite_replaces_rule() {
         },
         allow: true,
         scope: PermissionRuleScope::Session,
+        reason: None,
     });
     assert_eq!(store.check("shell", None), Some(true));
 
@@ -568,6 +571,7 @@ fn rule_store_overwrite_replaces_rule() {
         },
         allow: false,
         scope: PermissionRuleScope::Session,
+        reason: None,
     });
     assert_eq!(store.check("shell", None), Some(false));
 }
@@ -582,6 +586,7 @@ fn rule_store_clear_scope_removes_matching_rules() {
         },
         allow: true,
         scope: PermissionRuleScope::Session,
+        reason: None,
     });
     store.add_rule(RememberedRule {
         key: RuleKey {
@@ -590,6 +595,7 @@ fn rule_store_clear_scope_removes_matching_rules() {
         },
         allow: true,
         scope: PermissionRuleScope::Global,
+        reason: None,
     });
 
     store.clear_scope(PermissionRuleScope::Session);
@@ -610,6 +616,7 @@ fn rule_store_rules_returns_all_entries() {
         },
         allow: true,
         scope: PermissionRuleScope::Session,
+        reason: None,
     });
     store.add_rule(RememberedRule {
         key: RuleKey {
@@ -618,6 +625,7 @@ fn rule_store_rules_returns_all_entries() {
         },
         allow: false,
         scope: PermissionRuleScope::Project,
+        reason: None,
     });
 
     assert_eq!(store.rules().len(), 2);
@@ -678,6 +686,74 @@ async fn resolve_permission_emits_event_and_sends_decision() {
     let rules = session.remembered_rules();
     assert_eq!(rules.len(), 1);
     assert!(rules[0].allow);
+}
+
+/// Registers one pending permission on `session` and answers it with
+/// `decision`, returning the rules the session remembered as a result.
+async fn remembered_after(
+    session: &crate::session::Session,
+    decision: PermissionDecision,
+) -> Vec<crate::session::RememberedRule> {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    session.pending_permissions.insert(
+        "perm-1".to_owned(),
+        crate::session::permission::PendingPermissionEntry {
+            tool_call_id: "tc-1".to_owned(),
+            tool_name: "shell".to_owned(),
+            sender: tx,
+        },
+    );
+    session
+        .resolve_permission("perm-1", decision)
+        .expect("the pending permission should resolve");
+    session.remembered_rules()
+}
+
+#[tokio::test]
+async fn a_remembered_refusal_keeps_the_reason_it_was_refused_with() {
+    // The approver answers once; the rule answers every time after that, so
+    // the reason has to survive into the rule or it is said only once.
+    let mock = MockRuntime::builder().text("hi").build().unwrap();
+    let session = mock
+        .runtime()
+        .create_session("perm-reason", mock.model())
+        .unwrap();
+
+    let rules = remembered_after(
+        &session,
+        PermissionDecision::deny_and_remember(PermissionRuleScope::Session)
+            .with_reason("this run does not allow writes"),
+    )
+    .await;
+
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        rules[0].reason.as_deref(),
+        Some("this run does not allow writes")
+    );
+}
+
+#[tokio::test]
+async fn a_remembered_allow_keeps_no_reason() {
+    let mock = MockRuntime::builder().text("hi").build().unwrap();
+    let session = mock
+        .runtime()
+        .create_session("perm-reason-allow", mock.model())
+        .unwrap();
+
+    let rules = remembered_after(
+        &session,
+        PermissionDecision::allow_and_remember(PermissionRuleScope::Session)
+            .with_reason("allowed for the session"),
+    )
+    .await;
+
+    assert_eq!(rules.len(), 1);
+    assert!(rules[0].allow);
+    assert_eq!(
+        rules[0].reason, None,
+        "an allowed call explains itself by happening"
+    );
 }
 
 #[tokio::test]
@@ -2069,6 +2145,7 @@ async fn load_rules_with_project_id_returns_all_applicable_scopes() {
         },
         allow: true,
         scope: PermissionRuleScope::Session,
+        reason: None,
     };
 
     // Project-scoped rule: saved under a different session but same project_id.
@@ -2079,6 +2156,7 @@ async fn load_rules_with_project_id_returns_all_applicable_scopes() {
         },
         allow: true,
         scope: PermissionRuleScope::Project,
+        reason: None,
     };
 
     // Global-scoped rule: saved under yet another session, no project.
@@ -2089,6 +2167,7 @@ async fn load_rules_with_project_id_returns_all_applicable_scopes() {
         },
         allow: false,
         scope: PermissionRuleScope::Global,
+        reason: None,
     };
 
     // Save session-scoped rule under session-main with project_id.
@@ -2191,6 +2270,7 @@ async fn project_scoped_rules_are_visible_across_sessions() {
         },
         allow: true,
         scope: PermissionRuleScope::Project,
+        reason: None,
     };
 
     // Session-1 saves a project-scoped rule for "my-project".
@@ -2240,6 +2320,7 @@ async fn global_scoped_rules_are_visible_to_all_sessions() {
         },
         allow: false,
         scope: PermissionRuleScope::Global,
+        reason: None,
     };
 
     // Session-1 saves a global rule (no project_id).
@@ -2290,6 +2371,7 @@ async fn session_scoped_rules_are_not_visible_to_other_sessions() {
         },
         allow: true,
         scope: PermissionRuleScope::Session,
+        reason: None,
     };
 
     // Session-1 saves a session-scoped rule.
