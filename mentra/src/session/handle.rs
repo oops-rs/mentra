@@ -506,10 +506,35 @@ impl Session {
     /// The subagent is registered with the parent agent, a `SubagentSpawned` event is emitted,
     /// and the subagent runs its prompt in a detached `tokio::spawn`. When it completes, a
     /// `SessionEvent::TaskUpdated` event is broadcast with the final status.
+    ///
+    /// The subagent runs on [`RunOptions::default`]: this is a host-initiated
+    /// spawn with no session turn necessarily in flight, so there is no parent
+    /// run whose bounds it could inherit. A host that wants the subagent to
+    /// share a turn's cancellation and token accounting passes that turn's
+    /// [`RunOptions::child`] to
+    /// [`spawn_subagent_with_options`](Self::spawn_subagent_with_options)
+    /// instead. This is the opposite of the model-facing `task` intrinsic,
+    /// which always inherits because it can only run *inside* a parent run.
     pub async fn spawn_subagent(
         &mut self,
         name: &str,
         prompt: &str,
+    ) -> Result<SubagentHandle, RuntimeError> {
+        self.spawn_subagent_with_options(name, prompt, RunOptions::default())
+            .await
+    }
+
+    /// Spawns a disposable subagent that runs on caller-supplied `options`.
+    ///
+    /// Pass a turn's [`RunOptions::child`] to put the subagent under that
+    /// turn's cancellation, stop, deadline, and shared token accounting. The
+    /// subagent is detached, so those bounds are the only thing tying its
+    /// lifetime to the turn's.
+    pub async fn spawn_subagent_with_options(
+        &mut self,
+        name: &str,
+        prompt: &str,
+        options: RunOptions,
     ) -> Result<SubagentHandle, RuntimeError> {
         let mut subagent = self.agent.spawn_subagent()?;
         let agent_id = subagent.id().to_string();
@@ -530,7 +555,7 @@ impl Session {
 
         tokio::spawn(async move {
             let result = subagent
-                .send(vec![ContentBlock::Text { text: prompt_text }])
+                .run(vec![ContentBlock::Text { text: prompt_text }], options)
                 .await;
 
             let (status, detail) = match &result {

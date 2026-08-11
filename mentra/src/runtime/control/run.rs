@@ -127,9 +127,15 @@ impl RunOptions {
     /// resets to [`RunOptions::default`]: those express per-run policy a child
     /// sets independently, not an aggregate safety bound.
     ///
-    /// mentra does not itself spawn a child run from a parent's `Agent::run` call
-    /// — a host drives both. Call this when threading `RunOptions` into a
-    /// subagent's or delegated run's own `Agent::run`/`resume` call.
+    /// mentra applies this itself on exactly one path: the `task` intrinsic's
+    /// delegated subagent runs on the parent run's derived child options, so a
+    /// model that delegates work cannot spend outside the bounds its own run was
+    /// given. Every other subagent path is host-driven — call this when
+    /// threading `RunOptions` into a subagent's or delegated run's own
+    /// `Agent::run`/`resume` call, including through
+    /// [`Session::spawn_subagent_with_options`](crate::Session::spawn_subagent_with_options)
+    /// and, for a custom tool that spawns its own subagent,
+    /// [`ToolContext::child_run_options`](crate::tool::ToolContext::child_run_options).
     pub fn child(&self) -> RunOptions {
         RunOptions {
             cancellation: self.cancellation.clone(),

@@ -2313,3 +2313,91 @@ async fn session_scoped_rules_are_not_visible_to_other_sessions() {
 
     let _ = std::fs::remove_file(&store_path);
 }
+
+// ---- Host-facing subagent spawning ----
+
+/// Waits for the terminal `TaskUpdated` a detached subagent broadcasts when it
+/// finishes, skipping the `Spawned` notice.
+async fn next_subagent_outcome(
+    events: &mut crate::session::SessionEventReceiver,
+) -> (TaskLifecycleStatus, Option<String>) {
+    let deadline = std::time::Duration::from_secs(10);
+    tokio::time::timeout(deadline, async {
+        loop {
+            match events.recv().await.unwrap() {
+                SessionEvent::TaskUpdated {
+                    kind: TaskKind::Subagent,
+                    status,
+                    detail,
+                    ..
+                } if status != TaskLifecycleStatus::Spawned => return (status, detail),
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("a detached subagent must broadcast a terminal status")
+}
+
+#[tokio::test]
+async fn spawn_subagent_runs_on_default_options() {
+    // Host-facing and deliberately uninherited: this spawn is not made from
+    // inside a parent run, so there are no in-flight bounds to share. The
+    // opposite of the model-facing `task` intrinsic, which can only run inside
+    // one and always inherits.
+    let mock = MockRuntime::builder()
+        .text("subagent answer")
+        .build()
+        .unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("host-spawn", mock.model())
+        .unwrap();
+    let mut events = session.subscribe();
+
+    session.spawn_subagent("research", "go").await.unwrap();
+
+    let (status, detail) = next_subagent_outcome(&mut events).await;
+    assert_eq!(status, TaskLifecycleStatus::Finished);
+    assert_eq!(detail.as_deref(), Some("subagent answer"));
+}
+
+#[tokio::test]
+async fn spawn_subagent_with_options_puts_the_subagent_under_them() {
+    // The opt-in variant is how a host reaches `RunOptions::child` for a
+    // detached subagent. Tripped before the spawn so the outcome does not depend
+    // on winning a race with the provider.
+    let mock = MockRuntime::builder()
+        .text("never reached")
+        .build()
+        .unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("host-spawn-bounded", mock.model())
+        .unwrap();
+    let mut events = session.subscribe();
+
+    let cancellation = CancellationToken::default();
+    let turn_options = RunOptions {
+        cancellation: Some(cancellation.clone()),
+        ..RunOptions::default()
+    };
+    cancellation.cancel();
+
+    session
+        .spawn_subagent_with_options("research", "go", turn_options.child())
+        .await
+        .unwrap();
+
+    let (status, _) = next_subagent_outcome(&mut events).await;
+    assert_eq!(
+        status,
+        TaskLifecycleStatus::Failed,
+        "the supplied options must reach the detached run"
+    );
+    assert_eq!(
+        mock.recorded_requests().await.len(),
+        0,
+        "the cancelled subagent never reached the provider"
+    );
+}

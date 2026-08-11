@@ -135,7 +135,9 @@ impl ToolRuntime {
             self.tool_calls += execution_count;
 
             let executions = match batch {
-                ToolCallBatch::Exclusive(call) => vec![self.execute_one_tool(agent, call).await?],
+                ToolCallBatch::Exclusive(call) => {
+                    vec![self.execute_one_tool(agent, options, call).await?]
+                }
                 ToolCallBatch::Parallel(calls) => {
                     self.execute_parallel_batch(agent, options, calls).await?
                 }
@@ -527,7 +529,12 @@ impl ToolRuntime {
         path
     }
 
-    fn parallel_tool_context(&mut self, agent: &Agent, call: &ToolCall) -> ParallelToolContext {
+    fn parallel_tool_context(
+        &mut self,
+        agent: &Agent,
+        options: &RunOptions,
+        call: &ToolCall,
+    ) -> ParallelToolContext {
         ParallelToolContext {
             agent_id: self.agent_id.clone(),
             tool_call_id: call.id.clone(),
@@ -540,6 +547,7 @@ impl ToolRuntime {
             history_len: agent.history().len(),
             tasks: agent.tasks().to_vec(),
             event_tx: agent.event_sender(),
+            run_options: options.clone(),
         }
     }
 
@@ -635,6 +643,7 @@ impl ToolRuntime {
     async fn execute_one_tool(
         &mut self,
         agent: &mut Agent,
+        options: &RunOptions,
         call: ToolCall,
     ) -> Result<CompletedToolExecution, RuntimeError> {
         self.note_tool_started(agent, &call)?;
@@ -653,7 +662,7 @@ impl ToolRuntime {
             });
         }
 
-        Ok(self.execute_registered_tool(agent, call).await)
+        Ok(self.execute_registered_tool(agent, options, call).await)
     }
 
     async fn execute_parallel_batch(
@@ -692,7 +701,7 @@ impl ToolRuntime {
                 continue;
             };
 
-            let ctx = self.parallel_tool_context(agent, &call);
+            let ctx = self.parallel_tool_context(agent, options, &call);
             if let Some(result) = self.authorize_tool_call(&call, &tool, &ctx).await? {
                 let execution = self.completed_execution(
                     agent,
@@ -815,6 +824,7 @@ impl ToolRuntime {
     async fn execute_registered_tool(
         &mut self,
         agent: &mut Agent,
+        options: &RunOptions,
         mut call: ToolCall,
     ) -> CompletedToolExecution {
         let Some((tool, descriptor)) = self.registered_tool(&call.name) else {
@@ -836,7 +846,7 @@ impl ToolRuntime {
             };
         };
 
-        let authorization_ctx = self.parallel_tool_context(agent, &call);
+        let authorization_ctx = self.parallel_tool_context(agent, options, &call);
         match self
             .authorize_tool_call(&call, &tool, &authorization_ctx)
             .await
@@ -927,6 +937,7 @@ impl ToolRuntime {
                             runtime,
                             agent,
                             event_tx,
+                            run_options: options.clone(),
                         },
                         call.input.clone(),
                     ),

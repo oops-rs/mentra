@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Delegated work counts against the delegating run's budget
+
+- A model calling the `task` intrinsic used to get a subagent running on
+  `RunOptions::default()` — a fresh, zeroed token counter and no bounds at all.
+  Delegated tokens escaped the parent's `token_budget`, and a parent's
+  cancellation, stop, or deadline never reached the child. A run given a budget
+  could exceed it by delegating, which is the one thing a budget exists to
+  prevent. The delegated run now uses the parent run's `RunOptions::child`, so
+  parent and child trip one shared bound and one cancel ends both.
+- One edge worth knowing when you set a `token_budget`: a round is always
+  allowed to finish, so the round that crosses the bound can be the one asking
+  to delegate. The child then inherits an already-spent budget and stops before
+  its first model request, which the parent sees as a failed delegation rather
+  than an empty successful one. Delegation near the bound fails visibly instead
+  of quietly returning nothing.
+- The child's `UsageReport` events are relayed to the parent's event bus, so an
+  observer summing the parent's stream sees the same total the shared
+  accounting handle is checked against. The relayed events carry nothing
+  distinguishing them from the parent's own rounds — the aggregate is the
+  point, and `AgentEvent::UsageReport` has no agent field to put a mark in.
+- `ToolContext::child_run_options` and `ParallelToolContext::child_run_options`
+  give a custom tool that spawns a subagent the same derived options the `task`
+  intrinsic now uses. A tool that calls `Agent::send` on the child it spawned
+  still gets the old unbounded behavior; this is the one-line change that fixes
+  it.
+- `Session::spawn_subagent_with_options` runs a detached subagent under
+  caller-supplied options. Plain `Session::spawn_subagent` is unchanged and
+  still runs on defaults: it is host-initiated with no parent run in flight, so
+  there is nothing for it to inherit — pass a turn's `RunOptions::child` to the
+  new variant when you want the subagent bounded by that turn.
+- The `RunOptions::child` rustdoc claimed mentra never spawns a child run from
+  a parent's `Agent::run` call. The `task` intrinsic always contradicted that;
+  the doc now names the path that inherits and the ones a host drives.
+
 ### A session can end a turn in a typed value
 
 - `Session::append_turn_to_output<T>` is the session-level counterpart to

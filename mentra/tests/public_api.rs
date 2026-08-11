@@ -258,8 +258,10 @@ impl ToolExecutor for SubagentSummaryTool {
             .and_then(|value| value.as_str())
             .ok_or_else(|| "prompt is required".to_string())?;
         let mut child = ctx.spawn_subagent().map_err(|error| error.to_string())?;
+        // The public pattern for a custom tool that spawns work: the child runs
+        // under the parent run's derived bounds, not a fresh unbounded set.
         let message = child
-            .send(vec![ContentBlock::text(prompt)])
+            .run(vec![ContentBlock::text(prompt)], ctx.child_run_options())
             .await
             .map_err(|error| format!("child failed: {error}"))?;
         Ok(message.text())

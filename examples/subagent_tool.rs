@@ -44,8 +44,12 @@ impl ToolExecutor for DelegateSummaryTool {
             .ok_or_else(|| "prompt is required".to_string())?;
 
         let mut child = ctx.spawn_subagent().map_err(|error| error.to_string())?;
+        // Run the child on the parent run's derived options rather than `send`'s
+        // defaults, so its token usage counts against the parent's budget and a
+        // parent cancel reaches it. A custom tool that spawns work has to do
+        // this itself; the built-in `task` intrinsic already does.
         let message = child
-            .send(vec![ContentBlock::text(prompt)])
+            .run(vec![ContentBlock::text(prompt)], ctx.child_run_options())
             .await
             .map_err(|error| format!("Subagent failed: {error}"))?;
 

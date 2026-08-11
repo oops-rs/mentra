@@ -85,11 +85,29 @@ pub struct ToolContext<'a> {
     pub(crate) runtime: crate::runtime::RuntimeHandle,
     pub(crate) agent: &'a mut crate::agent::Agent,
     pub(crate) event_tx: crate::agent::AgentEventBus,
+    /// The options of the `Agent::run` call this execution is a step of.
+    /// Reachable only as [`child_run_options`](Self::child_run_options), so a
+    /// tool can share the run's aggregate bounds with work it spawns but cannot
+    /// read or edit the run's own policy.
+    pub(crate) run_options: crate::runtime::RunOptions,
 }
 
 impl ToolContext<'_> {
     pub fn working_directory(&self) -> &Path {
         self.working_directory.as_path()
+    }
+
+    /// [`RunOptions`](crate::runtime::RunOptions) for a run this tool spawns,
+    /// derived from the options of the run this tool is executing under — see
+    /// [`RunOptions::child`](crate::runtime::RunOptions::child) for what a child
+    /// inherits and what it resets.
+    ///
+    /// Thread these into the spawned run's own `Agent::run` call. A subagent
+    /// driven on `RunOptions::default()` instead gets a fresh, unbounded token
+    /// counter, so its spend escapes the parent's `token_budget` and a parent
+    /// cancel, stop, or deadline never reaches it.
+    pub fn child_run_options(&self) -> crate::runtime::RunOptions {
+        self.run_options.child()
     }
 
     /// Emit a progress event for the currently executing tool.
@@ -300,6 +318,9 @@ pub struct ParallelToolContext {
     pub(crate) history_len: usize,
     pub(crate) tasks: Vec<TaskItem>,
     pub(crate) event_tx: crate::agent::AgentEventBus,
+    /// The options of the `Agent::run` call this execution is a step of, as on
+    /// [`ToolContext::run_options`].
+    pub(crate) run_options: crate::runtime::RunOptions,
 }
 
 impl From<ToolContext<'_>> for ParallelToolContext {
@@ -316,6 +337,7 @@ impl From<ToolContext<'_>> for ParallelToolContext {
             history_len: ctx.agent.history().len(),
             tasks: ctx.agent.tasks().to_vec(),
             event_tx: ctx.event_tx,
+            run_options: ctx.run_options,
         }
     }
 }
@@ -427,6 +449,16 @@ impl ParallelToolContext {
 
     pub fn spawn_subagent(&self) -> Result<crate::agent::Agent, RuntimeError> {
         self.subagent_template.spawn()
+    }
+
+    /// [`RunOptions`](crate::runtime::RunOptions) for a run this tool spawns —
+    /// the parallel-lane counterpart of
+    /// [`ToolContext::child_run_options`], carrying the same caveat: a subagent
+    /// from [`spawn_subagent`](Self::spawn_subagent) driven on
+    /// `RunOptions::default()` gets a fresh, unbounded token counter and shares
+    /// none of the parent run's cancellation, stop, or deadline.
+    pub fn child_run_options(&self) -> crate::runtime::RunOptions {
+        self.run_options.child()
     }
 }
 

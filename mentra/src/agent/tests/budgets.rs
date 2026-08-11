@@ -1,11 +1,14 @@
 use crate::{
     BuiltinProvider, ContentBlock, Role, Runtime, TokenUsage,
+    agent::AgentEvent,
     error::RuntimeError,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     runtime::{CancellationToken, RunOptions},
 };
 
-use super::support::{ScriptedProvider, StaticTool, StreamScript, model_info, ok_stream};
+use super::support::{
+    ScriptedProvider, StaticTool, StopTrippingTool, StreamScript, model_info, ok_stream,
+};
 
 /// Builds a [`TokenUsage`] reporting only `input_tokens`/`output_tokens`, the two
 /// fields [`RunOptions::token_budget`] is evaluated against.
@@ -286,5 +289,258 @@ async fn child_usage_counts_toward_shared_token_budget() {
         child_provider_handle.recorded_requests().await.len(),
         1,
         "the shared bound halted the child before its second round"
+    );
+}
+
+/// Drains the events an agent emitted during a finished run.
+fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// The `input + output` totals of every [`AgentEvent::UsageReport`] in `events`,
+/// in the order they were emitted.
+fn reported_usage_totals(events: &[AgentEvent]) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::UsageReport {
+                input_tokens,
+                output_tokens,
+                ..
+            } => Some(input_tokens + output_tokens),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn delegated_subagent_usage_counts_against_the_parent_token_budget() {
+    // The `task` intrinsic is the one child run mentra drives itself: the model
+    // asks for it from inside the parent's run. Running it on the parent's
+    // `RunOptions::child` is what stops a model from delegating its way past the
+    // budget its own run was given — the child reports into the parent's
+    // accounting handle, and the parent ends at the next round boundary once the
+    // combined total crosses the bound.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            // Parent round 1 delegates, reporting 60 of the 100-token bound.
+            tool_use_stream_with_usage(
+                &model.id,
+                "parent-task",
+                "task",
+                r#"{"prompt":"delegate"}"#,
+                usage(40, 20),
+            ),
+            // The delegated run spends 50 more, taking the shared total to 110.
+            text_stream_with_usage(&model.id, "child summary", usage(30, 20)),
+            // Parent round 2 must never be requested.
+            text_stream_with_usage(&model.id, "parent done", usage(1, 1)),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let options = RunOptions {
+        token_budget: Some(100),
+        ..Default::default()
+    };
+    let result = agent
+        .run(vec![ContentBlock::text("delegate that")], options.clone())
+        .await;
+
+    assert_eq!(
+        options.reported_tokens(),
+        110,
+        "the delegated run must report into the parent's accounting handle, not a fresh one"
+    );
+    assert!(
+        matches!(result, Err(RuntimeError::EmptyAssistantResponse)),
+        "the parent stops gracefully at the boundary after delegated spend crossed the bound, \
+         reporting the same 'stopped before a final answer' outcome any tripped bound does"
+    );
+    assert_eq!(
+        provider_handle.recorded_requests().await.len(),
+        2,
+        "one parent round and one delegated round: the parent never got a second round"
+    );
+}
+
+#[tokio::test]
+async fn parent_cancellation_reaches_the_delegated_subagent() {
+    // The delegated run shares the parent's cancellation token, so it ends at
+    // its own next round boundary rather than running on unreachable while the
+    // parent is torn down. `cancel_probe` trips the very token the parent's
+    // options hold, so the child honoring it can only mean it inherited that
+    // token rather than a default `None`.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let cancellation = CancellationToken::default();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream_with_usage(
+                &model.id,
+                "parent-task",
+                "task",
+                r#"{"prompt":"delegate"}"#,
+                usage(1, 1),
+            ),
+            tool_use_stream_with_usage(
+                &model.id,
+                "child-tool",
+                "cancel_probe",
+                r#"{"value":"trip it"}"#,
+                usage(1, 1),
+            ),
+            // Never requested: the child checks the shared token before its
+            // second round.
+            text_stream_with_usage(&model.id, "child must not continue", usage(1, 1)),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_tool(StopTrippingTool::new("cancel_probe", cancellation.clone()))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let error = agent
+        .run(
+            vec![ContentBlock::text("delegate that")],
+            RunOptions {
+                cancellation: Some(cancellation),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a cancelled run must fail rather than finish");
+
+    assert!(matches!(error, RuntimeError::Cancelled));
+    assert_eq!(
+        provider_handle.recorded_requests().await.len(),
+        2,
+        "the child stopped at its own round boundary; without the shared token it would \
+         have run a second round before the parent ever saw the cancellation"
+    );
+}
+
+#[tokio::test]
+async fn delegated_usage_reports_reach_the_parent_event_stream() {
+    // The accounting fix alone would leave a parent's observer blind to
+    // delegated spend, since a subagent has its own event bus. Relaying the
+    // child's `UsageReport` keeps a stream that sums usage agreeing with the
+    // shared handle the budget is checked against.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream_with_usage(
+                &model.id,
+                "parent-task",
+                "task",
+                r#"{"prompt":"delegate"}"#,
+                usage(40, 20),
+            ),
+            text_stream_with_usage(&model.id, "child summary", usage(30, 20)),
+            text_stream_with_usage(&model.id, "parent done", usage(5, 5)),
+        ],
+    );
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    let options = RunOptions::default();
+    let message = agent
+        .run(vec![ContentBlock::text("delegate that")], options.clone())
+        .await
+        .expect("the run completes with no bound set");
+
+    assert_eq!(message.text(), "parent done");
+    let totals = reported_usage_totals(&collect_events(&mut events));
+    assert_eq!(
+        totals,
+        vec![60, 50, 10],
+        "the parent's stream carries the delegated round's usage between its own two rounds"
+    );
+    assert_eq!(
+        totals.iter().sum::<u64>(),
+        options.reported_tokens(),
+        "what an observer sums from the stream matches what the budget is checked against"
+    );
+}
+
+#[tokio::test]
+async fn delegating_with_the_budget_already_spent_fails_the_delegation() {
+    // A round is always allowed to finish, so the round that crosses the bound
+    // can still be the one asking to delegate. The child then inherits an
+    // already-exceeded budget and does zero rounds. That surfaces as a failed
+    // delegation the parent can see, not as a silent empty success — and the
+    // provider is never called on the child's behalf.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            // This single round spends the whole 100-token bound and delegates.
+            tool_use_stream_with_usage(
+                &model.id,
+                "parent-task",
+                "task",
+                r#"{"prompt":"delegate"}"#,
+                usage(60, 60),
+            ),
+            // Neither the child nor a second parent round may be requested.
+            text_stream_with_usage(&model.id, "must not run", usage(1, 1)),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let result = agent
+        .run(
+            vec![ContentBlock::text("delegate that")],
+            RunOptions {
+                token_budget: Some(100),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(RuntimeError::EmptyAssistantResponse)));
+    assert_eq!(
+        provider_handle.recorded_requests().await.len(),
+        1,
+        "the delegated run stopped at its first boundary without a model request"
+    );
+    let subagents = agent.watch_snapshot().borrow().subagents.clone();
+    assert_eq!(subagents.len(), 1);
+    assert!(
+        matches!(
+            &subagents[0].status,
+            crate::agent::SpawnedAgentStatus::Failed(message)
+                if message == "run completed without a final assistant message"
+        ),
+        "the exhausted delegation is recorded as failed, not finished: {:?}",
+        subagents[0].status
     );
 }

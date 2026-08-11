@@ -4,6 +4,7 @@ use crate::{
     ContentBlock,
     agent::{Agent, AgentEvent, CompactionTrigger, SpawnedAgentStatus},
     memory::{MemorySearchMode, MemorySearchRequest},
+    runtime::RunOptions,
     tool::{
         ParallelToolContext, ToolCall, ToolContext, ToolResult,
         internal::content_block_to_tool_result,
@@ -40,13 +41,14 @@ pub(super) async fn execute_mut(
                 name: runtime_intrinsic_descriptor(tool).provider.name,
                 input,
             };
+            let child_options = ctx.child_run_options();
             let block = match tool {
                 RuntimeIntrinsicTool::Compact => execute_compact(ctx.agent, call).await,
                 RuntimeIntrinsicTool::Idle => execute_idle(ctx.agent, call),
                 RuntimeIntrinsicTool::MemorySearch => unreachable!("handled above"),
                 RuntimeIntrinsicTool::MemoryPin => execute_memory_pin(ctx, call),
                 RuntimeIntrinsicTool::MemoryForget => execute_memory_forget(ctx, call),
-                RuntimeIntrinsicTool::Task => execute_task(ctx.agent, call).await,
+                RuntimeIntrinsicTool::Task => execute_task(ctx.agent, call, child_options).await,
             };
             content_block_to_tool_result("Runtime intrinsic", block)
         }
@@ -229,7 +231,14 @@ async fn execute_compact(agent: &mut Agent, call: ToolCall) -> ContentBlock {
     }
 }
 
-async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+/// Runs a delegated task on a disposable subagent.
+///
+/// `options` are the parent run's [`RunOptions::child`]: the delegated run
+/// reports its token usage into the parent's accounting handle and shares the
+/// parent's cancellation, stop, and deadline. Driving the child on
+/// `RunOptions::default()` instead would let delegated spend escape the
+/// parent's `token_budget` and leave the child running after a parent cancel.
+async fn execute_task(agent: &mut Agent, call: ToolCall, options: RunOptions) -> ContentBlock {
     match crate::agent::parse_task_input(call.input) {
         Ok(prompt) => {
             let task_summary = prompt.clone();
@@ -271,7 +280,19 @@ async fn execute_task(agent: &mut Agent, call: ToolCall) -> ContentBlock {
             let started = agent.register_subagent(&child);
             agent.emit_event(AgentEvent::SubagentSpawned { agent: started });
 
-            match Box::pin(child.send(vec![ContentBlock::Text { text: prompt }])).await {
+            // A subagent has its own event bus, so a parent's observer would
+            // otherwise see none of the delegated spend that now counts against
+            // the parent's `token_budget`. Relaying just `UsageReport` keeps the
+            // parent's stream summing to the same total the shared accounting
+            // handle reports. The guard must outlive the child's run.
+            let parent_events = agent.event_sender();
+            let _usage_relay = child.register_event_tap(move |event| {
+                if matches!(event, AgentEvent::UsageReport { .. }) {
+                    parent_events.send(event.clone());
+                }
+            });
+
+            match Box::pin(child.run(vec![ContentBlock::Text { text: prompt }], options)).await {
                 Ok(message) => {
                     let result_summary = if message.text().is_empty() {
                         child.final_text_summary()
