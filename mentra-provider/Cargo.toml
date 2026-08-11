@@ -10,10 +10,26 @@ homepage.workspace = true
 documentation = "https://docs.rs/mentra-provider"
 readme = "README.md"
 
+# `ResponsesTransport::WebSocket` is one of two transports the Responses family
+# can stream over, and the only one that needs a websocket client. HTTP+SSE is
+# the default and is what every non-OpenAI preset uses, so a host that never
+# selects the websocket transport was linking tokio-tungstenite (and the sink
+# adapters it drives) for a code path it cannot reach.
+#
+# Default-on, because that is what every existing caller already has: turning
+# it off is a deliberate choice, not something an upgrade does to you. A build
+# without it does not fall back to HTTP — asking for a transport that is not
+# compiled in is a configuration error, and `stream_response` says so.
+[features]
+default = ["responses-websocket"]
+responses-websocket = ["dep:tokio-tungstenite", "futures-util/sink"]
+
 [dependencies]
 async-trait = "0.1.89"
 base64 = "0.22.1"
-futures-util = { version = "0.3.31", features = ["sink"] }
+# `sink` only for the websocket transport's send half; the SSE readers need
+# nothing but `StreamExt`.
+futures-util = "0.3.31"
 http = "1.3.1"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
@@ -26,6 +42,6 @@ strum = { version = "0.27", features = ["derive"] }
 thiserror = "2.0.18"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.50.0", features = ["macros", "sync"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = { version = "0.28", optional = true }
 url = "2.5"
 zstd = "0.13"

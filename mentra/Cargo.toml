@@ -13,12 +13,19 @@ keywords = ["agents", "llm", "runtime", "tools", "ai"]
 categories = ["asynchronous", "development-tools"]
 
 [features]
-default = []
+# Default-on so an existing dependant sees no change: every caller who linked
+# mentra before this feature existed had the Responses websocket transport, and
+# an upgrade should not quietly take a transport away. Forwarded rather than
+# left to mentra-provider's own default (which is why the dependency below sets
+# `default-features = false`) so a host that only ever streams over HTTP+SSE can
+# turn it off here and drop tokio-tungstenite from its tree.
+default = ["responses-websocket"]
+responses-websocket = ["mentra-provider/responses-websocket"]
 openai-oauth = ["dep:ring"]
 test-utils = []
 
 [dependencies]
-mentra-provider = { version = "0.5.0", path = "../mentra-provider" }
+mentra-provider = { version = "0.5.0", path = "../mentra-provider", default-features = false }
 tokio = { version = "1.50.0", features = ["full"] }
 reqwest = { version = "0.12.23", default-features = false, features = [
     "json",

@@ -1,6 +1,11 @@
 pub mod model;
 pub mod session;
 pub mod sse;
+/// The `response.create` websocket transport. Compiled in with the
+/// `responses-websocket` feature; without it, a request that selects
+/// [`ResponsesTransport::WebSocket`](crate::ResponsesTransport::WebSocket)
+/// fails rather than falling back to HTTP.
+#[cfg(feature = "responses-websocket")]
 pub mod websocket;
 
 use std::collections::HashMap;

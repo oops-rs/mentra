@@ -35,9 +35,13 @@ use super::SharedTurnState;
 use super::model::ResponsesModelsPage;
 use super::model::ResponsesRequest;
 use super::sse::spawn_event_stream_with_provenance;
+#[cfg(feature = "responses-websocket")]
 use super::websocket::ResponsesWebsocketConnection;
+#[cfg(feature = "responses-websocket")]
 use super::websocket::ResponsesWebsocketTelemetry;
+#[cfg(feature = "responses-websocket")]
 use super::websocket::merge_request_headers;
+#[cfg(feature = "responses-websocket")]
 use super::websocket::response_create_frame;
 
 /// Session-scoped Responses transport state.
@@ -56,6 +60,7 @@ pub struct ResponsesSession<C> {
 #[derive(Default)]
 struct WebsocketSession {
     connection_reused: StdMutex<bool>,
+    #[cfg(feature = "responses-websocket")]
     connection: Option<ResponsesWebsocketConnection>,
     _last_request: Option<ResponsesRequest>,
     last_response_rx: Option<oneshot::Receiver<Response>>,
@@ -76,14 +81,17 @@ impl WebsocketSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(feature = "responses-websocket")]
     fn connection(&self) -> Option<ResponsesWebsocketConnection> {
         self.connection.clone()
     }
 
+    #[cfg(feature = "responses-websocket")]
     fn store_connection(&mut self, connection: ResponsesWebsocketConnection) {
         self.connection = Some(connection);
     }
 
+    #[cfg(feature = "responses-websocket")]
     fn clear_connection(&mut self) {
         self.connection = None;
     }
@@ -281,6 +289,12 @@ where
         self.state.clear_latest_response_id();
     }
 
+    /// Whether the cached websocket connection is gone or was never opened.
+    ///
+    /// This and the four methods below are the session's half of the
+    /// `responses-websocket` transport; without the feature there is no
+    /// connection to cache, so they are not compiled.
+    #[cfg(feature = "responses-websocket")]
     pub async fn websocket_connection_is_closed(&self) -> bool {
         let connection = self
             .state
@@ -294,6 +308,7 @@ where
         }
     }
 
+    #[cfg(feature = "responses-websocket")]
     pub async fn connect_websocket(
         &self,
         extra_headers: HeaderMap,
@@ -323,6 +338,7 @@ where
         Ok(())
     }
 
+    #[cfg(feature = "responses-websocket")]
     pub async fn stream_websocket_request(
         &self,
         request_body: serde_json::Value,
@@ -348,6 +364,7 @@ where
             .await
     }
 
+    #[cfg(feature = "responses-websocket")]
     async fn stream_websocket_request_with_provenance(
         &self,
         request_body: serde_json::Value,
@@ -374,6 +391,7 @@ where
             .await
     }
 
+    #[cfg(feature = "responses-websocket")]
     pub fn clear_websocket_connection(&self) {
         self.state
             .websocket_session
@@ -547,6 +565,7 @@ where
         )
     }
 
+    #[cfg(feature = "responses-websocket")]
     async fn stream_websocket_response(
         &self,
         request: ResponsesRequest,
@@ -588,6 +607,28 @@ where
             )
             .await?;
         Ok(self.track_response_state(stream))
+    }
+
+    /// The same entry point when the transport was not compiled in.
+    ///
+    /// Selecting [`ResponsesTransport::WebSocket`] is an explicit choice by the
+    /// caller, so a build without the transport reports that it cannot honor it
+    /// and names the feature that would. Quietly answering over HTTP+SSE instead
+    /// would return a stream the caller never asked for, and hide a
+    /// misconfigured build behind a working one.
+    #[cfg(not(feature = "responses-websocket"))]
+    async fn stream_websocket_response(
+        &self,
+        _request: ResponsesRequest,
+        _credentials: &ProviderCredentials,
+        _session: &SessionRequestOptions,
+        _reasoning_provenance: ReasoningProvenance,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "responses_websocket (not compiled in: rebuild mentra-provider with the \
+             `responses-websocket` feature)"
+                .to_string(),
+        ))
     }
 
     pub async fn send_response<'a>(&self, request: Request<'a>) -> Result<Response, ProviderError> {
@@ -1439,6 +1480,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         );
     }
 
+    #[cfg(feature = "responses-websocket")]
     #[tokio::test]
     async fn websocket_transport_sends_response_create_frame() {
         use futures_util::{SinkExt, StreamExt};
@@ -1928,6 +1970,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         assert!(captured.0.contains("x-openai-subagent: compact\r\n"));
     }
 
+    #[cfg(feature = "responses-websocket")]
     #[tokio::test]
     async fn websocket_connection_is_closed_without_cached_connection() {
         let session = ResponsesProvider::with_shared_credential_source(
@@ -1939,5 +1982,59 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         assert!(session.websocket_connection_is_closed().await);
         session.clear_websocket_connection();
         assert!(session.websocket_connection_is_closed().await);
+    }
+
+    /// A build without the transport must say so, and name the way back.
+    ///
+    /// The failure has to be visible at the call that asked for it: no panic,
+    /// and no silent demotion to HTTP+SSE, either of which would let a build
+    /// that cannot do what was configured pass for one that can. `openai` is
+    /// the preset whose capabilities advertise websockets, so this reaches the
+    /// missing transport rather than the runtime `websockets_enabled` check.
+    #[cfg(not(feature = "responses-websocket"))]
+    #[tokio::test]
+    async fn websocket_transport_without_the_feature_is_an_honest_error() {
+        let session = ResponsesProvider::with_shared_credential_source(
+            super::super::openai_definition(),
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+
+        let request = Request {
+            model: Cow::Borrowed("gpt-requested"),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions {
+                responses: crate::ResponsesRequestOptions {
+                    transport: crate::ResponsesTransport::WebSocket,
+                    ..Default::default()
+                },
+                ..ProviderRequestOptions::default()
+            },
+        };
+
+        let error = session
+            .stream_response(request)
+            .await
+            .err()
+            .expect("a transport that was not compiled in cannot stream");
+
+        assert!(
+            matches!(error, ProviderError::UnsupportedCapability(_)),
+            "expected an unsupported-capability error, got {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "provider does not support capability: responses_websocket (not compiled in: \
+             rebuild mentra-provider with the `responses-websocket` feature)",
+            "the message is the only thing that tells an operator how to fix the build"
+        );
     }
 }
