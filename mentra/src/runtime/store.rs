@@ -1815,11 +1815,38 @@ fn default_store_dir() -> PathBuf {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Every default store directory handed out on the current thread.
+    ///
+    /// Each one is unique, so recording them lets a test name the database its
+    /// own builder would have used — which is the only way to assert that a
+    /// builder given an explicit store left the default alone.
+    static DEFAULT_STORE_DIRS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
 fn default_store_dir() -> PathBuf {
     let suffix = NEXT_TEST_STORE_ID.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir()
+    let dir = std::env::temp_dir()
         .join("mentra-test-runtime")
-        .join(format!("process-{}-{suffix}", std::process::id()))
+        .join(format!("process-{}-{suffix}", std::process::id()));
+    DEFAULT_STORE_DIRS.with(|dirs| dirs.borrow_mut().push(dir.clone()));
+    dir
+}
+
+/// The database paths of every default store constructed on this thread.
+///
+/// Only `open()` creates the directory holding one, so an untouched default
+/// store leaves nothing at these paths.
+#[cfg(test)]
+pub(crate) fn default_store_paths_on_this_thread() -> Vec<PathBuf> {
+    DEFAULT_STORE_DIRS.with(|dirs| {
+        dirs.borrow()
+            .iter()
+            .map(|dir| dir.join("runtime.sqlite"))
+            .collect()
+    })
 }
 
 #[cfg(test)]

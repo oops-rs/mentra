@@ -102,6 +102,8 @@ struct VolatileState {
     memory: MemoryState,
     #[cfg(test)]
     fail_next_agent_record_save: bool,
+    #[cfg(test)]
+    recovery_preparations: usize,
 }
 
 /// An in-memory [`RuntimeStore`](super::RuntimeStore) that leaves no durable
@@ -137,6 +139,14 @@ impl VolatileRuntimeStore {
         self.lock().fail_next_agent_record_save = true;
     }
 
+    /// How many times recovery has been prepared on this store, counted across
+    /// every clone. Lets a test see *when* a runtime prepares recovery, and on
+    /// which store.
+    #[cfg(test)]
+    pub(crate) fn recovery_preparations(&self) -> usize {
+        self.lock().recovery_preparations
+    }
+
     fn lock(&self) -> MutexGuard<'_, VolatileState> {
         self.state
             .lock()
@@ -157,7 +167,13 @@ impl AgentStore for VolatileRuntimeStore {
 
     fn prepare_recovery(&self) -> Result<(), RuntimeError> {
         // Nothing to recover: a volatile store never survives a process
-        // restart, so there is no interrupted state to reconcile.
+        // restart, so there is no interrupted state to reconcile. The count
+        // is the only trace, and exists so a test can pin down when the
+        // runtime prepares recovery.
+        #[cfg(test)]
+        {
+            self.lock().recovery_preparations += 1;
+        }
         Ok(())
     }
 

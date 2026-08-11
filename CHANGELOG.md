@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Building a runtime no longer opens a store the caller replaced
+
+- `Runtime::builder()` used to prepare recovery on the default SQLite store
+  while it assembled the handle — opening the connection, creating
+  `~/.../mentra/workspaces/<cwd-hash>/`, and running the schema. `with_store`
+  then swapped that store out. Every embedder that supplies its own store, and
+  every test suite that runs against a temporary or volatile one, still had the
+  machine-wide default database created underneath it, on a machine that may
+  never have run mentra before.
+- Recovery now runs at the build boundary — in `build` and `build_async` — on
+  whichever store the builder ended with. Constructing a `SqliteRuntimeStore`
+  only records a path; nothing opens it before the choice of store has settled.
+- `with_store` no longer prepares the store it binds, because it cannot know it
+  holds the final one: called twice, it would prepare a store the caller went
+  on to discard. With one call site, recovery runs exactly once per built
+  runtime, which also keeps the `RecoveryPrepared` audit trail readable as "how
+  many times did this runtime start?".
+- No behavior change for a runtime that keeps the default store: it is still
+  recovered before first use, just later.
+
 ### Delegated work counts against the delegating run's budget
 
 - A model calling the `task` intrinsic used to get a subagent running on

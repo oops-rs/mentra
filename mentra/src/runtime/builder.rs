@@ -86,6 +86,11 @@ impl RuntimeBuilder {
     }
 
     /// Replaces the runtime store implementation.
+    ///
+    /// The default store is not opened on the way here. Recovery runs at build
+    /// time against whichever store the builder ends with, so a caller that
+    /// supplies its own never has the machine-wide default database created
+    /// underneath it.
     pub fn with_store(self, store: impl RuntimeStore + 'static) -> Self {
         Self {
             handle: self.handle.rebind_store(std::sync::Arc::new(store)),
@@ -405,10 +410,12 @@ impl RuntimeBuilder {
         }
 
         let provider_registry = Arc::new(std::sync::RwLock::new(self.provider_registry));
+        let handle = self
+            .handle
+            .with_provider_registry(provider_registry.clone());
+        handle.prepare_recovery();
         Ok(Runtime {
-            handle: self
-                .handle
-                .with_provider_registry(provider_registry.clone()),
+            handle,
             provider_registry,
             mcp_servers: outcomes,
         })
@@ -435,10 +442,12 @@ impl RuntimeBuilder {
         }
 
         let provider_registry = Arc::new(std::sync::RwLock::new(self.provider_registry));
+        let handle = self
+            .handle
+            .with_provider_registry(provider_registry.clone());
+        handle.prepare_recovery();
         Ok(Runtime {
-            handle: self
-                .handle
-                .with_provider_registry(provider_registry.clone()),
+            handle,
             provider_registry,
             mcp_servers: Vec::new(),
         })
@@ -448,7 +457,9 @@ impl RuntimeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::VolatileRuntimeStore;
     use crate::runtime::control::{HookDecision, PreExecutionContext};
+    use crate::runtime::store::default_store_paths_on_this_thread;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -557,5 +568,124 @@ mod tests {
             .expect("builds");
 
         assert!(runtime.mcp_servers().is_empty());
+    }
+
+    /// A caller that supplies its own store has opted out of the machine-wide
+    /// default. Constructing the handle used to open it anyway — creating
+    /// `runtime.sqlite` on a pristine machine — before `with_store` replaced
+    /// the store it had just prepared.
+    #[test]
+    fn a_build_with_a_caller_store_leaves_the_default_database_alone() {
+        let store = VolatileRuntimeStore::new();
+        let probe = store.clone();
+
+        let runtime = RuntimeBuilder::new(false)
+            .with_store(store)
+            .with_provider_instance(StubProvider)
+            .build()
+            .expect("builds");
+
+        let default_paths = default_store_paths_on_this_thread();
+        assert!(
+            !default_paths.is_empty(),
+            "the handle still constructs a default store, so this test has something to check"
+        );
+        for path in default_paths {
+            assert!(
+                !path.exists(),
+                "a discarded default store must never be opened: {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            probe.recovery_preparations(),
+            1,
+            "recovery must run once, on the store the caller kept"
+        );
+        drop(runtime);
+    }
+
+    /// The async build boundary carries the same guarantee as the sync one.
+    #[tokio::test]
+    async fn an_async_build_prepares_recovery_once_on_the_caller_store() {
+        let store = VolatileRuntimeStore::new();
+        let probe = store.clone();
+
+        let runtime = RuntimeBuilder::new(false)
+            .with_store(store)
+            .with_provider_instance(StubProvider)
+            .build_async()
+            .await
+            .expect("builds");
+
+        assert_eq!(probe.recovery_preparations(), 1);
+        drop(runtime);
+    }
+
+    /// Deferring recovery must not skip it: a build that keeps the default
+    /// store still reconciles interrupted state, which for SQLite means the
+    /// database is opened and its schema created.
+    #[test]
+    fn a_default_build_still_prepares_recovery() {
+        let runtime = RuntimeBuilder::new(false)
+            .with_provider_instance(StubProvider)
+            .build()
+            .expect("builds");
+
+        let default_paths = default_store_paths_on_this_thread();
+        assert!(!default_paths.is_empty());
+        for path in default_paths {
+            assert!(
+                path.exists(),
+                "the store a runtime actually kept must be prepared: {}",
+                path.display()
+            );
+        }
+        drop(runtime);
+    }
+
+    /// Recovery belongs to the build boundary, not to assembly: until `build`
+    /// settles which store survives, nothing may be prepared.
+    #[test]
+    fn assembling_a_builder_prepares_nothing() {
+        let store = VolatileRuntimeStore::new();
+        let probe = store.clone();
+
+        let builder = RuntimeBuilder::new(false)
+            .with_store(store)
+            .with_provider_instance(StubProvider);
+
+        assert_eq!(
+            probe.recovery_preparations(),
+            0,
+            "a store is only prepared once the builder is done being reconfigured"
+        );
+        drop(builder);
+    }
+
+    /// A store that is swapped out again must never be prepared: `with_store`
+    /// used to prepare eagerly, which made every intermediate store pay for a
+    /// choice the caller went on to revise.
+    #[test]
+    fn a_replaced_store_is_never_prepared() {
+        let discarded = VolatileRuntimeStore::new();
+        let discarded_probe = discarded.clone();
+        let kept = VolatileRuntimeStore::new();
+        let kept_probe = kept.clone();
+
+        let runtime = RuntimeBuilder::new(false)
+            .with_store(discarded)
+            .with_store(kept)
+            .with_provider_instance(StubProvider)
+            .build()
+            .expect("builds");
+
+        assert_eq!(
+            discarded_probe.recovery_preparations(),
+            0,
+            "a store the builder threw away must not have been opened"
+        );
+        assert_eq!(kept_probe.recovery_preparations(), 1);
+        drop(runtime);
     }
 }

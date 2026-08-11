@@ -80,6 +80,14 @@ fn clone_tooling_services(tooling: &ToolingServices) -> ToolingServices {
 }
 
 impl RuntimeHandle {
+    /// Assembles a handle around the default store, without opening it.
+    ///
+    /// A builder may replace the store before it settles, so nothing here may
+    /// touch the database: constructing a [`SqliteRuntimeStore`] only records a
+    /// path, and the first `open()` is what creates the directory and runs the
+    /// schema. Recovery is deferred to
+    /// [`prepare_recovery`](Self::prepare_recovery), which the builder calls
+    /// once on whichever store the caller kept.
     pub fn new(runtime_intrinsics_enabled: bool) -> Self {
         let store: Arc<dyn RuntimeStore> = Arc::new(SqliteRuntimeStore::default());
         let executor: Arc<dyn RuntimeExecutor> = Arc::new(LocalRuntimeExecutor);
@@ -87,7 +95,6 @@ impl RuntimeHandle {
         let hooks = RuntimeHooks::new().with_hook(AuditHook);
         let compaction: Arc<dyn crate::compaction::CompactionEngine> =
             Arc::new(StandardCompactionEngine);
-        let _ = store.prepare_recovery();
         let runtime_instance_id = format!("runtime-{}", std::process::id());
         let memory = Arc::new(MemoryEngine::new(store.clone(), hooks.clone()));
         let mut tool_registry = ToolRegistry::default();
@@ -95,7 +102,7 @@ impl RuntimeHandle {
             crate::runtime::intrinsic::register_tools(&mut tool_registry);
             tool_registry.register_builtin_tools(crate::tool::FileToolProfile::default());
         }
-        let handle = Self {
+        Self {
             execution: ExecutionServices {
                 executor: executor.clone(),
                 policy,
@@ -129,16 +136,34 @@ impl RuntimeHandle {
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
             provider_registry: Arc::new(RwLock::new(ProviderRegistry::default())),
-        };
-        let _ = handle.emit_hook(RuntimeHookEvent::RecoveryPrepared {
-            runtime_instance_id: handle.runtime_instance_id.clone(),
-        });
-        handle
+        }
     }
 
+    /// Reconciles interrupted state on this handle's store and announces it.
+    ///
+    /// The builder calls this once, at the build boundary, because that is the
+    /// first moment the store is known to be final. Calling it earlier — from
+    /// [`new`](Self::new) or from [`rebind_store`](Self::rebind_store) — opens
+    /// a database the caller may be about to discard, and writes a second
+    /// `RecoveryPrepared` audit row that makes "how many times did this runtime
+    /// start?" unanswerable from the audit trail.
+    ///
+    /// Recovery is best-effort: a store that cannot reconcile its interrupted
+    /// state does not sink an otherwise usable runtime.
+    pub fn prepare_recovery(&self) {
+        let _ = self.persistence.store.prepare_recovery();
+        let _ = self.emit_hook(RuntimeHookEvent::RecoveryPrepared {
+            runtime_instance_id: self.runtime_instance_id.clone(),
+        });
+    }
+
+    /// Returns a handle backed by `store` instead of this one's.
+    ///
+    /// The replacement is not prepared here; see
+    /// [`prepare_recovery`](Self::prepare_recovery) for why that waits for the
+    /// build boundary.
     pub fn rebind_store(&self, store: Arc<dyn RuntimeStore>) -> Self {
-        let _ = store.prepare_recovery();
-        let handle = Self {
+        Self {
             execution: self.execution.clone(),
             persistence: PersistenceServices {
                 store: store.clone(),
@@ -164,11 +189,7 @@ impl RuntimeHandle {
             lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
             provider_registry: self.provider_registry.clone(),
-        };
-        let _ = handle.emit_hook(RuntimeHookEvent::RecoveryPrepared {
-            runtime_instance_id: handle.runtime_instance_id.clone(),
-        });
-        handle
+        }
     }
 
     pub fn with_executor(&self, executor: Arc<dyn RuntimeExecutor>) -> Self {
