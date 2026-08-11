@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### A denied permission can say why
+
+- `PermissionDecision` gained a `reason` field and a
+  `PermissionDecision::with_reason` builder. What a host puts there becomes
+  the denied call's tool result, so a refusal can tell the model that this run
+  does not allow writes rather than only that something was denied — which is
+  the difference between a model that stops and one that retries the write.
+  Every existing constructor leaves it unset and an unexplained refusal still
+  reads "denied by session approver", so nothing changes until a host opts in.
+- **Breaking** only for callers building a `PermissionDecision` from a struct
+  literal rather than its constructors; those need the new field.
+
 ### Reasoning effort follows each provider's wire contract
 
 - **Breaking:** `ReasoningEffort` now exposes `low`, `medium`, `high`, `xhigh`,

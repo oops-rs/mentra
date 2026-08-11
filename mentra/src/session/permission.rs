@@ -27,11 +27,23 @@ pub struct PermissionRequest {
     pub preview: String,
 }
 
+/// What a refusal says when the deciding layer offered no reason of its own.
+const DENIED_BY_SESSION_APPROVER: &str = "denied by session approver";
+
 /// The response to a permission request from the UI layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionDecision {
     pub allow: bool,
     pub remember_as: Option<PermissionRuleScope>,
+    /// Why the call was refused, in the words the model will read.
+    ///
+    /// A denial reaches the model as the tool's result, so what it says
+    /// changes what the model does next: told only that something was denied
+    /// it tries the write again, told that this run does not allow writes it
+    /// stops and reports. Set it with [`PermissionDecision::with_reason`].
+    /// Ignored when `allow` is set, and a refusal that leaves it unset still
+    /// reads "denied by session approver" as it always has.
+    pub reason: Option<String>,
 }
 
 impl PermissionDecision {
@@ -40,6 +52,7 @@ impl PermissionDecision {
         Self {
             allow: true,
             remember_as: None,
+            reason: None,
         }
     }
 
@@ -48,6 +61,7 @@ impl PermissionDecision {
         Self {
             allow: false,
             remember_as: None,
+            reason: None,
         }
     }
 
@@ -56,6 +70,7 @@ impl PermissionDecision {
         Self {
             allow: true,
             remember_as: Some(scope),
+            reason: None,
         }
     }
 
@@ -64,6 +79,18 @@ impl PermissionDecision {
         Self {
             allow: false,
             remember_as: Some(scope),
+            reason: None,
+        }
+    }
+
+    /// The same decision, carrying the reason the model should read.
+    ///
+    /// Only refusals have anything to explain: an allowed call explains
+    /// itself by happening.
+    pub fn with_reason(self, reason: impl Into<String>) -> Self {
+        Self {
+            reason: Some(reason.into()),
+            ..self
         }
     }
 }
@@ -278,7 +305,14 @@ impl ToolAuthorizer for SessionToolAuthorizer {
         Ok(if resolved.allow {
             ToolAuthorizationDecision::allow()
         } else {
-            ToolAuthorizationDecision::deny("denied by session approver")
+            // Whoever answered gets to say why, because that text is what the
+            // model reads; a refusal that explains nothing keeps the wording
+            // this has always used.
+            ToolAuthorizationDecision::deny(
+                resolved
+                    .reason
+                    .unwrap_or_else(|| DENIED_BY_SESSION_APPROVER.to_string()),
+            )
         })
     }
 
@@ -384,6 +418,78 @@ mod tests {
             .expect("authorization should resume")
             .expect("task should succeed");
         assert_eq!(decision.outcome, ToolAuthorizationOutcome::Allow);
+    }
+
+    /// Runs one authorize-and-resolve round trip, answering with `decision`,
+    /// and returns what the authorizer handed back to the tool loop.
+    async fn resolved_with(decision: PermissionDecision) -> ToolAuthorizationDecision {
+        let (event_tx, mut rx) = broadcast::channel(8);
+        let pending = PendingPermissionStore::new();
+        let authorizer = SessionToolAuthorizer::new(
+            Some(Arc::new(PromptAuthorizer)),
+            event_tx,
+            pending.clone(),
+            RuleStore::new(),
+        );
+
+        let authorize_task = tokio::spawn({
+            let authorizer = authorizer.clone();
+            async move { authorizer.authorize(&sample_request()).await.unwrap() }
+        });
+
+        let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("permission request should arrive")
+            .expect("event should be present");
+        let SessionEvent::PermissionRequested { request_id, .. } = &event else {
+            panic!("expected PermissionRequested, got {event:?}");
+        };
+
+        pending
+            .remove(request_id)
+            .expect("pending permission should be registered")
+            .sender
+            .send(decision)
+            .expect("decision send should succeed");
+
+        tokio::time::timeout(Duration::from_millis(200), authorize_task)
+            .await
+            .expect("authorization should resume")
+            .expect("task should succeed")
+    }
+
+    #[tokio::test]
+    async fn a_reasoned_denial_carries_its_words_to_the_tool_result() {
+        // The reason becomes the tool result the model reads, so anything
+        // rewritten or dropped on the way is a reason it never sees.
+        let decision =
+            resolved_with(PermissionDecision::deny().with_reason("this run does not allow writes"))
+                .await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Deny);
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some("this run does not allow writes")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denial_with_nothing_to_say_keeps_the_standing_wording() {
+        let decision = resolved_with(PermissionDecision::deny()).await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Deny);
+        assert_eq!(decision.reason.as_deref(), Some(DENIED_BY_SESSION_APPROVER));
+    }
+
+    #[tokio::test]
+    async fn a_reason_on_an_allowed_call_changes_nothing() {
+        let decision = resolved_with(PermissionDecision::allow().with_reason("ignored")).await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Allow);
+        assert_eq!(
+            decision.reason, None,
+            "an allowed call has nothing to explain"
+        );
     }
 
     #[test]

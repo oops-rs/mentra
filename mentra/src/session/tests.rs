@@ -484,6 +484,7 @@ fn permission_decision_deny_constructor() {
     let decision = PermissionDecision::deny();
     assert!(!decision.allow);
     assert!(decision.remember_as.is_none());
+    assert!(decision.reason.is_none());
 }
 
 #[test]
@@ -498,6 +499,15 @@ fn permission_decision_deny_and_remember_constructor() {
     let decision = PermissionDecision::deny_and_remember(PermissionRuleScope::Global);
     assert!(!decision.allow);
     assert_eq!(decision.remember_as, Some(PermissionRuleScope::Global));
+}
+
+#[test]
+fn permission_decision_with_reason_keeps_the_rest_of_the_decision() {
+    let decision = PermissionDecision::deny_and_remember(PermissionRuleScope::Session)
+        .with_reason("no writes");
+    assert!(!decision.allow);
+    assert_eq!(decision.remember_as, Some(PermissionRuleScope::Session));
+    assert_eq!(decision.reason.as_deref(), Some("no writes"));
 }
 
 // -- RuleStore --
