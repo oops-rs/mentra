@@ -1,13 +1,12 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
+use serde::de::DeserializeOwned;
 use tokio::sync::broadcast;
 
 use crate::{
-    AgentTranscript, ContentBlock, Message,
-    agent::{Agent, AgentEvent, AgentEventTapGuard},
+    AgentTranscript, ContentBlock, Message, Role,
+    agent::{Agent, AgentEvent, AgentEventTapGuard, FinalOutput, TerminalOutputSpec},
     error::RuntimeError,
     runtime::{PermissionRuleStore, RunOptions, is_transient_runtime_error},
     session::{
@@ -309,8 +308,51 @@ impl Session {
         let user_text = extract_user_text(&content);
         self.emit(SessionEvent::UserMessage { text: user_text });
 
-        self.run_turn(|agent| Box::pin(agent.run(content, options)))
-            .await
+        let turn = self.begin_turn();
+        let result = self.agent.run(content, options).await;
+        self.finish_turn(turn, result)
+    }
+
+    /// Submits a user turn that must end in a typed value, and returns that
+    /// value together with the tool-result message that carried it.
+    ///
+    /// The session-level counterpart to [`Agent::run_to_output`], as
+    /// [`append_turn_with_options`](Self::append_turn_with_options) is to
+    /// [`Agent::run`]. A host that drives a conversation through a `Session` —
+    /// for the event stream and the permission handle — needs a typed final
+    /// answer without dropping to the agent and losing both.
+    ///
+    /// The turn announces itself on the stream exactly as every other turn
+    /// does: a [`SessionEvent::UserMessage`] going in, whatever the agent
+    /// emits while it runs, and on success one
+    /// [`SessionEvent::AssistantMessageCompleted`] carrying the text of the
+    /// turn's final assistant message. For a typed turn that is whatever prose
+    /// the model wrote alongside the terminal tool call, which is often
+    /// nothing. The value itself is deliberately not put there: it already
+    /// reaches the stream as the terminal tool's
+    /// [`ToolQueued`](SessionEvent::ToolQueued) input and
+    /// [`ToolCompleted`](SessionEvent::ToolCompleted) summary, and a client
+    /// that reads `AssistantMessageCompleted` as "what the assistant said"
+    /// would render a tool payload as prose. Failure reports the same way any
+    /// turn does — [`SessionEvent::Error`] and [`SessionStatus::Failed`].
+    ///
+    /// One asymmetry with a plain turn is worth knowing: a value that does not
+    /// deserialize into `T` fails *after* the agent committed the exchange, so
+    /// the transcript holds the terminal call and its result even though this
+    /// returns `Err`. The turn counter still does not move, as for any failed
+    /// turn.
+    pub async fn append_turn_to_output<T: DeserializeOwned>(
+        &mut self,
+        content: Vec<ContentBlock>,
+        options: RunOptions,
+        spec: TerminalOutputSpec,
+    ) -> Result<FinalOutput<T>, RuntimeError> {
+        let user_text = extract_user_text(&content);
+        self.emit(SessionEvent::UserMessage { text: user_text });
+
+        let turn = self.begin_turn();
+        let result = self.agent.run_to_output::<T>(content, options, spec).await;
+        self.finish_turn(turn, result)
     }
 
     /// Returns the agent's canonical transcript for UI reconstruction.
@@ -358,40 +400,49 @@ impl Session {
         &mut self,
         options: RunOptions,
     ) -> Result<Message, RuntimeError> {
-        self.run_turn(|agent| Box::pin(agent.resume_with_options(options)))
-            .await
+        let turn = self.begin_turn();
+        let result = self.agent.resume_with_options(options).await;
+        self.finish_turn(turn, result)
     }
 
-    /// Runs one turn on the agent, wrapped in the bookkeeping every turn needs:
-    /// status transitions, the event tap that forwards agent events onto the
-    /// session stream, the turn counter, and the terminal event.
+    /// Opens a turn: marks the session active and starts forwarding agent
+    /// events onto the session stream.
     ///
-    /// Both entry points share this so a turn started by a prompt and a turn
-    /// resumed after a failure can never report themselves differently.
-    async fn run_turn<F>(&mut self, run: F) -> Result<Message, RuntimeError>
-    where
-        F: for<'a> FnOnce(
-            &'a mut Agent,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Message, RuntimeError>> + Send + 'a>,
-        >,
-    {
+    /// Every turn opens here and closes in [`finish_turn`](Self::finish_turn) —
+    /// started by a prompt, resumed after a failure, or run to a typed output —
+    /// so no turn can report itself differently from the others.
+    fn begin_turn(&mut self) -> TurnGuard {
         self.update_status(SessionStatus::Active);
-
         let (event_tap, forwarded_seq) = self.install_agent_event_forwarder();
-        let result = run(&mut self.agent).await;
+        TurnGuard {
+            event_tap,
+            forwarded_seq,
+        }
+    }
+
+    /// Closes a turn opened by [`begin_turn`](Self::begin_turn): stops the
+    /// forwarder, emits the terminal event, and settles the status, the turn
+    /// counter, and `updated_at`.
+    fn finish_turn<O: TurnOutcome>(
+        &mut self,
+        turn: TurnGuard,
+        result: Result<O, RuntimeError>,
+    ) -> Result<O, RuntimeError> {
+        let TurnGuard {
+            event_tap,
+            forwarded_seq,
+        } = turn;
         drop(event_tap);
         self.sync_forwarded_seq(&forwarded_seq);
 
         match result {
-            Ok(message) => {
-                self.emit(SessionEvent::AssistantMessageCompleted {
-                    text: message.text(),
-                });
+            Ok(outcome) => {
+                let text = outcome.completion_text(self.agent.history());
+                self.emit(SessionEvent::AssistantMessageCompleted { text });
                 self.metadata.turn_count += 1;
                 self.update_status(SessionStatus::Idle);
                 self.touch_updated_at();
-                Ok(message)
+                Ok(outcome)
             }
             Err(error) => {
                 let recoverable = is_transient_runtime_error(&error);
@@ -535,6 +586,47 @@ impl Session {
 
     fn touch_updated_at(&mut self) {
         self.metadata.updated_at = unix_now();
+    }
+}
+
+/// The bookkeeping a turn holds open while it runs: the agent-event tap that
+/// forwards onto the session stream, and the sequence counter the tap advances
+/// behind it.
+#[must_use = "a turn opened with `begin_turn` must be closed with `finish_turn`"]
+struct TurnGuard {
+    event_tap: AgentEventTapGuard,
+    forwarded_seq: Arc<StdMutex<EventSeq>>,
+}
+
+/// What a successful turn puts in its terminal
+/// [`SessionEvent::AssistantMessageCompleted`].
+///
+/// Both shapes a turn can return resolve to one rule — the text of the turn's
+/// final assistant message — so the stream reads the same whether the turn
+/// returned that message itself or a typed value extracted from the tool
+/// result that followed it.
+trait TurnOutcome {
+    fn completion_text(&self, history: &[Message]) -> String;
+}
+
+impl TurnOutcome for Message {
+    /// A prompted or resumed turn returns the final assistant message itself.
+    fn completion_text(&self, _history: &[Message]) -> String {
+        self.text()
+    }
+}
+
+impl<T> TurnOutcome for FinalOutput<T> {
+    /// A typed turn ends on a tool-result message, so its final assistant
+    /// message is the one that carried the terminal call — the last assistant
+    /// message in the committed history.
+    fn completion_text(&self, history: &[Message]) -> String {
+        history
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .map(Message::text)
+            .unwrap_or_default()
     }
 }
 

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### A session can end a turn in a typed value
+
+- `Session::append_turn_to_output<T>` is the session-level counterpart to
+  `Agent::run_to_output`, as `append_turn_with_options` is to `Agent::run`. A
+  host that drives a conversation through a `Session` — for the event stream
+  and the permission handle — can now get a typed final answer without
+  dropping to the agent and losing the session's bookkeeping.
+- A typed turn announces itself on the stream exactly as any other turn does:
+  a `UserMessage` going in, and on success one `AssistantMessageCompleted`
+  carrying the text of the turn's final assistant message. That is whatever
+  prose the model wrote alongside the terminal tool call, often nothing. The
+  typed value is deliberately not put there — it already reaches the stream as
+  the terminal tool's `ToolQueued` input and `ToolCompleted` summary, and a
+  client reading `AssistantMessageCompleted` as "what the assistant said"
+  would render a tool payload as prose.
+- One asymmetry to know when wrapping it: a value that does not deserialize
+  into `T` fails after the agent committed the exchange, so the transcript
+  holds the terminal call and its result even though the call returns `Err`.
+  The turn counter still does not move, as for any failed turn.
+
 ### A denied permission can say why
 
 - `PermissionDecision` gained a `reason` field and a
