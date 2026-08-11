@@ -7,7 +7,7 @@ use crate::{
     memory::journal::PendingTurnState,
     memory::{MemorySearchMode, MemorySearchRequest, build_search_query, recalled_memory_message},
     provider::Request,
-    runtime::{RunOptions, RuntimeHookEvent, control::is_transient_provider_error},
+    runtime::{EarlyEnd, RunOptions, RuntimeHookEvent, control::is_transient_provider_error},
     team::format_inbox,
     tool::{ToolCall, ToolRuntime},
     transcript::{DelegationArtifact, DelegationKind, DelegationStatus},
@@ -74,8 +74,11 @@ impl<'a> TurnRunner<'a> {
             // the transcript is consistent), keeping the committed work, rather than
             // failing and rolling back the way `cancellation` does. Lets a caller
             // stop gathering once enough is done while preserving the context for a
-            // follow-up turn on the same agent.
+            // follow-up turn on the same agent. Recorded on the way out because a
+            // successful return says nothing about which of these two boundary
+            // checks produced it.
             if self.options.stop_requested() {
+                self.options.record_early_end(EarlyEnd::StopRequested);
                 return Ok(());
             }
             // Soft aggregate token bound: usage is only known once a round has
@@ -83,8 +86,10 @@ impl<'a> TurnRunner<'a> {
             // refuses to start another one once the last round's reported usage
             // pushed the cumulative total to or past the bound. The transcript
             // through the last completed round stays committed, exactly like
-            // `stop` above.
+            // `stop` above. Reached only when no stop was requested, which is
+            // the precedence `EarlyEnd::StopRequested` documents.
             if self.options.token_budget_exceeded() {
+                self.options.record_early_end(EarlyEnd::TokenBudget);
                 return Ok(());
             }
             if let Some(limit) = self.agent.max_rounds()
@@ -260,9 +265,19 @@ impl<'a> TurnRunner<'a> {
     /// Returns whether a queued injection can be followed by a provider
     /// request. This check happens before draining so a graceful stop or a
     /// hard run limit cannot consume queue entries that no request will see.
+    ///
+    /// The two graceful bounds are asked separately rather than as one `||` so
+    /// that the run ends reported as well as ended: this is a round boundary
+    /// like the one at the top of [`run`](Self::run), it ends the turn the same
+    /// way, and it therefore answers "why" the same way and in the same order.
     fn next_request_is_available(&self, rounds: usize) -> Result<bool, RuntimeError> {
         self.options.check_limits()?;
-        if self.options.stop_requested() || self.options.token_budget_exceeded() {
+        if self.options.stop_requested() {
+            self.options.record_early_end(EarlyEnd::StopRequested);
+            return Ok(false);
+        }
+        if self.options.token_budget_exceeded() {
+            self.options.record_early_end(EarlyEnd::TokenBudget);
             return Ok(false);
         }
         if let Some(limit) = self.agent.max_rounds()

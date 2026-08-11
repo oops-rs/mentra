@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::SystemTime;
@@ -7,6 +7,45 @@ use std::time::SystemTime;
 use crate::runtime::error::RuntimeError;
 
 const DEFAULT_PROVIDER_RETRY_BUDGET: usize = 5;
+
+/// Why a run ended before its work was done, when a bound rather than the model
+/// decided that.
+///
+/// The two graceful bounds — [`RunOptions::stop`] and
+/// [`RunOptions::token_budget`] — deliberately end a run the way the model
+/// finishing does: at a round boundary, transcript committed, `Ok`. That is the
+/// right *behavior* and a silent *report*, because what the caller receives is
+/// then identical for "the model was done" and "the runner refused to start
+/// another round". A caller that has to tell those apart — a CLI owing a
+/// distinct exit code, a supervisor deciding whether to prompt again — is
+/// otherwise left either recomputing the comparison the runner already made or
+/// reading prose, and the first answers a slightly different question (what is
+/// true *now*, not what was true at the boundary) while the second is not a
+/// contract at all. This records the runner's own decision at the moment it
+/// made it.
+///
+/// Read it back through [`RunOptions::ended_early`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EarlyEnd {
+    /// The run ended at a round boundary because [`RunOptions::stop`] was
+    /// tripped.
+    ///
+    /// Reported in preference to [`TokenBudget`](Self::TokenBudget) when both
+    /// were true at that boundary. A stop is an instruction the caller issued,
+    /// and the runner would have ended there with no budget set at all; a
+    /// crossed budget is an ambient bound that merely also held. Naming the
+    /// bound would tell a caller its allowance ran out when what actually
+    /// happened is that it asked to stop — and the runner's own control flow
+    /// agrees, since it checks `stop` first and never reaches the budget check.
+    StopRequested,
+    /// The run ended at a round boundary because cumulative reported usage had
+    /// reached or passed [`RunOptions::token_budget`].
+    ///
+    /// See that field for why this can only ever be noticed at a boundary, and
+    /// for what the run keeps when it is.
+    TokenBudget,
+}
 
 /// A shared flag a caller trips to stop a run.
 ///
@@ -89,6 +128,24 @@ pub struct RunOptions {
     /// leave it at its default (a fresh, zeroed counter) unless you are
     /// deliberately aliasing a specific run's accounting.
     pub token_usage: Arc<AtomicU64>,
+    /// Where a run records *why* it ended early, read back through
+    /// [`ended_early`](Self::ended_early).
+    ///
+    /// The counterpart of [`token_usage`](Self::token_usage) for the decision
+    /// rather than the count: the runner knows at the boundary it stops at
+    /// which bound stopped it, and this is how that reaches a caller holding a
+    /// clone of these options instead of being re-derived — or lost. Written at
+    /// most once, first writer winning, because a run ends at exactly one
+    /// boundary and because both conditions that produce an entry are sticky
+    /// under a fixed bound: a tripped stop token stays tripped, and a crossed
+    /// cumulative total stays crossed, so a later turn on this handle ends the
+    /// same way and would record the same answer. Raising
+    /// [`token_budget`](Self::token_budget) on a clone is the one way to make
+    /// the entry stale — the deliberate aliasing `token_usage` warns about,
+    /// seen from the reporting side. Like that field, this one is `pub` only so
+    /// `RunOptions { .., ..RunOptions::default() }` construction keeps working;
+    /// leave it at its default (a fresh, empty slot).
+    pub early_end: Arc<OnceLock<EarlyEnd>>,
 }
 
 impl Default for RunOptions {
@@ -103,6 +160,7 @@ impl Default for RunOptions {
             round_strategy: None,
             token_budget: None,
             token_usage: Arc::new(AtomicU64::new(0)),
+            early_end: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -126,6 +184,14 @@ impl RunOptions {
     /// field (`retry_budget`, `tool_budget`, `model_budget`, `round_strategy`)
     /// resets to [`RunOptions::default`]: those express per-run policy a child
     /// sets independently, not an aggregate safety bound.
+    ///
+    /// [`early_end`](Self::early_end) resets too, for a different reason — it
+    /// records a decision rather than carrying a bound. A child that ends on the
+    /// shared budget ended *its own* run at *its own* boundary; the parent then
+    /// reaches its next boundary and records for itself, so keeping the slots
+    /// apart loses nothing, while sharing one would let a child's ending be read
+    /// as the parent's — including on a parent that went on to finish its work
+    /// normally.
     ///
     /// mentra applies this itself on exactly one path: the `task` intrinsic's
     /// delegated subagent runs on the parent run's derived child options, so a
@@ -156,6 +222,24 @@ impl RunOptions {
 
     pub(crate) fn record_tokens(&self, tokens: u64) {
         self.token_usage.fetch_add(tokens, Ordering::SeqCst);
+    }
+
+    /// Why the run ended early, or `None` when none did — the model finished, or
+    /// the run failed outright and reported that as an error.
+    ///
+    /// Read from a clone: [`Agent::run`](crate::Agent::run) takes its options by
+    /// value, so a caller that wants this keeps a `clone()` of what it passed
+    /// in. The slot is shared behind an `Arc`, exactly as the counter behind
+    /// [`reported_tokens`](Self::reported_tokens) is.
+    pub fn ended_early(&self) -> Option<EarlyEnd> {
+        self.early_end.get().copied()
+    }
+
+    /// Records why the runner is ending this run early, keeping the first answer
+    /// if one is already there. See [`early_end`](Self::early_end) for why the
+    /// first is the one that stays true.
+    pub(crate) fn record_early_end(&self, end: EarlyEnd) {
+        let _ = self.early_end.set(end);
     }
 
     /// Whether cumulative reported usage has reached or exceeded
@@ -213,5 +297,58 @@ mod tests {
 
         token.cancel();
         assert!(format!("{token:?}").contains("cancelled: true"));
+    }
+
+    #[test]
+    fn a_clone_of_a_runs_options_reads_what_that_run_recorded() {
+        // The mechanism an embedder depends on: `Agent::run` takes its options
+        // by value, so the only way to hear back from a run is to have kept a
+        // clone — which shares the slot, exactly as it shares the counter.
+        let options = RunOptions {
+            token_budget: Some(100),
+            ..RunOptions::default()
+        };
+        let held = options.clone();
+
+        options.record_early_end(EarlyEnd::TokenBudget);
+
+        assert_eq!(held.ended_early(), Some(EarlyEnd::TokenBudget));
+    }
+
+    #[test]
+    fn a_child_run_records_its_early_end_apart_from_its_parent() {
+        // A delegated run that ends on the shared budget has ended its own run,
+        // not its parent's. The parent reaches its own next boundary and records
+        // there; until it does, claiming it ended early would be a guess — and a
+        // wrong one for a parent that goes on to finish its work.
+        let parent = RunOptions {
+            token_budget: Some(100),
+            ..RunOptions::default()
+        };
+        let child = parent.child();
+
+        child.record_early_end(EarlyEnd::TokenBudget);
+
+        assert_eq!(child.ended_early(), Some(EarlyEnd::TokenBudget));
+        assert_eq!(parent.ended_early(), None);
+        child.record_tokens(60);
+        assert_eq!(
+            parent.reported_tokens(),
+            60,
+            "what the two do share is the accounting, unchanged"
+        );
+    }
+
+    #[test]
+    fn the_first_early_end_recorded_is_the_one_that_stays() {
+        // Both conditions are sticky under a fixed bound, so a handle reused for
+        // a second turn ends the same way it ended the first. Keeping the first
+        // answer makes that explicit rather than depending on it.
+        let options = RunOptions::default();
+
+        options.record_early_end(EarlyEnd::StopRequested);
+        options.record_early_end(EarlyEnd::TokenBudget);
+
+        assert_eq!(options.ended_early(), Some(EarlyEnd::StopRequested));
     }
 }

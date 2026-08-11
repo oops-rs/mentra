@@ -3,7 +3,7 @@ use crate::{
     agent::AgentEvent,
     error::RuntimeError,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::{CancellationToken, RunOptions},
+    runtime::{CancellationToken, EarlyEnd, RunOptions},
 };
 
 use super::support::{
@@ -171,6 +171,236 @@ async fn absent_token_budget_ignores_reported_usage() {
     assert_eq!(message.text(), "done");
     assert_eq!(provider_handle.recorded_requests().await.len(), 2);
     assert_eq!(agent.history().len(), 4);
+}
+
+#[tokio::test]
+async fn a_crossed_budget_reports_why_the_turn_ended() {
+    // The defect this signal exists for: the run above ends correctly — the
+    // round that crossed the bound stays committed, nothing is rolled back —
+    // and says nothing about *why* it ended, since a run the model finished
+    // returns exactly the same way. `ended_early` is the runner's own answer,
+    // recorded at the boundary it refused to start another round at, and read
+    // back through a clone of the options the run was given.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream_with_usage(
+                &model.id,
+                "call-1",
+                "probe_tool",
+                r#"{"value":"hi"}"#,
+                usage(60, 40),
+            ),
+            text_stream_with_usage(&model.id, "must not run", usage(1, 1)),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(StaticTool::success("probe_tool", "ok"))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let options = RunOptions {
+        token_budget: Some(100),
+        ..Default::default()
+    };
+    let result = agent
+        .run(vec![ContentBlock::text("go")], options.clone())
+        .await;
+
+    assert_eq!(
+        options.ended_early(),
+        Some(EarlyEnd::TokenBudget),
+        "the run must report the bound that ended it, not leave it to be inferred"
+    );
+    // The behavior around the report is unchanged, and pinned here beside it so
+    // that adding the signal cannot quietly turn a graceful end into a rollback.
+    assert!(matches!(result, Err(RuntimeError::EmptyAssistantResponse)));
+    assert_eq!(
+        agent.history().len(),
+        3,
+        "the round that crossed the budget stays committed, not rolled back"
+    );
+    assert_eq!(provider_handle.recorded_requests().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_requested_stop_is_not_reported_as_a_crossed_budget() {
+    // Both graceful bounds end a turn at the same boundary in the same way, so
+    // the signal is only worth anything if it tells them apart. The budget here
+    // is set and nowhere near crossed: what ends the turn is the tool tripping
+    // the stop token, and that is what must be reported.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let stop = CancellationToken::default();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream_with_usage(
+                &model.id,
+                "call-1",
+                "stop_probe",
+                r#"{"value":"enough"}"#,
+                usage(10, 10),
+            ),
+            text_stream_with_usage(&model.id, "must not run", usage(1, 1)),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(StopTrippingTool::new("stop_probe", stop.clone()))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let options = RunOptions {
+        stop: Some(stop),
+        token_budget: Some(10_000),
+        ..Default::default()
+    };
+    let result = agent
+        .run(vec![ContentBlock::text("go")], options.clone())
+        .await;
+
+    assert_eq!(options.ended_early(), Some(EarlyEnd::StopRequested));
+    assert!(matches!(result, Err(RuntimeError::EmptyAssistantResponse)));
+    assert_eq!(
+        options.reported_tokens(),
+        20,
+        "the bound was never near: a caller recomputing it would have found nothing"
+    );
+    assert_eq!(provider_handle.recorded_requests().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_stop_and_a_crossed_budget_together_report_the_stop() {
+    // The one round both spends the whole bound and trips the stop, so both
+    // conditions hold at the boundary that ends the turn. The stop wins: it is
+    // an instruction the caller issued, and the turn would have ended there
+    // with no budget set at all. Reporting the budget would tell a caller its
+    // allowance ran out when what happened is that it asked to stop.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let stop = CancellationToken::default();
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream_with_usage(
+                &model.id,
+                "call-1",
+                "stop_probe",
+                r#"{"value":"enough"}"#,
+                usage(60, 60),
+            ),
+            text_stream_with_usage(&model.id, "must not run", usage(1, 1)),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(StopTrippingTool::new("stop_probe", stop.clone()))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let options = RunOptions {
+        stop: Some(stop),
+        token_budget: Some(100),
+        ..Default::default()
+    };
+    let _ = agent
+        .run(vec![ContentBlock::text("go")], options.clone())
+        .await;
+
+    assert!(
+        options.reported_tokens() >= 100,
+        "the budget really is crossed, so the precedence is what decides the report"
+    );
+    assert_eq!(options.ended_early(), Some(EarlyEnd::StopRequested));
+}
+
+#[tokio::test]
+async fn a_turn_that_runs_to_completion_reports_nothing() {
+    // The default that keeps the signal honest: a bound that was set but never
+    // reached leaves nothing behind, so `Some(..)` always means the runner
+    // ended the turn rather than the model finishing it.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![text_stream_with_usage(&model.id, "done", usage(10, 10))],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    let options = RunOptions {
+        stop: Some(CancellationToken::default()),
+        token_budget: Some(10_000),
+        ..Default::default()
+    };
+    let message = agent
+        .run(vec![ContentBlock::text("go")], options.clone())
+        .await
+        .expect("the run completes under both bounds");
+
+    assert_eq!(message.text(), "done");
+    assert_eq!(options.ended_early(), None);
+}
+
+#[tokio::test]
+async fn a_turn_that_ends_on_the_budget_and_still_answers_reports_why() {
+    // The case that makes the signal load-bearing rather than convenient. The
+    // model finished its message *and* a steer was queued behind it, so the
+    // runner checks whether another request is available, finds the bound
+    // crossed, and returns the message it has. The turn is an ordinary `Ok`
+    // carrying an ordinary final answer — indistinguishable from a turn that
+    // ran to completion except through what the runner recorded, and the still
+    // pending steer is the work that got left behind.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            text_stream_with_usage(&model.id, "answered first", usage(60, 40)),
+            text_stream_with_usage(&model.id, "must not run", usage(1, 1)),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let steering = agent.steering_handle();
+    steering.steer(vec![ContentBlock::text("and then this")]);
+
+    let options = RunOptions {
+        token_budget: Some(100),
+        ..Default::default()
+    };
+    let message = agent
+        .run(vec![ContentBlock::text("go")], options.clone())
+        .await
+        .expect("a turn that ends on the budget after a committed message succeeds");
+
+    assert_eq!(message.text(), "answered first");
+    assert_eq!(
+        options.ended_early(),
+        Some(EarlyEnd::TokenBudget),
+        "a successful turn is exactly where an unreported bound is invisible"
+    );
+    assert!(
+        steering.has_pending(),
+        "the steer no request could carry is kept, not consumed"
+    );
+    assert_eq!(provider_handle.recorded_requests().await.len(), 1);
 }
 
 #[tokio::test]

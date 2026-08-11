@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### A run that ends on a bound now says so
+
+- The two graceful bounds — `RunOptions::stop` and `RunOptions::token_budget`
+  — end a run at a round boundary with the transcript committed and an `Ok`,
+  exactly the way the model finishing does. That was the right behavior and a
+  silent report: a caller owing a distinct exit code for a tripped bound had
+  nothing typed to read, and recomputing `reported >= budget` after the fact
+  answers a slightly different question than the runner answered at the
+  boundary. The runner now records its own decision in a write-once slot on
+  the options, read back through `RunOptions::ended_early()` on any clone of
+  the handle — the same sharing rule as `reported_tokens()`.
+- `EarlyEnd` is `#[non_exhaustive]`, with `StopRequested` and `TokenBudget`.
+  When both were true at the boundary the stop wins: it is an instruction the
+  caller issued, where the budget is an ambient bound that merely also held —
+  and the runner's own control flow checks it first.
+- `RunOptions::child()` derives a fresh slot rather than sharing the parent's:
+  a child ending on the shared budget ended its own run at its own boundary,
+  and the parent records for itself when it reaches its own. Sharing would let
+  a delegated run's ending be read as the parent's, including on a parent that
+  went on to finish normally.
+
 ### A scripted runtime no longer leaves a database behind
 
 - `MockRuntime` used to default to a `SqliteRuntimeStore` at
