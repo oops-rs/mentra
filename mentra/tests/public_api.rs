@@ -650,6 +650,20 @@ impl Provider for ModelListingProvider {
     }
 }
 
+/// The builder was `pub` inside a private `mod builder`, re-exported nowhere:
+/// `Runtime::builder()` worked on inference, but a downstream helper taking or
+/// returning a half-built runtime could not write its signature at all. This
+/// test is that helper, written from outside the crate — it pins the re-export
+/// at both public paths, because compiling is the whole claim.
+#[test]
+fn a_runtime_builder_is_a_type_downstream_code_can_name() {
+    fn with_volatile_store(builder: mentra::RuntimeBuilder) -> mentra::runtime::RuntimeBuilder {
+        builder.with_store(VolatileRuntimeStore::new())
+    }
+
+    let _ = with_volatile_store(Runtime::builder());
+}
+
 fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

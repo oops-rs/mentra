@@ -17,7 +17,6 @@ use tokio::sync::broadcast;
 use crate::{
     agent::{Agent, AgentConfig, AgentSpawnOptions, AgentStatus},
     provider::{Provider, ProviderRegistry},
-    runtime::builder::RuntimeBuilder,
     session::{
         Session, SessionEvent, SessionId, SessionMetadata,
         permission::{PendingPermissionStore, SessionToolAuthorizer},
@@ -26,6 +25,7 @@ use crate::{
 };
 use mentra_provider::{BuiltinProvider, ModelInfo, ModelSelector, ProviderDescriptor, ProviderId};
 
+pub use builder::RuntimeBuilder;
 pub use control::sandbox::{ExecutionEnvironment, detect_environment};
 pub use control::{
     AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
