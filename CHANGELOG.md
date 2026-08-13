@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### The local executor can be decorated without being copied
+
+- `LocalRuntimeExecutor` is now re-exported from `mentra::runtime` beside the
+  `RuntimeExecutor` trait. A host can wrap the concrete executor to add scoped
+  request context while retaining Mentra's timeout, output-cap, process-group,
+  kill, and reap behavior instead of copying it or mutating process-global
+  state ([#19](https://github.com/oops-rs/mentra/issues/19)).
+
 ### A remembered refusal says why, every time
 
 - A rule remembered from a denial kept the verdict and its scope but not the
