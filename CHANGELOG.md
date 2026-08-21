@@ -34,6 +34,18 @@
   the bound bounds. A host raising `retry_budget` to sit out a rate limit should
   raise `model_budget` with it, or leave `model_budget` at `None`, where the two
   never meet.
+- A delegated run inherits both — `RunOptions::child()` now carries
+  `provider_retry` and `retry_budget` where it used to reset them. They are not
+  an allowance either run spends but a description of the provider both of them
+  dial, and that endpoint's rate-limit window does not shorten because the
+  caller delegated. A child that reset them met the same limiter with the
+  schedule its parent had already found too short, and every host would have had
+  to restate its own policy at each delegation boundary to prevent it. They
+  aggregate nothing, so patience in a child costs the parent none of its own;
+  `deadline` and `cancellation`, which already carried, stay the bound on how
+  long all of it may take. `tool_budget`, `model_budget`, and `round_strategy`
+  still reset — those bound work a child does rather than describe what it talks
+  to.
 - A latent panic went with it. The doubling clamped its shift to `usize`'s width
   and then applied it to a `u32`, so a 33rd attempt would have overflowed —
   unreachable at a budget of five, and reachable the moment raising the budget

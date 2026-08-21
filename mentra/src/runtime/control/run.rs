@@ -208,6 +208,10 @@ pub struct RunOptions {
     /// provider, and an attempt that failed still reached. A host raising this
     /// budget to sit out a rate limit should raise `model_budget` with it, or
     /// leave `model_budget` at `None`, where no such interaction exists.
+    ///
+    /// Inherited by [`child`](Self::child) runs, along with
+    /// [`provider_retry`](Self::provider_retry); see that method for why a
+    /// delegated run meets the same provider with the same patience.
     pub retry_budget: usize,
     /// How long each of those retries waits. See [`ProviderRetry`]; the default
     /// schedule is mentra's historical one, unchanged.
@@ -313,10 +317,24 @@ impl RunOptions {
     /// [`deadline`](Self::deadline), and the same [`token_budget`](Self::token_budget)
     /// bound backed by the *same* accounting handle — a child's reported usage
     /// adds to the parent's running total, so parent and child together trip one
-    /// shared bound rather than each getting an independent one. Every other
-    /// field (`retry_budget`, `provider_retry`, `tool_budget`, `model_budget`,
-    /// `round_strategy`) resets to [`RunOptions::default`]: those express per-run policy a child
-    /// sets independently, not an aggregate safety bound.
+    /// shared bound rather than each getting an independent one.
+    ///
+    /// [`retry_budget`](Self::retry_budget) and
+    /// [`provider_retry`](Self::provider_retry) carry too, for a different
+    /// reason: they are not an allowance either run spends but a description of
+    /// the provider both of them dial. How long that endpoint's rate-limit
+    /// window lasts does not change because the caller delegated, so a child
+    /// that reset them would meet the same limiter with the schedule the parent
+    /// had already found too short — and a host would have to restate its own
+    /// policy at every delegation boundary to prevent it. Unlike the bounds
+    /// above they aggregate nothing: a child's retries are its own, and being
+    /// patient costs the parent none of them. `deadline` and `cancellation`,
+    /// which do carry, remain the bound on how long all that patience may take.
+    ///
+    /// The rest (`tool_budget`, `model_budget`, `round_strategy`) resets to
+    /// [`RunOptions::default`]: those express per-run policy a child sets
+    /// independently, bounding work it does rather than describing what it
+    /// talks to.
     ///
     /// [`early_end`](Self::early_end) resets too, for a different reason — it
     /// records a decision rather than carrying a bound. A child that ends on the
@@ -342,6 +360,8 @@ impl RunOptions {
             deadline: self.deadline,
             token_budget: self.token_budget,
             token_usage: Arc::clone(&self.token_usage),
+            retry_budget: self.retry_budget,
+            provider_retry: self.provider_retry,
             ..RunOptions::default()
         }
     }
@@ -557,16 +577,29 @@ mod tests {
     }
 
     #[test]
-    fn a_child_run_starts_from_the_default_schedule() {
-        // Same reasoning as `retry_budget`: how patiently a delegated run
-        // treats its own provider is its own policy, not an aggregate bound
-        // inherited from the parent.
-        let parent = RunOptions::default().with_provider_retry(ProviderRetry {
-            base_delay: Duration::from_secs(30),
+    fn a_delegated_run_meets_the_same_provider_with_the_same_patience() {
+        // A child dials the endpoint its parent dialled, and that endpoint's
+        // rate-limit window did not shorten because the work was delegated.
+        // Resetting here would hand the subagent the blip-shaped schedule the
+        // parent had already found too short against the same limiter.
+        let parent = RunOptions {
+            retry_budget: 9,
+            ..RunOptions::default()
+        }
+        .with_provider_retry(ProviderRetry {
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(30),
             ..ProviderRetry::default()
         });
 
-        assert_eq!(parent.child().provider_retry, ProviderRetry::default());
+        let child = parent.child();
+
+        assert_eq!(child.provider_retry, parent.provider_retry);
+        assert_eq!(child.retry_budget, 9);
+        assert_eq!(
+            child.model_budget, None,
+            "what the child does not inherit is an allowance for its own work"
+        );
     }
 
     #[test]
