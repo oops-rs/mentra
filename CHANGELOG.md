@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### A rule pattern matches the call, not a path
+
+- A remembered permission rule's `pattern` is matched against the JSON encoding
+  of the call's structured input, but it was matched with a path globber, whose
+  `*` stops at `/`. `serde_json` writes map keys in order, so any preview
+  carrying an absolute path — a `cwd`, a file argument — put every key
+  serialized after it out of reach: a rule written `**"mode":"command"**`
+  matched nothing at all, and only a pattern that spelled out the absolute path
+  ever worked. The failure was silent in the worst way. The rule saved, the
+  store reported success, nothing warned, and an operator who believed they had
+  remembered an answer had in fact written a rule that would never answer a
+  call again. This is older than targets: `mode` has been unmatchable for any
+  absolute cwd for as long as the field has existed.
+- JSON's own punctuation was read as glob syntax for the same reason — `{`…`}`
+  as brace alternation, `[`…`]` as a character class — so a pattern quoting the
+  front of an object matched something other than the object it quoted.
+- Patterns are now matched by a separatorless wildcard matcher: `*` matches any
+  run of characters, `/` included; `?` matches exactly one character, counted
+  as a `char` and not a byte; everything else, punctuation included, is
+  literal. Matching stays anchored, so a rule about a fragment is still written
+  `*fragment*`. `**` means what `*` means, which keeps every rule persisted
+  under the old semantics — where `**` was the only way to cross a separator —
+  answering exactly as it did.
+- Only the permission matcher changed. The workspace file globber still matches
+  real filesystem paths, where `/` is a separator and `**/*.rs` has to mean any
+  depth.
+
 ### A command can name where it runs
 
 - A host could install one executor and nothing more: `CommandRequest` said
