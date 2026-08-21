@@ -133,7 +133,11 @@ fn parse_retry_after(value: &str, now: OffsetDateTime) -> Option<Duration> {
 
 /// Parses an IMF-fixdate, the `Sun, 06 Nov 1994 08:49:37 GMT` spelling.
 fn parse_http_date(value: &str) -> Option<OffsetDateTime> {
-    let format = time::format_description::parse(
+    // `parse_borrowed` rather than `parse`: the latter is deprecated from
+    // time 0.3.55 and a downstream resolving a newer `time` would see the
+    // warning in this crate. Version 2 of the description syntax, which the
+    // spelling below is already written in.
+    let format = time::format_description::parse_borrowed::<2>(
         "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT",
     )
     .ok()?;
