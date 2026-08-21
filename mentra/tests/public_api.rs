@@ -666,6 +666,40 @@ fn a_runtime_builder_is_a_type_downstream_code_can_name() {
     let _ = with_volatile_store(Runtime::builder());
 }
 
+/// The two paths a downstream crate re-exports these from, written from
+/// outside mentra so a rename is a failing test rather than a broken host.
+///
+/// basis re-exports `ProviderRetry` and `ResponsesTransport` from its own
+/// `basis::runtime` so a host of *its* never names mentra, which makes both
+/// paths part of this crate's contract rather than an implementation detail
+/// that happens to be reachable. `ResponsesTransport` is visible at the crate
+/// root too; `mentra::provider::` is the one to depend on, since it sits with
+/// `ResponsesRequestOptions` and the rest of the wire vocabulary.
+#[test]
+fn the_retry_schedule_and_transport_are_types_downstream_code_can_name() {
+    fn patient(retry: mentra::runtime::ProviderRetry) -> mentra::runtime::RunOptions {
+        mentra::runtime::RunOptions::default().with_provider_retry(retry)
+    }
+
+    fn over(transport: mentra::provider::ResponsesTransport) -> mentra::RuntimeBuilder {
+        Runtime::empty_builder().with_responses_transport(transport)
+    }
+
+    let options = patient(mentra::runtime::ProviderRetry {
+        base_delay: std::time::Duration::from_secs(1),
+        max_delay: std::time::Duration::from_secs(30),
+        ..Default::default()
+    });
+    let _ = over(mentra::provider::ResponsesTransport::HttpSse);
+
+    // The delegation contract basis depends on, asserted from outside: a
+    // subagent meets the same provider with the same patience, so a host
+    // states its schedule once rather than at every boundary.
+    let child = options.child();
+    assert_eq!(child.provider_retry, options.provider_retry);
+    assert_eq!(child.retry_budget, options.retry_budget);
+}
+
 /// The downstream shape this exists for, written from outside the crate: a
 /// host registers an executor that serves named targets and a tool that names
 /// one. Every guard around a shell command still applies — only the executor
