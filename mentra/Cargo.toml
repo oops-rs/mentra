@@ -54,6 +54,10 @@ unicode-normalization = "0.1.24"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+# Tests only: `start_paused` lets a retry schedule measured in tens of seconds
+# be asserted without waiting them out. Not enabled for the library build, so
+# nothing a dependant links changes.
+tokio = { version = "1.50.0", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }

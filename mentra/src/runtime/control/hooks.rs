@@ -449,6 +449,7 @@ pub fn is_transient_runtime_error(error: &RuntimeError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn make_context(tool_name: &str) -> PreExecutionContext {
         PreExecutionContext {
@@ -542,6 +543,36 @@ mod tests {
 
         let files_result = hooks.run(&make_context("files")).await.unwrap();
         assert_eq!(files_result, HookDecision::Allow);
+    }
+
+    fn http(status: reqwest::StatusCode, retry_after: Option<Duration>) -> ProviderError {
+        ProviderError::Http {
+            status,
+            body: String::new(),
+            retry_after,
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_is_transient_whether_or_not_it_named_a_window() {
+        // Classification is what decides a retry happens at all; the schedule
+        // only decides how long it waits. A `Retry-After` must not change the
+        // first answer, in either direction.
+        for retry_after in [None, Some(Duration::from_secs(45))] {
+            assert!(is_transient_provider_error(&http(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                retry_after
+            )));
+            assert!(is_transient_provider_error(&http(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                retry_after
+            )));
+        }
+
+        assert!(
+            !is_transient_provider_error(&http(reqwest::StatusCode::BAD_REQUEST, None)),
+            "a request the caller must fix is not worth re-sending"
+        );
     }
 }
 

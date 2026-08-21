@@ -5,11 +5,11 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
-use mentra::runtime::{RunOptions, SqliteRuntimeStore};
+use mentra::runtime::{ProviderRetry, RunOptions, SqliteRuntimeStore};
 use mentra::{
     AgentConfig, BuiltinProvider, ContentBlock, Message, Role, Runtime,
     agent::{AgentEvent, AgentStatus, RoundContext, RoundDecision, RoundStrategy},
@@ -195,6 +195,161 @@ async fn send_retries_transient_provider_error_before_streaming() {
     assert_eq!(
         agent.last_message(),
         Some(&Message::assistant(ContentBlock::text("recovered")))
+    );
+}
+
+/// Every delay a run announced before retrying, in the order it waited them.
+///
+/// `RetryAttempt` reports the delay the runner is about to take, so this is the
+/// schedule as it was actually applied rather than as it was configured.
+fn announced_retry_delays(events: &[AgentEvent]) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RetryAttempt { next_delay_ms, .. } => Some(*next_delay_ms),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Fails `count` times with `error`, then answers `text`.
+fn failing_then_text(count: usize, error: fn() -> ProviderError, text: &str) -> Vec<StreamScript> {
+    let mut scripts: Vec<StreamScript> = (0..count).map(|_| failed_request(error())).collect();
+    scripts.push(text_stream("model", text));
+    scripts
+}
+
+fn offline() -> ProviderError {
+    ProviderError::Http {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        body: "offline".to_string(),
+        retry_after: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_default_run_waits_the_schedule_mentra_has_always_waited() {
+    // Nobody's timing changes until they ask: 500 ms, doubling.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        failing_then_text(3, offline, "recovered"),
+    );
+
+    let runtime = test_runtime(provider);
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    let message = agent
+        .send(vec![ContentBlock::text("hello")])
+        .await
+        .expect("the run retries and then succeeds");
+
+    assert_eq!(message.text(), "recovered");
+    assert_eq!(
+        announced_retry_delays(&collect_events(&mut events)),
+        vec![500, 1_000, 2_000]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_host_schedule_replaces_the_default_delays() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        failing_then_text(3, offline, "recovered"),
+    );
+
+    let runtime = test_runtime(provider);
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    let message = agent
+        .run(
+            vec![ContentBlock::text("hello")],
+            RunOptions::default().with_provider_retry(ProviderRetry {
+                base_delay: Duration::from_secs(2),
+                max_delay: Duration::from_secs(6),
+                ..ProviderRetry::default()
+            }),
+        )
+        .await
+        .expect("the run retries and then succeeds");
+
+    assert_eq!(message.text(), "recovered");
+    assert_eq!(
+        announced_retry_delays(&collect_events(&mut events)),
+        vec![2_000, 4_000, 6_000],
+        "the host's base doubles to the host's ceiling"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_that_names_its_window_is_waited_out() {
+    // The failure this exists for: a gateway answering 429 with a window far
+    // longer than a blip-shaped backoff would ever reach.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            failed_request(ProviderError::Http {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                body: "rate limit exceeded".to_string(),
+                retry_after: Some(Duration::from_secs(45)),
+            }),
+            text_stream("model", "recovered"),
+        ],
+    );
+
+    let runtime = test_runtime(provider);
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    let message = agent
+        .send(vec![ContentBlock::text("hello")])
+        .await
+        .expect("the run waits out the window and succeeds");
+
+    assert_eq!(message.text(), "recovered");
+    assert_eq!(
+        announced_retry_delays(&collect_events(&mut events)),
+        vec![45_000],
+        "the provider's window, not the schedule's 500 ms"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_server_cannot_park_a_run_for_an_hour() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            failed_request(ProviderError::Http {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: "come back later".to_string(),
+                retry_after: Some(Duration::from_secs(3_600)),
+            }),
+            text_stream("model", "recovered"),
+        ],
+    );
+
+    let runtime = test_runtime(provider);
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::text("hello")])
+        .await
+        .expect("the run succeeds after the clamped wait");
+
+    assert_eq!(
+        announced_retry_delays(&collect_events(&mut events)),
+        vec![60_000],
+        "clamped to the default one-minute ceiling"
     );
 }
 

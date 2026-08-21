@@ -32,8 +32,6 @@ enum RoundFlow {
     Stop,
 }
 
-const PROVIDER_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
-const PROVIDER_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
 const MEMORY_SEARCH_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub(super) struct TurnRunner<'a> {
@@ -427,7 +425,13 @@ impl<'a> TurnRunner<'a> {
                             self.options.model_budget(),
                         ));
                     }
-                    let delay = provider_retry_delay(attempt);
+                    // The provider's own answer, when it gave one, beats a
+                    // schedule that cannot know how long the window is. See
+                    // `ProviderRetry::delay_for` for which of the two wins.
+                    let delay = self
+                        .options
+                        .provider_retry
+                        .delay_for(attempt, error.retry_after());
                     self.agent.emit_event(AgentEvent::RetryAttempt {
                         agent_id: self.agent.id().to_string(),
                         error_message: error.to_string(),
@@ -643,15 +647,6 @@ fn summarize_tool_results(
             _ => None,
         })
         .collect()
-}
-
-fn provider_retry_delay(attempt: usize) -> Duration {
-    let shift = attempt.saturating_sub(1).min(usize::BITS as usize - 1) as u32;
-    let factor = 1u32 << shift;
-    PROVIDER_RETRY_BASE_DELAY
-        .checked_mul(factor)
-        .unwrap_or(PROVIDER_RETRY_MAX_DELAY)
-        .min(PROVIDER_RETRY_MAX_DELAY)
 }
 
 fn format_invalid_tool_input_feedback(invalid_tool_uses: &[InvalidToolUse]) -> String {

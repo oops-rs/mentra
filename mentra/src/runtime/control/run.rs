@@ -2,11 +2,110 @@ use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::runtime::error::RuntimeError;
 
 const DEFAULT_PROVIDER_RETRY_BUDGET: usize = 5;
+const DEFAULT_PROVIDER_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const DEFAULT_PROVIDER_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const DEFAULT_PROVIDER_RETRY_AFTER_CAP: Duration = Duration::from_secs(60);
+
+/// How long a run waits between provider retries.
+///
+/// *How many* retries it gets stays on [`RunOptions::retry_budget`]; see that
+/// field for why the count did not move in here. This is the other half: what
+/// each of those attempts waits for.
+///
+/// The defaults reproduce mentra's historical schedule exactly — 500 ms,
+/// doubling, capped at 5 s — which is shaped for a blip: a connection reset, a
+/// tunnel restart, a 502 from a proxy that is already coming back. A rate limit
+/// is a different failure. It lasts as long as the window it belongs to, which
+/// is routinely a minute, and the whole default budget elapses in about twelve
+/// and a half seconds — five attempts into a limit that was never going to lift
+/// in that time, and then a lost turn. A host that knows it is behind a metered
+/// gateway can say so here instead of living with a schedule chosen for a
+/// different failure.
+///
+/// ```rust
+/// use std::time::Duration;
+/// use mentra::runtime::{ProviderRetry, RunOptions};
+///
+/// // Wait out a minute-long rate-limit window rather than a blip.
+/// let options = RunOptions {
+///     retry_budget: 8,
+///     ..RunOptions::default()
+/// }
+/// .with_provider_retry(ProviderRetry {
+///     base_delay: Duration::from_secs(1),
+///     max_delay: Duration::from_secs(30),
+///     ..ProviderRetry::default()
+/// });
+/// # let _ = options;
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderRetry {
+    /// The wait before the second attempt, doubled before each attempt after
+    /// it.
+    pub base_delay: Duration,
+    /// The ceiling the doubling stops at. Reached and then held, so a long
+    /// budget spends its tail attempts at a steady interval rather than an
+    /// ever-growing one.
+    pub max_delay: Duration,
+    /// The longest wait a *server* may impose through `Retry-After`.
+    ///
+    /// A server that answers `Retry-After: 3600` is not describing a rate
+    /// limit any run should sit through, and honoring it unconditionally hands
+    /// a remote party control of how long this process blocks. The header is
+    /// clamped to this before it is considered. It never shortens
+    /// [`max_delay`](Self::max_delay): a schedule the host chose is the host's
+    /// business, and this bounds only what the other end asked for.
+    pub retry_after_cap: Duration,
+}
+
+impl Default for ProviderRetry {
+    fn default() -> Self {
+        Self {
+            base_delay: DEFAULT_PROVIDER_RETRY_BASE_DELAY,
+            max_delay: DEFAULT_PROVIDER_RETRY_MAX_DELAY,
+            retry_after_cap: DEFAULT_PROVIDER_RETRY_AFTER_CAP,
+        }
+    }
+}
+
+impl ProviderRetry {
+    /// The wait this schedule prescribes before the attempt that follows
+    /// `attempt` (one-based), before anything the provider said is considered.
+    pub fn scheduled_delay(&self, attempt: usize) -> Duration {
+        // Clamped to `u32`'s width, not `usize`'s: the factor is a `u32`, and
+        // shifting one by 32 or more is a panic in debug and nonsense in
+        // release. Unreachable at the default budget of five, reachable the
+        // moment a host raises it — which is the point of this type.
+        let shift = attempt.saturating_sub(1).min(u32::BITS as usize - 1) as u32;
+        let factor = 1u32 << shift;
+        self.base_delay
+            .checked_mul(factor)
+            .unwrap_or(self.max_delay)
+            .min(self.max_delay)
+    }
+
+    /// The wait actually taken before the attempt that follows `attempt`, given
+    /// what the provider asked for in `retry_after`.
+    ///
+    /// The longer of the two wins, because they answer different questions: the
+    /// schedule is the host's floor on how hard it is willing to hammer a
+    /// provider, and `Retry-After` is the provider's floor on when it will
+    /// answer again. Waiting the shorter of them satisfies neither. The
+    /// server's number is clamped to
+    /// [`retry_after_cap`](Self::retry_after_cap) first.
+    pub fn delay_for(&self, attempt: usize, retry_after: Option<Duration>) -> Duration {
+        let scheduled = self.scheduled_delay(attempt);
+        match retry_after {
+            Some(requested) => scheduled.max(requested.min(self.retry_after_cap)),
+            None => scheduled,
+        }
+    }
+}
 
 /// Why a run ended before its work was done, when a bound rather than the model
 /// decided that.
@@ -90,8 +189,33 @@ pub struct RunOptions {
     /// never stops the run.
     pub stop: Option<CancellationToken>,
     pub deadline: Option<SystemTime>,
+    /// How many times one provider request may be re-attempted after a
+    /// transient failure, before the run gives up and reports the error.
+    ///
+    /// The count stayed here rather than moving into [`ProviderRetry`] beside
+    /// the schedule it belongs with, because
+    /// `RunOptions { retry_budget: 3, ..default() }` is how every host that has
+    /// ever changed this wrote it, and there is no spelling of a moved public
+    /// field that keeps those compiling. One number, one home;
+    /// [`provider_retry`](Self::provider_retry) holds the rest.
+    ///
+    /// **Retries are model requests.** Each attempt increments the same counter
+    /// [`model_budget`](Self::model_budget) bounds, so a run with both set can
+    /// exhaust its model budget on retries and end in
+    /// [`ModelBudgetExceeded`](crate::error::RuntimeError::ModelBudgetExceeded)
+    /// without the model ever having answered. That is deliberate:
+    /// `model_budget` bounds how many times this run may reach for the
+    /// provider, and an attempt that failed still reached. A host raising this
+    /// budget to sit out a rate limit should raise `model_budget` with it, or
+    /// leave `model_budget` at `None`, where no such interaction exists.
     pub retry_budget: usize,
+    /// How long each of those retries waits. See [`ProviderRetry`]; the default
+    /// schedule is mentra's historical one, unchanged.
+    pub provider_retry: ProviderRetry,
     pub tool_budget: Option<usize>,
+    /// A bound on how many provider requests this run may make, counting failed
+    /// attempts — see [`retry_budget`](Self::retry_budget). `None` (the
+    /// default) never bounds the run.
     pub model_budget: Option<usize>,
     /// A per-run [`RoundStrategy`](crate::agent::RoundStrategy) invoked at each
     /// round boundary (after a committed tool round and after a committed
@@ -155,6 +279,7 @@ impl Default for RunOptions {
             stop: None,
             deadline: None,
             retry_budget: DEFAULT_PROVIDER_RETRY_BUDGET,
+            provider_retry: ProviderRetry::default(),
             tool_budget: None,
             model_budget: None,
             round_strategy: None,
@@ -173,6 +298,14 @@ impl RunOptions {
         self
     }
 
+    /// Sets the provider retry schedule on these options, returning the updated
+    /// value. Leaves [`retry_budget`](Self::retry_budget), which counts the
+    /// attempts this schedule spaces, alone.
+    pub fn with_provider_retry(mut self, provider_retry: ProviderRetry) -> Self {
+        self.provider_retry = provider_retry;
+        self
+    }
+
     /// Derives [`RunOptions`] for work spawned during this run — a subagent or a
     /// delegated run — sharing this run's aggregate safety bounds: the same
     /// [`cancellation`](Self::cancellation) and [`stop`](Self::stop) tokens (so
@@ -181,8 +314,8 @@ impl RunOptions {
     /// bound backed by the *same* accounting handle — a child's reported usage
     /// adds to the parent's running total, so parent and child together trip one
     /// shared bound rather than each getting an independent one. Every other
-    /// field (`retry_budget`, `tool_budget`, `model_budget`, `round_strategy`)
-    /// resets to [`RunOptions::default`]: those express per-run policy a child
+    /// field (`retry_budget`, `provider_retry`, `tool_budget`, `model_budget`,
+    /// `round_strategy`) resets to [`RunOptions::default`]: those express per-run policy a child
     /// sets independently, not an aggregate safety bound.
     ///
     /// [`early_end`](Self::early_end) resets too, for a different reason — it
@@ -289,6 +422,152 @@ impl RunOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the runner waited before each retry before this type existed:
+    /// 500 ms doubling to a 5 s ceiling. Pinned so a future edit to the
+    /// defaults has to be a deliberate one.
+    #[test]
+    fn the_default_schedule_is_the_one_mentra_has_always_used() {
+        let retry = ProviderRetry::default();
+
+        let delays: Vec<Duration> = (1..=8)
+            .map(|attempt| retry.scheduled_delay(attempt))
+            .collect();
+
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_host_schedule_doubles_from_its_own_base_to_its_own_ceiling() {
+        let retry = ProviderRetry {
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(10),
+            ..ProviderRetry::default()
+        };
+
+        let delays: Vec<Duration> = (1..=5)
+            .map(|attempt| retry.scheduled_delay(attempt))
+            .collect();
+
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_budget_does_not_overflow_the_doubling() {
+        // The factor is a `u32`; the old code clamped the shift to `usize`'s
+        // width, so a host generous enough to allow a 64th attempt got a panic
+        // instead of a delay. Unreachable at a budget of five, reachable the
+        // moment raising the budget is the supported thing to do.
+        let retry = ProviderRetry::default();
+
+        assert_eq!(retry.scheduled_delay(usize::MAX), retry.max_delay);
+        assert_eq!(retry.scheduled_delay(64), retry.max_delay);
+    }
+
+    #[test]
+    fn a_server_that_names_a_longer_wait_gets_it() {
+        let retry = ProviderRetry::default();
+
+        // Attempt 1's own schedule is 500 ms; the limit lasts a minute.
+        assert_eq!(
+            retry.delay_for(1, Some(Duration::from_secs(45))),
+            Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn a_server_that_names_a_shorter_wait_does_not_shorten_the_schedule() {
+        // `Retry-After` is the provider's floor on when it will answer, not a
+        // licence to hammer it sooner than the host chose to.
+        let retry = ProviderRetry {
+            base_delay: Duration::from_secs(5),
+            ..ProviderRetry::default()
+        };
+
+        assert_eq!(
+            retry.delay_for(1, Some(Duration::from_secs(1))),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn a_server_cannot_park_the_run_for_an_hour() {
+        let retry = ProviderRetry::default();
+
+        assert_eq!(
+            retry.delay_for(1, Some(Duration::from_secs(3600))),
+            retry.retry_after_cap,
+            "the header is clamped before it is considered"
+        );
+        assert_eq!(retry.retry_after_cap, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn the_cap_bounds_the_server_and_never_the_host() {
+        // A host that chose to wait five minutes between attempts keeps that
+        // schedule; the cap exists to bound a remote party, not the caller.
+        let retry = ProviderRetry {
+            base_delay: Duration::from_secs(300),
+            max_delay: Duration::from_secs(300),
+            retry_after_cap: Duration::from_secs(60),
+        };
+
+        assert_eq!(retry.delay_for(1, None), Duration::from_secs(300));
+        assert_eq!(
+            retry.delay_for(1, Some(Duration::from_secs(3600))),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn a_silent_provider_leaves_the_schedule_alone() {
+        let retry = ProviderRetry::default();
+
+        assert_eq!(retry.delay_for(3, None), retry.scheduled_delay(3));
+    }
+
+    #[test]
+    fn a_default_run_carries_the_default_schedule() {
+        assert_eq!(
+            RunOptions::default().provider_retry,
+            ProviderRetry::default()
+        );
+        assert_eq!(RunOptions::default().retry_budget, 5);
+    }
+
+    #[test]
+    fn a_child_run_starts_from_the_default_schedule() {
+        // Same reasoning as `retry_budget`: how patiently a delegated run
+        // treats its own provider is its own policy, not an aggregate bound
+        // inherited from the parent.
+        let parent = RunOptions::default().with_provider_retry(ProviderRetry {
+            base_delay: Duration::from_secs(30),
+            ..ProviderRetry::default()
+        });
+
+        assert_eq!(parent.child().provider_retry, ProviderRetry::default());
+    }
 
     #[test]
     fn a_cancellation_token_shows_whether_it_was_tripped() {
