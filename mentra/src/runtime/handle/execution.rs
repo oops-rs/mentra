@@ -58,6 +58,7 @@ impl RuntimeHandle {
             timeout: self.execution.policy.effective_timeout(requested_timeout),
             env: self.execution.policy.allowed_environment(),
             max_output_bytes_per_stream: self.execution.policy.max_output_bytes_per_stream,
+            target: None,
         };
 
         Ok((config, command_request))

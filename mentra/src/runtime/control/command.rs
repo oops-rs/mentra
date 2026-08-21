@@ -53,6 +53,19 @@ pub struct CommandRequest {
     pub timeout: Duration,
     pub env: Vec<(String, String)>,
     pub max_output_bytes_per_stream: usize,
+    /// Where the host asked this command to run; `None` is the local executor.
+    ///
+    /// Execution data, not policy: the executor reads it, nothing else decides
+    /// on it. A targeted request is authorized, validated, timeout-clamped and
+    /// output-capped exactly like a local one, so routing a command elsewhere
+    /// can never be a way around the policy that guards running it here. An
+    /// executor that does not serve the named target must refuse the request
+    /// rather than run it locally.
+    ///
+    /// Defaulted on deserialization so a request serialized before this field
+    /// existed still loads, as the untargeted request it was.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 /// Executes runtime command requests.
@@ -65,6 +78,12 @@ pub struct CommandRequest {
 pub trait RuntimeExecutor: Send + Sync {
     async fn run(&self, request: CommandRequest) -> Result<CommandOutput, String>;
 
+    /// Runs an untargeted command.
+    ///
+    /// The convenience form keeps the signature it always had, so it can only
+    /// build a request with [`CommandRequest::target`] set to `None`. A caller
+    /// that needs a target builds the [`CommandRequest`] itself and calls
+    /// [`run`](Self::run).
     async fn run_command(
         &self,
         command: &str,
@@ -81,6 +100,7 @@ pub trait RuntimeExecutor: Send + Sync {
             timeout,
             env,
             max_output_bytes_per_stream,
+            target: None,
         })
         .await
     }
@@ -91,6 +111,10 @@ pub trait RuntimeExecutor: Send + Sync {
 /// This executor clears unlisted environment variables and enforces output,
 /// timeout, and timeout-cleanup limits. It does not sandbox filesystem or
 /// network access.
+///
+/// It serves no named target and refuses any request that carries one: a
+/// command the host addressed elsewhere silently running on this machine
+/// would be the one failure mode a target is meant to prevent.
 pub struct LocalRuntimeExecutor;
 
 #[async_trait]
@@ -102,7 +126,13 @@ impl RuntimeExecutor for LocalRuntimeExecutor {
             timeout,
             env,
             max_output_bytes_per_stream,
+            target,
         } = request;
+        if let Some(target) = target {
+            return Err(format!(
+                "no executor serves target `{target}`; the local executor only runs untargeted commands"
+            ));
+        }
         let command = match spec {
             CommandSpec::Shell { command } => command,
         };
@@ -367,6 +397,7 @@ mod tests {
                 timeout: Duration::from_secs(5),
                 env: minimal_shell_env(),
                 max_output_bytes_per_stream: 8,
+                target: None,
             })
             .await
             .expect("command output");
@@ -390,6 +421,7 @@ mod tests {
                 timeout: Duration::from_secs(5),
                 env: minimal_shell_env(),
                 max_output_bytes_per_stream: 1024,
+                target: None,
             })
             .await
             .expect("command output");
@@ -410,6 +442,7 @@ mod tests {
                 timeout: Duration::from_millis(50),
                 env: minimal_shell_env(),
                 max_output_bytes_per_stream: 1024,
+                target: None,
             })
             .await
             .expect("command output");
@@ -417,5 +450,27 @@ mod tests {
         assert!(output.timed_out);
         assert_eq!(output.status_code, Some(124));
         assert!(!output.success);
+    }
+
+    #[tokio::test]
+    async fn targeted_request_is_refused_instead_of_running_locally() {
+        let error = LocalRuntimeExecutor
+            .run(CommandRequest {
+                spec: CommandSpec::Shell {
+                    command: "printf 'ran locally'".to_string(),
+                },
+                cwd: std::env::temp_dir(),
+                timeout: Duration::from_secs(5),
+                env: minimal_shell_env(),
+                max_output_bytes_per_stream: 1024,
+                target: Some("mac".to_string()),
+            })
+            .await
+            .expect_err("a targeted request must not run locally");
+
+        assert_eq!(
+            error,
+            "no executor serves target `mac`; the local executor only runs untargeted commands"
+        );
     }
 }
