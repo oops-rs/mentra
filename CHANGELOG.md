@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### A command can name where it runs
+
+- A host could install one executor and nothing more: `CommandRequest` said
+  what to run and under what limits, never where, so a runtime that could
+  reach a macOS build host over SSH had no way to be told that *this* command
+  was for it. `CommandRequest` now carries `target: Option<String>`, and
+  `RuntimeHandle::execute_shell_command_on` and
+  `ToolContext::execute_shell_command_on` (also on `ParallelToolContext`) put
+  a name on one call. `None` is the local executor, and the untargeted methods
+  are that call with `None`.
+- The name is execution data, not policy. It rides on the request to the
+  installed `RuntimeExecutor` and is read only there — which names exist and
+  what each one reaches is the host's business. Everything that guards a local
+  command guards a targeted one unchanged: working-root authorization, shell
+  validation, the timeout clamp, the environment allowlist, the output cap,
+  and the hooks that record a denial. Naming a target chooses where an
+  authorized command runs; it is never a way around what authorized it.
+- `LocalRuntimeExecutor` serves no name and refuses any request that carries
+  one — "no executor serves target `mac`; the local executor only runs
+  untargeted commands". Falling back to a local run would be the exact failure
+  a target exists to prevent: a command addressed to another machine quietly
+  executing on this one.
+- Background tasks stay local in this release. `start_background_task` always
+  sends `target: None`, because a task outlives the call that started it and
+  nothing yet carries a remote task's fate back to the agent waiting on it.
+- Additive for existing code: the field defaults to `None` on deserialization,
+  the `run_command` convenience method on `RuntimeExecutor` keeps its
+  signature and builds untargeted requests, and an executor that ignores
+  `target` behaves exactly as it did. Code that constructs a `CommandRequest`
+  literally names the new field.
+
 ### The local executor can be decorated without being copied
 
 - `LocalRuntimeExecutor` is now re-exported from `mentra::runtime` beside the
