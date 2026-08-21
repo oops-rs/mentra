@@ -430,3 +430,146 @@ fn resolve_path(base_dir: &Path, path: &str) -> PathBuf {
         base_dir.join(candidate)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::runtime::{
+        VolatileRuntimeStore,
+        control::{CommandOutput, LocalRuntimeExecutor, RuntimeExecutor, RuntimePolicy},
+    };
+
+    const AGENT_ID: &str = "agent-1";
+
+    /// Records what the handle handed it and answers without running anything,
+    /// so a test can read the request the routing layer actually produced.
+    #[derive(Default)]
+    struct RecordingExecutor {
+        requests: Mutex<Vec<CommandRequest>>,
+    }
+
+    impl RecordingExecutor {
+        fn last_target(&self) -> Option<String> {
+            self.requests
+                .lock()
+                .expect("recorded requests poisoned")
+                .last()
+                .expect("one recorded request")
+                .target
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeExecutor for RecordingExecutor {
+        async fn run(&self, request: CommandRequest) -> Result<CommandOutput, String> {
+            self.requests
+                .lock()
+                .expect("recorded requests poisoned")
+                .push(request);
+            Ok(CommandOutput {
+                stdout: "recorded".to_string(),
+                stderr: String::new(),
+                success: true,
+                status_code: Some(0),
+                timed_out: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            })
+        }
+    }
+
+    /// A handle wired to `executor`, with one agent registered and a policy
+    /// that permits shell commands. The store is volatile so nothing here
+    /// touches the machine-wide database.
+    fn handle_with(executor: Arc<dyn RuntimeExecutor>) -> RuntimeHandle {
+        let handle = RuntimeHandle::new(false)
+            .rebind_store(Arc::new(VolatileRuntimeStore::new()))
+            .with_policy(RuntimePolicy::permissive())
+            .with_executor(executor);
+        let base_dir = std::env::temp_dir();
+        handle
+            .agent_contexts
+            .write()
+            .expect("agent context registry poisoned")
+            .insert(
+                AGENT_ID.to_string(),
+                AgentExecutionConfig {
+                    name: "agent".to_string(),
+                    team_dir: base_dir.clone(),
+                    tasks_dir: base_dir.clone(),
+                    base_dir,
+                    memory_tool_search_limit: 5,
+                    auto_route_shell: false,
+                    is_teammate: false,
+                },
+            );
+        handle
+    }
+
+    #[tokio::test]
+    async fn a_named_target_reaches_the_executor() {
+        let executor = Arc::new(RecordingExecutor::default());
+        let handle = handle_with(executor.clone());
+
+        handle
+            .execute_shell_command_on(
+                AGENT_ID,
+                Some("x".to_string()),
+                "true".to_string(),
+                None,
+                None,
+                std::env::temp_dir(),
+            )
+            .await
+            .expect("the stub executor answers");
+
+        assert_eq!(executor.last_target(), Some("x".to_string()));
+    }
+
+    #[tokio::test]
+    async fn an_untargeted_command_reaches_the_executor_with_no_target() {
+        let executor = Arc::new(RecordingExecutor::default());
+        let handle = handle_with(executor.clone());
+
+        handle
+            .execute_shell_command(
+                AGENT_ID,
+                "true".to_string(),
+                None,
+                None,
+                std::env::temp_dir(),
+            )
+            .await
+            .expect("the stub executor answers");
+
+        assert_eq!(executor.last_target(), None);
+    }
+
+    /// The refusal has to come from the executor, not from a local run that
+    /// happened to succeed: a command addressed to a host that this runtime
+    /// cannot reach must fail loudly rather than execute here.
+    #[tokio::test]
+    async fn the_local_executor_refuses_a_target_it_does_not_serve() {
+        let handle = handle_with(Arc::new(LocalRuntimeExecutor));
+
+        let error = handle
+            .execute_shell_command_on(
+                AGENT_ID,
+                Some("mac".to_string()),
+                "true".to_string(),
+                None,
+                None,
+                std::env::temp_dir(),
+            )
+            .await
+            .expect_err("a targeted command must not run on the local executor");
+
+        assert_eq!(
+            error,
+            "no executor serves target `mac`; the local executor only runs untargeted commands"
+        );
+    }
+}
