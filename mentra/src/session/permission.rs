@@ -1,3 +1,5 @@
+mod pattern;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -117,6 +119,18 @@ impl PermissionDecision {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuleKey {
     pub tool_name: String,
+    /// Wildcard pattern matched against the JSON encoding of the call's
+    /// structured input, or `None` to answer every call to the tool.
+    ///
+    /// Matched as data rather than as a path: `*` matches any run of
+    /// characters including `/`, `**` means the same as `*`, `?` matches one
+    /// character, and every other character — JSON's braces, brackets and
+    /// commas included — is literal. Matching is anchored, so a rule about a
+    /// fragment is written `*fragment*`.
+    ///
+    /// Path-glob semantics were wrong here: `*` stopped at `/`, so any preview
+    /// carrying an absolute path made every key serialized after it
+    /// unmatchable, and a rule written against one silently answered nothing.
     pub pattern: Option<String>,
 }
 
@@ -171,9 +185,10 @@ impl RuleStore {
 
     /// Checks whether a tool is allowed by a remembered rule.
     ///
-    /// Pattern rules are matched against `input_json` using glob syntax and
-    /// take precedence over bare (no-pattern) rules. Returns `Some(true)` if
-    /// allowed, `Some(false)` if denied, or `None` if no matching rule exists.
+    /// Pattern rules are matched against `input_json` with the wildcard syntax
+    /// documented on [`RuleKey::pattern`] and take precedence over bare
+    /// (no-pattern) rules. Returns `Some(true)` if allowed, `Some(false)` if
+    /// denied, or `None` if no matching rule exists.
     /// Use [`RuleStore::matching_rule`] when the rule's own reason matters.
     pub fn check(&self, tool_name: &str, input_json: Option<&str>) -> Option<bool> {
         self.matching_rule(tool_name, input_json)
@@ -183,7 +198,8 @@ impl RuleStore {
     /// The remembered rule that answers a call, if one does.
     ///
     /// Matches exactly as [`RuleStore::check`] does — pattern rules against
-    /// `input_json` by glob, taking precedence over bare (no-pattern) rules —
+    /// `input_json` by wildcard, taking precedence over bare (no-pattern)
+    /// rules —
     /// and hands back the whole rule, so a refusal can restate the reason it
     /// was remembered with rather than only its verdict.
     pub fn matching_rule(
@@ -201,9 +217,9 @@ impl RuleStore {
                 continue;
             }
             match &rule.key.pattern {
-                Some(glob) => {
+                Some(rule_pattern) => {
                     if let Some(json) = input_json
-                        && glob_match::glob_match(glob, json)
+                        && pattern::matches(rule_pattern, json)
                     {
                         pattern_match = Some(rule);
                     }
@@ -727,8 +743,9 @@ mod tests {
             scope: PermissionRuleScope::Session,
             reason: None,
         });
-        // Pattern rule: deny when input matches.
-        // Use ** so path separators inside the JSON string are matched.
+        // Pattern rule: deny when input matches. `**` reads the same as `*`
+        // now that a pattern is matched as data, and is kept here because a
+        // rule persisted with that spelling has to keep answering.
         store.add_rule(RememberedRule {
             key: RuleKey {
                 tool_name: "shell".to_owned(),
@@ -743,6 +760,103 @@ mod tests {
             store.check("shell", Some(r#"{"command":"rm -rf /tmp"}"#)),
             Some(false)
         );
+    }
+
+    /// The preview a host builds for a routed command, with its keys in the
+    /// order `serde_json` writes them: an absolute `cwd` sits before `mode`
+    /// and `target`.
+    fn spawn_preview() -> &'static str {
+        r#"{"body":"cargo test","cwd":"/Users/dev/basis","mode":"command","target":"mac"}"#
+    }
+
+    /// A pattern is matched against JSON, and JSON is not a path. Matched by a
+    /// path globber, `*` stops dead at the `/` inside an absolute `cwd`, so
+    /// every key serialized after `cwd` becomes unreachable — the rule saves,
+    /// reports nothing, and silently answers no call it was written for.
+    #[test]
+    fn a_pattern_reaches_a_key_that_follows_an_absolute_path() {
+        let store = RuleStore::new();
+        store.add_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: "spawn".to_owned(),
+                pattern: Some(r#"**"mode":"command"**"#.to_owned()),
+            },
+            allow: true,
+            scope: PermissionRuleScope::Session,
+            reason: None,
+        });
+
+        assert_eq!(store.check("spawn", Some(spawn_preview())), Some(true));
+    }
+
+    #[test]
+    fn a_pattern_reaches_the_last_key_of_a_preview() {
+        let store = RuleStore::new();
+        store.add_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: "spawn".to_owned(),
+                pattern: Some(r#"**"target":"mac"**"#.to_owned()),
+            },
+            allow: true,
+            scope: PermissionRuleScope::Session,
+            reason: None,
+        });
+
+        assert_eq!(store.check("spawn", Some(spawn_preview())), Some(true));
+    }
+
+    /// `**` was only ever needed because `*` could not cross a separator.
+    /// Both now mean the same thing, so a rule written either way answers.
+    #[test]
+    fn one_star_and_two_stars_both_cross_a_path_separator() {
+        let store = RuleStore::new();
+        store.add_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: "spawn".to_owned(),
+                pattern: Some(r#"*"target":"mac"*"#.to_owned()),
+            },
+            allow: true,
+            scope: PermissionRuleScope::Session,
+            reason: None,
+        });
+
+        assert_eq!(store.check("spawn", Some(spawn_preview())), Some(true));
+    }
+
+    /// JSON is punctuation-dense, and a path globber reads some of that
+    /// punctuation as syntax: `{`…`}` is brace alternation and `[`…`]` a
+    /// character class. A pattern that quotes the front of an object must
+    /// match the object it quotes.
+    #[test]
+    fn json_punctuation_in_a_pattern_is_matched_literally() {
+        let store = RuleStore::new();
+        store.add_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: "spawn".to_owned(),
+                pattern: Some(r#"{"body":"cargo test"*"#.to_owned()),
+            },
+            allow: true,
+            scope: PermissionRuleScope::Session,
+            reason: None,
+        });
+
+        assert_eq!(store.check("spawn", Some(spawn_preview())), Some(true));
+    }
+
+    #[test]
+    fn a_pattern_that_names_another_target_does_not_match() {
+        let store = RuleStore::new();
+        store.add_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: "spawn".to_owned(),
+                pattern: Some(r#"**"target":"linux"**"#.to_owned()),
+            },
+            allow: true,
+            scope: PermissionRuleScope::Session,
+            reason: None,
+        });
+
+        assert_eq!(store.check("spawn", Some(spawn_preview())), None);
     }
 
     #[test]

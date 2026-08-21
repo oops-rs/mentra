@@ -462,6 +462,13 @@ impl WorkspaceEditor {
         Ok(())
     }
 
+    /// Whether a workspace file matches a caller's glob.
+    ///
+    /// A path glob, deliberately: the pattern describes a filesystem path, so
+    /// `/` is a separator that `*` must not cross and `**/*.rs` has to mean
+    /// any depth. This is the opposite of a permission rule pattern, which
+    /// describes JSON and uses [`crate::session::permission`]'s separatorless
+    /// matcher instead.
     fn path_matches_glob(&self, root: &Path, path: &Path, pattern: Option<&str>) -> bool {
         let Some(pattern) = pattern else {
             return true;
