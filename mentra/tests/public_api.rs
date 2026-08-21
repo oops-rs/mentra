@@ -15,7 +15,9 @@ use mentra::{
         Provider, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
         Response, Role, provider_event_stream_from_response,
     },
-    runtime::VolatileRuntimeStore,
+    runtime::{
+        CommandOutput, CommandRequest, RuntimeExecutor, RuntimePolicy, VolatileRuntimeStore,
+    },
     tool::{ParallelToolContext, ToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec},
 };
 use serde_json::{Value, json};
@@ -662,6 +664,107 @@ fn a_runtime_builder_is_a_type_downstream_code_can_name() {
     }
 
     let _ = with_volatile_store(Runtime::builder());
+}
+
+/// The downstream shape this exists for, written from outside the crate: a
+/// host registers an executor that serves named targets and a tool that names
+/// one. Every guard around a shell command still applies — only the executor
+/// reads the name. Compiling is half the claim; the other half is that the
+/// name survives the trip.
+#[tokio::test]
+async fn a_tool_can_name_the_executor_a_command_runs_on() {
+    #[derive(Clone, Default)]
+    struct TargetLog(Arc<Mutex<Vec<Option<String>>>>);
+
+    #[async_trait]
+    impl RuntimeExecutor for TargetLog {
+        async fn run(&self, request: CommandRequest) -> Result<CommandOutput, String> {
+            self.0
+                .lock()
+                .expect("target log poisoned")
+                .push(request.target.clone());
+            Ok(CommandOutput {
+                stdout: format!("ran on {}", request.target.unwrap_or("local".to_string())),
+                stderr: String::new(),
+                success: true,
+                status_code: Some(0),
+                timed_out: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            })
+        }
+    }
+
+    struct TargetedShellTool;
+
+    #[async_trait]
+    impl ToolDefinition for TargetedShellTool {
+        fn descriptor(&self) -> ToolSpec {
+            ToolSpec::builder("targeted_shell")
+                .description("Run a command on a named host")
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "target": { "type": "string" },
+                        "command": { "type": "string" }
+                    },
+                    "required": ["command"]
+                }))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for TargetedShellTool {
+        async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
+            let command = input
+                .get("command")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "command is required".to_string())?
+                .to_string();
+            let target = input
+                .get("target")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let cwd = ctx.resolve_working_directory(None)?;
+            let output = ctx
+                .execute_shell_command_on(target, command, None, None, cwd)
+                .await?;
+            Ok(output.stdout)
+        }
+    }
+
+    let log = TargetLog::default();
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model.clone()]);
+    provider.push_turns(vec![
+        Turn::ToolCalls(vec![ScriptedToolCall::new(
+            "targeted_shell",
+            json!({ "target": "mac", "command": "xcodebuild -version" }),
+        )]),
+        Turn::Text("done".to_string()),
+    ]);
+
+    let runtime = Runtime::builder()
+        .with_runtime_identifier(format!("public-api-{}", now_nanos()))
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .with_policy(RuntimePolicy::permissive())
+        .with_executor(log.clone())
+        .build()
+        .expect("build runtime");
+    runtime.register_tool(TargetedShellTool);
+    let mut agent = runtime.spawn("target-agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("build it on the mac")])
+        .await
+        .expect("run completes");
+
+    assert_eq!(
+        log.0.lock().expect("target log poisoned").as_slice(),
+        [Some("mac".to_string())]
+    );
 }
 
 fn now_nanos() -> u128 {
