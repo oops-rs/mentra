@@ -2,6 +2,89 @@
 
 ## Unreleased
 
+### A host chooses how long to wait for a rate limit
+
+- mentra's provider backoff was two private constants: 500 ms, doubling, capped
+  at 5 s, five attempts — about twelve and a half seconds in total. That is a
+  schedule for a blip, a reset connection or a proxy restarting, and it is the
+  wrong shape for a rate limit, which lasts as long as the window it belongs to
+  and is routinely a minute. A gateway answering 429 six times in fourteen
+  seconds spent a run's whole budget inside the window and then lost the turn,
+  and no host could say otherwise.
+- `RunOptions::provider_retry` is a `ProviderRetry { base_delay, max_delay,
+  retry_after_cap }`. Its defaults are exactly the old numbers, so nothing
+  changes for anyone who does not ask. `RunOptions::with_provider_retry` sets it
+  in one call. The count of attempts stays on `retry_budget`, where every host
+  that has ever changed it already writes it — one number, one home, and no
+  spelling of a moved public field would have kept those lines compiling.
+- A 429 or 503 that carries `Retry-After` is now waited out. The longer of the
+  schedule and the header wins, because the two answer different questions: the
+  schedule is the host's floor on how hard it is willing to push a provider, and
+  the header is the provider's floor on when it will answer again — waiting the
+  shorter of them satisfies neither. Both spellings RFC 9110 allows are read, a
+  count of seconds and an HTTP-date, and a date already in the past means retry
+  now.
+- The server's number is clamped to `retry_after_cap` — one minute by default —
+  before it is considered, so a provider answering `Retry-After: 3600` cannot
+  park a run for an hour. The clamp never shortens a schedule the host chose: it
+  bounds what the other end asked for, nothing else. `AgentEvent::RetryAttempt`
+  reports the delay actually taken, header-driven or not.
+- Retries still count against `model_budget`, unchanged, and both fields now say
+  so: an attempt that failed still reached for the provider, and that is what
+  the bound bounds. A host raising `retry_budget` to sit out a rate limit should
+  raise `model_budget` with it, or leave `model_budget` at `None`, where the two
+  never meet.
+- A latent panic went with it. The doubling clamped its shift to `usize`'s width
+  and then applied it to a `u32`, so a 33rd attempt would have overflowed —
+  unreachable at a budget of five, and reachable the moment raising the budget
+  became the supported thing to do.
+
+### An HTTP error remembers the Retry-After it was sent
+
+- A rate limit is the one failure whose recovery time the server knows and the
+  client cannot guess, and `Retry-After` is how it says so — but the header died
+  with the `reqwest::Response`, which nothing above mentra-provider ever sees.
+  `ProviderError::Http` now carries `retry_after: Option<Duration>`, read off
+  the response at the moment it becomes an error, and
+  `ProviderError::retry_after()` answers the same question for `Retryable`'s
+  existing `delay` so a backoff need not know which variant it is holding.
+- `ProviderError::from_http_response` is the constructor every provider in the
+  crate now uses. It takes the status, the hint, and the body off one response,
+  so a call site cannot capture one and forget another.
+- Compatibility: code that builds or matches a `ProviderError::Http` literally
+  names the new field, the same way `CommandRequest`'s `target` was added.
+  `from_http_response` replaces the literal at a construction site; a `match`
+  arm that does not care adds `..`.
+
+### A host chooses the Responses transport
+
+- mentra-provider has shipped two Responses transports for releases — HTTP+SSE
+  and a websocket driven by `response.create` frames — and the websocket one has
+  been unreachable from mentra the whole time. Nothing in the runtime ever wrote
+  `ResponsesRequestOptions.transport`, so every request went out over HTTP+SSE
+  whatever the endpoint was capable of, and a gateway answering `101 Switching
+  Protocols` on `/v1/responses` had no way to be used as one.
+- `RuntimeBuilder::with_responses_transport` chooses it. Runtime scope, because
+  a transport is a property of the connection to a provider rather than of one
+  run: two runs against the same endpoint on different transports are two
+  different conversations with it. The choice settles every request the runtime
+  makes — turns and compaction alike, since a run that summarizes over a
+  different transport than it talks over is the same silent split one level
+  down. `ResponsesTransport` is reachable as `mentra::ResponsesTransport` and
+  `mentra::provider::ResponsesTransport`.
+- Left unset, nothing changes: each request's own options stand, which is
+  HTTP+SSE unless a host set otherwise. Set, the runtime's answer holds over a
+  disagreeing `AgentConfig`, because two live opinions about one socket is not a
+  state worth keeping.
+- A provider whose capabilities report `supports_websockets: false` — anthropic
+  and gemini — refuses an explicit websocket selection at its first request,
+  naming itself, before anything is sent. Answering over HTTP+SSE instead would
+  return a stream nobody asked for and hide a misconfigured runtime behind a
+  working one; `stream_response` already takes that stance for a transport that
+  is not compiled in, and this is the same refusal one layer up. The refusal is
+  terminal, so the retry budget is not spent re-asking a question whose answer
+  cannot change.
+
 ### A rule pattern matches the call, not a path
 
 - A remembered permission rule's `pattern` is matched against the JSON encoding
