@@ -414,10 +414,7 @@ where
             .map_err(ProviderError::Transport)?;
 
         if !response.status().is_success() {
-            return Err(ProviderError::Http {
-                status: response.status(),
-                body: response.text().await.unwrap_or_default(),
-            });
+            return Err(ProviderError::from_http_response(response).await);
         }
 
         let models = response
@@ -512,10 +509,7 @@ where
             .await?;
 
         if !response.status().is_success() {
-            let error = ProviderError::Http {
-                status: response.status(),
-                body: response.text().await.unwrap_or_default(),
-            };
+            let error = ProviderError::from_http_response(response).await;
             if state_mode == crate::ResponsesStateMode::Hybrid
                 && request.previous_response_id().is_some()
                 && let Some(rejection) = previous_response_state_rejection(&error)
@@ -532,10 +526,7 @@ where
                     .send_http_responses_request(&request, compression, credentials, session)
                     .await?;
                 if !response.status().is_success() {
-                    return Err(ProviderError::Http {
-                        status: response.status(),
-                        body: response.text().await.unwrap_or_default(),
-                    });
+                    return Err(ProviderError::from_http_response(response).await);
                 }
                 return Ok(
                     self.track_response_state(spawn_event_stream_with_provenance(
@@ -801,7 +792,7 @@ fn previous_response_parameter_is_unsupported(body: &str) -> bool {
 fn previous_response_state_rejection(
     error: &ProviderError,
 ) -> Option<PreviousResponseStateRejection> {
-    let ProviderError::Http { status, body } = error else {
+    let ProviderError::Http { status, body, .. } = error else {
         return None;
     };
     if !(*status == reqwest::StatusCode::BAD_REQUEST || *status == reqwest::StatusCode::NOT_FOUND) {
@@ -1717,6 +1708,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         let unsupported = ProviderError::Http {
             status: reqwest::StatusCode::BAD_REQUEST,
             body: r#"{"detail":"Unsupported parameter: previous_response_id"}"#.to_string(),
+            retry_after: None,
         };
         assert_eq!(
             previous_response_state_rejection(&unsupported),
@@ -1726,6 +1718,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         let stale = ProviderError::Http {
             status: reqwest::StatusCode::NOT_FOUND,
             body: r#"{"error":{"message":"previous_response_id expired"}}"#.to_string(),
+            retry_after: None,
         };
         assert_eq!(
             previous_response_state_rejection(&stale),
@@ -1735,6 +1728,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
         let unrelated = ProviderError::Http {
             status: reqwest::StatusCode::BAD_REQUEST,
             body: r#"{"detail":"Unsupported parameter: temperature"}"#.to_string(),
+            retry_after: None,
         };
         assert_eq!(previous_response_state_rejection(&unrelated), None);
 
@@ -1743,6 +1737,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             body: r#"{"detail":"Unsupported parameter: temperature","request":{
                     "previous_response_id":"resp_1"}}"#
                 .to_string(),
+            retry_after: None,
         };
         assert_eq!(
             previous_response_state_rejection(&echoed_previous_response_id),

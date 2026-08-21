@@ -219,10 +219,7 @@ where
         let response = request.send().await.map_err(ProviderError::Transport)?;
 
         if !response.status().is_success() {
-            return Err(ProviderError::Http {
-                status: response.status(),
-                body: response.text().await.unwrap_or_default(),
-            });
+            return Err(ProviderError::from_http_response(response).await);
         }
 
         let models = response
@@ -281,10 +278,7 @@ where
             .map_err(ProviderError::Transport)?;
 
         if !response.status().is_success() {
-            return Err(ProviderError::Http {
-                status: response.status(),
-                body: response.text().await.unwrap_or_default(),
-            });
+            return Err(ProviderError::from_http_response(response).await);
         }
 
         response

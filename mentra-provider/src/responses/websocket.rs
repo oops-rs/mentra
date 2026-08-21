@@ -29,6 +29,8 @@ use crate::ProviderId;
 use crate::ReasoningFormat;
 use crate::ReasoningProvenance;
 use crate::ResponseHeaders;
+use crate::error::retry_after_from_header_value;
+use crate::error::retry_after_from_headers;
 
 use super::SharedTurnState;
 use super::sse::StreamState;
@@ -443,12 +445,17 @@ fn map_ws_error(error: WsError, url: &Url) -> ProviderError {
     match error {
         WsError::Http(response) => {
             let status = response.status();
+            let retry_after = retry_after_from_headers(response.headers());
             let body = response
                 .body()
                 .as_ref()
                 .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
                 .unwrap_or_else(|| format!("websocket connection failed for {url}"));
-            ProviderError::Http { status, body }
+            ProviderError::Http {
+                status,
+                body,
+                retry_after,
+            }
         }
         // Connection lost mid-handshake: the peer went away before the upgrade
         // completed. That is a transient liveness failure (restart, tunnel
@@ -518,10 +525,28 @@ fn parse_wrapped_websocket_error_event(payload: &str) -> Option<MappedWebsocketE
 
     let status = reqwest::StatusCode::from_u16(event.status?).ok()?;
     let body = payload.to_string();
+    let headers = event.headers.map(response_headers_from_json);
+    // The upgrade's own headers are long gone by the time a rate limit arrives
+    // as a wrapped frame, so the only `Retry-After` on this path is the one the
+    // frame echoed. Read it here or it is lost.
+    let retry_after = headers.as_ref().and_then(retry_after_from_response_headers);
     Some(MappedWebsocketError {
-        error: ProviderError::Http { status, body },
-        headers: event.headers.map(response_headers_from_json),
+        error: ProviderError::Http {
+            status,
+            body,
+            retry_after,
+        },
+        headers,
     })
+}
+
+/// Reads `Retry-After` out of headers a frame carried as JSON.
+fn retry_after_from_response_headers(headers: &ResponseHeaders) -> Option<Duration> {
+    headers
+        .values
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| retry_after_from_header_value(value))
 }
 
 fn response_headers_from_json(headers: JsonMap<String, Value>) -> ResponseHeaders {

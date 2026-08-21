@@ -175,6 +175,7 @@ async fn send_retries_transient_provider_error_before_streaming() {
             failed_request(ProviderError::Http {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 body: "offline".to_string(),
+                retry_after: None,
             }),
             text_stream(&model.id, "recovered"),
         ],
@@ -251,6 +252,7 @@ async fn retry_and_round_counters_are_reported_distinctly() {
             failed_request(ProviderError::Http {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 body: "offline".to_string(),
+                retry_after: None,
             }),
             text_stream(&model.id, "recovered"),
         ],

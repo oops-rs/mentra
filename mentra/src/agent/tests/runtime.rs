@@ -771,6 +771,7 @@ fn transient_runtime_error_helper_matches_provider_retry_policy() {
     let transient = crate::runtime::RuntimeError::FailedToStreamResponse(ProviderError::Http {
         status: reqwest::StatusCode::TOO_MANY_REQUESTS,
         body: String::new(),
+        retry_after: None,
     });
     let permanent = crate::runtime::RuntimeError::FailedToStreamResponse(
         ProviderError::InvalidRequest("bad request".to_string()),
