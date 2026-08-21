@@ -171,6 +171,7 @@ impl ToolContext<'_> {
         self.runtime.app_context::<T>()
     }
 
+    /// Runs one command on the local executor.
     pub async fn execute_shell_command(
         &self,
         command: String,
@@ -181,6 +182,33 @@ impl ToolContext<'_> {
         self.runtime
             .execute_shell_command(
                 &self.agent_id,
+                command,
+                justification,
+                requested_timeout,
+                cwd,
+            )
+            .await
+    }
+
+    /// Runs one command on the executor the host named.
+    ///
+    /// A tool that lets its caller say *where* a command runs passes the name
+    /// here; `None` is the local executor. The name reaches the installed
+    /// [`crate::runtime::RuntimeExecutor`] on the request and is interpreted
+    /// only there, so a tool can route a command without gaining any way to
+    /// route around the policy that authorized it.
+    pub async fn execute_shell_command_on(
+        &self,
+        target: Option<String>,
+        command: String,
+        justification: Option<String>,
+        requested_timeout: Option<std::time::Duration>,
+        cwd: PathBuf,
+    ) -> Result<crate::runtime::CommandOutput, String> {
+        self.runtime
+            .execute_shell_command_on(
+                &self.agent_id,
+                target,
                 command,
                 justification,
                 requested_timeout,
@@ -403,6 +431,7 @@ impl ParallelToolContext {
         self.runtime.app_context::<T>()
     }
 
+    /// Runs one command on the local executor.
     pub async fn execute_shell_command(
         &self,
         command: String,
@@ -413,6 +442,33 @@ impl ParallelToolContext {
         self.runtime
             .execute_shell_command(
                 &self.agent_id,
+                command,
+                justification,
+                requested_timeout,
+                cwd,
+            )
+            .await
+    }
+
+    /// Runs one command on the executor the host named.
+    ///
+    /// A tool that lets its caller say *where* a command runs passes the name
+    /// here; `None` is the local executor. The name reaches the installed
+    /// [`crate::runtime::RuntimeExecutor`] on the request and is interpreted
+    /// only there, so a tool can route a command without gaining any way to
+    /// route around the policy that authorized it.
+    pub async fn execute_shell_command_on(
+        &self,
+        target: Option<String>,
+        command: String,
+        justification: Option<String>,
+        requested_timeout: Option<std::time::Duration>,
+        cwd: PathBuf,
+    ) -> Result<crate::runtime::CommandOutput, String> {
+        self.runtime
+            .execute_shell_command_on(
+                &self.agent_id,
+                target,
                 command,
                 justification,
                 requested_timeout,
