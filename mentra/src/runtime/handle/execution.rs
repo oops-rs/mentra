@@ -3,9 +3,18 @@ use crate::runtime::TaskIntrinsicTool;
 use super::*;
 
 impl RuntimeHandle {
+    /// Authorizes, validates and shapes one command into a request.
+    ///
+    /// `target` rides through untouched: it names the executor the host wants,
+    /// and every check above it — working-root authorization, shell
+    /// validation, the timeout clamp, the output cap, the environment
+    /// allowlist — applies to a targeted command exactly as it does to a local
+    /// one. A target chooses where an authorized command runs; it never
+    /// decides whether it may.
     fn build_command_request(
         &self,
         agent_id: &str,
+        target: Option<String>,
         command: String,
         requested_timeout: Option<Duration>,
         cwd: PathBuf,
@@ -58,7 +67,7 @@ impl RuntimeHandle {
             timeout: self.execution.policy.effective_timeout(requested_timeout),
             env: self.execution.policy.allowed_environment(),
             max_output_bytes_per_stream: self.execution.policy.max_output_bytes_per_stream,
-            target: None,
+            target,
         };
 
         Ok((config, command_request))
@@ -72,8 +81,11 @@ impl RuntimeHandle {
         requested_timeout: Option<Duration>,
         cwd: PathBuf,
     ) -> Result<BackgroundTaskSummary, String> {
+        // Background tasks are untargeted in this release: a task outlives the
+        // call that started it, and nothing yet reports a remote task's fate
+        // back to the agent that asked for it.
         let (_config, command_request) =
-            self.build_command_request(agent_id, command, requested_timeout, cwd, true)?;
+            self.build_command_request(agent_id, None, command, requested_timeout, cwd, true)?;
 
         if let Some(limit) = self.execution.policy.background_task_limit
             && self
@@ -264,16 +276,45 @@ impl RuntimeHandle {
         task::execute_with_store(self.persistence.store.as_ref(), tool, input, dir, access)
     }
 
+    /// Runs one command on the local executor.
     pub async fn execute_shell_command(
         &self,
         agent_id: &str,
+        command: String,
+        justification: Option<String>,
+        requested_timeout: Option<Duration>,
+        cwd: PathBuf,
+    ) -> Result<CommandOutput, String> {
+        self.execute_shell_command_on(
+            agent_id,
+            None,
+            command,
+            justification,
+            requested_timeout,
+            cwd,
+        )
+        .await
+    }
+
+    /// Runs one command on the executor the host named.
+    ///
+    /// `target` is passed to the installed [`RuntimeExecutor`] on the request
+    /// and is not interpreted here: which names exist, and what each one
+    /// reaches, is the host's business. Every guard around the command is the
+    /// same one an untargeted call gets. `None` means the local executor;
+    /// the builtin [`LocalRuntimeExecutor`] refuses any other name rather than
+    /// running a command that was addressed elsewhere.
+    pub async fn execute_shell_command_on(
+        &self,
+        agent_id: &str,
+        target: Option<String>,
         command: String,
         _justification: Option<String>,
         requested_timeout: Option<Duration>,
         cwd: PathBuf,
     ) -> Result<CommandOutput, String> {
         let (_config, command_request) =
-            self.build_command_request(agent_id, command, requested_timeout, cwd, false)?;
+            self.build_command_request(agent_id, target, command, requested_timeout, cwd, false)?;
 
         self.execution.executor.run(command_request).await
     }
