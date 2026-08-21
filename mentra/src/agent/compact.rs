@@ -88,6 +88,16 @@ impl Agent {
         debug_assert!(preserve_from <= self.history().len());
 
         let base_revision = self.memory.revision();
+        // Compaction is a provider request like any other, so it goes out on
+        // the transport the runtime chose. Leaving it on the request's own
+        // value would quietly summarize over HTTP+SSE inside a run the host
+        // put on a websocket.
+        let mut provider_request_options = self.config.provider_request_options.clone();
+        crate::provider::select_responses_transport(
+            self.provider.as_ref(),
+            self.runtime.responses_transport(),
+            &mut provider_request_options,
+        )?;
         let Some(proposal) = self
             .runtime
             .compaction_engine()
@@ -97,7 +107,7 @@ impl Agent {
                     self.model(),
                     self.transcript().clone(),
                     &self.config.compaction,
-                    self.config.provider_request_options.clone(),
+                    provider_request_options,
                 ),
             )
             .await?

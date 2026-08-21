@@ -129,6 +129,15 @@ impl RuntimeHandle {
             .get_provider(id)
     }
 
+    /// The Responses transport this runtime chose for every request it makes,
+    /// or `None` when it left the choice to each request's own options.
+    pub(crate) fn responses_transport(&self) -> Option<crate::provider::ResponsesTransport> {
+        self.provider_registry
+            .read()
+            .expect("provider registry poisoned")
+            .responses_transport()
+    }
+
     pub(crate) fn memory_engine(&self) -> Arc<MemoryEngine> {
         self.persistence.memory.clone()
     }

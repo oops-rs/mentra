@@ -370,6 +370,15 @@ impl<'a> TurnRunner<'a> {
             request_history.push(recalled);
         }
         self.agent.inject_teammate_identity(&mut request_history);
+        let mut provider_request_options = self.agent.config.provider_request_options.clone();
+        // Settled once, before the first attempt: a transport the provider
+        // cannot serve is a configuration error, and retrying it would only
+        // reach the same refusal five more times.
+        crate::provider::select_responses_transport(
+            provider.as_ref(),
+            self.agent.runtime.responses_transport(),
+            &mut provider_request_options,
+        )?;
         let request = Request {
             model: self.agent.model.as_str().into(),
             system: self.agent.effective_system_prompt(),
@@ -379,7 +388,7 @@ impl<'a> TurnRunner<'a> {
             temperature: self.agent.config.temperature,
             max_output_tokens: self.agent.config.max_output_tokens,
             metadata: Cow::Borrowed(&self.agent.config.metadata),
-            provider_request_options: self.agent.config.provider_request_options.clone(),
+            provider_request_options,
         };
         let mut attempt = 0usize;
         let mut stream = loop {

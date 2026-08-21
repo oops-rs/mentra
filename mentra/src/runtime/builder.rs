@@ -3,7 +3,7 @@ use std::{any::Any, path::Path, sync::Arc};
 use crate::{
     compaction::CompactionEngine,
     mcp::{McpManager, McpServerConfig, McpSseServerConfig},
-    provider::{Provider, ProviderRegistry},
+    provider::{Provider, ProviderRegistry, ResponsesTransport},
     runtime::{
         RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks, RuntimePolicy, RuntimeStore,
         control::PreExecutionHook, error::RuntimeError, skill::SkillLoadError,
@@ -275,6 +275,42 @@ impl RuntimeBuilder {
         let _ = self
             .provider_registry
             .register_builtin_provider(id, api_key);
+        self
+    }
+
+    /// Chooses the transport this runtime's Responses-family requests stream
+    /// over.
+    ///
+    /// Runtime scope, because a transport is a property of the connection to a
+    /// provider rather than of one run: an HTTP+SSE turn and a websocket turn
+    /// against the same endpoint are two different conversations with it, and a
+    /// per-run switch would mean the runtime holding two live opinions about
+    /// one socket. Left unset, each request's own
+    /// [`ResponsesRequestOptions::transport`](crate::provider::ResponsesRequestOptions)
+    /// stands — which is HTTP+SSE unless a host set otherwise, exactly as
+    /// before this method existed.
+    ///
+    /// A provider that does not serve websockets — anthropic and gemini, whose
+    /// definitions report `supports_websockets: false` — refuses an explicit
+    /// [`ResponsesTransport::WebSocket`](crate::provider::ResponsesTransport)
+    /// at its first request, naming itself, rather than answering over
+    /// HTTP+SSE. Selecting a transport is an explicit act, and a silent
+    /// fallback would hand back a stream nobody asked for.
+    ///
+    /// ```rust,no_run
+    /// use mentra::{BuiltinProvider, Runtime};
+    /// use mentra::provider::ResponsesTransport;
+    /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = Runtime::builder()
+    ///     .with_provider(BuiltinProvider::OpenAI, "sk-...")
+    ///     .with_responses_transport(ResponsesTransport::WebSocket)
+    ///     .build()?;
+    /// # let _ = runtime;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_responses_transport(mut self, transport: ResponsesTransport) -> Self {
+        self.provider_registry.set_responses_transport(transport);
         self
     }
 

@@ -140,6 +140,15 @@ pub struct ProviderRegistry {
     default_embedding_provider: Option<ProviderId>,
     providers: HashMap<ProviderId, Arc<dyn Provider>>,
     embedding_providers: HashMap<ProviderId, Arc<dyn EmbeddingProvider>>,
+    /// The Responses transport this runtime's requests go out on, or `None`
+    /// when the runtime does not choose and each request's own options stand.
+    ///
+    /// It lives here rather than on the handle because a transport is a
+    /// property of the connection to a provider, and this is where a runtime
+    /// keeps those. It also means the choice travels the one path the builder
+    /// already hands to the handle at build time, instead of a field every
+    /// `with_*` reconstructor would have to remember to carry.
+    responses_transport: Option<ResponsesTransport>,
 }
 
 impl ProviderRegistry {
@@ -269,6 +278,55 @@ impl ProviderRegistry {
     pub(crate) fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
+
+    pub(crate) fn set_responses_transport(&mut self, transport: ResponsesTransport) {
+        self.responses_transport = Some(transport);
+    }
+
+    pub(crate) fn responses_transport(&self) -> Option<ResponsesTransport> {
+        self.responses_transport
+    }
+}
+
+/// Settles which Responses transport a request goes out on, and refuses one the
+/// provider cannot serve.
+///
+/// The runtime's choice, when it made one, replaces whatever the request's own
+/// options carried: it is the connection-level answer, and a per-request one
+/// that disagreed would mean two live opinions about a single socket. With no
+/// runtime choice the request's own value stands, which is what every caller
+/// had before a runtime could choose at all.
+///
+/// A provider whose capabilities report no websocket support is refused rather
+/// than quietly served over HTTP+SSE. The fallback is the tempting behavior and
+/// the wrong one: asking for a transport is explicit, so answering on a
+/// different one returns a stream nobody asked for and hides a misconfigured
+/// runtime behind a working one — the same stance `stream_response` already
+/// takes when the transport is not compiled in.
+pub(crate) fn select_responses_transport(
+    provider: &dyn Provider,
+    chosen: Option<ResponsesTransport>,
+    options: &mut ProviderRequestOptions,
+) -> Result<(), crate::error::RuntimeError> {
+    if let Some(transport) = chosen {
+        options.responses.transport = transport;
+    }
+
+    if options.responses.transport != ResponsesTransport::WebSocket
+        || provider.capabilities().supports_websockets
+    {
+        return Ok(());
+    }
+
+    let descriptor = provider.descriptor();
+    let name = descriptor
+        .display_name
+        .unwrap_or_else(|| descriptor.id.as_str().to_string());
+    Err(crate::error::RuntimeError::OperationDenied(format!(
+        "provider '{name}' does not serve the Responses websocket transport; \
+         select ResponsesTransport::HttpSse or register a provider that does \
+         — answering over HTTP+SSE would return a transport nobody asked for"
+    )))
 }
 
 fn shared_provider<P>(provider: P) -> Arc<dyn Provider>
