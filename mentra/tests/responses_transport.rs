@@ -157,6 +157,26 @@ async fn a_runtime_that_chooses_nothing_still_streams_over_http_sse() {
     assert_eq!(recorder.transports(), vec![ResponsesTransport::HttpSse]);
 }
 
+#[test]
+fn a_runtime_reports_the_transport_it_was_given() {
+    // Without this reader the choice is write-only: the only evidence a host's
+    // selection reached the runtime is a turn run against a provider that
+    // records what it was handed, so anything downstream can test its own field
+    // and stop at the seam — the shape of test that passes while the wiring
+    // between the two is broken.
+    let unset = runtime_for(RecordingProvider::new(BuiltinProvider::OpenAI, true), None);
+    assert_eq!(unset.responses_transport(), None);
+
+    let chosen = runtime_for(
+        RecordingProvider::new(BuiltinProvider::OpenAI, true),
+        Some(ResponsesTransport::WebSocket),
+    );
+    assert_eq!(
+        chosen.responses_transport(),
+        Some(ResponsesTransport::WebSocket)
+    );
+}
+
 #[tokio::test]
 async fn a_chosen_websocket_transport_reaches_the_request() {
     // The gap this closes: `ResponsesRequestOptions.transport` existed and the

@@ -325,6 +325,27 @@ impl Runtime {
             .descriptors()
     }
 
+    /// The Responses transport this runtime chose for every request it makes,
+    /// or `None` when it left the choice to each request's own options — which
+    /// is HTTP+SSE unless a host set otherwise.
+    ///
+    /// The reader for
+    /// [`RuntimeBuilder::with_responses_transport`](crate::runtime::RuntimeBuilder::with_responses_transport).
+    /// A transport is otherwise the one piece of a runtime's configuration
+    /// nothing can observe: a registered tool shows up in
+    /// [`tools`](Self::tools), a provider in [`providers`](Self::providers),
+    /// but a transport reaches only the requests the runtime sends. That makes
+    /// the wiring between a host's choice and this runtime untestable except by
+    /// running a turn against a provider that records what it was handed — and
+    /// leaves a host that wants to report its own configuration with no way to
+    /// ask.
+    pub fn responses_transport(&self) -> Option<crate::provider::ResponsesTransport> {
+        self.provider_registry
+            .read()
+            .expect("provider registry poisoned")
+            .responses_transport()
+    }
+
     /// Registers a builtin provider from an API key.
     pub fn register_provider(
         &mut self,

@@ -88,6 +88,13 @@
   HTTP+SSE unless a host set otherwise. Set, the runtime's answer holds over a
   disagreeing `AgentConfig`, because two live opinions about one socket is not a
   state worth keeping.
+- `Runtime::responses_transport()` reads the choice back. A transport is
+  otherwise the one piece of a runtime's configuration nothing can observe — a
+  registered tool shows up in `Runtime::tools()`, a provider in
+  `Runtime::providers()`, but a transport reaches only the requests the runtime
+  sends — which leaves anything wrapping mentra able to test its own field and
+  nothing past the seam, and a host wanting to report its own configuration with
+  no way to ask.
 - A provider whose capabilities report `supports_websockets: false` — anthropic
   and gemini — refuses an explicit websocket selection at its first request,
   naming itself, before anything is sent. Answering over HTTP+SSE instead would
