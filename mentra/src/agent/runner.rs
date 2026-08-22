@@ -354,17 +354,18 @@ impl<'a> TurnRunner<'a> {
         Ok(())
     }
 
-    async fn stream_turn(&mut self) -> Result<StreamedTurn, RuntimeError> {
-        if self.model_requests >= self.options.model_budget() {
-            return Err(RuntimeError::ModelBudgetExceeded(
-                self.options.model_budget(),
-            ));
-        }
-        self.agent.inject_team_inbox()?;
-        self.agent.inject_background_notifications()?;
-        self.agent.set_status(AgentStatus::AwaitingModel);
-        self.agent.refresh_tasks_from_disk()?;
-        self.agent.auto_compact_if_needed().await?;
+    /// Builds the request for this round and opens the model stream, retrying
+    /// transient transport failures on the host's schedule.
+    ///
+    /// Separated from [`stream_turn`](Self::stream_turn) so the request — which
+    /// borrows the agent to avoid copying the system prompt and metadata every
+    /// round — is dropped before the caller may need to mutate the agent to
+    /// recover.
+    ///
+    /// Returns the stream and the attempt number it was opened on.
+    async fn open_model_stream(
+        &mut self,
+    ) -> Result<(crate::provider::ProviderEventStream, usize), RuntimeError> {
         let provider = self.agent.provider.clone();
         let tools = self.agent.tools();
         let mut request_history = self.agent.micro_compacted_history();
@@ -393,7 +394,7 @@ impl<'a> TurnRunner<'a> {
             provider_request_options,
         };
         let mut attempt = 0usize;
-        let mut stream = loop {
+        let stream = loop {
             self.options.check_limits()?;
             attempt += 1;
             self.model_requests += 1;
@@ -466,6 +467,37 @@ impl<'a> TurnRunner<'a> {
                     return Err(RuntimeError::FailedToStreamResponse(error));
                 }
             }
+        };
+
+        Ok((stream, attempt))
+    }
+
+    async fn stream_turn(&mut self) -> Result<StreamedTurn, RuntimeError> {
+        if self.model_requests >= self.options.model_budget() {
+            return Err(RuntimeError::ModelBudgetExceeded(
+                self.options.model_budget(),
+            ));
+        }
+        self.agent.inject_team_inbox()?;
+        self.agent.inject_background_notifications()?;
+        self.agent.set_status(AgentStatus::AwaitingModel);
+        self.agent.refresh_tasks_from_disk()?;
+        self.agent.auto_compact_if_needed().await?;
+        let (mut stream, attempt) = match self.open_model_stream().await {
+            Ok(opened) => opened,
+            // The estimate said the request fit and the provider says it did
+            // not. An estimate is all a runtime has before sending, so being
+            // wrong here is expected rather than exceptional: compact on the
+            // provider's word and send once more. Only once — a second
+            // overflow after compacting is not something more compacting
+            // fixes.
+            Err(RuntimeError::FailedToStreamResponse(error))
+                if error.is_context_length_exceeded() =>
+            {
+                self.agent.compact_after_context_overflow().await?;
+                self.open_model_stream().await?
+            }
+            Err(error) => return Err(error),
         };
 
         let mut pending = PendingAssistantTurn::default();

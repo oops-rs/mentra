@@ -38,6 +38,22 @@ pub enum ProviderError {
         /// than filling the field in by hand.
         retry_after: Option<Duration>,
     },
+    /// The request did not fit in the model's context window.
+    ///
+    /// Providers report this as an ordinary 400, indistinguishable by status
+    /// from a malformed request, but the two call for opposite responses: a
+    /// malformed request will fail identically forever, while an overflow
+    /// succeeds as soon as the transcript is shorter. It is separated here so
+    /// a runtime can compact and try again instead of giving up on a run whose
+    /// only problem is its own length.
+    ///
+    /// It is not [`transient`](crate::ProviderError): retrying the same
+    /// request unchanged reaches the same refusal.
+    #[error("provider context length exceeded: {message}", message = provider_http_error(.status, .body))]
+    ContextLengthExceeded {
+        status: reqwest::StatusCode,
+        body: String,
+    },
     #[error("failed to decode provider response: {0}")]
     Decode(#[source] reqwest::Error),
     #[error("failed to serialize provider request: {0}")]
@@ -62,11 +78,22 @@ impl ProviderError {
     pub async fn from_http_response(response: reqwest::Response) -> Self {
         let status = response.status();
         let retry_after = retry_after_from_headers(response.headers());
+        let body = response.text().await.unwrap_or_default();
+
+        if is_context_overflow(status, &body) {
+            return Self::ContextLengthExceeded { status, body };
+        }
+
         Self::Http {
             status,
-            body: response.text().await.unwrap_or_default(),
+            body,
             retry_after,
         }
+    }
+
+    /// Whether this error says the request was too long for the model.
+    pub fn is_context_length_exceeded(&self) -> bool {
+        matches!(self, Self::ContextLengthExceeded { .. })
     }
 
     /// How long the provider asked the caller to wait before trying again, or
@@ -82,6 +109,41 @@ impl ProviderError {
             _ => None,
         }
     }
+}
+
+/// What the providers say when a request does not fit.
+///
+/// There is no status code or error code they agree on, so the body is all
+/// there is to go on. The list is deliberately narrow: a false positive turns
+/// a permanently malformed request into a compact-and-retry, which throws away
+/// transcript to no purpose.
+const CONTEXT_OVERFLOW_MARKERS: &[&str] = &[
+    // OpenAI and most gateways that copy its error shape.
+    "context_length_exceeded",
+    "maximum context length",
+    "context length exceeded",
+    // Anthropic.
+    "prompt is too long",
+    "exceed context limit",
+    // Gemini.
+    "exceeds the maximum number of tokens",
+    // vLLM, llama.cpp and several hosted OpenAI-compatible endpoints.
+    "reduce the length of the messages",
+    "please reduce the length",
+];
+
+fn is_context_overflow(status: reqwest::StatusCode, body: &str) -> bool {
+    if !matches!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::PAYLOAD_TOO_LARGE
+    ) {
+        return false;
+    }
+
+    let body = body.to_ascii_lowercase();
+    CONTEXT_OVERFLOW_MARKERS
+        .iter()
+        .any(|marker| body.contains(marker))
 }
 
 fn provider_http_error(status: &reqwest::StatusCode, body: &str) -> String {
@@ -148,6 +210,58 @@ fn parse_http_date(value: &str) -> Option<OffsetDateTime> {
 
 #[cfg(test)]
 mod tests {
+    use super::{ProviderError, is_context_overflow};
+
+    #[test]
+    fn each_providers_way_of_saying_too_long_is_recognized() {
+        let bad_request = reqwest::StatusCode::BAD_REQUEST;
+
+        for body in [
+            r#"{"error":{"code":"context_length_exceeded","message":"This model's maximum context length is 128000 tokens"}}"#,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 215000 tokens > 200000 maximum"}}"#,
+            r#"{"error":{"message":"The input token count exceeds the maximum number of tokens allowed"}}"#,
+            r#"{"object":"error","message":"This model's maximum context length is 8192 tokens. Please reduce the length of the messages."}"#,
+        ] {
+            assert!(is_context_overflow(bad_request, body), "{body}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_bad_request_is_not_mistaken_for_an_overflow() {
+        // A false positive throws away transcript to fix something compaction
+        // cannot fix, so the markers have to stay narrow.
+        assert!(!is_context_overflow(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"unknown field `temperatur`"}}"#
+        ));
+        assert!(!is_context_overflow(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"tool `read` has an invalid input_schema"}}"#
+        ));
+    }
+
+    #[test]
+    fn an_overflow_message_on_another_status_is_left_alone() {
+        // A 500 whose body happens to quote a context-length error is a server
+        // failure, and retrying it is the right response.
+        assert!(!is_context_overflow(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "maximum context length"
+        ));
+    }
+
+    #[test]
+    fn an_overflow_error_answers_the_predicate_and_nothing_else_does() {
+        let overflow = ProviderError::ContextLengthExceeded {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "prompt is too long".to_string(),
+        };
+        let other = ProviderError::InvalidRequest("nope".to_string());
+
+        assert!(overflow.is_context_length_exceeded());
+        assert!(!other.is_context_length_exceeded());
+    }
+
     use super::*;
 
     /// The instant in RFC 9110's own `Retry-After` example, built without the

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### A run that overflows the context compacts instead of dying
+
+- Every provider reports "this request is too long" as an ordinary 400,
+  indistinguishable by status from a malformed request. mentra treated it as
+  one: non-retryable, and the run ended. But the two call for opposite
+  responses — a malformed request fails identically forever, while an overflow
+  succeeds as soon as the transcript is shorter.
+- `ProviderError::ContextLengthExceeded` separates them.
+  `ProviderError::from_http_response` recognizes it from what the providers
+  actually say — OpenAI's `context_length_exceeded`, Anthropic's `prompt is
+  too long`, Gemini's `exceeds the maximum number of tokens`, vLLM's `please
+  reduce the length` — on a 400 or 413 only. The marker list is deliberately
+  narrow: a false positive would throw away transcript to fix something
+  compaction cannot fix. It is *not* transient, because retrying the same
+  request unchanged reaches the same refusal.
+- A run that hits it compacts and sends once more. Only once: a second refusal
+  after compacting is not something more compacting fixes, and looping would
+  grind the transcript away one summary at a time. The recovery ignores
+  `auto_compact_threshold_tokens` entirely — a threshold is a guess about what
+  will fit, and the provider has just answered the question.
+
 ### Auto-compaction is measured against the model, not against 50,000
 
 - `auto_compact_threshold_tokens: Some(50_000)` was the one model-dependent

@@ -30,6 +30,9 @@ use crate::{
 pub(super) enum StreamScript {
     Buffered(Vec<Result<ProviderEvent, ProviderError>>),
     Receiver(ProviderEventStream),
+    /// The `stream` call itself fails, as it does for a real provider whose
+    /// HTTP request is refused before any SSE begins.
+    Failure(ProviderError),
 }
 
 #[derive(Clone)]
@@ -101,6 +104,7 @@ impl Provider for ScriptedProvider {
                 Ok(rx)
             }
             Some(StreamScript::Receiver(receiver)) => Ok(receiver),
+            Some(StreamScript::Failure(error)) => Err(error),
             None => panic!("no scripted stream available"),
         }
     }

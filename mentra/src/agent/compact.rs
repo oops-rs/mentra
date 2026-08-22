@@ -75,6 +75,19 @@ impl Agent {
         Ok(())
     }
 
+    /// Compacts because the provider refused the request as too long.
+    ///
+    /// Unlike [`auto_compact_if_needed`](Self::auto_compact_if_needed) this
+    /// consults no threshold: the threshold is an estimate of what will fit and
+    /// the provider has just said, authoritatively, that it did not. There is
+    /// nothing left to predict.
+    pub(crate) async fn compact_after_context_overflow(&mut self) -> Result<(), RuntimeError> {
+        let preserve_from = required_tail_start_for_continuation(self.history());
+        self.compact_history(preserve_from, CompactionTrigger::Auto)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn compact_history(
         &mut self,
         preserve_from: usize,

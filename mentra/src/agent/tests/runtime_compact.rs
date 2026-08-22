@@ -1125,3 +1125,127 @@ fn temp_dir(label: &str) -> PathBuf {
     fs::create_dir_all(&path).expect("create temp dir");
     path
 }
+
+#[tokio::test]
+async fn a_provider_that_says_the_request_is_too_long_gets_a_compacted_one() {
+    // The threshold is an estimate of what will fit; the provider's refusal is
+    // the authoritative answer. A run whose only problem is its own length
+    // should not die of it.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            super::support::StreamScript::Failure(ProviderError::ContextLengthExceeded {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: "prompt is too long: 215000 tokens > 200000 maximum".to_string(),
+            }),
+            text_stream(&model.id, "answered after compacting"),
+        ],
+    )
+    .with_capabilities(ProviderCapabilities {
+        supports_history_compaction: true,
+        ..Default::default()
+    });
+
+    provider
+        .push_compact_response(Ok(CompactionResponse {
+            output: vec![CompactionInputItem::CompactionSummary {
+                content: "Summary of previous work".to_string(),
+            }],
+        }))
+        .await;
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    // Auto-compaction is off, so nothing but the provider's
+                    // refusal can have triggered the compaction.
+                    auto_compact_threshold_tokens: None,
+                    mode: CompactionMode::PreferRemote,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let message = agent
+        .send(vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }])
+        .await
+        .expect("the run recovers instead of failing");
+
+    assert_eq!(message.text(), "answered after compacting");
+}
+
+#[tokio::test]
+async fn a_second_overflow_after_compacting_is_not_retried_again() {
+    // Compacting twice does not make a request that is still too long fit, and
+    // a loop here would grind the transcript away one summary at a time.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let too_long = || {
+        super::support::StreamScript::Failure(ProviderError::ContextLengthExceeded {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "prompt is too long".to_string(),
+        })
+    };
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![too_long(), too_long(), text_stream(&model.id, "never run")],
+    )
+    .with_capabilities(ProviderCapabilities {
+        supports_history_compaction: true,
+        ..Default::default()
+    });
+
+    provider
+        .push_compact_response(Ok(CompactionResponse {
+            output: vec![CompactionInputItem::CompactionSummary {
+                content: "Summary".to_string(),
+            }],
+        }))
+        .await;
+
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: None,
+                    mode: CompactionMode::PreferRemote,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let result = agent
+        .send(vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }])
+        .await;
+
+    assert!(result.is_err(), "the second refusal ends the run");
+    assert_eq!(
+        provider_handle.recorded_requests().await.len(),
+        2,
+        "one compaction, one retry, and then it stops"
+    );
+}

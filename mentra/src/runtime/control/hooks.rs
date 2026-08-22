@@ -429,7 +429,11 @@ pub fn is_transient_provider_error(error: &ProviderError) -> bool {
                 || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || *status == reqwest::StatusCode::REQUEST_TIMEOUT
         }
-        ProviderError::Serialize(_)
+        // Not transient: the same request will be too long every time. The
+        // runtime recovers from this one by compacting and trying again, not
+        // by waiting.
+        ProviderError::ContextLengthExceeded { .. }
+        | ProviderError::Serialize(_)
         | ProviderError::Deserialize(_)
         | ProviderError::InvalidRequest(_)
         | ProviderError::InvalidResponse(_)
