@@ -158,6 +158,11 @@ impl ToolDefinition for WriteTool {
 }
 
 impl ToolDefinition for EditTool {
+    /// The schema describes both shapes `parse_edit` accepts: a list of
+    /// `edits`, and a single flat `old_string`/`new_string` pair it normalizes
+    /// into one. Declaring only the first made `edits` look required while the
+    /// tool happily took the second, which is exactly the disagreement input
+    /// validation exists to catch.
     fn descriptor(&self) -> RuntimeToolDescriptor {
         mutation_descriptor(
             "edit",
@@ -179,12 +184,17 @@ impl ToolDefinition for EditTool {
                         },
                         "minItems": 1
                     },
-                    "replace_all": { "type": "boolean" }
+                    "replace_all": { "type": "boolean" },
+                    "old_string": { "type": "string" },
+                    "new_string": { "type": "string" }
                 },
-                "required": ["edits"],
                 "anyOf": [
                     { "required": ["path"] },
                     { "required": ["file_path"] }
+                ],
+                "oneOf": [
+                    { "required": ["edits"] },
+                    { "required": ["old_string", "new_string"] }
                 ]
             }),
         )

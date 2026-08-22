@@ -139,6 +139,24 @@ impl Runtime {
         self.handle.register_tool(tool);
     }
 
+    /// Registers a custom tool unless its name is already taken.
+    ///
+    /// [`register_tool`](Self::register_tool) replaces a tool of the same
+    /// name, which is right for deliberately overriding a builtin and wrong
+    /// for a loader that did not mean to shadow one. This reports the
+    /// collision instead.
+    pub fn try_register_tool<T>(&self, tool: T) -> Result<(), crate::tool::ToolNameCollision>
+    where
+        T: ExecutableTool + 'static,
+    {
+        self.handle.try_register_tool(tool)
+    }
+
+    /// Removes a registered tool by name, reporting whether one was there.
+    pub fn unregister_tool(&self, name: &str) -> bool {
+        self.handle.unregister_tool_by_name(name)
+    }
+
     /// Returns descriptors for registered tools in a deterministic order.
     pub fn tools(&self) -> Vec<crate::tool::RuntimeToolDescriptor> {
         let tool_names = self

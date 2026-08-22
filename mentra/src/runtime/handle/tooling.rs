@@ -54,6 +54,27 @@ impl RuntimeHandle {
             .register_tool(tool);
     }
 
+    /// Registers a tool unless its name is already taken.
+    pub fn try_register_tool<T>(&self, tool: T) -> Result<(), crate::tool::ToolNameCollision>
+    where
+        T: ExecutableTool + 'static,
+    {
+        self.tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .try_register_tool(tool)
+    }
+
+    /// Removes a tool by name, reporting whether one was there.
+    pub fn unregister_tool_by_name(&self, name: &str) -> bool {
+        self.tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .unregister(name)
+    }
+
     pub(crate) fn register_scoped_tool<T>(&self, agent_id: &str, tool: T)
     where
         T: ExecutableTool + 'static,

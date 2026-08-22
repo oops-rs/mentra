@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### A tool call is checked against the schema its tool published (#23)
+
+- A tool advertises an `input_schema` to the model and nothing ever compared a
+  call against it. A missing required field or a string where a number belonged
+  reached the tool's own code, where it became a deserialization error the
+  model could not act on — or, for a tool reading fields loosely, did the wrong
+  thing quietly.
+- Calls are now validated before authorization, so a malformed call is
+  corrected rather than put to a person for permission, and the model is told
+  which field and what was expected.
+- The validator is deliberately partial. It covers what models get wrong — a
+  missing required field, a wrong scalar type, a value outside an `enum`, a
+  misspelled property under `additionalProperties: false` — and ignores
+  keywords it does not implement rather than refusing a call over them. A whole
+  number arriving as `10.0` satisfies `integer`, because providers serialize it
+  that way and failing it would fail a correct call.
+- Terminal-output tools are exempt: such a tool's result *is* the turn's value
+  and it validates that value itself, so rejecting the call here would turn a
+  turn that fails cleanly into one that asks the model to try again forever.
+- Turning this on immediately caught one of its own: `edit` accepted a flat
+  `old_string`/`new_string` pair that its published schema never mentioned,
+  while declaring `edits` required. The schema now describes both shapes the
+  tool actually accepts.
+
+### A duplicate tool name can be refused rather than silently replacing (#24)
+
+- `register_tool` replaces a tool of the same name. That is right for
+  deliberately overriding a builtin and wrong for anything loading tools it did
+  not write — an MCP server, a plugin, a user's config — where a collision
+  means calls meant for one implementation reach another and nothing says so.
+- `Runtime::try_register_tool` reports a `ToolNameCollision` and leaves the
+  registry untouched. `Runtime::unregister_tool` removes one by name and says
+  whether there was one; it was crate-private before, so a host could add a
+  tool but never take it back.
+
 ### A host can drive the session controls the model already had
 
 - `Session::compact(instructions)` compacts on demand. The model could already

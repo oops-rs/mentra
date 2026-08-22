@@ -474,6 +474,41 @@ impl ToolRuntime {
             });
     }
 
+    /// Checks a call against the schema its tool published, returning the
+    /// result to hand back when it does not fit.
+    ///
+    /// A tool advertises an `input_schema` to the model and nothing compared a
+    /// call against it, so a missing required field or a string where a number
+    /// belonged reached the tool's own code — where it became a confusing
+    /// deserialization error, or worse, was read loosely and did the wrong
+    /// thing quietly. Answering here gives the model the one thing it can act
+    /// on: which field, and what was expected.
+    fn schema_violation_result(
+        &self,
+        call: &ToolCall,
+        descriptor: &RuntimeToolDescriptor,
+    ) -> Option<ContentBlock> {
+        // A terminal tool's result *is* the turn's value, and it validates that
+        // value itself with a message about the requested type. Rejecting the
+        // call here instead would replace a turn that fails cleanly with one
+        // that asks the model to try again -- forever, for a model that keeps
+        // producing the same wrong shape.
+        if descriptor.terminal {
+            return None;
+        }
+
+        let error = crate::tool::schema::validate_tool_input(
+            &descriptor.provider.input_schema,
+            &call.input,
+        )
+        .err()?;
+        Some(ContentBlock::ToolResult {
+            tool_use_id: call.id.clone(),
+            content: format!("Invalid input for '{}': {error}", call.name).into(),
+            is_error: true,
+        })
+    }
+
     fn unavailable_tool_result(&self, call: ToolCall) -> ContentBlock {
         ContentBlock::ToolResult {
             tool_use_id: call.id,
@@ -769,6 +804,22 @@ impl ToolRuntime {
                 continue;
             };
 
+            if let Some(result) = self.schema_violation_result(&call, &descriptor) {
+                agent.emit_event(AgentEvent::ToolExecutionFinished {
+                    result: result.clone(),
+                });
+                results[index] = Some(CompletedToolExecution {
+                    result,
+                    task_succeeded: false,
+                    should_end_turn: false,
+                    terminated: false,
+                    tool_name: call.name.clone(),
+                    input_json: serde_json::to_string(&call.input).unwrap_or_default(),
+                    details: None,
+                });
+                continue;
+            }
+
             let ctx = self.parallel_tool_context(agent, options, &call);
             if let Some(result) = self.authorize_tool_call(&call, &tool, &ctx).await? {
                 let execution = self.completed_execution(
@@ -914,6 +965,23 @@ impl ToolRuntime {
                 details: None,
             };
         };
+
+        // Before authorization: a call that does not fit its own schema should
+        // be corrected, not put to a person for permission.
+        if let Some(result) = self.schema_violation_result(&call, &descriptor) {
+            agent.emit_event(AgentEvent::ToolExecutionFinished {
+                result: result.clone(),
+            });
+            return CompletedToolExecution {
+                result,
+                task_succeeded: false,
+                should_end_turn: false,
+                terminated: false,
+                tool_name: call.name.clone(),
+                input_json: serde_json::to_string(&call.input).unwrap_or_default(),
+                details: None,
+            };
+        }
 
         let authorization_ctx = self.parallel_tool_context(agent, options, &call);
         match self

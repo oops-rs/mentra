@@ -11,6 +11,7 @@ mod model;
 mod orchestrator;
 pub(crate) mod paging;
 mod runtime;
+pub(crate) mod schema;
 mod truncation;
 
 use std::{collections::HashMap, sync::Arc};
@@ -56,6 +57,13 @@ struct RegisteredTool {
     handler: Arc<dyn ExecutableTool>,
 }
 
+/// A tool could not be registered because its name was already taken.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("a tool named '{name}' is already registered")]
+pub struct ToolNameCollision {
+    pub name: String,
+}
+
 #[derive(Clone, Default)]
 /// Registry of tools available to a runtime instance.
 pub struct ToolRegistry {
@@ -65,6 +73,12 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     /// Registers a tool implementation and refreshes the cached tool specs.
+    ///
+    /// A tool whose name is already registered *replaces* the one there. That
+    /// is the right behavior for deliberately overriding a builtin, and the
+    /// wrong one for a plugin loader that did not mean to shadow anything —
+    /// use [`try_register_tool`](Self::try_register_tool) when a collision
+    /// should be an error rather than a silent swap.
     pub fn register_tool<T>(&mut self, tool: T)
     where
         T: ExecutableTool + 'static,
@@ -79,6 +93,44 @@ impl ToolRegistry {
             },
         );
         self.refresh_provider_specs();
+    }
+
+    /// Registers a tool unless its name is already taken.
+    ///
+    /// Returns the name that collided, leaving the registry untouched. For
+    /// anything loading tools it did not write — MCP servers, plugins, a
+    /// user's config — where silently replacing a tool means calls meant for
+    /// one implementation reach another and nothing says so.
+    pub fn try_register_tool<T>(&mut self, tool: T) -> Result<(), ToolNameCollision>
+    where
+        T: ExecutableTool + 'static,
+    {
+        let handler: Arc<dyn ExecutableTool> = Arc::new(tool);
+        let descriptor = handler.descriptor();
+        let name = descriptor.provider.name.clone();
+        if self.tools.contains_key(&name) {
+            return Err(ToolNameCollision { name });
+        }
+
+        self.tools.insert(
+            name,
+            RegisteredTool {
+                descriptor,
+                handler,
+            },
+        );
+        self.refresh_provider_specs();
+        Ok(())
+    }
+
+    /// Removes a tool by name, reporting whether one was there.
+    pub fn unregister(&mut self, name: &str) -> bool {
+        self.unregister_tool(name)
+    }
+
+    /// Returns whether a tool is registered under this name.
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
     }
 
     /// Returns the provider-facing tool specifications.

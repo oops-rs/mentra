@@ -5588,3 +5588,131 @@ async fn a_post_execution_hook_sees_the_input_the_tool_actually_ran_with() {
         "the post hook judges what ran, not what the model asked for"
     );
 }
+
+#[tokio::test]
+async fn a_call_that_does_not_fit_its_schema_is_answered_not_executed() {
+    // A tool publishes an input_schema to the model and nothing compared a call
+    // against it, so a missing required field reached the tool's own code and
+    // became a deserialization error the model could not act on.
+    struct SchemaTool {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::tool::ToolDefinition for SchemaTool {
+        fn descriptor(&self) -> crate::tool::ToolSpec {
+            crate::tool::ToolSpec::builder("write_note")
+                .description("write a note")
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "lines": {"type": "integer"}
+                    },
+                    "required": ["path"]
+                }))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl crate::tool::ToolExecutor for SchemaTool {
+        async fn execute_mut(
+            &self,
+            _ctx: crate::tool::ToolContext<'_>,
+            _input: serde_json::Value,
+        ) -> crate::tool::ToolResult {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok("wrote".to_string())
+        }
+    }
+
+    let ran = Arc::new(AtomicUsize::new(0));
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "write_note", r#"{"lines":"three"}"#),
+            text_stream(&model.id, "fixed it"),
+        ],
+    );
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(SchemaTool {
+            ran: Arc::clone(&ran),
+        })
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "write it".to_string(),
+        }])
+        .await
+        .expect("the run continues after the correction");
+
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool never ran");
+
+    let result = agent
+        .history()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                content,
+                is_error: true,
+                ..
+            } => Some(content.to_display_string()),
+            _ => None,
+        })
+        .expect("the model was told what was wrong");
+    // Both problems, and which field each belongs to: that is the only thing
+    // the model can act on.
+    assert!(result.contains("'path' is required"), "{result}");
+    assert!(
+        result.contains("'lines' should be integer, got string"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+async fn registering_a_duplicate_name_can_be_refused_instead_of_silently_replacing() {
+    // `register_tool` replaces, which is right for deliberately overriding a
+    // builtin and wrong for a loader that did not mean to shadow one: calls
+    // meant for one implementation reach another and nothing says so.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![text_stream(&model.id, "done")],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(StaticTool::success("echo_tool", "first"))
+        .build()
+        .expect("build runtime");
+
+    let collision = runtime
+        .try_register_tool(StaticTool::success("echo_tool", "second"))
+        .expect_err("the name is taken");
+    assert_eq!(collision.name, "echo_tool");
+
+    // Refused means untouched, not partially applied.
+    runtime
+        .try_register_tool(StaticTool::success("other_tool", "fine"))
+        .expect("a free name registers");
+
+    assert!(runtime.unregister_tool("echo_tool"));
+    assert!(
+        !runtime.unregister_tool("echo_tool"),
+        "removing what is already gone reports that there was nothing there"
+    );
+
+    // With the name free, the same registration now succeeds.
+    runtime
+        .try_register_tool(StaticTool::success("echo_tool", "second"))
+        .expect("the name was released");
+}
