@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### An agent keeps the tool results it read
+
+- `CompactionConfig::keep_recent_tool_results` defaulted to 3. The rewrite it
+  drives, `micro_compact_history`, runs before every provider request, at any
+  context size, on any model: every tool result over 100 bytes except the last
+  three was replaced by `[Previous: used <tool>]`. An agent that read five files
+  could see three of them, and nothing in the run said which two it had lost.
+  The threshold that is supposed to decide when history is too large,
+  `auto_compact_threshold_tokens`, never entered into it.
+- The default is now `usize::MAX` — the value the function already treated as
+  off, short-circuiting before it copies anything. A harness whose tool results
+  are genuinely disposable can still lower it; a harness that reads files no
+  longer has to know to.
+
 ### A host chooses how long to wait for a rate limit
 
 - mentra's provider backoff was two private constants: 500 ms, doubling, capped

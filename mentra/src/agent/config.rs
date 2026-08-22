@@ -66,6 +66,16 @@ impl Default for TeamConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactionConfig {
+    /// How many of the most recent tool results keep their full content when
+    /// the history is rebuilt for a provider request.
+    ///
+    /// Every older result larger than 100 bytes is replaced by a
+    /// `[Previous: used <tool>]` marker. That rewrite runs before *every*
+    /// request, at any context size, so a low value silently costs the model
+    /// the file it read three tool calls ago. `usize::MAX` disables the
+    /// rewrite entirely and is the default: an agent that reads files needs
+    /// what it read. Lower it only for a workload whose tool results are
+    /// genuinely disposable.
     pub keep_recent_tool_results: usize,
     pub auto_compact_threshold_tokens: Option<usize>,
     pub transcript_dir: PathBuf,
@@ -81,7 +91,7 @@ pub struct CompactionConfig {
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            keep_recent_tool_results: 3,
+            keep_recent_tool_results: usize::MAX,
             auto_compact_threshold_tokens: Some(50_000),
             transcript_dir: default_transcript_dir(),
             summary_max_input_chars: 80_000,
@@ -332,6 +342,13 @@ mod tests {
         assert_eq!(config.task.tasks_dir, tasks_dir);
         assert_eq!(config.team.team_dir, team_dir);
         assert_eq!(config.compaction.transcript_dir, transcript_dir);
+    }
+
+    #[test]
+    fn compaction_keeps_every_tool_result_by_default() {
+        let compaction = CompactionConfig::default();
+
+        assert_eq!(compaction.keep_recent_tool_results, usize::MAX);
     }
 
     #[test]
