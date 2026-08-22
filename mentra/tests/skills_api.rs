@@ -180,3 +180,28 @@ fn a_skill_can_be_kept_out_of_the_models_reach() {
             .model_invocable
     );
 }
+
+#[test]
+fn a_host_can_run_a_skill_the_model_may_not() {
+    // The flag's promise is that a person can still invoke it. Without a host
+    // path to the body, such a skill was visible in a listing and reachable by
+    // nobody at all.
+    let root = temp_dir("host-invocable");
+    fs::create_dir_all(root.join("release")).expect("create skill dir");
+    fs::write(
+        root.join("release").join("SKILL.md"),
+        "---\nname: release\ndescription: cuts a release\ndisable-model-invocation: true\n---\nStep one\n",
+    )
+    .expect("write skill");
+
+    let runtime = runtime();
+    runtime.register_skills_dir(&root).expect("registers");
+
+    let body = runtime.skill_body("release").expect("the host may run it");
+    assert!(body.contains("Step one"), "{body}");
+
+    assert!(
+        runtime.skill_body("nope").is_err(),
+        "an unknown skill is still unknown"
+    );
+}

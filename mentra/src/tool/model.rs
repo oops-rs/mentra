@@ -272,16 +272,38 @@ impl ToolContext<'_> {
         self.agent.spawn_subagent()
     }
 
+    /// Records a spawned subagent and announces it on the parent's stream.
+    ///
+    /// Emitting is part of registering here, where for the `task` intrinsic
+    /// the two are separate calls: a tool that registered a child without
+    /// announcing it left the child in the parent's snapshot and absent from
+    /// every observer's view of it, and there is no reason a caller would
+    /// want that. The event is the same `SubagentSpawned` the intrinsic emits.
     pub fn register_subagent(&mut self, agent: &crate::agent::Agent) -> SpawnedAgentSummary {
-        self.agent.register_subagent(agent)
+        let summary = self.agent.register_subagent(agent);
+        self.agent
+            .emit_event(crate::agent::AgentEvent::SubagentSpawned {
+                agent: summary.clone(),
+            });
+        summary
     }
 
+    /// Marks a subagent finished and announces it on the parent's stream.
+    ///
+    /// The other half of [`register_subagent`](Self::register_subagent).
+    /// Returns `None` — and announces nothing — when no subagent under `id`
+    /// was registered.
     pub fn finish_subagent(
         &mut self,
         id: &str,
         status: SpawnedAgentStatus,
     ) -> Option<SpawnedAgentSummary> {
-        self.agent.finish_subagent(id, status)
+        let finished = self.agent.finish_subagent(id, status)?;
+        self.agent
+            .emit_event(crate::agent::AgentEvent::SubagentFinished {
+                agent: finished.clone(),
+            });
+        Some(finished)
     }
 
     /// Relays a child agent's token usage onto this agent's event stream.

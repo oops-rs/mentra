@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### A pinned model learns its context window
+
+- `Runtime::resolve_model` synthesized a bare `ModelInfo` for
+  `ModelSelector::Id`, consulting the provider's listing only for
+  `NewestAvailable`. Every pinned `--model` therefore resolved with
+  `context_window: None`, so the window-relative compaction threshold applied
+  to none of them — including the Gemini models that do report a limit.
+- A named model is now looked up in the listing too, and the listed entry wins
+  when it is found. The lookup is best-effort in both directions: a provider
+  that cannot list, fails to, or simply does not name this id still resolves,
+  because a pinned id is a fact about the caller's intent rather than a claim
+  the listing has to confirm.
+- `Session::context_window` reads the value the threshold is actually computed
+  from, so a host no longer has to mirror the `ModelInfo` it last handed over
+  and watch the mirror desync the moment anything calls `set_model`.
+
+### Filling in what the last batch left unreachable
+
+- `RuntimeBuilder::with_openai_compatible(id, base_url, api_key)` registers an
+  OpenAI-compatible endpoint before the runtime exists.
+  `Runtime::register_openai_compatible` needs a built runtime, which is no help
+  to a host that must settle its provider first, and the keyless case had no
+  clean spelling because a static credential source cannot say "none" — `None`
+  here says it.
+- `Session::compact` outside a turn emitted nothing on the session stream. The
+  agent event forwarder is installed between `begin_turn` and `finish_turn`, so
+  a compaction run on its own had no tap and a host watching saw the transcript
+  shrink with nothing explaining it. It now forwards for the duration of the
+  compaction — no status change and no turn counter, just the forwarding.
+- `Runtime::skill_body` returns a skill's body whether or not the model may
+  invoke it. `disable-model-invocation` promised that a host could still run
+  such a skill, and no public API returned one: `load_skill` refuses it, and
+  that refusal is the point.
+- `ToolContext::register_subagent` and `finish_subagent` now emit
+  `SubagentSpawned` and `SubagentFinished`. They mutated the parent's snapshot
+  while the events were emitted only by the `task` intrinsic, so a host's own
+  delegating tool left a child in the snapshot and invisible to every observer.
+- `MockRuntimeBuilder::with_post_hook` lets a scripted runtime exercise a
+  `PostExecutionHook`, and `model_context_window` gives the scripted model a
+  window to compact against. `with_tool_authorizer`'s doc comment had been
+  concatenated above `with_pre_hook`, leaving it undocumented; both are on
+  their own methods again.
+
 ### A registered tool can delegate the way the task intrinsic does
 
 - Three pieces of delegation machinery were `pub(crate)` for the `task`

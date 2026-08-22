@@ -389,6 +389,44 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers an endpoint speaking the OpenAI `chat/completions` wire,
+    /// before the runtime exists.
+    ///
+    /// The builder-time counterpart to
+    /// [`Runtime::register_openai_compatible`](crate::Runtime::register_openai_compatible),
+    /// for a host that must settle its provider before it has a runtime to
+    /// register one on. `api_key` is `None` for an endpoint that wants no
+    /// credentials — a local vLLM or llama.cpp server — which is otherwise
+    /// awkward to express, since a static credential source has no way to say
+    /// "none".
+    ///
+    /// ```rust,no_run
+    /// # use mentra::Runtime;
+    /// let runtime = Runtime::empty_builder()
+    ///     .with_openai_compatible("deepseek", "https://api.deepseek.com/", Some("key".into()))
+    ///     .with_openai_compatible("local", "http://127.0.0.1:8000/", None)
+    ///     .build();
+    /// ```
+    pub fn with_openai_compatible(
+        mut self,
+        id: impl Into<crate::provider::ProviderId>,
+        base_url: impl AsRef<str>,
+        api_key: Option<String>,
+    ) -> Self {
+        let provider = match api_key {
+            Some(api_key) => crate::provider::openai_compatible::OpenAiCompatibleProvider::new(
+                id, base_url, api_key,
+            ),
+            None => {
+                crate::provider::openai_compatible::OpenAiCompatibleProvider::without_credentials(
+                    id, base_url,
+                )
+            }
+        };
+        self.provider_registry.register_provider_instance(provider);
+        self
+    }
+
     /// Registers a provider-core instance built from `mentra::provider_core`.
     ///
     /// Use this when you want Mentra's runtime with a customized provider

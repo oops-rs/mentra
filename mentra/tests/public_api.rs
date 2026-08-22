@@ -857,3 +857,34 @@ fn model_with_created_at(id: &str, provider: BuiltinProvider, unix_timestamp: i6
     );
     model
 }
+
+#[test]
+fn an_openai_compatible_endpoint_can_be_registered_before_the_runtime_exists() {
+    // A host that must settle its provider before it has a runtime could not
+    // use the post-build registration, and the keyless case had no way to say
+    // "no credentials" through a static credential source.
+    let runtime = Runtime::empty_builder()
+        .with_openai_compatible(
+            "deepseek",
+            "https://api.deepseek.com/",
+            Some("key".to_string()),
+        )
+        .with_openai_compatible("local-vllm", "http://127.0.0.1:8000/", None)
+        .build()
+        .expect("runtime builds");
+
+    let registered: Vec<String> = runtime
+        .providers()
+        .into_iter()
+        .map(|provider| provider.id.as_str().to_string())
+        .collect();
+
+    assert!(
+        registered.contains(&"deepseek".to_string()),
+        "{registered:?}"
+    );
+    assert!(
+        registered.contains(&"local-vllm".to_string()),
+        "{registered:?}"
+    );
+}

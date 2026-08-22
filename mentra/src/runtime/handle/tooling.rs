@@ -195,6 +195,20 @@ impl RuntimeHandle {
         loader.get_content(name)
     }
 
+    /// Returns a skill's body whether or not the model may invoke it.
+    pub fn skill_body(&self, name: &str) -> Result<String, String> {
+        let skills = self
+            .tooling
+            .skill_loader
+            .read()
+            .expect("skill loader poisoned");
+        let Some(loader) = skills.as_ref() else {
+            return Err("Skill loader is not available".to_string());
+        };
+
+        loader.get_body(name)
+    }
+
     pub fn get_tool(&self, name: &str) -> Option<Arc<dyn ExecutableTool>> {
         self.tooling
             .tool_registry

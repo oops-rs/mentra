@@ -5819,3 +5819,69 @@ async fn a_registered_tool_can_relay_a_delegated_runs_usage_to_its_parent() {
         "the child's usage reached the parent's stream: {relayed:?}"
     );
 }
+
+#[tokio::test]
+async fn a_tool_that_registers_a_subagent_announces_it() {
+    // register_subagent/finish_subagent mutated the parent's snapshot while the
+    // matching events were emitted only by the `task` intrinsic, so a host's
+    // own delegating tool left the child in the snapshot and invisible to
+    // every observer.
+    struct DelegatingTool;
+
+    #[async_trait]
+    impl crate::tool::ToolDefinition for DelegatingTool {
+        fn descriptor(&self) -> crate::tool::ToolSpec {
+            crate::tool::ToolSpec::builder("delegate")
+                .description("delegates work its own way")
+                .input_schema(json!({"type": "object", "properties": {}}))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl crate::tool::ToolExecutor for DelegatingTool {
+        async fn execute_mut(
+            &self,
+            mut ctx: crate::tool::ToolContext<'_>,
+            _input: serde_json::Value,
+        ) -> crate::tool::ToolResult {
+            let child = ctx.spawn_subagent().map_err(|error| error.to_string())?;
+            let started = ctx.register_subagent(&child);
+            ctx.finish_subagent(&started.id, SpawnedAgentStatus::Finished);
+            Ok("delegated".to_string())
+        }
+    }
+
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "delegate", "{}"),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(DelegatingTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::text("delegate it")])
+        .await
+        .expect("the run completes");
+
+    let lifecycle: Vec<&'static str> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AgentEvent::SubagentSpawned { .. } => Some("spawned"),
+            AgentEvent::SubagentFinished { .. } => Some("finished"),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(lifecycle, vec!["spawned", "finished"]);
+}

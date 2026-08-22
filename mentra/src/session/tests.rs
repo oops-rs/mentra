@@ -2671,6 +2671,7 @@ async fn a_person_can_compact_their_own_session() {
         )
         .unwrap();
 
+    let mut rx = session.subscribe();
     session
         .append_turn(vec![ContentBlock::text("one")])
         .await
@@ -2689,6 +2690,22 @@ async fn a_person_can_compact_their_own_session() {
 
     assert_eq!(details.trigger, crate::agent::CompactionTrigger::Manual);
     assert!(details.replaced_items > 0, "{details:?}");
+
+    // A compaction outside a turn still reaches the stream: a host watching it
+    // otherwise sees the transcript shrink with nothing saying why.
+    let compaction_events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|event| {
+            matches!(
+                event,
+                SessionEvent::CompactionStarted { .. } | SessionEvent::CompactionCompleted { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        compaction_events.len(),
+        2,
+        "a started and a completed reach the stream: {compaction_events:?}"
+    );
     assert!(
         session.history().len() < before,
         "compaction shortened the history: {} -> {}",
@@ -2726,4 +2743,134 @@ async fn an_image_only_turn_says_it_carried_an_image() {
         .expect("the turn was announced");
 
     assert_eq!(announced, (String::new(), 1));
+}
+
+#[tokio::test]
+async fn a_pinned_model_still_learns_its_context_window() {
+    // A named model used to synthesize a bare ModelInfo without consulting the
+    // listing, so every pinned --model resolved to an unknown window and
+    // window-relative compaction silently applied to none of them.
+    use crate::provider::ModelSelector;
+
+    let mock = MockRuntime::builder()
+        .text("hello")
+        .model_context_window(200_000)
+        .build()
+        .unwrap();
+    let pinned = mock.model();
+
+    let resolved = mock
+        .runtime()
+        .resolve_model(
+            pinned.provider.clone(),
+            ModelSelector::Id(pinned.id.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resolved.context_window, Some(200_000));
+
+    let session = mock.runtime().create_session("pinned", resolved).unwrap();
+    assert_eq!(session.context_window(), Some(200_000));
+}
+
+#[tokio::test]
+async fn a_model_the_listing_does_not_name_still_resolves() {
+    // A pinned id is a fact about the caller's intent, not a claim the listing
+    // has to confirm.
+    use crate::provider::ModelSelector;
+
+    let mock = MockRuntime::builder().text("hello").build().unwrap();
+
+    let resolved = mock
+        .runtime()
+        .resolve_model(
+            mock.model().provider.clone(),
+            ModelSelector::Id("some-unlisted-model".into()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resolved.id, "some-unlisted-model");
+    assert_eq!(resolved.context_window, None);
+}
+
+#[tokio::test]
+async fn a_scripted_runtime_can_exercise_a_post_execution_hook() {
+    // A host can unit-test its own hook, but only a scripted runtime shows that
+    // the runtime consults it and honors what it returned.
+    use crate::runtime::{PostExecutionContext, PostExecutionHook, ResultDecision};
+    use crate::tool::{ToolDefinition, ToolExecutor, ToolResult, ToolResultContent, ToolSpec};
+
+    struct Redacts;
+
+    #[async_trait::async_trait]
+    impl PostExecutionHook for Redacts {
+        async fn post_tool_execution(
+            &self,
+            context: &PostExecutionContext,
+        ) -> Result<ResultDecision, crate::error::RuntimeError> {
+            Ok(ResultDecision::Replace {
+                content: ToolResultContent::text(format!(
+                    "[reviewed] {}",
+                    context.content.to_display_string()
+                )),
+                is_error: context.is_error,
+            })
+        }
+    }
+
+    struct EchoTool;
+
+    #[async_trait::async_trait]
+    impl ToolDefinition for EchoTool {
+        fn descriptor(&self) -> ToolSpec {
+            ToolSpec::builder("echo_tool")
+                .description("echoes")
+                .input_schema(serde_json::json!({"type": "object", "properties": {}}))
+                .build()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for EchoTool {
+        async fn execute_mut(
+            &self,
+            _ctx: crate::tool::ToolContext<'_>,
+            _input: serde_json::Value,
+        ) -> ToolResult {
+            Ok("echoed".to_string())
+        }
+    }
+
+    let mock = MockRuntime::builder()
+        .tool_calls([crate::test::MockToolCall::new(
+            "echo_tool",
+            serde_json::json!({}),
+        )])
+        .text("done")
+        .with_post_hook(Redacts)
+        .build()
+        .unwrap();
+    mock.runtime().register_tool(EchoTool);
+
+    let mut session = mock
+        .runtime()
+        .create_session("hooked", mock.model())
+        .unwrap();
+    session
+        .append_turn(vec![ContentBlock::text("go")])
+        .await
+        .unwrap();
+
+    let reviewed = session
+        .history()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.to_display_string()),
+            _ => None,
+        })
+        .expect("a tool result reached the transcript");
+    assert_eq!(reviewed, "[reviewed] echoed");
 }

@@ -131,6 +131,17 @@ impl Runtime {
         RuntimeBuilder::new(false)
     }
 
+    /// Returns a skill's body, whether or not the model may invoke it.
+    ///
+    /// The path a host uses to run a skill itself — as a slash command, say.
+    /// `load_skill` refuses a skill whose frontmatter set
+    /// `disable-model-invocation`, and that refusal is the point; without this
+    /// such a skill appeared in [`skills`](Self::skills) and could be run by
+    /// nobody, which made the flag's promise false.
+    pub fn skill_body(&self, name: &str) -> Result<String, String> {
+        self.handle.skill_body(name)
+    }
+
     /// Registers a custom tool on the runtime after construction.
     pub fn register_tool<T>(&self, tool: T)
     where
@@ -579,7 +590,21 @@ impl Runtime {
         }
 
         match selector {
-            ModelSelector::Id(id) => Ok(ModelInfo::new(id, provider)),
+            // A named model still gets looked up, because the listing is where
+            // metadata the caller cannot supply lives — `context_window` above
+            // all, which decides the compaction threshold. Synthesizing the
+            // `ModelInfo` from the id alone left every pinned `--model`
+            // resolving to an unknown window, so window-relative compaction
+            // silently applied to none of them.
+            //
+            // The lookup is best-effort in both directions: a provider that
+            // cannot list, fails to, or simply does not name this id still
+            // resolves, because a model id the caller pinned is a fact about
+            // their intent and not a claim the listing has to confirm.
+            ModelSelector::Id(id) => Ok(self
+                .listed_model(&provider, &id)
+                .await
+                .unwrap_or_else(|| ModelInfo::new(id, provider))),
             ModelSelector::NewestAvailable => {
                 let mut models = self.list_models(Some(&provider)).await?;
                 models.sort_by(|left, right| {
@@ -594,6 +619,26 @@ impl Runtime {
                     .ok_or(RuntimeError::NoModelsAvailable(provider))
             }
         }
+    }
+
+    /// Looks `id` up in a provider's listing, or `None` if it cannot be found
+    /// there for any reason.
+    async fn listed_model(&self, provider: &ProviderId, id: &str) -> Option<ModelInfo> {
+        let lists_models = self
+            .provider_registry
+            .read()
+            .expect("provider registry poisoned")
+            .get_provider(Some(provider))
+            .is_some_and(|provider| provider.capabilities().supports_model_listing);
+        if !lists_models {
+            return None;
+        }
+
+        self.list_models(Some(provider))
+            .await
+            .ok()?
+            .into_iter()
+            .find(|model| model.id == id)
     }
 }
 

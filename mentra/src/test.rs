@@ -19,7 +19,7 @@ use crate::{
         ProviderEventStream, ProviderId, Request, Response, Role,
         provider_event_stream_from_response,
     },
-    runtime::{PreExecutionHook, SqliteRuntimeStore, VolatileRuntimeStore},
+    runtime::{PostExecutionHook, PreExecutionHook, SqliteRuntimeStore, VolatileRuntimeStore},
     tool::ToolAuthorizer,
 };
 
@@ -97,6 +97,7 @@ pub struct MockRuntimeBuilder {
     policy: RuntimePolicy,
     tool_authorizer: Option<Box<dyn ToolAuthorizer>>,
     pre_hook: Option<Box<dyn PreExecutionHook>>,
+    post_hook: Option<Box<dyn PostExecutionHook>>,
 }
 
 impl Default for MockRuntimeBuilder {
@@ -114,6 +115,7 @@ impl Default for MockRuntimeBuilder {
             policy: RuntimePolicy::permissive(),
             tool_authorizer: None,
             pre_hook: None,
+            post_hook: None,
         }
     }
 }
@@ -147,13 +149,6 @@ impl MockRuntimeBuilder {
         self
     }
 
-    /// Installs a tool authorizer, so a scripted run can exercise the
-    /// permission flow.
-    ///
-    /// Without one the session authorizer allows every call unconditionally
-    /// and [`SessionEvent::PermissionRequested`](crate::SessionEvent) is never
-    /// emitted — which makes "does this host ask before it writes?" impossible
-    /// to test against a mock.
     /// Installs a pre-execution hook, so a scripted run can exercise the
     /// interception path.
     ///
@@ -165,8 +160,35 @@ impl MockRuntimeBuilder {
         self
     }
 
+    /// Installs a post-execution hook, so a scripted run can exercise the
+    /// result-rewriting path.
+    ///
+    /// The same reason [`with_pre_hook`](Self::with_pre_hook) exists: a host
+    /// can unit-test its own hook, but only a scripted runtime shows that the
+    /// runtime consults it and honors what it returned.
+    pub fn with_post_hook(mut self, hook: impl PostExecutionHook + 'static) -> Self {
+        self.post_hook = Some(Box::new(hook));
+        self
+    }
+
+    /// Installs a tool authorizer, so a scripted run can exercise the
+    /// permission flow.
+    ///
+    /// Without one the session authorizer allows every call unconditionally
+    /// and [`SessionEvent::PermissionRequested`](crate::SessionEvent) is never
+    /// emitted — which makes "does this host ask before it writes?" impossible
+    /// to test against a mock.
     pub fn with_tool_authorizer(mut self, authorizer: impl ToolAuthorizer + 'static) -> Self {
         self.tool_authorizer = Some(Box::new(authorizer));
+        self
+    }
+
+    /// Gives the scripted model a context window, as a provider listing would.
+    ///
+    /// The window is what a window-relative compaction threshold is computed
+    /// from, so a test covering that behavior needs a model that reports one.
+    pub fn model_context_window(mut self, context_window: usize) -> Self {
+        self.model.context_window = Some(context_window);
         self
     }
 
@@ -223,6 +245,10 @@ impl MockRuntimeBuilder {
             builder = builder.with_pre_hook(hook);
         }
 
+        if let Some(hook) = self.post_hook {
+            builder = builder.with_post_hook(hook);
+        }
+
         if let Some(authorizer) = self.tool_authorizer {
             builder = builder.with_tool_authorizer(authorizer);
         }
@@ -272,6 +298,17 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor::new(self.kind.clone())
+    }
+
+    /// A scripted provider does list its models, and saying so is what lets a
+    /// pinned model id resolve through the listing the way a real one does.
+    fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+        crate::provider::ProviderCapabilities {
+            supports_model_listing: true,
+            supports_streaming: true,
+            supports_tool_calls: true,
+            ..Default::default()
+        }
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {

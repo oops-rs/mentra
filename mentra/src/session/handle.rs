@@ -269,6 +269,16 @@ impl Session {
         self.agent.set_reasoning(reasoning)
     }
 
+    /// Returns how many tokens this session's model accepts, when known.
+    ///
+    /// Reads the agent directly rather than making a host mirror the
+    /// `ModelInfo` it last handed over: a mirror desyncs the moment anything
+    /// calls [`set_model`](Self::set_model), and this is the value the
+    /// compaction threshold is actually computed from.
+    pub fn context_window(&self) -> Option<usize> {
+        self.agent.context_window()
+    }
+
     /// Returns the reasoning options this session's turns are sent with.
     ///
     /// The reader for [`set_reasoning`](Self::set_reasoning): a picker that
@@ -309,13 +319,25 @@ impl Session {
         // The last turn stays whole, as it does for the intrinsic: compacting
         // the exchange a caller just had is the one thing they did not ask for.
         let preserve_from = self.agent.history().len().saturating_sub(1);
-        self.agent
+        // A compaction outside a turn still has something to say. The event
+        // forwarder is otherwise installed only between `begin_turn` and
+        // `finish_turn`, so the agent's `ContextCompacted` had no tap and a
+        // host watching the stream saw a transcript shrink with no event
+        // explaining it. This is not a turn — no status change, no counter —
+        // just the forwarding.
+        let (event_tap, forwarded_seq) = self.install_agent_event_forwarder();
+        let result = self
+            .agent
             .compact_history_with_instructions(
                 preserve_from,
                 crate::agent::CompactionTrigger::Manual,
                 instructions,
             )
-            .await
+            .await;
+        drop(event_tap);
+        self.sync_forwarded_seq(&forwarded_seq);
+        self.touch_updated_at();
+        result
     }
 
     /// Returns the underlying agent identifier.

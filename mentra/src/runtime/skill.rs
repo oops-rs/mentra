@@ -182,6 +182,19 @@ impl SkillLoader {
         lines.join("\n")
     }
 
+    /// Returns a skill's body regardless of whether the model may invoke it.
+    ///
+    /// The host-side counterpart to [`get_content`](Self::get_content): a
+    /// skill marked `disable-model-invocation` is refused there and returned
+    /// here, which is the whole point of the flag. Without this, that skill was
+    /// visible in a listing and reachable by nobody at all.
+    pub(crate) fn get_body(&self, name: &str) -> Result<String, String> {
+        let Some(skill) = self.skills.get(name) else {
+            return Err(format!("Unknown skill '{name}'"));
+        };
+        Ok(render_skill(name, &skill.body))
+    }
+
     pub(crate) fn get_content(&self, name: &str) -> Result<String, String> {
         let Some(skill) = self.skills.get(name) else {
             return Err(format!("Unknown skill '{name}'"));
@@ -190,9 +203,13 @@ impl SkillLoader {
             return Err(format!("Skill '{name}' cannot be invoked by the model"));
         }
 
-        let body = skill.body.trim_end_matches(['\n', '\r']);
-        Ok(format!("<skill name=\"{name}\">\n{body}\n</skill>"))
+        Ok(render_skill(name, &skill.body))
     }
+}
+
+fn render_skill(name: &str, body: &str) -> String {
+    let body = body.trim_end_matches(['\n', '\r']);
+    format!("<skill name=\"{name}\">\n{body}\n</skill>")
 }
 
 fn collect_skill_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), SkillLoadError> {
