@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### An Anthropic request caches the conversation, not just its preamble
+
+- Anthropic requests carried two cache breakpoints, on the system prompt and on
+  the last tool definition. Both are static for the life of a session: they
+  cache the preamble and nothing that grows. Every turn therefore re-read the
+  whole transcript at full input price, and the longer a session ran the more
+  each turn cost.
+- The two remaining breakpoints Anthropic allows now go at the end of each of
+  the last two user messages. Two rather than one because a breakpoint is both
+  where an entry is written and where one is read: the newest user message
+  writes the prefix through the current turn, and the one before it is where
+  this request reads what the previous turn wrote. A single moving breakpoint
+  leaves the previous write at no marked position.
+- The end of a user message is the boundary because everything before it — the
+  preamble, every earlier turn, and the tool results just appended — is settled
+  by then and never rewritten.
+
 ### Truncated output keeps the end a failure is reported at
 
 - Both places mentra cuts oversized output kept the head. A command's most

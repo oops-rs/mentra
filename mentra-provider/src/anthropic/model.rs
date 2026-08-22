@@ -224,16 +224,19 @@ impl AnthropicRequest {
 
         let target_model = value.model.to_string();
 
+        let mut messages = value
+            .messages
+            .iter()
+            .map(|message| {
+                AnthropicMessage::try_from_with_target(message, target_provider, &target_model)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        mark_conversation_cache_breakpoints(&mut messages);
+
         Ok(AnthropicRequest {
             model: value.model.into_owned(),
             system: value.system.map(|s| build_system_blocks(s.into_owned())),
-            messages: value
-                .messages
-                .iter()
-                .map(|message| {
-                    AnthropicMessage::try_from_with_target(message, target_provider, &target_model)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            messages,
             tools: build_anthropic_tools(
                 value.tools.as_ref(),
                 value.tool_choice.as_ref(),
@@ -362,7 +365,65 @@ fn matches_anthropic_model(model: &str, canonical: &str) -> bool {
 #[derive(Serialize)]
 struct AnthropicMessage {
     role: String,
-    content: Vec<AnthropicContentBlock>,
+    content: Vec<AnthropicRequestBlock>,
+}
+
+/// A content block on its way out in a request, with the optional cache
+/// breakpoint that only outbound blocks can carry.
+///
+/// The breakpoint is a property of a block's position in one request, not of
+/// the block itself, so it lives here rather than on [`AnthropicContentBlock`],
+/// which is also what a response is read back into.
+#[derive(Serialize)]
+struct AnthropicRequestBlock {
+    #[serde(flatten)]
+    block: AnthropicContentBlock,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
+}
+
+impl From<AnthropicContentBlock> for AnthropicRequestBlock {
+    fn from(block: AnthropicContentBlock) -> Self {
+        Self {
+            block,
+            cache_control: None,
+        }
+    }
+}
+
+/// Anthropic accepts four cache breakpoints in a request. The system prompt
+/// takes one and the tool list takes another, and both are static for the life
+/// of a session — they cache the preamble and nothing that grows. The other two
+/// go on the conversation.
+const CONVERSATION_CACHE_BREAKPOINTS: usize = 2;
+
+/// Puts a cache breakpoint at the end of each of the last two user messages.
+///
+/// Two, rather than one: a breakpoint marks a position both to write a cache
+/// entry at and to read one from. The newest user message writes the prefix
+/// through the current turn, and the one before it is the position where this
+/// request reads the entry the previous turn wrote. With a single moving
+/// breakpoint the write from the last turn sits at no marked position, and a
+/// conversation pays full input price for its whole transcript every turn.
+///
+/// The end of a user message is the right place because everything before it —
+/// system prompt, tools, and every earlier turn including the tool results just
+/// appended — is settled by then and never rewritten.
+fn mark_conversation_cache_breakpoints(messages: &mut [AnthropicMessage]) {
+    let mut remaining = CONVERSATION_CACHE_BREAKPOINTS;
+
+    for message in messages.iter_mut().rev() {
+        if remaining == 0 {
+            break;
+        }
+        if message.role != Role::User.to_string() {
+            continue;
+        }
+        if let Some(block) = message.content.last_mut() {
+            block.cache_control = Some(AnthropicCacheControl::ephemeral());
+            remaining -= 1;
+        }
+    }
 }
 
 impl TryFrom<Message> for AnthropicMessage {
@@ -389,6 +450,7 @@ impl TryFrom<&Message> for AnthropicMessage {
                 .content
                 .iter()
                 .map(AnthropicContentBlock::from_without_replay_target)
+                .map(AnthropicRequestBlock::from)
                 .collect(),
         })
     }
@@ -417,6 +479,7 @@ impl AnthropicMessage {
                 .content
                 .iter()
                 .map(|block| AnthropicContentBlock::from_with_replay_target(block, &target))
+                .map(AnthropicRequestBlock::from)
                 .collect(),
         })
     }
@@ -836,6 +899,51 @@ mod tests {
             }),
             redacted,
         }
+    }
+
+    #[test]
+    fn the_last_two_user_messages_carry_cache_breakpoints() {
+        // The system prompt and the tool list are cached, and both are static.
+        // Without a breakpoint on the conversation itself every turn re-reads
+        // the whole transcript at full input price. Two breakpoints, not one:
+        // the newer writes the prefix through this turn, the older is where
+        // this request reads the entry the previous turn wrote.
+        let mut request =
+            request_with_message("claude-test", Message::user(ContentBlock::text("first")));
+        request.messages = Cow::Owned(vec![
+            Message::user(ContentBlock::text("first")),
+            Message::assistant(ContentBlock::text("answer")),
+            Message::user(ContentBlock::text("second")),
+            Message::assistant(ContentBlock::text("answer")),
+            Message::user(ContentBlock::text("third")),
+        ]);
+
+        let wire =
+            serde_json::to_value(AnthropicRequest::try_from(request).expect("request converts"))
+                .expect("request serializes");
+
+        let cached: Vec<usize> = wire["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| {
+                message["content"]
+                    .as_array()
+                    .expect("content array")
+                    .iter()
+                    .any(|block| block.get("cache_control").is_some())
+            })
+            .map(|(index, _)| index)
+            .collect();
+
+        assert_eq!(cached, vec![2, 4], "{wire}");
+        assert_eq!(
+            wire["messages"][4]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(wire["messages"][4]["content"][0]["type"], "text");
+        assert_eq!(wire["messages"][4]["content"][0]["text"], "third");
     }
 
     #[test]
