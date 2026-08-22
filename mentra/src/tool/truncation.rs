@@ -10,6 +10,13 @@ use mentra_provider::ToolResultContent;
 
 static NEXT_SPILL_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Byte budgets below this keep the head alone rather than splitting into two
+/// windows too short to carry a line of context each.
+const MIN_BYTES_FOR_TWO_WINDOWS: usize = 256;
+
+/// Line budgets below this keep the head alone, for the same reason.
+const MIN_LINES_FOR_TWO_WINDOWS: usize = 4;
+
 pub(super) enum SpillBehavior {
     Enabled(PathBuf),
     Disabled(&'static str),
@@ -43,27 +50,77 @@ impl ToolOutputLimiter {
             return ToolResultContent::Text(text);
         }
 
+        // A budget with room for two windows is spent on both ends of the
+        // output. What a command has to say is rarely all at the top: the
+        // compile line that failed, the assertion that tripped and the stack it
+        // unwound are the last thing written, and a head-only window is the one
+        // that reliably misses them.
+        let (head_bytes, head_lines, tail_bytes, tail_lines) = self.windows();
+
         let mut shown_bytes = 0_usize;
         let mut shown_lines = 0_usize;
         for line in text.split_inclusive('\n') {
-            if shown_lines == self.max_lines
-                || shown_bytes.saturating_add(line.len()) > self.max_bytes
-            {
+            if shown_lines == head_lines || shown_bytes.saturating_add(line.len()) > head_bytes {
                 break;
             }
             shown_bytes += line.len();
             shown_lines += 1;
         }
 
+        // Walk back from the end while the tail stays inside its own budget and
+        // never reaches back into what the head already showed.
+        let mut tail_start = text.len();
+        let mut kept_tail_lines = 0_usize;
+        if tail_lines > 0 {
+            for line in text.split_inclusive('\n').rev() {
+                let start = tail_start - line.len();
+                if start < shown_bytes
+                    || kept_tail_lines == tail_lines
+                    || (text.len() - start) > tail_bytes
+                {
+                    break;
+                }
+                tail_start = start;
+                kept_tail_lines += 1;
+            }
+        }
+
         let mut truncated = text[..shown_bytes].to_string();
         if !truncated.is_empty() && !truncated.ends_with('\n') {
             truncated.push('\n');
         }
+        let tail = text[tail_start..].to_string();
+        let shown = shown_lines + kept_tail_lines;
         let spill = self.spill(text, "txt").await;
         truncated.push_str(&format!(
-            "[truncated: showing {shown_lines} of {total_lines} lines; {spill}]"
+            "[truncated: showing {shown} of {total_lines} lines; {spill}]"
         ));
+        if !tail.is_empty() {
+            truncated.push('\n');
+            truncated.push_str(&tail);
+        }
         ToolResultContent::Text(truncated)
+    }
+
+    /// Splits the byte and line budgets into a head window and a tail window.
+    ///
+    /// A budget too small for two useful windows is spent entirely on the head:
+    /// half of four lines, or of a couple hundred bytes, says less than the
+    /// whole of it does.
+    fn windows(&self) -> (usize, usize, usize, usize) {
+        if self.max_bytes < MIN_BYTES_FOR_TWO_WINDOWS || self.max_lines < MIN_LINES_FOR_TWO_WINDOWS
+        {
+            return (self.max_bytes, self.max_lines, 0, 0);
+        }
+
+        let head_bytes = self.max_bytes / 2;
+        let head_lines = self.max_lines / 2;
+        (
+            head_bytes,
+            head_lines,
+            self.max_bytes - head_bytes,
+            self.max_lines - head_lines,
+        )
     }
 
     async fn apply_structured(&self, value: serde_json::Value) -> ToolResultContent {
@@ -222,6 +279,28 @@ mod tests {
         );
         assert!(result.starts_with("one\ntwo\n[truncated:"));
         assert!(result.contains("showing 2 of 3 lines"));
+    }
+
+    #[tokio::test]
+    async fn a_truncated_result_keeps_the_last_lines_too() {
+        // The reason a build failed is on the last line of its output, not the
+        // first. A budget with room for two windows spends it on both ends.
+        let mut content = String::from("FIRST: compiling\n");
+        for index in 0..500 {
+            content.push_str(&format!("filler {index}\n"));
+        }
+        content.push_str("LAST: assertion failed\n");
+
+        let result = text(
+            no_spill(2_048, 40)
+                .apply(ToolResultContent::Text(content))
+                .await,
+        );
+
+        assert!(result.starts_with("FIRST: compiling\n"), "{result}");
+        assert!(result.ends_with("LAST: assertion failed\n"), "{result}");
+        assert!(result.contains("[truncated:"), "{result}");
+        assert!(result.contains(" of 502 lines"), "{result}");
     }
 
     #[tokio::test]

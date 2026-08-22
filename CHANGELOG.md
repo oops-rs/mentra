@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Truncated output keeps the end a failure is reported at
+
+- Both places mentra cuts oversized output kept the head. A command's most
+  load-bearing lines are at both ends — the echo and early context at the top,
+  the assertion that tripped and the stack it unwound at the bottom — and a
+  head-only window is the one that reliably misses the half explaining why the
+  command failed.
+- A capped stdout or stderr capture now keeps a head window and a tail window
+  with `[... <n> bytes elided ...]` between them, so the result never reads as
+  contiguous output. The whole stream is still drained, so a cap never blocks a
+  child on a full pipe, and the kept bytes still never exceed
+  `max_output_bytes_per_stream` — the marker is paid for out of the same budget.
+- `ToolOutputLimiter` splits its byte and line budgets the same way, and its
+  `[truncated: showing N of M lines; ...]` marker now counts both windows.
+- A budget too small to hold two useful windows — under 256 bytes, or under four
+  lines — still spends all of it on the head. Half of four lines says less than
+  the whole of it does, and every existing small-budget result is unchanged.
+
 ### A usage report says what was spent thinking
 
 - `TokenUsage` has carried `reasoning_tokens` and `thoughts_tokens` since the
