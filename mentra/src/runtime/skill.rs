@@ -17,6 +17,7 @@ struct SkillEntry {
     description: String,
     body: String,
     path: PathBuf,
+    model_invocable: bool,
 }
 
 /// A loaded skill, without its body.
@@ -30,6 +31,14 @@ struct SkillEntry {
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
+    /// Whether the model may reach this skill.
+    ///
+    /// `false` when the `SKILL.md` frontmatter set `disable-model-invocation`:
+    /// the skill is not listed to the model and `load_skill` refuses it, while
+    /// a host driving skills itself still sees it here and can run it. That is
+    /// the whole point of the flag — a skill a person invokes deliberately,
+    /// never one a model reaches for on its own.
+    pub model_invocable: bool,
     /// The `SKILL.md` this came from. With several roots registered, this is
     /// how a host tells which one won.
     pub path: PathBuf,
@@ -55,6 +64,17 @@ pub enum SkillLoadError {
 struct SkillFrontmatter {
     name: Option<String>,
     description: Option<String>,
+    /// Keeps a skill out of the model's reach.
+    ///
+    /// Both spellings are accepted because the frontmatter convention uses
+    /// hyphens and Rust callers reach for underscores; a skill author should
+    /// not have to know which one this parser preferred.
+    #[serde(
+        default,
+        rename = "disable-model-invocation",
+        alias = "disable_model_invocation"
+    )]
+    disable_model_invocation: bool,
 }
 
 impl SkillLoader {
@@ -102,6 +122,7 @@ impl SkillLoader {
                     description,
                     body,
                     path: file,
+                    model_invocable: !meta.disable_model_invocation,
                 },
             );
         }
@@ -129,18 +150,29 @@ impl SkillLoader {
             .map(|(name, entry)| SkillInfo {
                 name: name.clone(),
                 description: entry.description.clone(),
+                model_invocable: entry.model_invocable,
                 path: entry.path.clone(),
             })
             .collect()
     }
 
+    /// The skill list shown to the model.
+    ///
+    /// Skills whose frontmatter disabled model invocation are left out: naming
+    /// one here and refusing it in `load_skill` would be an invitation
+    /// followed by a refusal.
     pub(crate) fn get_descriptions(&self) -> String {
-        if self.skills.is_empty() {
+        let invocable = self
+            .skills
+            .iter()
+            .filter(|(_, skill)| skill.model_invocable)
+            .collect::<Vec<_>>();
+        if invocable.is_empty() {
             return String::new();
         }
 
         let mut lines = vec!["Skills available:".to_string()];
-        for (name, skill) in &self.skills {
+        for (name, skill) in invocable {
             lines.push(format!("  - {name}: {}", skill.description));
         }
         lines.push(
@@ -154,6 +186,9 @@ impl SkillLoader {
         let Some(skill) = self.skills.get(name) else {
             return Err(format!("Unknown skill '{name}'"));
         };
+        if !skill.model_invocable {
+            return Err(format!("Skill '{name}' cannot be invoked by the model"));
+        }
 
         let body = skill.body.trim_end_matches(['\n', '\r']);
         Ok(format!("<skill name=\"{name}\">\n{body}\n</skill>"))
@@ -243,6 +278,64 @@ mod tests {
     use super::{SkillLoadError, SkillLoader};
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn a_skill_that_disables_model_invocation_is_neither_listed_nor_loadable() {
+        // Listing it and then refusing it would be an invitation followed by a
+        // refusal, so it is left out of the model's list entirely.
+        let root = temp_skills_dir("disabled");
+        write_skill(
+            &root,
+            "release",
+            "---\nname: release\ndescription: cuts a release\ndisable-model-invocation: true\n---\nSteps\n",
+        );
+        write_skill(
+            &root,
+            "git",
+            "---\nname: git\ndescription: Git helpers\n---\nStep 1\n",
+        );
+
+        let loader = SkillLoader::from_dir(&root).expect("load skills");
+
+        let descriptions = loader.get_descriptions();
+        assert!(descriptions.contains("git: Git helpers"), "{descriptions}");
+        assert!(!descriptions.contains("release"), "{descriptions}");
+
+        let refused = loader
+            .get_content("release")
+            .expect_err("the model may not load it");
+        assert!(
+            refused.contains("cannot be invoked by the model"),
+            "{refused}"
+        );
+        assert!(loader.get_content("git").is_ok());
+
+        // A host still sees it, which is what makes it invocable by a person.
+        let infos = loader.infos();
+        let release = infos
+            .iter()
+            .find(|info| info.name == "release")
+            .expect("still loaded");
+        assert!(!release.model_invocable);
+    }
+
+    #[test]
+    fn every_skill_disabled_leaves_no_list_at_all() {
+        let root = temp_skills_dir("all-disabled");
+        write_skill(
+            &root,
+            "release",
+            "---\nname: release\ndescription: cuts a release\ndisable_model_invocation: true\n---\nSteps\n",
+        );
+
+        let loader = SkillLoader::from_dir(&root).expect("load skills");
+
+        assert_eq!(
+            loader.get_descriptions(),
+            "",
+            "an empty list must not become a header with nothing under it"
+        );
+    }
 
     #[test]
     fn parses_frontmatter_and_strips_it_from_content() {

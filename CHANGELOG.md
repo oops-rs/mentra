@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### A skill can be kept out of the model's reach
+
+- `SKILL.md` frontmatter parsing read `name` and `description` and ignored
+  everything else, so `disable-model-invocation` — the convention's way of
+  saying "a person invokes this, not the model" — did nothing at all.
+- A skill that sets it is left out of the list the model is shown and refused
+  by `load_skill`. Left out rather than listed-and-refused, because naming a
+  skill to the model and then declining it is an invitation followed by a
+  refusal. Both `disable-model-invocation` and `disable_model_invocation` are
+  read, since the convention uses hyphens and Rust callers reach for
+  underscores.
+- The skill is still loaded and still appears in `Runtime::skills`, now with
+  `SkillInfo::model_invocable` saying which it is. That is the point of the
+  flag: a host driving skills itself can still run it.
+
 ### A tool call is checked against the schema its tool published (#23)
 
 - A tool advertises an `input_schema` to the model and nothing ever compared a

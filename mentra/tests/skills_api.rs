@@ -100,10 +100,15 @@ fn enumeration_reports_name_description_and_source() {
     let SkillInfo {
         name,
         description,
+        model_invocable,
         path,
     } = &skills[0];
     assert_eq!(name, "haiku");
     assert_eq!(description, "writes haiku");
+    assert!(
+        *model_invocable,
+        "a skill is the model's to reach unless its frontmatter says otherwise"
+    );
     assert_eq!(path, &root.join("haiku").join("SKILL.md"));
 }
 
@@ -141,5 +146,37 @@ fn roots_before_a_failing_one_stay_registered() {
         runtime.skills().len(),
         1,
         "the root that loaded before the failure stays registered"
+    );
+}
+
+#[test]
+fn a_skill_can_be_kept_out_of_the_models_reach() {
+    // `disable-model-invocation` exists for a skill a person invokes
+    // deliberately and a model should never reach for on its own.
+    let root = temp_dir("disabled-invocation");
+    fs::create_dir_all(root.join("release")).expect("create skill dir");
+    fs::write(
+        root.join("release").join("SKILL.md"),
+        "---\nname: release\ndescription: cuts a release\ndisable-model-invocation: true\n---\nSteps\n",
+    )
+    .expect("write skill");
+    write_skill(&root, "haiku", "haiku", "writes haiku", "A");
+
+    let runtime = runtime();
+    runtime.register_skills_dir(&root).expect("registers");
+
+    let skills = runtime.skills();
+    // The host still sees it: that is what makes it invocable by a person.
+    let release = skills
+        .iter()
+        .find(|skill| skill.name == "release")
+        .expect("the skill is still loaded");
+    assert!(!release.model_invocable);
+    assert!(
+        skills
+            .iter()
+            .find(|skill| skill.name == "haiku")
+            .expect("the other skill loaded")
+            .model_invocable
     );
 }
