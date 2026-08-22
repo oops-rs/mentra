@@ -50,6 +50,7 @@ pub(super) async fn execute_glob(ctx: ParallelToolContext, input: Value) -> Tool
             input.path.unwrap_or_else(|| ".".to_string()),
             &input.pattern,
             input.limit.unwrap_or(200),
+            !input.include_ignored,
         )
     })
     .await

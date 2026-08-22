@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Search skips what the repository already ignores
+
+- The workspace search walk had no notion of `.gitignore`, did not skip `.git`,
+  and did not skip hidden entries, while `limit` bounded *matches* rather than
+  files visited. A low-yield `grep` at a Rust workspace root therefore walked
+  all of `target/` before returning, and reported matches out of build output
+  as though they were source.
+- `grep` and `glob` now skip `.git`, hidden entries, and everything the
+  `.gitignore` and `.ignore` files exclude — including per-directory ignore
+  files, where a nested file's rules override the ones above it as git's own do.
+  `SearchOptions::respect_ignore_files` controls it and defaults to on; the
+  `grep` and `glob` tools take an `include_ignored` flag for the searches that
+  do want build output.
+- `ls` is unchanged and still reports everything in a directory. It answers
+  "what is here", and hiding entries from that answer is a surprise rather than
+  a convenience.
+- Matching uses the `ignore` crate; the traversal does not. The runtime's own
+  walk reauthorizes every child against the agent's read roots before
+  inspecting or following it, so a symlink cannot lead a search out of the
+  workspace, and a third-party walker doing its own traversal cannot make that
+  check. The filter is applied after authorization, never instead of it.
+
 ### A hook can govern what a tool result shows the model
 
 - `PreExecutionHook` was the only seam that could change anything.

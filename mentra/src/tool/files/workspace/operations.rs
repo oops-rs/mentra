@@ -1,6 +1,6 @@
 use regex::RegexBuilder;
 
-use super::{BTreeSet, EntryKind, OverlayEntry, SearchOptions, WorkspaceEditor};
+use super::{EntryKind, IgnoreFilter, OverlayEntry, SearchOptions, Walk, WorkspaceEditor};
 use crate::tool::files::schema::{FileOperation, InsertPosition};
 
 impl WorkspaceEditor {
@@ -93,27 +93,23 @@ impl WorkspaceEditor {
                 entries.push(format!("[file] {}", self.display_relative_to(&path, &path)));
             }
             EntryKind::Dir => {
-                let mut visited = BTreeSet::new();
                 if limit > 0 {
-                    self.walk_entries(
-                        &path,
-                        1,
-                        depth,
-                        "files_list",
-                        &mut visited,
-                        &mut |child, kind| {
-                            let label = match kind {
-                                EntryKind::File => "file",
-                                EntryKind::Dir => "dir",
-                                EntryKind::Missing => return Ok(true),
-                            };
-                            entries.push(format!(
-                                "[{label}] {}",
-                                self.display_relative_to(&path, child)
-                            ));
-                            Ok(entries.len() < limit)
-                        },
-                    )?;
+                    // `ls` answers "what is in this directory", and hiding
+                    // entries from that answer is a surprise. Only search and
+                    // glob skip what the repository ignores.
+                    let mut walk = Walk::new("files_list", depth, IgnoreFilter::disabled());
+                    self.walk_entries(&path, 1, &mut walk, &mut |child, kind| {
+                        let label = match kind {
+                            EntryKind::File => "file",
+                            EntryKind::Dir => "dir",
+                            EntryKind::Missing => return Ok(true),
+                        };
+                        entries.push(format!(
+                            "[{label}] {}",
+                            self.display_relative_to(&path, child)
+                        ));
+                        Ok(entries.len() < limit)
+                    })?;
                 }
             }
             EntryKind::Missing => unreachable!(),
@@ -189,7 +185,13 @@ impl WorkspaceEditor {
         ))
     }
 
-    pub(crate) fn glob(&self, path: String, pattern: &str, limit: usize) -> Result<String, String> {
+    pub(crate) fn glob(
+        &self,
+        path: String,
+        pattern: &str,
+        limit: usize,
+        respect_ignore_files: bool,
+    ) -> Result<String, String> {
         let path = self.resolve_path(&path)?;
         let path = self.authorize_read(&path, "files_glob")?;
         let kind = self.entry_kind(&path)?;
@@ -209,7 +211,13 @@ impl WorkspaceEditor {
                     }
                 }
                 EntryKind::Dir => {
-                    self.collect_glob_matches(&path, pattern, limit, &mut matches)?;
+                    self.collect_glob_matches(
+                        &path,
+                        pattern,
+                        limit,
+                        respect_ignore_files,
+                        &mut matches,
+                    )?;
                 }
                 EntryKind::Missing => unreachable!(),
             }

@@ -35,6 +35,9 @@ pub(super) struct GrepInput {
     #[serde(default)]
     pub(super) multiline: bool,
     pub(super) limit: Option<usize>,
+    /// Search build output and other ignored files too.
+    #[serde(default)]
+    pub(super) include_ignored: bool,
 }
 
 impl GrepInput {
@@ -46,6 +49,7 @@ impl GrepInput {
             context: self.context,
             multiline: self.multiline,
             max_line_chars: Some(500),
+            respect_ignore_files: !self.include_ignored,
         }
     }
 }
@@ -56,6 +60,9 @@ pub(super) struct GlobInput {
     #[serde(default)]
     pub(super) path: Option<String>,
     pub(super) limit: Option<usize>,
+    /// Match build output and other ignored files too.
+    #[serde(default)]
+    pub(super) include_ignored: bool,
 }
 
 #[derive(Debug, Deserialize)]

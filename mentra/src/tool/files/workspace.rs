@@ -9,9 +9,14 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use ignore::{
+    Match,
+    gitignore::{Gitignore, GitignoreBuilder},
+};
 use regex::Regex;
 
 use crate::runtime::{RuntimeHandle, RuntimeHookEvent};
@@ -35,7 +40,7 @@ enum OriginalState {
     File(Vec<u8>),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct SearchOptions {
     pub(crate) file_glob: Option<String>,
     pub(crate) ignore_case: bool,
@@ -43,6 +48,161 @@ pub(crate) struct SearchOptions {
     pub(crate) context: usize,
     pub(crate) multiline: bool,
     pub(crate) max_line_chars: Option<usize>,
+    /// Whether to skip what the repository already treats as not-source:
+    /// `.git`, hidden entries, and everything the `.gitignore` files exclude.
+    ///
+    /// On by default, because a search that walks `target/` or `node_modules/`
+    /// spends most of its time on files no one asked about and reports matches
+    /// from build output as though they were code.
+    pub(crate) respect_ignore_files: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            file_glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 0,
+            multiline: false,
+            max_line_chars: None,
+            respect_ignore_files: true,
+        }
+    }
+}
+
+/// One traversal's state: what it is allowed to read, how deep it may go, what
+/// it has already seen, and what it is filtering out.
+struct Walk {
+    /// The action name each entry is authorized against.
+    action: &'static str,
+    max_depth: usize,
+    /// Canonical paths already descended into, so a symlink cycle terminates.
+    visited: BTreeSet<PathBuf>,
+    filter: IgnoreFilter,
+}
+
+impl Walk {
+    fn new(action: &'static str, max_depth: usize, filter: IgnoreFilter) -> Self {
+        Self {
+            action,
+            max_depth,
+            visited: BTreeSet::new(),
+            filter,
+        }
+    }
+}
+
+/// Decides which entries a search walk may look at.
+///
+/// This is a filter over the runtime's own walk rather than the `ignore`
+/// crate's `WalkBuilder`, deliberately: [`WorkspaceEditor::walk_entries`]
+/// reauthorizes every child against the agent's read roots before it is
+/// inspected or followed, so a symlink cannot lead the walk out of the
+/// workspace. A third-party walker does its own traversal and cannot make that
+/// check, so only the *matching* is borrowed.
+#[derive(Default)]
+struct IgnoreFilter {
+    /// One matcher per directory level that carried a `.gitignore`, outermost
+    /// first. A deeper file's rules override a shallower one's, as git does.
+    matchers: Vec<Arc<Gitignore>>,
+    enabled: bool,
+}
+
+impl IgnoreFilter {
+    /// A filter that lets everything through, for the walks that are meant to
+    /// report a directory exactly as it is.
+    fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Builds the filter for a search rooted at `root`.
+    fn new(root: &Path, enabled: bool) -> Self {
+        if !enabled {
+            return Self::default();
+        }
+
+        let mut filter = Self {
+            matchers: Vec::new(),
+            enabled: true,
+        };
+        filter.push_directory(root);
+        filter
+    }
+
+    /// Adds `directory`'s own ignore rules, if it has any, and says whether a
+    /// level was pushed so the caller can pop it on the way back out.
+    fn push_directory(&mut self, directory: &Path) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        let mut builder = GitignoreBuilder::new(directory);
+        let mut added = false;
+        for name in [".gitignore", ".ignore"] {
+            let candidate = directory.join(name);
+            if candidate.is_file() && builder.add(&candidate).is_none() {
+                added = true;
+            }
+        }
+        // A repository's own excludes belong to its root and nowhere else.
+        let info_exclude = directory.join(".git/info/exclude");
+        if info_exclude.is_file() && builder.add(&info_exclude).is_none() {
+            added = true;
+        }
+
+        if !added {
+            return false;
+        }
+        match builder.build() {
+            Ok(matcher) => {
+                self.matchers.push(Arc::new(matcher));
+                true
+            }
+            // An unparseable ignore file is not a reason to refuse the search.
+            Err(_) => false,
+        }
+    }
+
+    fn pop_directory(&mut self, pushed: bool) {
+        if pushed {
+            self.matchers.pop();
+        }
+    }
+
+    /// Whether the walk may look at, and descend into, `path`.
+    fn allows(&self, path: &Path, kind: EntryKind) -> bool {
+        if !self.enabled {
+            return true;
+        }
+
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return true;
+        };
+        // Never search a repository's object store: it is not source, it is
+        // large, and its contents are compressed anyway.
+        if name == ".git" {
+            return false;
+        }
+        // Hidden entries are excluded for the same reason ripgrep excludes
+        // them: `.venv`, `.cache` and `.next` are the bulk of what is hidden in
+        // a working tree, and none of it is what a search meant.
+        if name.starts_with('.') {
+            return false;
+        }
+
+        let is_dir = kind == EntryKind::Dir;
+        // Deepest first: a nested `.gitignore` overrides the rules above it,
+        // including with a negation.
+        for matcher in self.matchers.iter().rev() {
+            match matcher.matched(path, is_dir) {
+                Match::Ignore(_) => return false,
+                Match::Whitelist(_) => return true,
+                Match::None => continue,
+            }
+        }
+        true
+    }
 }
 
 pub(crate) struct WorkspaceEditor {
@@ -280,18 +440,16 @@ impl WorkspaceEditor {
         &self,
         dir: &Path,
         current_depth: usize,
-        max_depth: usize,
-        action: &str,
-        visited: &mut BTreeSet<PathBuf>,
+        walk: &mut Walk,
         visit: &mut F,
     ) -> Result<bool, String>
     where
         F: FnMut(&Path, EntryKind) -> Result<bool, String>,
     {
-        if current_depth > max_depth {
+        if current_depth > walk.max_depth {
             return Ok(true);
         }
-        if !self.mark_directory_visited(dir, visited)? {
+        if !self.mark_directory_visited(dir, &mut walk.visited)? {
             return Ok(true);
         }
 
@@ -302,25 +460,28 @@ impl WorkspaceEditor {
             // read root. Reauthorize each child immediately before inspecting
             // or following it so recursion cannot cross that boundary. Doing
             // this lazily also preserves the existing limit short-circuit.
-            self.authorize_read(&child, action)?;
+            self.authorize_read(&child, walk.action)?;
             let kind = self.entry_kind(&child)?;
             if kind == EntryKind::Missing {
+                continue;
+            }
+            // Checked after authorization, not instead of it: skipping an
+            // ignored entry is an efficiency and relevance decision, and must
+            // never be the reason a path outside the read roots goes
+            // unchallenged.
+            if !walk.filter.allows(&child, kind) {
                 continue;
             }
             if !visit(&child, kind)? {
                 return Ok(false);
             }
-            if kind == EntryKind::Dir
-                && !self.walk_entries(
-                    &child,
-                    current_depth + 1,
-                    max_depth,
-                    action,
-                    visited,
-                    visit,
-                )?
-            {
-                return Ok(false);
+            if kind == EntryKind::Dir {
+                let pushed = walk.filter.push_directory(&child);
+                let keep_going = self.walk_entries(&child, current_depth + 1, walk, visit);
+                walk.filter.pop_directory(pushed);
+                if !keep_going? {
+                    return Ok(false);
+                }
             }
         }
 
@@ -335,22 +496,19 @@ impl WorkspaceEditor {
         limit: usize,
         matches: &mut Vec<String>,
     ) -> Result<(), String> {
-        let mut visited = BTreeSet::new();
-        self.walk_entries(
-            root,
-            1,
-            usize::MAX,
+        let mut walk = Walk::new(
             "files_search",
-            &mut visited,
-            &mut |child, kind| {
-                if kind == EntryKind::File
-                    && self.path_matches_glob(root, child, options.file_glob.as_deref())
-                {
-                    self.search_file(child, regex, options, limit, matches)?;
-                }
-                Ok(matches.len() < limit)
-            },
-        )?;
+            usize::MAX,
+            IgnoreFilter::new(root, options.respect_ignore_files),
+        );
+        self.walk_entries(root, 1, &mut walk, &mut |child, kind| {
+            if kind == EntryKind::File
+                && self.path_matches_glob(root, child, options.file_glob.as_deref())
+            {
+                self.search_file(child, regex, options, limit, matches)?;
+            }
+            Ok(matches.len() < limit)
+        })?;
         Ok(())
     }
 
@@ -359,22 +517,20 @@ impl WorkspaceEditor {
         root: &Path,
         pattern: &str,
         limit: usize,
+        respect_ignore_files: bool,
         matches: &mut Vec<String>,
     ) -> Result<(), String> {
-        let mut visited = BTreeSet::new();
-        self.walk_entries(
-            root,
-            1,
-            usize::MAX,
+        let mut walk = Walk::new(
             "files_glob",
-            &mut visited,
-            &mut |child, kind| {
-                if kind == EntryKind::File && self.path_matches_glob(root, child, Some(pattern)) {
-                    matches.push(self.display_relative_to(root, child));
-                }
-                Ok(matches.len() < limit)
-            },
-        )?;
+            usize::MAX,
+            IgnoreFilter::new(root, respect_ignore_files),
+        );
+        self.walk_entries(root, 1, &mut walk, &mut |child, kind| {
+            if kind == EntryKind::File && self.path_matches_glob(root, child, Some(pattern)) {
+                matches.push(self.display_relative_to(root, child));
+            }
+            Ok(matches.len() < limit)
+        })?;
         Ok(())
     }
 
@@ -692,11 +848,95 @@ mod tests {
         fs::write(root.join("src/nested/mod.rs"), "pub mod nested;\n").expect("write module");
         fs::write(root.join("src/note.txt"), "not rust\n").expect("write note");
 
-        let output = editor.glob(".".to_string(), "**/*.rs", 20).expect("glob");
+        let output = editor
+            .glob(".".to_string(), "**/*.rs", 20, true)
+            .expect("glob");
 
         assert!(output.contains("src/lib.rs"));
         assert!(output.contains("src/nested/mod.rs"));
         assert!(!output.contains("note.txt"));
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn a_search_skips_what_the_repository_ignores() {
+        // The motivating case: a low-yield grep at a Rust workspace root walked
+        // all of `target/`, reported matches out of build artifacts, and spent
+        // most of its time doing it.
+        let (root, editor) = test_editor("grep-ignored");
+        fs::write(root.join(".gitignore"), "/target\n*.log\n").expect("write gitignore");
+        fs::create_dir_all(root.join("target/debug")).expect("create target");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::create_dir_all(root.join(".git")).expect("create git dir");
+        fs::write(root.join("src/lib.rs"), "let needle = 1;\n").expect("write source");
+        fs::write(root.join("target/debug/build.rs"), "let needle = 2;\n").expect("write built");
+        fs::write(root.join("build.log"), "needle\n").expect("write log");
+        fs::write(root.join(".git/config"), "needle\n").expect("write git config");
+
+        let output = editor
+            .grep(".".to_string(), "needle", SearchOptions::default(), 50)
+            .expect("grep");
+
+        assert!(output.contains("src/lib.rs"), "{output}");
+        assert!(!output.contains("target/"), "{output}");
+        assert!(!output.contains("build.log"), "{output}");
+        assert!(!output.contains(".git/"), "{output}");
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn a_search_can_be_asked_for_the_ignored_files_too() {
+        let (root, editor) = test_editor("grep-include-ignored");
+        fs::write(root.join(".gitignore"), "/target\n").expect("write gitignore");
+        fs::create_dir_all(root.join("target")).expect("create target");
+        fs::write(root.join("target/built.rs"), "let needle = 2;\n").expect("write built");
+
+        let output = editor
+            .grep(
+                ".".to_string(),
+                "needle",
+                SearchOptions {
+                    respect_ignore_files: false,
+                    ..Default::default()
+                },
+                50,
+            )
+            .expect("grep");
+
+        assert!(output.contains("target/built.rs"), "{output}");
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn a_nested_ignore_file_overrides_the_one_above_it() {
+        // git's own rule: the deepest matching file wins, negation included.
+        let (root, editor) = test_editor("grep-nested-ignore");
+        fs::write(root.join(".gitignore"), "*.gen\n").expect("write root gitignore");
+        fs::create_dir_all(root.join("keep")).expect("create keep");
+        fs::write(root.join("keep/.gitignore"), "!*.gen\n").expect("write nested gitignore");
+        fs::write(root.join("skipped.gen"), "needle\n").expect("write skipped");
+        fs::write(root.join("keep/kept.gen"), "needle\n").expect("write kept");
+
+        let output = editor
+            .grep(".".to_string(), "needle", SearchOptions::default(), 50)
+            .expect("grep");
+
+        assert!(output.contains("keep/kept.gen"), "{output}");
+        assert!(!output.contains("skipped.gen"), "{output}");
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn listing_a_directory_still_reports_everything_in_it() {
+        // `ls` answers "what is here". Hiding entries from that is a surprise,
+        // and it is not a walk anyone runs for its yield.
+        let (root, editor) = test_editor("list-ignored");
+        fs::write(root.join(".gitignore"), "/target\n").expect("write gitignore");
+        fs::create_dir_all(root.join("target")).expect("create target");
+
+        let output = editor.list(".".to_string(), 3, 50).expect("list");
+
+        assert!(output.contains("target"), "{output}");
         fs::remove_dir_all(root).expect("remove test workspace");
     }
 
