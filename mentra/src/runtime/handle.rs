@@ -22,8 +22,8 @@ use crate::{
     runtime::{
         control::{
             AuditHook, CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor,
-            PreExecutionHooks, RuntimeExecutor, RuntimeHookEvent, RuntimeHooks, RuntimePolicy,
-            read_limited_file,
+            PostExecutionHooks, PreExecutionHooks, RuntimeExecutor, RuntimeHookEvent, RuntimeHooks,
+            RuntimePolicy, read_limited_file,
         },
         error::RuntimeError,
         store::{RuntimeStore, SqliteRuntimeStore},
@@ -59,6 +59,7 @@ pub(crate) struct ExecutionServices {
     pub(crate) tool_authorizer: Option<Arc<dyn ToolAuthorizer>>,
     pub(crate) hooks: RuntimeHooks,
     pub(crate) pre_hooks: PreExecutionHooks,
+    pub(crate) post_hooks: PostExecutionHooks,
 }
 
 #[derive(Clone)]
@@ -148,6 +149,10 @@ impl RuntimeHandle {
 
     pub(crate) fn pre_hooks(&self) -> &PreExecutionHooks {
         &self.execution.pre_hooks
+    }
+
+    pub(crate) fn post_hooks(&self) -> &PostExecutionHooks {
+        &self.execution.post_hooks
     }
 
     pub(crate) fn hooks(&self) -> &RuntimeHooks {

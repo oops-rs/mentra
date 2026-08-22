@@ -179,6 +179,23 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Appends a single post-execution hook, keeping any already registered.
+    ///
+    /// Post-execution hooks run in reverse registration order, so a hook
+    /// registered before another wraps it: first in on the way to the tool,
+    /// last out on the way back.
+    pub fn with_post_hook<H>(self, hook: H) -> Self
+    where
+        H: crate::runtime::PostExecutionHook + 'static,
+    {
+        let post_hooks = self.handle.post_hooks().clone().with_hook(hook);
+        Self {
+            handle: self.handle.with_post_hooks(post_hooks),
+            provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
+        }
+    }
+
     /// Replaces hooks with the provided collection.
     pub fn with_hooks<I>(self, hooks: I) -> Self
     where

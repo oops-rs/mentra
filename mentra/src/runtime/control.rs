@@ -10,8 +10,9 @@ pub use command::{
     read_limited_file,
 };
 pub use hooks::{
-    AuditHook, AuditLogHook, HookDecision, PreExecutionContext, PreExecutionHook,
-    PreExecutionHooks, RuntimeHook, RuntimeHookEvent, RuntimeHooks, is_transient_provider_error,
+    AuditHook, AuditLogHook, HookDecision, PostExecutionContext, PostExecutionHook,
+    PostExecutionHooks, PreExecutionContext, PreExecutionHook, PreExecutionHooks, ResultDecision,
+    RuntimeHook, RuntimeHookEvent, RuntimeHooks, is_transient_provider_error,
     is_transient_runtime_error,
 };
 pub(crate) use policy::ShellValidation;

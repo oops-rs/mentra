@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### A hook can govern what a tool result shows the model
+
+- `PreExecutionHook` was the only seam that could change anything.
+  `RuntimeHook::on_event` sees `ToolExecutionFinished` and can only watch it
+  into the audit store. That left the question a pre-execution hook cannot
+  answer: whether a call is acceptable is often only decidable from its
+  *output* — a grep that pulled a credential out of a file nobody meant to
+  expose, a command whose stderr carries an internal hostname. Up front, the
+  output does not exist yet.
+- `PostExecutionHook::post_tool_execution` returns
+  `ResultDecision::{Keep, Replace { content, is_error }}`, registered with
+  `RuntimeBuilder::with_post_hook`. The context carries the tool name, the call
+  id, the working directory, the result, and the input the tool *actually ran
+  with* — after any `HookDecision::Modify`, so a hook judges what happened
+  rather than what was asked for.
+- Hooks run in reverse registration order, where pre-execution hooks run
+  forward, because the two bracket the call: whoever registers first is
+  outermost, seeing the input first on the way in and the result last on the
+  way out. Each hook sees the result as its predecessors left it.
+- The hooks run before the result pager, so a hook sees the whole result rather
+  than its first window, and whatever it returns is still bounded afterwards.
+  Only genuine executions reach them — a call blocked before it ran has no
+  output to judge.
+- A hook governs the model's view, not the record.
+  `AgentEvent::ToolExecutionFinished` has already carried the unmodified result
+  to every subscriber by the time a hook is consulted, so the audit trail still
+  says what actually happened.
+
 ### A run that overflows the context compacts instead of dying
 
 - Every provider reports "this request is too long" as an ordinary 400,

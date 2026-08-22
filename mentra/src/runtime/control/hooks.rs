@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     provider::{ProviderError, TokenUsage},
     runtime::{AuditStore, RuntimeStore, error::RuntimeError},
-    tool::{ToolAuthorizationOutcome, ToolAuthorizationPreview},
+    tool::{ToolAuthorizationOutcome, ToolAuthorizationPreview, ToolResultContent},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,6 +450,309 @@ pub fn is_transient_runtime_error(error: &RuntimeError) -> bool {
     error.category() == crate::error::ErrorCategory::Retryable
 }
 
+// ---------------------------------------------------------------------------
+// Post-execution hook types
+// ---------------------------------------------------------------------------
+
+/// What a tool produced, handed to the hooks before the model sees it.
+#[derive(Debug, Clone)]
+pub struct PostExecutionContext {
+    pub agent_id: String,
+    pub tool_name: String,
+    pub tool_call_id: String,
+    /// The input the tool actually ran with, as JSON — after any
+    /// [`HookDecision::Modify`] a pre-execution hook applied, not the input the
+    /// model wrote.
+    pub input_json: String,
+    /// What a relative path in the result resolves against, as for
+    /// [`PreExecutionContext`].
+    pub working_directory: PathBuf,
+    /// What the tool returned.
+    pub content: ToolResultContent,
+    /// Whether the tool reported failure.
+    pub is_error: bool,
+}
+
+/// What should reach the model in place of what the tool returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultDecision {
+    /// Leave the result as it is.
+    Keep,
+    /// Show the model this instead.
+    ///
+    /// The seam a pre-execution hook cannot cover: whether a call is acceptable
+    /// is often only answerable from its *output* — a grep that pulled a
+    /// credential out of a file nobody meant to expose, a command whose stderr
+    /// carries an internal hostname, a result worth annotating rather than
+    /// hiding. Denying the call up front cannot express any of it, because up
+    /// front the output does not exist yet.
+    Replace {
+        content: ToolResultContent,
+        is_error: bool,
+    },
+}
+
+/// Consulted after a tool runs, and able to rewrite what the model is shown.
+///
+/// Async for the same reason [`PreExecutionHook`] is: it runs inside a turn,
+/// and a hook that reads a file or asks a service would otherwise block a
+/// runtime worker for its whole duration.
+///
+/// A hook cannot un-run the tool. By the time it is consulted the side effects
+/// have happened and `AgentEvent::ToolExecutionFinished` has already carried
+/// the unmodified result to every subscriber — this seam governs the model's
+/// view of the result, not the audit trail of what actually occurred.
+#[async_trait]
+pub trait PostExecutionHook: Send + Sync {
+    async fn post_tool_execution(
+        &self,
+        context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError>;
+}
+
+/// Forwards to the hook inside, as [`PreExecutionHook`] does.
+#[async_trait]
+impl<T: PostExecutionHook + ?Sized> PostExecutionHook for Box<T> {
+    async fn post_tool_execution(
+        &self,
+        context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError> {
+        (**self).post_tool_execution(context).await
+    }
+}
+
+#[async_trait]
+impl<T: PostExecutionHook + ?Sized> PostExecutionHook for Arc<T> {
+    async fn post_tool_execution(
+        &self,
+        context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError> {
+        (**self).post_tool_execution(context).await
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct PostExecutionHooks {
+    hooks: Vec<Arc<dyn PostExecutionHook>>,
+}
+
+impl PostExecutionHooks {
+    pub fn new() -> Self {
+        Self { hooks: Vec::new() }
+    }
+
+    pub fn with_hook<H>(mut self, hook: H) -> Self
+    where
+        H: PostExecutionHook + 'static,
+    {
+        self.hooks.push(Arc::new(hook));
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+
+    /// Runs every hook in reverse registration order, threading each
+    /// replacement into the next.
+    ///
+    /// Reverse, where the pre-execution hooks run forward, because the two
+    /// bracket the call: the hooks a host registers first are the outermost,
+    /// so they see the input first on the way in and the result last on the
+    /// way out. A guard registered before another therefore has the final say
+    /// in both directions, which is the only ordering under which "registered
+    /// first, so it wraps everything after it" holds.
+    ///
+    /// Each hook sees the result as its predecessors left it, so no hook can
+    /// slip a result past one that wraps it.
+    pub async fn run(
+        &self,
+        context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError> {
+        if self.hooks.is_empty() {
+            return Ok(ResultDecision::Keep);
+        }
+
+        let mut current = context.clone();
+        let mut replaced = ResultDecision::Keep;
+
+        for hook in self.hooks.iter().rev() {
+            if let ResultDecision::Replace { content, is_error } =
+                hook.post_tool_execution(&current).await?
+            {
+                current.content = content.clone();
+                current.is_error = is_error;
+                replaced = ResultDecision::Replace { content, is_error };
+            }
+        }
+
+        Ok(replaced)
+    }
+}
+
+#[cfg(test)]
+mod post_execution {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+
+    use crate::runtime::control::hooks::{
+        PostExecutionContext, PostExecutionHook, PostExecutionHooks, ResultDecision,
+    };
+    use crate::{error::RuntimeError, tool::ToolResultContent};
+
+    fn context(content: &str) -> PostExecutionContext {
+        PostExecutionContext {
+            agent_id: "agent".to_string(),
+            tool_name: "grep".to_string(),
+            tool_call_id: "call-1".to_string(),
+            input_json: r#"{"pattern":"token"}"#.to_string(),
+            working_directory: std::path::PathBuf::from("/repo"),
+            content: ToolResultContent::text(content),
+            is_error: false,
+        }
+    }
+
+    struct Appending(&'static str);
+
+    #[async_trait]
+    impl PostExecutionHook for Appending {
+        async fn post_tool_execution(
+            &self,
+            context: &PostExecutionContext,
+        ) -> Result<ResultDecision, RuntimeError> {
+            Ok(ResultDecision::Replace {
+                content: ToolResultContent::text(format!(
+                    "{}{}",
+                    context.content.to_display_string(),
+                    self.0
+                )),
+                is_error: context.is_error,
+            })
+        }
+    }
+
+    struct Keeps(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl PostExecutionHook for Keeps {
+        async fn post_tool_execution(
+            &self,
+            _context: &PostExecutionContext,
+        ) -> Result<ResultDecision, RuntimeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ResultDecision::Keep)
+        }
+    }
+
+    #[tokio::test]
+    async fn no_hooks_keeps_the_result() {
+        let decision = PostExecutionHooks::new()
+            .run(&context("out"))
+            .await
+            .expect("hooks run");
+
+        assert_eq!(decision, ResultDecision::Keep);
+    }
+
+    #[tokio::test]
+    async fn a_hook_that_keeps_leaves_the_result_alone() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let decision = PostExecutionHooks::new()
+            .with_hook(Keeps(Arc::clone(&seen)))
+            .run(&context("out"))
+            .await
+            .expect("hooks run");
+
+        assert_eq!(decision, ResultDecision::Keep);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn hooks_run_in_reverse_registration_order() {
+        // The pre hooks run forward and these run backward because the two
+        // bracket the call: whoever was registered first is outermost, so
+        // it sees the input first and the result last.
+        let decision = PostExecutionHooks::new()
+            .with_hook(Appending("-outer"))
+            .with_hook(Appending("-inner"))
+            .run(&context("out"))
+            .await
+            .expect("hooks run");
+
+        let ResultDecision::Replace { content, .. } = decision else {
+            panic!("expected a replacement");
+        };
+        assert_eq!(content.to_display_string(), "out-inner-outer");
+    }
+
+    #[tokio::test]
+    async fn a_later_hook_sees_what_an_earlier_one_produced() {
+        struct Requires;
+
+        #[async_trait]
+        impl PostExecutionHook for Requires {
+            async fn post_tool_execution(
+                &self,
+                context: &PostExecutionContext,
+            ) -> Result<ResultDecision, RuntimeError> {
+                assert_eq!(
+                    context.content.to_display_string(),
+                    "out-inner",
+                    "the outer hook must see the inner hook's replacement"
+                );
+                Ok(ResultDecision::Keep)
+            }
+        }
+
+        let decision = PostExecutionHooks::new()
+            .with_hook(Requires)
+            .with_hook(Appending("-inner"))
+            .run(&context("out"))
+            .await
+            .expect("hooks run");
+
+        let ResultDecision::Replace { content, .. } = decision else {
+            panic!("a keep after a replace must not discard the replacement");
+        };
+        assert_eq!(content.to_display_string(), "out-inner");
+    }
+
+    #[tokio::test]
+    async fn a_hook_can_turn_a_success_into_an_error() {
+        struct Fails;
+
+        #[async_trait]
+        impl PostExecutionHook for Fails {
+            async fn post_tool_execution(
+                &self,
+                _context: &PostExecutionContext,
+            ) -> Result<ResultDecision, RuntimeError> {
+                Ok(ResultDecision::Replace {
+                    content: ToolResultContent::text("refused: result held a credential"),
+                    is_error: true,
+                })
+            }
+        }
+
+        let decision = PostExecutionHooks::new()
+            .with_hook(Fails)
+            .run(&context("AKIA..."))
+            .await
+            .expect("hooks run");
+
+        assert_eq!(
+            decision,
+            ResultDecision::Replace {
+                content: ToolResultContent::text("refused: result held a credential"),
+                is_error: true,
+            }
+        );
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

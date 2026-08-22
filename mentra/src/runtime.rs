@@ -29,8 +29,9 @@ pub use builder::RuntimeBuilder;
 pub use control::sandbox::{ExecutionEnvironment, detect_environment};
 pub use control::{
     AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
-    CommandSpec, EarlyEnd, ExecOutput, HookDecision, LocalRuntimeExecutor, PreExecutionContext,
-    PreExecutionHook, PreExecutionHooks, ProviderRetry, RunOptions, RuntimeExecutor, RuntimeHook,
+    CommandSpec, EarlyEnd, ExecOutput, HookDecision, LocalRuntimeExecutor, PostExecutionContext,
+    PostExecutionHook, PostExecutionHooks, PreExecutionContext, PreExecutionHook,
+    PreExecutionHooks, ProviderRetry, ResultDecision, RunOptions, RuntimeExecutor, RuntimeHook,
     RuntimeHookEvent, RuntimeHooks, RuntimePolicy, ShellValidationMode,
     is_transient_provider_error, is_transient_runtime_error,
 };

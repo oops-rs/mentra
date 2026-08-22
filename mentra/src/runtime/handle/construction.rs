@@ -109,6 +109,7 @@ impl RuntimeHandle {
                 tool_authorizer: None,
                 hooks: hooks.clone(),
                 pre_hooks: PreExecutionHooks::new(),
+                post_hooks: PostExecutionHooks::new(),
             },
             persistence: PersistenceServices {
                 store: store.clone(),
@@ -200,6 +201,7 @@ impl RuntimeHandle {
                 tool_authorizer: self.execution.tool_authorizer.clone(),
                 hooks: self.execution.hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
+                post_hooks: self.execution.post_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -239,6 +241,7 @@ impl RuntimeHandle {
                 tool_authorizer: self.execution.tool_authorizer.clone(),
                 hooks: self.execution.hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
+                post_hooks: self.execution.post_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -278,6 +281,7 @@ impl RuntimeHandle {
                 tool_authorizer: self.execution.tool_authorizer.clone(),
                 hooks: hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
+                post_hooks: self.execution.post_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -306,6 +310,46 @@ impl RuntimeHandle {
         }
     }
 
+    pub fn with_post_hooks(&self, post_hooks: PostExecutionHooks) -> Self {
+        Self {
+            execution: ExecutionServices {
+                executor: self.execution.executor.clone(),
+                policy: self.execution.policy.clone(),
+                tool_authorizer: self.execution.tool_authorizer.clone(),
+                hooks: self.execution.hooks.clone(),
+                pre_hooks: self.execution.pre_hooks.clone(),
+                post_hooks,
+            },
+            persistence: PersistenceServices {
+                store: self.persistence.store.clone(),
+                memory: Arc::new(MemoryEngine::new(
+                    self.persistence.store.clone(),
+                    self.execution.hooks.clone(),
+                )),
+                compaction: self.persistence.compaction.clone(),
+            },
+            collaboration: CollaborationServices {
+                background_tasks: BackgroundTaskManager::new(
+                    self.persistence.store.clone(),
+                    self.execution.executor.clone(),
+                    background_hook_sink(
+                        self.persistence.store.clone(),
+                        self.execution.hooks.clone(),
+                    ),
+                ),
+                team: self.collaboration.team.clone(),
+                teammate_host: self.collaboration.teammate_host.clone(),
+            },
+            tooling: clone_tooling_services(&self.tooling),
+            runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
+            runtime_instance_id: format!("runtime-{}", std::process::id()),
+            persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
+            lease_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            agent_contexts: Arc::new(RwLock::new(HashMap::new())),
+            provider_registry: self.provider_registry.clone(),
+        }
+    }
+
     pub fn with_pre_hooks(&self, pre_hooks: PreExecutionHooks) -> Self {
         Self {
             execution: ExecutionServices {
@@ -314,6 +358,7 @@ impl RuntimeHandle {
                 tool_authorizer: self.execution.tool_authorizer.clone(),
                 hooks: self.execution.hooks.clone(),
                 pre_hooks,
+                post_hooks: self.execution.post_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -386,6 +431,7 @@ impl RuntimeHandle {
                 tool_authorizer: Some(tool_authorizer),
                 hooks: self.execution.hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
+                post_hooks: self.execution.post_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),

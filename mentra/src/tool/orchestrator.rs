@@ -8,7 +8,7 @@ use crate::{
     ContentBlock,
     agent::{Agent, AgentEvent, AgentStatus},
     error::RuntimeError,
-    runtime::control::{HookDecision, PreExecutionContext},
+    runtime::control::{HookDecision, PostExecutionContext, PreExecutionContext, ResultDecision},
     runtime::{RunOptions, RuntimeHookEvent},
     tool::{
         ExecutableTool, ParallelToolContext, RuntimeToolDescriptor, ToolAuthorizationOutcome,
@@ -71,6 +71,10 @@ struct CompletedToolExecution {
     /// existing `request_idle` callers see unchanged behavior.
     terminated: bool,
     tool_name: String,
+    /// The input the tool actually ran with, as JSON — after any pre-execution
+    /// hook rewrote it, so a post-execution hook judges what happened rather
+    /// than what was asked for.
+    input_json: String,
     /// This execution's opaque `ToolOutput::details`, if any — collected by
     /// [`ToolRuntime::execute_calls`] into [`ToolExecutionOutcome::details`].
     details: Option<serde_json::Value>,
@@ -147,7 +151,14 @@ impl ToolRuntime {
             for execution in executions {
                 successful_task |= execution.task_succeeded;
                 end_turn |= execution.should_end_turn;
-                let result = self.page_result(agent, &execution.tool_name, execution.result);
+                let reviewed = self
+                    .run_post_hooks(
+                        &execution.tool_name,
+                        &execution.input_json,
+                        execution.result,
+                    )
+                    .await?;
+                let result = self.page_result(agent, &execution.tool_name, reviewed);
                 if execution.terminated {
                     terminator.get_or_insert(execution.tool_name);
                 }
@@ -364,6 +375,60 @@ impl ToolRuntime {
         self.runtime.pre_hooks().run(&context).await
     }
 
+    /// Offers a finished result to the post-execution hooks and applies what
+    /// they decided.
+    ///
+    /// Runs before [`page_result`](Self::page_result), so a hook sees the whole
+    /// result rather than its first window, and whatever it returns is still
+    /// bounded by the pager afterwards — a hook cannot enlarge a result past
+    /// the limit the runtime set.
+    ///
+    /// Only genuine executions reach here. A call that was never run — blocked
+    /// by a terminating sibling, or refused before it started — has no output
+    /// for a *post-execution* hook to judge.
+    async fn run_post_hooks(
+        &mut self,
+        tool_name: &str,
+        input_json: &str,
+        result: ContentBlock,
+    ) -> Result<ContentBlock, RuntimeError> {
+        if self.runtime.post_hooks().is_empty() {
+            return Ok(result);
+        }
+
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } = result
+        else {
+            return Ok(result);
+        };
+
+        let context = PostExecutionContext {
+            agent_id: self.agent_id.clone(),
+            tool_name: tool_name.to_string(),
+            tool_call_id: tool_use_id.clone(),
+            input_json: input_json.to_string(),
+            working_directory: self.working_directory(),
+            content,
+            is_error,
+        };
+
+        Ok(match self.runtime.post_hooks().run(&context).await? {
+            ResultDecision::Keep => ContentBlock::ToolResult {
+                tool_use_id,
+                content: context.content,
+                is_error: context.is_error,
+            },
+            ResultDecision::Replace { content, is_error } => ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            },
+        })
+    }
+
     /// Runs the pre-execution hooks and applies whatever they decided.
     ///
     /// `Ok(None)` means proceed — possibly with `call.input` rewritten by a
@@ -512,6 +577,7 @@ impl ToolRuntime {
             should_end_turn: effect.should_end_turn,
             terminated: effect.terminated,
             tool_name: call.name.clone(),
+            input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details,
         }
     }
@@ -658,6 +724,7 @@ impl ToolRuntime {
                 should_end_turn: false,
                 terminated: false,
                 tool_name: call.name.clone(),
+                input_json: serde_json::to_string(&call.input).unwrap_or_default(),
                 details: None,
             });
         }
@@ -696,6 +763,7 @@ impl ToolRuntime {
                     should_end_turn: false,
                     terminated: false,
                     tool_name: call.name.clone(),
+                    input_json: serde_json::to_string(&call.input).unwrap_or_default(),
                     details: None,
                 });
                 continue;
@@ -842,6 +910,7 @@ impl ToolRuntime {
                 should_end_turn: false,
                 terminated: false,
                 tool_name: call.name.clone(),
+                input_json: serde_json::to_string(&call.input).unwrap_or_default(),
                 details: None,
             };
         };

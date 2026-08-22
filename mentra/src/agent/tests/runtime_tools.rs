@@ -5439,3 +5439,152 @@ async fn pre_execution_hook_blocks_tool_call() {
         "expected blocked tool result in history"
     );
 }
+
+#[tokio::test]
+async fn a_post_execution_hook_rewrites_what_the_model_is_shown() {
+    // The seam a pre-execution hook cannot cover: whether a call is acceptable
+    // is often only answerable from its output. A host can only wrap tools it
+    // registered itself, so a guard that lives outside the runtime always has
+    // a hole where the runtime's own tools are.
+    struct RedactSecrets;
+
+    #[async_trait]
+    impl crate::runtime::control::PostExecutionHook for RedactSecrets {
+        async fn post_tool_execution(
+            &self,
+            context: &crate::runtime::control::PostExecutionContext,
+        ) -> Result<crate::runtime::control::ResultDecision, RuntimeError> {
+            let text = context.content.to_display_string();
+            if !text.contains("AKIA") {
+                return Ok(crate::runtime::control::ResultDecision::Keep);
+            }
+            Ok(crate::runtime::control::ResultDecision::Replace {
+                content: crate::tool::ToolResultContent::text(
+                    text.replace("AKIA0123", "[redacted]"),
+                ),
+                is_error: context.is_error,
+            })
+        }
+    }
+
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "grep_tool", r#"{"pattern":"key"}"#),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(StaticTool::success(
+            "grep_tool",
+            "config.rs: key = AKIA0123",
+        ))
+        .with_post_hook(RedactSecrets)
+        .build()
+        .expect("build runtime");
+
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "find the key".to_string(),
+        }])
+        .await
+        .expect("run completes");
+
+    let transcript_result = agent
+        .history()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.to_display_string()),
+            _ => None,
+        })
+        .expect("a tool result reaches the transcript");
+    assert_eq!(transcript_result, "config.rs: key = [redacted]");
+
+    // The event stream is the audit trail of what actually happened, and the
+    // tool really did return the secret. The hook governs the model's view, not
+    // the record.
+    let mut observed = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let AgentEvent::ToolExecutionFinished { result } = event
+            && let ContentBlock::ToolResult { content, .. } = result
+        {
+            observed.push(content.to_display_string());
+        }
+    }
+    assert_eq!(observed, vec!["config.rs: key = AKIA0123".to_string()]);
+}
+
+#[tokio::test]
+async fn a_post_execution_hook_sees_the_input_the_tool_actually_ran_with() {
+    struct RecordsInput(Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[async_trait]
+    impl crate::runtime::control::PostExecutionHook for RecordsInput {
+        async fn post_tool_execution(
+            &self,
+            context: &crate::runtime::control::PostExecutionContext,
+        ) -> Result<crate::runtime::control::ResultDecision, RuntimeError> {
+            self.0
+                .lock()
+                .expect("input log poisoned")
+                .push(context.input_json.clone());
+            Ok(crate::runtime::control::ResultDecision::Keep)
+        }
+    }
+
+    struct RewritesInput;
+
+    #[async_trait]
+    impl PreExecutionHook for RewritesInput {
+        async fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            Ok(HookDecision::Modify {
+                input_json: r#"{"value":"rewritten"}"#.to_string(),
+                reason: None,
+            })
+        }
+    }
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "echo_tool", r#"{"value":"original"}"#),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(StaticTool::success("echo_tool", "ok"))
+        .with_pre_hook(RewritesInput)
+        .with_post_hook(RecordsInput(Arc::clone(&seen)))
+        .build()
+        .expect("build runtime");
+
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "go".to_string(),
+        }])
+        .await
+        .expect("run completes");
+
+    assert_eq!(
+        *seen.lock().expect("input log poisoned"),
+        vec![r#"{"value":"rewritten"}"#.to_string()],
+        "the post hook judges what ran, not what the model asked for"
+    );
+}
