@@ -69,7 +69,14 @@ where
         definition: ProviderDefinition,
         credential_source: Arc<C>,
     ) -> Self {
+        // The idle timeout, not a total one: a streamed turn can legitimately
+        // run for minutes, but a gap between chunks means the provider stopped
+        // talking. `read_timeout` resets on every successful read, so it bounds
+        // the silence without bounding the turn. The resulting error is a
+        // `Transport` error, which the runtime already treats as transient and
+        // retries.
         let client = reqwest::Client::builder()
+            .read_timeout(definition.stream_idle_timeout)
             .build()
             .expect("Failed to build client");
 

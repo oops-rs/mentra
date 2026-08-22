@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### A stalled stream fails instead of hanging
+
+- All three HTTP clients were built from a bare `reqwest::Client::builder()`,
+  with no timeout of any kind. `stream_idle_timeout` existed on
+  `ProviderDefinition` and only the Responses websocket transport read it, so a
+  provider that accepted a turn over SSE and then stopped sending held the
+  stream open until whatever deadline the caller happened to have — and a caller
+  without one waited forever.
+- The Anthropic, Responses, and Gemini clients now apply the definition's
+  `stream_idle_timeout` as a read timeout. It bounds the gap between chunks
+  rather than the length of a turn, so a response that legitimately takes
+  minutes is unaffected while silence is not, and the timer resets on every
+  chunk that does arrive.
+- A stream that trips it fails with a transport error, which
+  `is_transient_provider_error` already classifies as retryable, so the run
+  retries it on the schedule the host configured rather than dying.
+
 ### An Anthropic request caches the conversation, not just its preamble
 
 - Anthropic requests carried two cache breakpoints, on the system prompt and on

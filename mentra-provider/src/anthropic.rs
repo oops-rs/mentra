@@ -108,7 +108,14 @@ where
         definition: ProviderDefinition,
         credential_source: Arc<C>,
     ) -> Self {
+        // The idle timeout, not a total one: a streamed turn can legitimately
+        // run for minutes, but a gap between chunks means the provider stopped
+        // talking. `read_timeout` resets on every successful read, so it bounds
+        // the silence without bounding the turn. The resulting error is a
+        // `Transport` error, which the runtime already treats as transient and
+        // retries.
         let client = reqwest::Client::builder()
+            .read_timeout(definition.stream_idle_timeout)
             .build()
             .expect("Failed to build client");
 
@@ -262,10 +269,110 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
     use super::*;
+    use crate::{
+        ContentBlock, Message, ProviderRequestOptions, StaticCredentialSource, ToolChoice,
+    };
 
     #[test]
     fn definition_advertises_history_compaction_support() {
         assert!(definition().capabilities.supports_history_compaction);
+    }
+
+    /// Answers one request with SSE headers and a first event, then holds the
+    /// socket open and sends nothing further — a provider that accepted the
+    /// turn and stopped talking. `_shutdown` keeps the connection alive until
+    /// the test drops it.
+    fn spawn_stalling_sse_server() -> (String, mpsc::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("read listener addr");
+        let (shutdown, wait_for_shutdown) = mpsc::channel::<()>();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut temp = [0_u8; 1024];
+            let _ = stream.read(&mut temp).expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\n\
+                      content-type: text/event-stream\r\n\
+                      transfer-encoding: chunked\r\n\r\n\
+                      2b\r\n\
+                      event: ping\ndata: {\"type\":\"ping\"}\n\n\r\n",
+                )
+                .expect("write stream head");
+            stream.flush().expect("flush stream head");
+            // Then say nothing at all.
+            let _ = wait_for_shutdown.recv();
+        });
+
+        (format!("http://{addr}"), shutdown)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_sse_stream_fails_instead_of_hanging() {
+        // A provider that accepts a turn and then stops sending held the stream
+        // open until the caller's own deadline, if it had one. The definition's
+        // `stream_idle_timeout` now bounds the gap between chunks.
+        let (base_url, _shutdown) = spawn_stalling_sse_server();
+        let mut definition = definition();
+        definition.base_url = Some(base_url);
+        definition.stream_idle_timeout = Duration::from_millis(250);
+
+        let provider = AnthropicProvider::with_definition_and_credential_source(
+            definition,
+            StaticCredentialSource::new("test-key"),
+        );
+
+        let started = Instant::now();
+        let mut stream = ProviderSession::stream(
+            &provider,
+            Request {
+                model: Cow::Borrowed("claude-test"),
+                system: None,
+                messages: Cow::Owned(vec![Message::user(ContentBlock::text("hi"))]),
+                tools: Cow::Owned(vec![]),
+                tool_choice: Some(ToolChoice::Auto),
+                temperature: None,
+                max_output_tokens: Some(16),
+                metadata: Cow::Owned(BTreeMap::new()),
+                provider_request_options: ProviderRequestOptions::default(),
+            },
+        )
+        .await
+        .expect("headers arrive before the stall");
+
+        let drain = async {
+            while let Some(event) = stream.recv().await {
+                if let Err(error) = event {
+                    return Some(error);
+                }
+            }
+            None
+        };
+        // The bound is the assertion: without an idle timeout of its own the
+        // stream waits on a provider that will never speak again, and the only
+        // thing that ends the wait is a deadline someone else imposed.
+        let failure = tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .expect("the stream gave up on its own rather than hanging");
+
+        let error = failure.expect("the stalled stream ends in an error, not silence");
+        assert!(
+            matches!(error, ProviderError::Transport(_)),
+            "a stall is a transport failure so the run retries it: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the stream gave up on its own, not on a test deadline"
+        );
     }
 }

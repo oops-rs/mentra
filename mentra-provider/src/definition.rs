@@ -169,6 +169,14 @@ pub struct ProviderDefinition {
     pub headers: Option<HashMap<String, String>>,
     #[serde(default)]
     pub retry: RetryPolicy,
+    /// How long a stream may go without producing anything before it is
+    /// treated as failed.
+    ///
+    /// This bounds the gap between chunks, not the length of a turn: a
+    /// streamed response can legitimately take minutes, while silence means
+    /// the other end stopped talking. It applies to the SSE transports and to
+    /// the Responses websocket alike. A stream that trips it fails with a
+    /// transport error, which the runtime retries like any other.
     #[serde(default = "default_stream_idle_timeout")]
     pub stream_idle_timeout: Duration,
     #[serde(default = "default_websocket_connect_timeout")]
