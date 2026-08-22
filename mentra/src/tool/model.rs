@@ -284,6 +284,86 @@ impl ToolContext<'_> {
         self.agent.finish_subagent(id, status)
     }
 
+    /// Relays a child agent's token usage onto this agent's event stream.
+    ///
+    /// A subagent has its own event bus, so an observer watching the parent
+    /// sees none of what a delegated run spent — while that spend still counts
+    /// against the parent's `token_budget`. Relaying `UsageReport` keeps the
+    /// parent's stream summing to the same total the accounting reports.
+    ///
+    /// The returned guard must outlive the child's run: dropping it stops the
+    /// relay, so binding it to `_` ends it immediately.
+    #[must_use = "the relay stops when this guard is dropped"]
+    pub fn relay_subagent_usage(
+        &self,
+        child: &crate::agent::Agent,
+    ) -> crate::agent::AgentEventTapGuard {
+        self.relay_subagent_events(child, |event| {
+            matches!(event, crate::agent::AgentEvent::UsageReport { .. })
+        })
+    }
+
+    /// Relays the child agent's events that `filter` accepts onto this agent's
+    /// stream.
+    ///
+    /// The general form of [`relay_subagent_usage`](Self::relay_subagent_usage),
+    /// for a tool that wants a delegated run's tool calls or text visible to
+    /// whoever is watching the parent. Relaying everything means a parent's
+    /// observer sees two interleaved runs, so the filter is the parameter
+    /// rather than a default.
+    ///
+    /// The returned guard must outlive the child's run.
+    #[must_use = "the relay stops when this guard is dropped"]
+    pub fn relay_subagent_events(
+        &self,
+        child: &crate::agent::Agent,
+        filter: impl Fn(&crate::agent::AgentEvent) -> bool + Send + Sync + 'static,
+    ) -> crate::agent::AgentEventTapGuard {
+        let parent_events = self.agent.event_sender();
+        child.register_event_tap(move |event| {
+            if filter(event) {
+                parent_events.send(event.clone());
+            }
+        })
+    }
+
+    /// Records a delegation this tool performed in the parent's transcript.
+    ///
+    /// Delegation entries are what a transcript reader follows to reconstruct
+    /// who asked whom for what. Only the `task` intrinsic could write them, so
+    /// a tool that delegated work its own way left no trace of the delegation
+    /// — the result appeared in the transcript with nothing saying where it
+    /// came from.
+    pub fn record_delegation_request(
+        &mut self,
+        content: impl Into<String>,
+        delegation: crate::transcript::DelegationArtifact,
+        edge: Option<crate::transcript::DelegationEdge>,
+    ) -> Result<(), RuntimeError> {
+        self.agent
+            .record_delegation_request(content, delegation, edge)?;
+        self.agent.sync_memory_snapshot();
+        Ok(())
+    }
+
+    /// Records the outcome of a delegation this tool performed.
+    ///
+    /// The other half of
+    /// [`record_delegation_request`](Self::record_delegation_request): the
+    /// request says what was asked and this says what came back, and a reader
+    /// following the edges needs both.
+    pub fn record_delegation_result(
+        &mut self,
+        content: impl Into<String>,
+        delegation: crate::transcript::DelegationArtifact,
+        edge: Option<crate::transcript::DelegationEdge>,
+    ) -> Result<(), RuntimeError> {
+        self.agent
+            .record_delegation_result(content, delegation, edge)?;
+        self.agent.sync_memory_snapshot();
+        Ok(())
+    }
+
     pub async fn spawn_teammate(
         &mut self,
         name: impl Into<String>,

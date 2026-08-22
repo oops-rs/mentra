@@ -5716,3 +5716,106 @@ async fn registering_a_duplicate_name_can_be_refused_instead_of_silently_replaci
         .try_register_tool(StaticTool::success("echo_tool", "second"))
         .expect("the name was released");
 }
+
+#[tokio::test]
+async fn a_registered_tool_can_relay_a_delegated_runs_usage_to_its_parent() {
+    // A subagent has its own event bus, so a parent's observer saw none of the
+    // spend a delegated run made -- while that spend still counted against the
+    // parent's budget. Only the `task` intrinsic could bridge it.
+    struct DelegatingTool;
+
+    #[async_trait]
+    impl crate::tool::ToolDefinition for DelegatingTool {
+        fn descriptor(&self) -> crate::tool::ToolSpec {
+            crate::tool::ToolSpec::builder("delegate")
+                .description("delegates work its own way")
+                .input_schema(json!({"type": "object", "properties": {}}))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl crate::tool::ToolExecutor for DelegatingTool {
+        async fn execute_mut(
+            &self,
+            ctx: crate::tool::ToolContext<'_>,
+            _input: serde_json::Value,
+        ) -> crate::tool::ToolResult {
+            let mut child = ctx.spawn_subagent().map_err(|error| error.to_string())?;
+            // The guard has to outlive the run; binding it to `_` would end the
+            // relay before the child says anything.
+            let _relay = ctx.relay_subagent_usage(&child);
+            let options = ctx.child_run_options();
+            child
+                .run(vec![ContentBlock::text("go")], options)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok("delegated".to_string())
+        }
+    }
+
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "delegate", "{}"),
+            // The child's turn, reporting usage the parent must learn about.
+            super::support::ok_stream(vec![
+                crate::provider::ProviderEvent::MessageStarted {
+                    id: "child".to_string(),
+                    model: model.id.clone(),
+                    role: Role::Assistant,
+                },
+                crate::provider::ProviderEvent::ContentBlockStarted {
+                    index: 0,
+                    kind: ContentBlockStart::Text,
+                },
+                crate::provider::ProviderEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::Text("child done".to_string()),
+                },
+                crate::provider::ProviderEvent::ContentBlockStopped { index: 0 },
+                crate::provider::ProviderEvent::MessageDelta {
+                    stop_reason: None,
+                    usage: Some(crate::TokenUsage {
+                        input_tokens: Some(70),
+                        output_tokens: Some(30),
+                        ..Default::default()
+                    }),
+                },
+                crate::provider::ProviderEvent::MessageStopped,
+            ]),
+            text_stream(&model.id, "all done"),
+        ],
+    );
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(DelegatingTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::text("delegate it")])
+        .await
+        .expect("the run completes");
+
+    let relayed: Vec<u64> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AgentEvent::UsageReport {
+                input_tokens,
+                output_tokens,
+                ..
+            } => Some(input_tokens + output_tokens),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        relayed.contains(&100),
+        "the child's usage reached the parent's stream: {relayed:?}"
+    );
+}

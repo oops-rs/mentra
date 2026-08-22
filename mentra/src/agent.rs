@@ -125,7 +125,12 @@ struct AgentEventTapRegistry {
     taps: Vec<(u64, AgentEventTap)>,
 }
 
-pub(crate) struct AgentEventTapGuard {
+/// Keeps a relay of one agent's events alive.
+///
+/// Dropping it stops the relay, so it must outlive the child's run — binding
+/// it to `_` ends the relay immediately, which is the one mistake this is easy
+/// to make.
+pub struct AgentEventTapGuard {
     registry: Arc<Mutex<AgentEventTapRegistry>>,
     id: u64,
 }

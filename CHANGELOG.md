@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### A registered tool can delegate the way the task intrinsic does
+
+- Three pieces of delegation machinery were `pub(crate)` for the `task`
+  intrinsic's sole use, so a host's own delegating tool could do the work but
+  none of the bookkeeping.
+- `ToolContext::relay_subagent_usage` puts a delegated run's `UsageReport` on
+  the parent's event stream. A subagent has its own event bus, so an observer
+  watching the parent saw none of what the child spent — while that spend
+  counted against the parent's `token_budget` all along.
+  `relay_subagent_events` is the general form, taking a filter, because
+  relaying everything means a parent's observer sees two interleaved runs.
+- `ToolContext::record_delegation_request` and `record_delegation_result` write
+  the `DelegationArtifact` and `DelegationEdge` entries a transcript reader
+  follows to reconstruct who asked whom for what. Without them a tool's
+  delegated result appeared in the transcript with nothing saying where it came
+  from.
+- `AgentEventTapGuard` is public, since a relay is only alive while its guard
+  is. Both relay methods are `#[must_use]`: binding one to `_` ends the relay
+  before the child has said anything, which is the one mistake here that is
+  easy to make and silent.
+
 ### An image-only turn is no longer a blank message
 
 - `SessionEvent::UserMessage` carried text and nothing else, so a turn that was
