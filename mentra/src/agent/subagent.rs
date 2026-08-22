@@ -19,6 +19,7 @@ const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent working for another age
 pub(crate) struct DisposableSubagentTemplate {
     runtime: RuntimeHandle,
     model: String,
+    context_window: Option<usize>,
     parent_name: String,
     config: AgentConfig,
     provider: Arc<dyn Provider>,
@@ -31,6 +32,7 @@ impl DisposableSubagentTemplate {
         Self {
             runtime: agent.runtime.clone(),
             model: agent.model.clone(),
+            context_window: agent.context_window,
             parent_name: agent.name.clone(),
             config: agent.config.clone(),
             provider: Arc::clone(&agent.provider),
@@ -51,6 +53,7 @@ impl DisposableSubagentTemplate {
         Agent::new(
             self.runtime.clone(),
             self.model.clone(),
+            self.context_window,
             format!("{}::task", self.parent_name),
             config,
             Arc::clone(&self.provider),

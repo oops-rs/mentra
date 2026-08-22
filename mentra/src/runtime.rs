@@ -219,6 +219,7 @@ impl Runtime {
         Agent::new(
             self.handle.clone(),
             model.id,
+            model.context_window,
             name.into(),
             config,
             self.provider_registry
@@ -601,6 +602,7 @@ impl Runtime {
         let agent = Agent::new(
             session_handle,
             model.id.clone(),
+            model.context_window,
             name.clone(),
             config,
             provider,

@@ -71,6 +71,12 @@ pub struct Agent {
     id: String,
     runtime: RuntimeHandle,
     model: String,
+    /// How many tokens this agent's model accepts, when the provider said so.
+    ///
+    /// Not persisted: it belongs to the model listing, not to the agent, and a
+    /// resumed agent that has not been handed a fresh `ModelInfo` falls back to
+    /// the absolute compaction threshold rather than guessing a window.
+    context_window: Option<usize>,
     provider_id: ProviderId,
     name: String,
     config: AgentConfig,
@@ -187,6 +193,7 @@ impl Agent {
     pub(crate) fn new(
         runtime: RuntimeHandle,
         model: String,
+        context_window: Option<usize>,
         name: String,
         config: AgentConfig,
         provider: Arc<dyn Provider>,
@@ -222,6 +229,7 @@ impl Agent {
             id: agent_id,
             runtime,
             model,
+            context_window,
             provider_id: provider.descriptor().id,
             name,
             config,
@@ -308,6 +316,9 @@ impl Agent {
             id: state.record.id.clone(),
             runtime,
             model: state.record.model.clone(),
+            // The persisted record carries a model id and nothing about the
+            // model; a host that wants the window back calls `set_model`.
+            context_window: None,
             provider_id: state.record.provider_id.clone(),
             name: state.record.name.clone(),
             config: state.record.config.clone(),
@@ -368,6 +379,14 @@ impl Agent {
         &self.model
     }
 
+    /// Returns how many tokens this agent's model accepts, when known.
+    ///
+    /// `None` means the provider's listing did not say and no host has: it is
+    /// unknown, not unlimited.
+    pub fn context_window(&self) -> Option<usize> {
+        self.context_window
+    }
+
     /// Updates the model and provider used for future turns, then persists the
     /// new agent record so resumed sessions continue with the same setting.
     pub fn set_model(&mut self, model: crate::ModelInfo) -> Result<(), RuntimeError> {
@@ -376,6 +395,7 @@ impl Agent {
             .get_provider(Some(&model.provider))
             .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?;
         self.model = model.id;
+        self.context_window = model.context_window;
         self.provider_id = provider.descriptor().id;
         self.provider = provider;
         self.persist_agent_record()

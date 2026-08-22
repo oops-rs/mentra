@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Auto-compaction is measured against the model, not against 50,000
+
+- `auto_compact_threshold_tokens: Some(50_000)` was the one model-dependent
+  constant in the stack that was model-independent. 50k is most of a 64k
+  window and a rounding error in a 1M one, so the same default either compacted
+  a large model far too eagerly or left a small one to overflow.
+- `CompactionConfig::auto_compact_threshold_percent` defaults to 75 and wins
+  whenever the model's context window is known, leaving a quarter of the window
+  for the turn that follows the compaction. `auto_compact_threshold_tokens`
+  keeps its meaning and its 50,000 default for models whose window is not
+  known, and setting it to `None` still disables auto-compaction outright — a
+  known window does not switch it back on.
+- `CompactionConfig::auto_compact_threshold(context_window)` resolves the two
+  into the number a run is actually measured against. `Agent::context_window`
+  reports what the agent's model said. It is not persisted: the window belongs
+  to the model listing rather than to the agent, so a resumed agent falls back
+  to the absolute threshold until a host hands it a `ModelInfo` again.
+
 ### A model says how much context it has, and a host can ask what a turn will cost
 
 - `ModelInfo` had no context window, so nothing downstream could be expressed

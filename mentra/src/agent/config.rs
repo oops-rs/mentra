@@ -77,7 +77,24 @@ pub struct CompactionConfig {
     /// what it read. Lower it only for a workload whose tool results are
     /// genuinely disposable.
     pub keep_recent_tool_results: usize,
+    /// The token count above which a run compacts, when the model's context
+    /// window is unknown.
+    ///
+    /// `None` disables auto-compaction outright, whatever the window is.
     pub auto_compact_threshold_tokens: Option<usize>,
+    /// The percentage of the model's context window to compact at, when the
+    /// window *is* known.
+    ///
+    /// A single absolute token count is the one model-dependent constant that
+    /// cannot be model-independent: 50k is most of a 64k window and a rounding
+    /// error in a 1M one, so a fixed number either compacts a large model far
+    /// too eagerly or leaves a small one to overflow. When
+    /// [`ModelInfo::context_window`](crate::ModelInfo::context_window) is
+    /// known, this percentage of it wins; otherwise
+    /// `auto_compact_threshold_tokens` does. `None` here always uses the
+    /// absolute number. Values above 100 are treated as 100.
+    #[serde(default = "default_auto_compact_threshold_percent")]
+    pub auto_compact_threshold_percent: Option<u8>,
     pub transcript_dir: PathBuf,
     pub summary_max_input_chars: usize,
     pub summary_max_output_tokens: u32,
@@ -93,6 +110,7 @@ impl Default for CompactionConfig {
         Self {
             keep_recent_tool_results: usize::MAX,
             auto_compact_threshold_tokens: Some(50_000),
+            auto_compact_threshold_percent: default_auto_compact_threshold_percent(),
             transcript_dir: default_transcript_dir(),
             summary_max_input_chars: 80_000,
             summary_max_output_tokens: 2_000,
@@ -100,6 +118,30 @@ impl Default for CompactionConfig {
             preserve_recent_user_tokens: 20_000,
             preserve_recent_delegation_results: 8,
             max_persisted_transcripts: Some(10),
+        }
+    }
+}
+
+fn default_auto_compact_threshold_percent() -> Option<u8> {
+    // Leaves a quarter of the window for the turn that follows the compaction:
+    // the summary, the next user message, and whatever tool results that turn
+    // produces all have to fit after the threshold is crossed.
+    Some(75)
+}
+
+impl CompactionConfig {
+    /// Resolves the token count at which a run compacts, for a model whose
+    /// context window is `context_window`.
+    ///
+    /// `None` means auto-compaction is off.
+    pub fn auto_compact_threshold(&self, context_window: Option<usize>) -> Option<usize> {
+        let fallback = self.auto_compact_threshold_tokens?;
+
+        match (context_window, self.auto_compact_threshold_percent) {
+            (Some(window), Some(percent)) => {
+                Some(window.saturating_mul(percent.min(100) as usize) / 100)
+            }
+            _ => Some(fallback),
         }
     }
 }
@@ -342,6 +384,55 @@ mod tests {
         assert_eq!(config.task.tasks_dir, tasks_dir);
         assert_eq!(config.team.team_dir, team_dir);
         assert_eq!(config.compaction.transcript_dir, transcript_dir);
+    }
+
+    #[test]
+    fn a_known_context_window_sets_the_threshold_not_a_constant() {
+        // 50k is most of a 64k window and a rounding error in a 1M one. The
+        // same config has to mean something different for each.
+        let compaction = CompactionConfig::default();
+
+        assert_eq!(
+            compaction.auto_compact_threshold(Some(1_048_576)),
+            Some(786_432)
+        );
+        assert_eq!(
+            compaction.auto_compact_threshold(Some(64_000)),
+            Some(48_000)
+        );
+    }
+
+    #[test]
+    fn an_unknown_context_window_falls_back_to_the_absolute_threshold() {
+        let compaction = CompactionConfig::default();
+
+        assert_eq!(compaction.auto_compact_threshold(None), Some(50_000));
+    }
+
+    #[test]
+    fn clearing_the_token_threshold_disables_compaction_at_any_window() {
+        // `None` has always meant off, and a known window must not switch it
+        // back on.
+        let compaction = CompactionConfig {
+            auto_compact_threshold_tokens: None,
+            ..Default::default()
+        };
+
+        assert_eq!(compaction.auto_compact_threshold(Some(200_000)), None);
+        assert_eq!(compaction.auto_compact_threshold(None), None);
+    }
+
+    #[test]
+    fn clearing_the_percentage_pins_the_threshold_to_the_absolute_number() {
+        let compaction = CompactionConfig {
+            auto_compact_threshold_percent: None,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            compaction.auto_compact_threshold(Some(1_000_000)),
+            Some(50_000)
+        );
     }
 
     #[test]

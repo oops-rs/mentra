@@ -27,7 +27,11 @@ impl Agent {
     }
 
     pub(crate) async fn auto_compact_if_needed(&mut self) -> Result<(), RuntimeError> {
-        let Some(threshold) = self.config.compaction.auto_compact_threshold_tokens else {
+        let Some(threshold) = self
+            .config
+            .compaction
+            .auto_compact_threshold(self.context_window())
+        else {
             return Ok(());
         };
 

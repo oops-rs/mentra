@@ -52,6 +52,7 @@ impl Agent {
         let teammate = Self::new(
             self.runtime.clone(),
             self.model.clone(),
+            self.context_window,
             name.clone(),
             config,
             Arc::clone(&self.provider),
