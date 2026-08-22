@@ -117,6 +117,9 @@ pub enum WireApi {
     Responses,
     AnthropicMessages,
     GeminiGenerateContent,
+    /// The wire the OpenAI-compatible ecosystem implements, as distinct from
+    /// OpenAI's own `v1/responses`.
+    OpenAiChatCompletions,
 }
 
 impl Display for WireApi {
@@ -125,6 +128,7 @@ impl Display for WireApi {
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::GeminiGenerateContent => "gemini_generate_content",
+            Self::OpenAiChatCompletions => "openai_chat_completions",
         };
         f.write_str(value)
     }

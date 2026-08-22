@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### mentra speaks the wire the OpenAI-compatible ecosystem actually serves
+
+- `WireApi` had three variants and none of them was `chat/completions`. Every
+  provider that was not Anthropic or Gemini posted to `v1/responses`, which is
+  OpenAI's own wire and almost nobody else's. Pointing mentra at DeepSeek,
+  Groq, Together, Fireworks, Mistral, xAI, vLLM or llama.cpp produced a 404 —
+  and a 404 on a custom base URL reads like a typo in the URL, not like a wire
+  mismatch, so the failure did not even say what was wrong.
+- `WireApi::OpenAiChatCompletions` and `chat_completions::ChatCompletionsProvider`
+  implement that wire. It is not a variation on Responses: a flat `messages`
+  array rather than typed input items, tool results as their own `role: "tool"`
+  messages rather than blocks inside a user turn, tool arguments as a JSON
+  string rather than a value, and `max_tokens` rather than `max_output_tokens`.
+  Streaming reuses the same SSE plumbing, opening and closing content blocks
+  around a wire that has no notion of either.
+- `Runtime::register_openai_compatible` and
+  `register_openai_compatible_without_credentials` register one by id and base
+  URL — the second for a local server that wants no key.
+  `provider::openai_compatible::OpenAiCompatibleProvider` is the type behind
+  them.
+- The Ollama and LM Studio presets were registered on the Responses wire.
+  Ollama has never served `v1/responses`, and LM Studio's OpenAI-compatible
+  surface is `chat/completions`. Both now use it.
+- Separated reasoning is read: `reasoning_content` as DeepSeek and vLLM spell
+  it, `reasoning` as several gateways do, both becoming thinking blocks. It is
+  never sent back, which is what the providers that emit it ask for.
+  `stream_options.include_usage` is requested, without which a streamed turn on
+  this wire reports no usage at all.
+- A stream that ends without `[DONE]` still closes its blocks, because plenty
+  of endpoints simply close the connection.
+
 ### A stalled stream fails instead of hanging
 
 - All three HTTP clients were built from a bare `reqwest::Client::builder()`,

@@ -375,6 +375,43 @@ fn openai_compatible_embedding_provider(
     mentra_provider::responses::ResponsesProvider::new(definition, NoCredentialsSource)
 }
 
+/// Builds a provider for an endpoint speaking the OpenAI `chat/completions`
+/// wire.
+///
+/// This is the wire the OpenAI-compatible ecosystem actually implements.
+/// `v1/responses` is OpenAI's own, and an endpoint that does not serve it
+/// answers 404 to every turn — with an error that reads like a mistyped base
+/// URL rather than like a wire mismatch.
+fn chat_completions_provider(
+    provider: impl Into<mentra_provider::ProviderId>,
+    display_name: &str,
+    description: &str,
+    base_url: &str,
+    credentials: Option<String>,
+) -> Arc<dyn Provider> {
+    let mut definition = mentra_provider::chat_completions::definition(provider, base_url);
+    definition.descriptor.display_name = Some(display_name.to_string());
+    definition.descriptor.description = Some(description.to_string());
+
+    match credentials {
+        Some(api_key) => shared_provider(
+            mentra_provider::chat_completions::ChatCompletionsProvider::new(
+                definition,
+                mentra_provider::StaticCredentialSource::new(api_key),
+            ),
+        ),
+        None => {
+            definition.auth_scheme = mentra_provider::AuthScheme::None;
+            shared_provider(
+                mentra_provider::chat_completions::ChatCompletionsProvider::new(
+                    definition,
+                    NoCredentialsSource,
+                ),
+            )
+        }
+    }
+}
+
 #[derive(Clone)]
 struct NoCredentialsSource;
 
@@ -428,24 +465,18 @@ where
 }
 
 pub mod openai {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use async_trait::async_trait;
 
-    use super::AuthScheme;
-    use super::BuiltinProvider;
     use super::CompactionRequest;
     use super::CompactionResponse;
     use super::Provider;
     use super::ProviderCapabilities;
-    use super::ProviderDefinition;
     use super::ProviderDescriptor;
     use super::ProviderError;
     use super::ProviderEventStream;
     use super::Request;
-    use super::RetryPolicy;
-    use super::WireApi;
     use super::shared_provider;
 
     use crate::provider::model::ModelInfo;
@@ -465,48 +496,6 @@ pub mod openai {
         pub fn new(api_key: impl Into<String>) -> Self {
             Self {
                 inner: shared_provider(mentra_provider::responses::openai(api_key)),
-            }
-        }
-
-        pub(crate) fn openai_compatible(
-            provider: BuiltinProvider,
-            display_name: &'static str,
-            description: &'static str,
-            base_url: &str,
-        ) -> Self {
-            let mut definition = ProviderDefinition::new(provider);
-            definition.descriptor.display_name = Some(display_name.to_string());
-            definition.descriptor.description = Some(description.to_string());
-            definition.wire_api = WireApi::Responses;
-            definition.auth_scheme = AuthScheme::None;
-            definition.capabilities = ProviderCapabilities {
-                supports_model_listing: true,
-                supports_streaming: true,
-                supports_websockets: false,
-                supports_tool_calls: true,
-                supports_images: true,
-                supports_history_compaction: false,
-                supports_memory_summarization: false,
-                supports_deferred_tools: false,
-                supports_hosted_tool_search: false,
-                supports_hosted_web_search: false,
-                supports_image_generation: false,
-                supports_reasoning_effort: false,
-                reports_reasoning_tokens: false,
-                reports_thoughts_tokens: false,
-                supports_structured_tool_results: false,
-                supports_embeddings: true,
-            };
-            definition.base_url = Some(base_url.to_string());
-            definition.headers = Some(HashMap::new());
-            definition.retry = RetryPolicy::default();
-
-            let provider = mentra_provider::responses::ResponsesProvider::new(
-                definition,
-                super::NoCredentialsSource,
-            );
-            Self {
-                inner: shared_provider(provider),
             }
         }
 
@@ -749,6 +738,113 @@ pub mod gemini {
     }
 }
 
+/// Providers for any endpoint speaking the OpenAI `chat/completions` wire.
+///
+/// DeepSeek, Groq, Together, Fireworks, Mistral, xAI, OpenRouter, vLLM,
+/// llama.cpp, Ollama and LM Studio all serve this wire; almost none of them
+/// serve `v1/responses`. Point this at a base URL and it will speak the thing
+/// on the other end.
+pub mod openai_compatible {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::MemorySummarizeRequest;
+    use super::MemorySummarizeResponse;
+    use super::Provider;
+    use super::ProviderCapabilities;
+    use super::ProviderDescriptor;
+    use super::ProviderError;
+    use super::ProviderEventStream;
+    use super::Request;
+    use crate::provider::model::ModelInfo;
+
+    /// A provider for one OpenAI-compatible endpoint.
+    ///
+    /// ```rust,no_run
+    /// use mentra::provider::openai_compatible::OpenAiCompatibleProvider;
+    ///
+    /// let deepseek = OpenAiCompatibleProvider::new(
+    ///     "deepseek",
+    ///     "https://api.deepseek.com/",
+    ///     std::env::var("DEEPSEEK_API_KEY").unwrap(),
+    /// );
+    /// ```
+    #[derive(Clone)]
+    pub struct OpenAiCompatibleProvider {
+        inner: Arc<dyn Provider>,
+    }
+
+    impl OpenAiCompatibleProvider {
+        /// Registers an endpoint that authenticates with a bearer token.
+        ///
+        /// `id` is the name the runtime will know this provider by, and can be
+        /// anything not already registered.
+        pub fn new(
+            id: impl Into<mentra_provider::ProviderId>,
+            base_url: impl AsRef<str>,
+            api_key: impl Into<String>,
+        ) -> Self {
+            let id = id.into();
+            let display_name = id.as_str().to_string();
+            Self {
+                inner: super::chat_completions_provider(
+                    id,
+                    &display_name,
+                    "OpenAI-compatible chat/completions provider",
+                    base_url.as_ref(),
+                    Some(api_key.into()),
+                ),
+            }
+        }
+
+        /// Registers an endpoint that wants no credentials — a local vLLM or
+        /// llama.cpp server, say.
+        pub fn without_credentials(
+            id: impl Into<mentra_provider::ProviderId>,
+            base_url: impl AsRef<str>,
+        ) -> Self {
+            let id = id.into();
+            let display_name = id.as_str().to_string();
+            Self {
+                inner: super::chat_completions_provider(
+                    id,
+                    &display_name,
+                    "OpenAI-compatible chat/completions provider",
+                    base_url.as_ref(),
+                    None,
+                ),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for OpenAiCompatibleProvider {
+        fn descriptor(&self) -> ProviderDescriptor {
+            self.inner.descriptor()
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            self.inner.list_models().await
+        }
+
+        async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+            self.inner.stream(request).await
+        }
+
+        async fn summarize_memories(
+            &self,
+            request: MemorySummarizeRequest<'_>,
+        ) -> Result<MemorySummarizeResponse, ProviderError> {
+            self.inner.summarize_memories(request).await
+        }
+    }
+}
+
 pub mod ollama {
     use std::sync::Arc;
 
@@ -776,12 +872,15 @@ pub mod ollama {
 
         pub fn with_base_url(base_url: impl AsRef<str>) -> Self {
             Self {
-                inner: Arc::new(super::openai::OpenAIProvider::openai_compatible(
+                // Ollama serves `v1/chat/completions` and has never served
+                // `v1/responses`.
+                inner: super::chat_completions_provider(
                     BuiltinProvider::Ollama,
                     "Ollama",
-                    "Ollama OpenAI-compatible Responses API provider",
+                    "Ollama OpenAI-compatible chat/completions provider",
                     base_url.as_ref(),
-                )),
+                    None,
+                ),
             }
         }
     }
@@ -846,12 +945,16 @@ pub mod lmstudio {
 
         pub fn with_base_url(base_url: impl AsRef<str>) -> Self {
             Self {
-                inner: Arc::new(super::openai::OpenAIProvider::openai_compatible(
+                // LM Studio's OpenAI-compatible surface is
+                // `v1/chat/completions`; only recent builds serve
+                // `v1/responses` at all.
+                inner: super::chat_completions_provider(
                     BuiltinProvider::LmStudio,
                     "LM Studio",
-                    "LM Studio OpenAI-compatible Responses API provider",
+                    "LM Studio OpenAI-compatible chat/completions provider",
                     base_url.as_ref(),
-                )),
+                    None,
+                ),
             }
         }
     }

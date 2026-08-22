@@ -374,6 +374,54 @@ impl Runtime {
             .register_lmstudio();
     }
 
+    /// Registers any endpoint speaking the OpenAI `chat/completions` wire.
+    ///
+    /// `id` is the name this runtime will know the provider by. Almost every
+    /// OpenAI-compatible endpoint — DeepSeek, Groq, Together, Fireworks,
+    /// Mistral, xAI, vLLM, llama.cpp — serves this wire and not OpenAI's own
+    /// `v1/responses`.
+    ///
+    /// ```rust,no_run
+    /// # let mut runtime = mentra::Runtime::empty_builder().build().unwrap();
+    /// runtime.register_openai_compatible(
+    ///     "groq",
+    ///     "https://api.groq.com/openai/",
+    ///     std::env::var("GROQ_API_KEY").unwrap(),
+    /// );
+    /// ```
+    pub fn register_openai_compatible(
+        &mut self,
+        id: impl Into<crate::provider::ProviderId>,
+        base_url: impl AsRef<str>,
+        api_key: impl Into<String>,
+    ) {
+        self.provider_registry
+            .write()
+            .expect("provider registry poisoned")
+            .register_provider_instance(
+                crate::provider::openai_compatible::OpenAiCompatibleProvider::new(
+                    id, base_url, api_key,
+                ),
+            );
+    }
+
+    /// Registers an OpenAI-compatible endpoint that wants no credentials, such
+    /// as a local vLLM or llama.cpp server.
+    pub fn register_openai_compatible_without_credentials(
+        &mut self,
+        id: impl Into<crate::provider::ProviderId>,
+        base_url: impl AsRef<str>,
+    ) {
+        self.provider_registry
+            .write()
+            .expect("provider registry poisoned")
+            .register_provider_instance(
+                crate::provider::openai_compatible::OpenAiCompatibleProvider::without_credentials(
+                    id, base_url,
+                ),
+            );
+    }
+
     /// Registers a custom runtime provider implementation.
     ///
     /// This is the supported seam for injecting a scripted provider in tests or
