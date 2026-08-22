@@ -269,6 +269,55 @@ impl Session {
         self.agent.set_reasoning(reasoning)
     }
 
+    /// Returns the reasoning options this session's turns are sent with.
+    ///
+    /// The reader for [`set_reasoning`](Self::set_reasoning): a picker that
+    /// cannot show which effort a session was opened with has to keep its own
+    /// copy and hope the two never diverge.
+    pub fn reasoning(&self) -> Option<&crate::provider::ReasoningOptions> {
+        self.agent.reasoning()
+    }
+
+    /// Renames the session and persists the new name.
+    ///
+    /// A session's name is fixed at creation otherwise, so a host that mints
+    /// one before it knows what the conversation is about is stuck with
+    /// whatever placeholder it guessed.
+    pub fn set_name(&mut self, name: impl Into<String>) -> Result<(), RuntimeError> {
+        let name = name.into();
+        self.metadata.title = name.clone();
+        self.metadata.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.agent.set_name(name)
+    }
+
+    /// Compacts this session's transcript now, without waiting for a threshold.
+    ///
+    /// The model can already ask for this through the `compact` intrinsic; the
+    /// person whose session it is could not. `instructions` says what to keep
+    /// — "hold on to the migration plan, drop the log spelunking" — and is
+    /// added to the standing continuity requirements rather than replacing
+    /// them.
+    ///
+    /// Returns `None` when there was nothing to compact.
+    pub async fn compact(
+        &mut self,
+        instructions: Option<&str>,
+    ) -> Result<Option<crate::agent::CompactionDetails>, RuntimeError> {
+        // The last turn stays whole, as it does for the intrinsic: compacting
+        // the exchange a caller just had is the one thing they did not ask for.
+        let preserve_from = self.agent.history().len().saturating_sub(1);
+        self.agent
+            .compact_history_with_instructions(
+                preserve_from,
+                crate::agent::CompactionTrigger::Manual,
+                instructions,
+            )
+            .await
+    }
+
     /// Returns the underlying agent identifier.
     pub fn agent_id(&self) -> &str {
         self.agent.id()

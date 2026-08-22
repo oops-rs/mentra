@@ -168,6 +168,14 @@ pub struct CompactionRequest {
     pub provider_request_options: ProviderRequestOptions,
     pub mode: CompactionMode,
     pub max_persisted_transcripts: Option<usize>,
+    /// What the person asking for this compaction wants kept.
+    ///
+    /// A compaction decides what survives a session, and the summarizer cannot
+    /// know that "keep the migration plan, drop the log spelunking" matters
+    /// unless someone says so. Added to the standing instructions rather than
+    /// replacing them, so a caller cannot accidentally drop the continuity
+    /// requirements by asking for one extra thing.
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -429,8 +437,12 @@ pub(crate) fn compaction_request_from_agent(
         provider_request_options,
         mode: config.mode,
         max_persisted_transcripts: config.max_persisted_transcripts,
+        instructions: None,
     }
 }
+
+const REMOTE_COMPACTION_INSTRUCTIONS: &str =
+    "Compact this transcript into a continuity handoff that preserves delegated work.";
 
 async fn summarize_locally(
     provider: Arc<dyn Provider>,
@@ -469,7 +481,13 @@ File paths, command outputs, and error messages should be quoted verbatim.";
         prompt.push_str(&context_preamble);
         prompt.push_str("\n=== END EXTRACTED FACTS ===\n\n");
     }
-    prompt.push_str("Summarize this agent transcript for continuity and multi-agent handoff. Preserve goal, progress, concrete decisions, constraints, delegated work outcomes, artifacts, open questions, and next steps.\n\nTranscript JSON:\n");
+    prompt.push_str("Summarize this agent transcript for continuity and multi-agent handoff. Preserve goal, progress, concrete decisions, constraints, delegated work outcomes, artifacts, open questions, and next steps.\n");
+    if let Some(instructions) = request.instructions.as_deref() {
+        prompt.push_str("\nThe person who asked for this compaction added: ");
+        prompt.push_str(instructions);
+        prompt.push('\n');
+    }
+    prompt.push_str("\nTranscript JSON:\n");
     prompt.push_str(transcript);
     let response = provider
         .send(Request {
@@ -532,9 +550,12 @@ async fn compact_remotely(
     let response = provider
         .compact(ProviderCompactionRequest {
             model: Cow::Borrowed(request.model.as_str()),
-            instructions: Cow::Borrowed(
-                "Compact this transcript into a continuity handoff that preserves delegated work.",
-            ),
+            instructions: match request.instructions.as_deref() {
+                Some(extra) => Cow::Owned(format!(
+                    "{REMOTE_COMPACTION_INSTRUCTIONS} The person who asked for this compaction added: {extra}"
+                )),
+                None => Cow::Borrowed(REMOTE_COMPACTION_INSTRUCTIONS),
+            },
             input: Cow::Owned(input),
             metadata: Cow::Owned(Default::default()),
             provider_request_options: request.provider_request_options.clone(),

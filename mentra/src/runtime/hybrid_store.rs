@@ -252,6 +252,10 @@ impl AgentStore for HybridRuntimeStore {
         self.inner.save_agent_memory(agent_id, memory)
     }
 
+    fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError> {
+        self.inner.delete_agent(agent_id)
+    }
+
     fn load_agent(&self, agent_id: &str) -> Result<Option<LoadedAgentState>, RuntimeError> {
         self.inner.load_agent(agent_id)
     }

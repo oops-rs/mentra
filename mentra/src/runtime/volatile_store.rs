@@ -217,6 +217,16 @@ impl AgentStore for VolatileRuntimeStore {
         Ok(())
     }
 
+    fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError> {
+        let mut state = self.lock();
+        state.agents.remove(agent_id);
+        state.agent_memory.remove(agent_id);
+        // The order list is what listing iterates; leaving the id in it turns
+        // a deleted agent into an entry that cannot be loaded.
+        state.agent_order.retain(|id| id != agent_id);
+        Ok(())
+    }
+
     fn load_agent(&self, agent_id: &str) -> Result<Option<LoadedAgentState>, RuntimeError> {
         let state = self.lock();
         let Some(record) = state.agents.get(agent_id).cloned() else {
@@ -227,7 +237,14 @@ impl AgentStore for VolatileRuntimeStore {
                 "Agent '{agent_id}' is missing persisted memory"
             )));
         };
-        Ok(Some(LoadedAgentState { record, memory }))
+        // A store that keeps nothing across process lifetimes has no first or
+        // last write worth reporting.
+        Ok(Some(LoadedAgentState {
+            record,
+            memory,
+            created_at: None,
+            updated_at: None,
+        }))
     }
 
     fn list_agents(&self) -> Result<Vec<LoadedAgentState>, RuntimeError> {
@@ -244,7 +261,12 @@ impl AgentStore for VolatileRuntimeStore {
                 let memory = state.agent_memory.get(id).cloned().ok_or_else(|| {
                     RuntimeError::Store(format!("Agent '{id}' is missing persisted memory"))
                 })?;
-                Ok(LoadedAgentState { record, memory })
+                Ok(LoadedAgentState {
+                    record,
+                    memory,
+                    created_at: None,
+                    updated_at: None,
+                })
             })
             .collect()
     }

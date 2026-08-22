@@ -53,6 +53,14 @@ pub struct PersistedAgentRecord {
 pub struct LoadedAgentState {
     pub(crate) record: PersistedAgentRecord,
     pub(crate) memory: AgentMemoryState,
+    /// When the store first wrote this agent, in seconds since the epoch.
+    ///
+    /// Storage metadata rather than agent state, which is why it lives here
+    /// and not on [`PersistedAgentRecord`]: a store that keeps no history —
+    /// the volatile one — has nothing to report and says so.
+    pub(crate) created_at: Option<u64>,
+    /// When the store last wrote this agent, in seconds since the epoch.
+    pub(crate) updated_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +96,12 @@ pub trait AgentStore: Send + Sync {
         memory: &AgentMemoryState,
     ) -> Result<(), RuntimeError>;
     fn load_agent(&self, agent_id: &str) -> Result<Option<LoadedAgentState>, RuntimeError>;
+    /// Removes an agent's record and its persisted memory.
+    ///
+    /// Removing one without the other leaves a row that cannot be resumed, so
+    /// implementations must remove both. Deleting an agent that is not there
+    /// succeeds: the caller's goal is that it be gone.
+    fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError>;
     fn list_agents(&self) -> Result<Vec<LoadedAgentState>, RuntimeError>;
     fn list_agents_by_runtime(
         &self,
@@ -1036,7 +1050,7 @@ impl AgentStore for SqliteRuntimeStore {
                 SELECT
                     id, runtime_identifier, name, model, provider_id, config_json,
                     hidden_tools_json, max_rounds, teammate_identity_json, rounds_since_task,
-                    idle_requested, status_json, subagents_json
+                    idle_requested, status_json, subagents_json, created_at, updated_at
                 FROM agents WHERE id = ?1
                 "#,
                 params![agent_id],
@@ -1047,7 +1061,7 @@ impl AgentStore for SqliteRuntimeStore {
                     let teammate_identity_json: Option<String> = row.get(8)?;
                     let status_json: String = row.get(11)?;
                     let subagents_json: String = row.get(12)?;
-                    Ok(PersistedAgentRecord {
+                    let record = PersistedAgentRecord {
                         id: row.get(0)?,
                         runtime_identifier: row.get(1)?,
                         name: row.get(2)?,
@@ -1064,12 +1078,17 @@ impl AgentStore for SqliteRuntimeStore {
                         idle_requested: row.get::<_, i64>(10)? != 0,
                         status: from_json(&status_json).map_err(to_sql_error)?,
                         subagents: from_json(&subagents_json).map_err(to_sql_error)?,
-                    })
+                    };
+                    Ok((
+                        record,
+                        row.get::<_, i64>(13)? as u64,
+                        row.get::<_, i64>(14)? as u64,
+                    ))
                 },
             )
             .optional()
             .map_err(sqlite_error)?;
-        let Some(record) = record else {
+        let Some((record, created_at, updated_at)) = record else {
             return Ok(None);
         };
 
@@ -1090,7 +1109,40 @@ impl AgentStore for SqliteRuntimeStore {
             )));
         };
 
-        Ok(Some(LoadedAgentState { record, memory }))
+        Ok(Some(LoadedAgentState {
+            record,
+            memory,
+            created_at: Some(created_at),
+            updated_at: Some(updated_at),
+        }))
+    }
+
+    fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError> {
+        let conn = self.open()?;
+        // One transaction, because a record without its memory cannot be
+        // resumed and memory without its record is unreachable.
+        conn.execute("BEGIN", []).map_err(sqlite_error)?;
+        let result = (|| -> Result<(), RuntimeError> {
+            conn.execute(
+                "DELETE FROM agent_memory WHERE agent_id = ?1",
+                params![agent_id],
+            )
+            .map_err(sqlite_error)?;
+            conn.execute("DELETE FROM agents WHERE id = ?1", params![agent_id])
+                .map_err(sqlite_error)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", []).map_err(sqlite_error)?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", []);
+                Err(error)
+            }
+        }
     }
 
     fn list_agents(&self) -> Result<Vec<LoadedAgentState>, RuntimeError> {

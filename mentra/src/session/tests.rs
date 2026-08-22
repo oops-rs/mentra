@@ -2483,3 +2483,215 @@ async fn spawn_subagent_with_options_puts_the_subagent_under_them() {
         "the cancelled subagent never reached the provider"
     );
 }
+
+#[tokio::test]
+async fn a_session_can_be_renamed_after_it_is_minted() {
+    // A host that opens a session before it knows what the conversation is
+    // about was otherwise stuck with whatever placeholder it guessed.
+    let mock = MockRuntime::builder().text("hello").build().unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("untitled", mock.model())
+        .unwrap();
+
+    session.set_name("migrate the provider wire").unwrap();
+
+    assert_eq!(session.name(), "migrate the provider wire");
+    assert_eq!(session.metadata().title, "migrate the provider wire");
+}
+
+#[tokio::test]
+async fn a_session_reports_the_reasoning_it_was_opened_with() {
+    use crate::provider::{ReasoningEffort, ReasoningOptions};
+
+    let mock = MockRuntime::builder().text("hello").build().unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("test-session", mock.model())
+        .unwrap();
+
+    assert_eq!(session.reasoning(), None);
+
+    session
+        .set_reasoning(Some(ReasoningOptions {
+            effort: Some(ReasoningEffort::High),
+            summary: None,
+        }))
+        .unwrap();
+
+    assert_eq!(
+        session.reasoning().and_then(|options| options.effort),
+        Some(ReasoningEffort::High)
+    );
+}
+
+#[tokio::test]
+async fn sessions_can_be_listed_per_workspace_on_one_runtime() {
+    // The runtime identifier used to be fixed when the runtime was built, so
+    // every session on one runtime carried the same tag and a per-workspace
+    // listing could not tell them apart.
+    use crate::runtime::SessionOptions;
+
+    let mock = MockRuntime::builder().text("hello").build().unwrap();
+
+    let _first = mock
+        .runtime()
+        .create_session_with_options(
+            "session-in-a",
+            mock.model(),
+            SessionOptions {
+                runtime_identifier: Some("workspace-a".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let _second = mock
+        .runtime()
+        .create_session_with_options(
+            "session-in-b",
+            mock.model(),
+            SessionOptions {
+                runtime_identifier: Some("workspace-b".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let in_a = mock.runtime().list_persisted_agents("workspace-a").unwrap();
+    let in_b = mock.runtime().list_persisted_agents("workspace-b").unwrap();
+
+    assert_eq!(
+        in_a.iter()
+            .map(|agent| agent.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-in-a"]
+    );
+    assert_eq!(
+        in_b.iter()
+            .map(|agent| agent.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-in-b"]
+    );
+}
+
+#[tokio::test]
+async fn a_persisted_agent_reports_when_it_was_written() {
+    use crate::runtime::SessionOptions;
+
+    let directory = std::env::temp_dir().join(format!(
+        "mentra-session-timestamps-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let mock = MockRuntime::builder()
+        .text("hello")
+        .with_store(SqliteRuntimeStore::new(directory.join("runtime.db")))
+        .build()
+        .unwrap();
+    let _session = mock
+        .runtime()
+        .create_session_with_options(
+            "timestamped",
+            mock.model(),
+            SessionOptions {
+                runtime_identifier: Some("workspace-t".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let listed = mock.runtime().list_persisted_agents("workspace-t").unwrap();
+
+    let agent = listed.first().expect("the session was persisted");
+    // A host ordering sessions by recency needs these; the columns have been
+    // in the table all along.
+    let created_at = agent.created_at.expect("sqlite records a creation time");
+    let updated_at = agent.updated_at.expect("sqlite records an update time");
+    assert!(created_at > 0);
+    assert!(updated_at >= created_at);
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test]
+async fn a_deleted_agent_is_gone_from_the_store() {
+    use crate::runtime::SessionOptions;
+
+    let mock = MockRuntime::builder().text("hello").build().unwrap();
+    let session = mock
+        .runtime()
+        .create_session_with_options(
+            "disposable",
+            mock.model(),
+            SessionOptions {
+                runtime_identifier: Some("workspace-d".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let agent_id = session.agent_id().to_string();
+
+    mock.runtime().delete_agent(&agent_id).unwrap();
+
+    assert!(
+        mock.runtime()
+            .list_persisted_agents("workspace-d")
+            .unwrap()
+            .is_empty()
+    );
+    // Deleting what is already gone succeeds: the caller's goal is that it be
+    // gone.
+    mock.runtime().delete_agent(&agent_id).unwrap();
+}
+
+#[tokio::test]
+async fn a_person_can_compact_their_own_session() {
+    // The model could already ask for this through the `compact` intrinsic.
+    // The person whose session it is could not.
+    let mock = MockRuntime::builder()
+        .text("first")
+        .text("second")
+        .text("{\"goal\":\"ship the wire\",\"progress\":\"drafted\"}")
+        .build()
+        .unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session_with_config(
+            "compactable",
+            mock.model(),
+            crate::agent::AgentConfig {
+                compaction: crate::agent::CompactionConfig {
+                    // The default protects a generous recent tail, which in a
+                    // three-turn test is the whole transcript.
+                    preserve_recent_user_tokens: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    session
+        .append_turn(vec![ContentBlock::text("one")])
+        .await
+        .unwrap();
+    session
+        .append_turn(vec![ContentBlock::text("two")])
+        .await
+        .unwrap();
+    let before = session.history().len();
+
+    let details = session
+        .compact(Some("keep the wire decision, drop the log reading"))
+        .await
+        .unwrap()
+        .expect("there was a transcript to compact");
+
+    assert_eq!(details.trigger, crate::agent::CompactionTrigger::Manual);
+    assert!(details.replaced_items > 0, "{details:?}");
+    assert!(
+        session.history().len() < before,
+        "compaction shortened the history: {} -> {}",
+        before,
+        session.history().len()
+    );
+}

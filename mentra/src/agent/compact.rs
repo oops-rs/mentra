@@ -93,6 +93,23 @@ impl Agent {
         preserve_from: usize,
         trigger: CompactionTrigger,
     ) -> Result<Option<CompactionDetails>, RuntimeError> {
+        self.compact_history_with_instructions(preserve_from, trigger, None)
+            .await
+    }
+
+    /// Compacts the transcript, telling the summarizer what the caller wants
+    /// kept.
+    ///
+    /// The instructions are added to the standing continuity requirements
+    /// rather than replacing them: a caller asking for one extra thing should
+    /// not thereby lose the file paths and command outcomes every summary
+    /// needs.
+    pub(crate) async fn compact_history_with_instructions(
+        &mut self,
+        preserve_from: usize,
+        trigger: CompactionTrigger,
+        instructions: Option<&str>,
+    ) -> Result<Option<CompactionDetails>, RuntimeError> {
         if self.history().is_empty() {
             return Ok(None);
         }
@@ -118,15 +135,16 @@ impl Agent {
         let Some(proposal) = self
             .runtime
             .compaction_engine()
-            .compact(
-                self.provider.clone(),
-                compaction_request_from_agent(
+            .compact(self.provider.clone(), {
+                let mut request = compaction_request_from_agent(
                     self.model(),
                     self.transcript().clone(),
                     &self.config.compaction,
                     provider_request_options,
-                ),
-            )
+                );
+                request.instructions = instructions.map(str::to_string);
+                request
+            })
             .await?
         else {
             return Ok(None);

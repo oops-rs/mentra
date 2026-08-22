@@ -408,6 +408,7 @@ async fn compact_preserves_salvaged_details_and_lets_discarded_details_go_with_t
         provider_request_options: ProviderRequestOptions::default(),
         mode: CompactionMode::LocalOnly,
         max_persisted_transcripts: None,
+        instructions: None,
     };
 
     let outcome = StandardCompactionEngine
@@ -518,6 +519,7 @@ fn request_for(items: Vec<TranscriptItem>, label: &str, model: &ModelInfo) -> Co
         provider_request_options: ProviderRequestOptions::default(),
         mode: CompactionMode::LocalOnly,
         max_persisted_transcripts: None,
+        instructions: None,
     }
 }
 

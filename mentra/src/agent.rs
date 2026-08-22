@@ -420,6 +420,21 @@ impl Agent {
         self.persist_agent_record()
     }
 
+    /// Returns the reasoning options future turns will be sent with.
+    ///
+    /// The reader for [`set_reasoning`](Self::set_reasoning). A picker that
+    /// cannot show which effort a session is on has to keep its own copy and
+    /// hope the two never diverge.
+    pub fn reasoning(&self) -> Option<&crate::provider::ReasoningOptions> {
+        self.config.provider_request_options.reasoning.as_ref()
+    }
+
+    /// Renames the agent and persists the new name.
+    pub fn set_name(&mut self, name: impl Into<String>) -> Result<(), RuntimeError> {
+        self.name = name.into();
+        self.persist_agent_record()
+    }
+
     /// Returns the effective agent configuration.
     pub fn config(&self) -> &AgentConfig {
         &self.config

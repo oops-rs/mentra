@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### A host can drive the session controls the model already had
+
+- `Session::compact(instructions)` compacts on demand. The model could already
+  ask for this through the `compact` intrinsic; the person whose session it is
+  could not, because `Agent::compact_history` is crate-private. `instructions`
+  says what to keep — "hold on to the migration plan, drop the log spelunking"
+  — and is *added* to the standing continuity requirements rather than
+  replacing them, so asking for one extra thing cannot lose the file paths and
+  command outcomes every summary needs.
+- `Session::set_name` renames a session. A name was otherwise fixed at
+  creation, so a host that opens a session before knowing what the conversation
+  is about was stuck with the placeholder it guessed.
+- `Session::reasoning` and `Agent::reasoning` report what `set_reasoning` last
+  set. An effort picker that cannot read the current value has to keep its own
+  copy and hope the two never diverge.
+- `PersistedAgentSummary` carries `created_at` and `updated_at`. The `agents`
+  table has had both columns all along; nothing exposed them, so a host could
+  not order its session list by recency. They are `Option` because a volatile
+  store has no first or last write to report.
+- `Runtime::delete_agent` removes an agent's record and its persisted memory
+  together — removing one without the other leaves a row that cannot be
+  resumed. Deleting an agent that is already gone succeeds.
+
+### A session can be tagged with its own runtime identifier
+
+- The runtime identifier was fixed when the runtime was built, so every session
+  minted on one runtime carried the same tag and
+  `Runtime::list_persisted_agents` could not tell one workspace's sessions from
+  another's. A host serving several workspaces from a single runtime — an
+  editor with more than one project open — had no way to answer "which sessions
+  belong to this project".
+- `Runtime::create_session_with_options` takes a `SessionOptions` carrying the
+  config, the project id, and an optional `runtime_identifier` for the rows this
+  session mints. `create_session_full` is unchanged and delegates to it.
+
 ### Search skips what the repository already ignores
 
 - The workspace search walk had no notion of `.gitignore`, did not skip `.git`,

@@ -94,6 +94,30 @@ pub struct PersistedAgentSummary {
     pub is_teammate: bool,
     pub status: AgentStatus,
     pub history_len: usize,
+    /// When the store first wrote this agent, in seconds since the epoch.
+    ///
+    /// `None` from a store that keeps nothing across process lifetimes. A host
+    /// listing sessions needs these to order them by recency, which was
+    /// otherwise impossible even though the `agents` table has carried both
+    /// columns all along.
+    pub created_at: Option<u64>,
+    /// When the store last wrote this agent, in seconds since the epoch.
+    pub updated_at: Option<u64>,
+}
+
+/// How a session is configured, scoped, and tagged in the store.
+#[derive(Debug, Clone, Default)]
+pub struct SessionOptions {
+    pub config: AgentConfig,
+    /// Scopes this session's permission rules to a project.
+    pub project_id: Option<String>,
+    /// The runtime identifier this session's persisted rows are tagged with.
+    ///
+    /// `None` uses the runtime's own, which is what every session got before:
+    /// one tag for every session on a runtime, and a
+    /// [`list_persisted_agents`](Runtime::list_persisted_agents) that cannot
+    /// separate one workspace's sessions from another's.
+    pub runtime_identifier: Option<std::sync::Arc<str>>,
 }
 
 impl Runtime {
@@ -294,9 +318,22 @@ impl Runtime {
                         is_teammate: state.record.teammate_identity.is_some(),
                         status: state.record.status,
                         history_len: state.memory.transcript.len(),
+                        created_at: state.created_at,
+                        updated_at: state.updated_at,
                     })
                     .collect()
             })
+    }
+
+    /// Removes a persisted agent and everything stored under it.
+    ///
+    /// Deleting the record without its memory would leave a row that
+    /// [`resume`](Self::resume) refuses with "missing persisted memory", so
+    /// this removes both. It does not stop a live [`Agent`] already holding
+    /// that id — an agent in memory keeps running, and persists itself again
+    /// on its next write.
+    pub fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError> {
+        self.handle.store().delete_agent(agent_id)
     }
 
     /// Restores every persisted agent known to the runtime store.
@@ -567,6 +604,26 @@ impl Runtime {
         self.create_session_full(name, model, config, None)
     }
 
+    /// Creates a new session with full control over how it is scoped and
+    /// persisted.
+    ///
+    /// The reason this exists next to
+    /// [`create_session_full`](Self::create_session_full): a runtime's
+    /// identifier is otherwise fixed when the runtime is built, so every
+    /// session minted on one runtime carries the same tag and
+    /// [`list_persisted_agents`](Self::list_persisted_agents) cannot tell them
+    /// apart. A host serving several workspaces from one runtime — an editor
+    /// with more than one project open — needs each session's rows tagged with
+    /// the workspace they belong to.
+    pub fn create_session_with_options(
+        &self,
+        name: impl Into<String>,
+        model: ModelInfo,
+        options: SessionOptions,
+    ) -> Result<Session, RuntimeError> {
+        self.build_session(name.into(), model, options)
+    }
+
     /// Creates a new session wrapping a freshly spawned agent with explicit config and
     /// an optional project identifier.
     ///
@@ -580,7 +637,28 @@ impl Runtime {
         config: AgentConfig,
         project_id: Option<String>,
     ) -> Result<Session, RuntimeError> {
-        let name = name.into();
+        self.build_session(
+            name.into(),
+            model,
+            SessionOptions {
+                config,
+                project_id,
+                runtime_identifier: None,
+            },
+        )
+    }
+
+    fn build_session(
+        &self,
+        name: String,
+        model: ModelInfo,
+        options: SessionOptions,
+    ) -> Result<Session, RuntimeError> {
+        let SessionOptions {
+            config,
+            project_id,
+            runtime_identifier,
+        } = options;
         let session_id = SessionId::new();
         let metadata = SessionMetadata::new(session_id.clone(), &name, &model.id);
         let (event_tx, _) = broadcast::channel(512);
@@ -594,6 +672,10 @@ impl Runtime {
                     pending_permissions.clone(),
                     rule_store.clone(),
                 )));
+        let session_handle = match runtime_identifier {
+            Some(identifier) => session_handle.with_runtime_identifier(identifier),
+            None => session_handle,
+        };
         let provider = self
             .provider_registry
             .read()
