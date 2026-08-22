@@ -136,6 +136,7 @@ fn all_session_event_variants_serialize_with_type_tag() {
         },
         SessionEvent::UserMessage {
             text: "hi".to_string(),
+            image_count: 0,
         },
         SessionEvent::AssistantTokenDelta {
             delta: "h".to_string(),
@@ -300,7 +301,7 @@ async fn append_turn_emits_user_and_assistant_events() {
 
     let has_user = events
         .iter()
-        .any(|e| matches!(e, SessionEvent::UserMessage { text } if text == "hello"));
+        .any(|e| matches!(e, SessionEvent::UserMessage { text, .. } if text == "hello"));
     let has_assistant = events.iter().any(
         |e| matches!(e, SessionEvent::AssistantMessageCompleted { text } if text == "response"),
     );
@@ -991,7 +992,7 @@ async fn full_session_lifecycle_produces_correct_event_stream() {
     // Verify UserMessage appears before AssistantMessageCompleted.
     let user_pos = events
         .iter()
-        .position(|e| matches!(e, SessionEvent::UserMessage { text } if text == "Hi there"));
+        .position(|e| matches!(e, SessionEvent::UserMessage { text, .. } if text == "Hi there"));
     let assistant_pos = events.iter().position(|e| {
         matches!(e, SessionEvent::AssistantMessageCompleted { text } if text == "Hello, world!")
     });
@@ -2694,4 +2695,35 @@ async fn a_person_can_compact_their_own_session() {
         before,
         session.history().len()
     );
+}
+
+#[tokio::test]
+async fn an_image_only_turn_says_it_carried_an_image() {
+    // A screenshot pasted with nothing typed produced `text: ""`, so a client
+    // rendering the stream showed a blank user message and the transcript read
+    // as though the person had sent nothing.
+    use crate::provider::ImageSource;
+
+    let mock = MockRuntime::builder().text("I see it").build().unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("image-session", mock.model())
+        .unwrap();
+    let mut rx = session.subscribe();
+
+    session
+        .append_turn(vec![ContentBlock::Image {
+            source: ImageSource::bytes("image/png", vec![1, 2, 3]),
+        }])
+        .await
+        .unwrap();
+
+    let announced = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|event| match event {
+            SessionEvent::UserMessage { text, image_count } => Some((text, image_count)),
+            _ => None,
+        })
+        .expect("the turn was announced");
+
+    assert_eq!(announced, (String::new(), 1));
 }

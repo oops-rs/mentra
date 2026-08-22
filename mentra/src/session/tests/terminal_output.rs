@@ -227,7 +227,7 @@ async fn a_typed_turn_completes_with_the_model_prose_after_the_terminal_tool_eve
     let user = position(
         &events,
         "UserMessage",
-        |event| matches!(event, SessionEvent::UserMessage { text } if text == "produce the report"),
+        |event| matches!(event, SessionEvent::UserMessage { text, .. } if text == "produce the report"),
     );
     let queued = position(&events, "ToolQueued", |event| {
         matches!(event, SessionEvent::ToolQueued { tool_name, .. }

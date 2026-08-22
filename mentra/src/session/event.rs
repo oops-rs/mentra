@@ -64,6 +64,15 @@ pub enum SessionEvent {
     },
     UserMessage {
         text: String,
+        /// How many images the turn carried.
+        ///
+        /// A turn can be images alone — a screenshot pasted with nothing typed
+        /// — and `text` is then empty. A client rendering only `text` shows a
+        /// blank user message and the transcript looks like the person sent
+        /// nothing, so the count is here to be rendered as the attachment it
+        /// is.
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        image_count: usize,
     },
     AssistantTokenDelta {
         delta: String,
@@ -175,4 +184,8 @@ pub enum SessionEvent {
         /// transcript and stay reachable.
         abandoned_entries: usize,
     },
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }

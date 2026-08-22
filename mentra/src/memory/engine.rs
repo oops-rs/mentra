@@ -510,8 +510,12 @@ fn message_to_lines(message: &Message) -> Vec<String> {
             ContentBlock::Text { text } => Some(text.trim().to_string()),
             ContentBlock::ToolUse { name, input, .. } => Some(format!("tool use {name} {input}")),
             ContentBlock::ToolResult { content, .. } => Some(format!("tool result {content}")),
-            ContentBlock::Image { .. }
-            | ContentBlock::Thinking { .. }
+            // Not the pixels, which memory has no use for, but the fact that
+            // the turn carried one. A turn that was a screenshot and nothing
+            // else otherwise reduces to an empty line and vanishes from a
+            // recalled episode entirely.
+            ContentBlock::Image { .. } => Some("image attached".to_string()),
+            ContentBlock::Thinking { .. }
             | ContentBlock::HostedToolSearch { .. }
             | ContentBlock::HostedWebSearch { .. }
             | ContentBlock::ImageGeneration { .. } => None,

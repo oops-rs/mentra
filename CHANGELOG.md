@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### An image-only turn is no longer a blank message
+
+- `SessionEvent::UserMessage` carried text and nothing else, so a turn that was
+  a pasted screenshot and nothing typed announced `text: ""`. A client
+  rendering the stream showed an empty user message, and the transcript read as
+  though the person had sent nothing at all. The event now carries
+  `image_count`.
+- Memory ingestion mapped an image to `None`, so the same turn reduced to an
+  empty line and disappeared from any recalled episode. An image now projects
+  as `image attached` — not the pixels, which memory has no use for, but the
+  fact that the turn carried one.
+
 ### A skill can be kept out of the model's reach
 
 - `SKILL.md` frontmatter parsing read `name` and `description` and ignored

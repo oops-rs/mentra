@@ -362,8 +362,7 @@ impl Session {
         content: Vec<ContentBlock>,
         options: RunOptions,
     ) -> Result<Message, RuntimeError> {
-        let user_text = extract_user_text(&content);
-        self.emit(SessionEvent::UserMessage { text: user_text });
+        self.emit(user_message_event(&content));
 
         let turn = self.begin_turn();
         let result = self.agent.run(content, options).await;
@@ -412,8 +411,7 @@ impl Session {
         options: RunOptions,
         spec: TerminalOutputSpec,
     ) -> Result<FinalOutput<T>, RuntimeError> {
-        let user_text = extract_user_text(&content);
-        self.emit(SessionEvent::UserMessage { text: user_text });
+        self.emit(user_message_event(&content));
 
         let turn = self.begin_turn();
         let result = self.agent.run_to_output::<T>(content, options, spec).await;
@@ -717,6 +715,20 @@ impl<T> TurnOutcome for FinalOutput<T> {
             .find(|message| message.role == Role::Assistant)
             .map(Message::text)
             .unwrap_or_default()
+    }
+}
+
+/// Builds the event announcing a submitted user turn.
+///
+/// The image count rides along because a turn can be images alone: a client
+/// rendering only `text` would show a blank message where a screenshot was.
+fn user_message_event(content: &[ContentBlock]) -> SessionEvent {
+    SessionEvent::UserMessage {
+        text: extract_user_text(content),
+        image_count: content
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::Image { .. }))
+            .count(),
     }
 }
 
