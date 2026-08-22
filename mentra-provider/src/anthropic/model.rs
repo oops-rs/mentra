@@ -36,6 +36,8 @@ impl From<AnthropicModel> for ModelInfo {
                 .created_at
                 .as_deref()
                 .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
+            // Anthropic's model listing does not report a context window.
+            context_window: None,
         }
     }
 }

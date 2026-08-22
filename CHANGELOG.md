@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### A model says how much context it has, and a host can ask what a turn will cost
+
+- `ModelInfo` had no context window, so nothing downstream could be expressed
+  relative to the model it was about. `ModelInfo::context_window` is populated
+  from the provider's own listing where one reports it — Gemini's
+  `inputTokenLimit` — and is `None` for Anthropic and the Responses family,
+  whose listings say nothing about a limit. `ModelInfo::with_context_window`
+  sets it for a host that knows the number.
+- `memory::estimated_request_tokens` is public. It is the estimate the
+  runtime's own auto-compaction is evaluated against, and until now a host had
+  no way to report context usage at all: a provider reports what a turn cost
+  only after it has run, while a usage bar has to say what the next turn will
+  cost before it is sent.
+
 ### mentra speaks the wire the OpenAI-compatible ecosystem actually serves
 
 - `WireApi` had three variants and none of them was `chat/completions`. Every

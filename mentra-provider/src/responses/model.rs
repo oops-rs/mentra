@@ -69,6 +69,9 @@ impl ResponsesModel {
             created_at: self
                 .created
                 .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp as i64).ok()),
+            // Neither OpenAI's listing nor any Responses-compatible one reports
+            // a context window.
+            context_window: None,
         }
     }
 }

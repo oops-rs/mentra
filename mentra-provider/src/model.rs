@@ -11,6 +11,17 @@ pub struct ModelInfo {
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub created_at: Option<OffsetDateTime>,
+    /// How many tokens the model accepts in one request, when the provider
+    /// says so.
+    ///
+    /// Most providers do not: neither Anthropic's nor OpenAI's model listing
+    /// reports a limit, so this is `None` for them and a host that knows the
+    /// number can set it. Gemini reports it as `inputTokenLimit`. It is the
+    /// only thing that lets anything downstream — a compaction threshold, a
+    /// context-usage report — be expressed relative to the model rather than
+    /// as a constant that is wrong for most of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 impl ModelInfo {
@@ -21,7 +32,14 @@ impl ModelInfo {
             display_name: None,
             description: None,
             created_at: None,
+            context_window: None,
         }
+    }
+
+    /// Returns this model with its context window set.
+    pub fn with_context_window(mut self, context_window: usize) -> Self {
+        self.context_window = Some(context_window);
+        self
     }
 }
 

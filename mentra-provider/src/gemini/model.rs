@@ -33,6 +33,8 @@ pub(crate) struct GeminiModel {
         alias = "supported_generation_methods"
     )]
     supported_generation_methods: Vec<String>,
+    #[serde(default, rename = "inputTokenLimit", alias = "input_token_limit")]
+    pub(crate) input_token_limit: Option<usize>,
 }
 
 impl GeminiModel {
@@ -59,6 +61,7 @@ impl From<GeminiModel> for ModelInfo {
             display_name: model.display_name,
             description: model.description,
             created_at: None,
+            context_window: model.input_token_limit,
         }
     }
 }
@@ -508,8 +511,28 @@ mod tests {
     use super::{GeminiGenerateContentRequest, GeminiModel};
 
     #[test]
+    fn a_listed_model_carries_the_input_token_limit_gemini_reports() {
+        // Gemini is the one listing of the three that states a limit, and it is
+        // what lets a compaction threshold be a fraction of the window rather
+        // than a constant that is wrong for most models.
+        let listed: super::GeminiModel = serde_json::from_value(json!({
+            "name": "models/gemini-2.5-pro",
+            "displayName": "Gemini 2.5 Pro",
+            "supportedGenerationMethods": ["generateContent"],
+            "inputTokenLimit": 1_048_576,
+        }))
+        .expect("model parses");
+
+        let info = ModelInfo::from(listed);
+
+        assert_eq!(info.id, "gemini-2.5-pro");
+        assert_eq!(info.context_window, Some(1_048_576));
+    }
+
+    #[test]
     fn converts_model_name_to_base_model_id() {
         let model = GeminiModel {
+            input_token_limit: None,
             name: "models/gemini-3-flash".to_string(),
             base_model_id: Some("gemini-3-flash".to_string()),
             display_name: Some("Gemini 3 Flash".to_string()),

@@ -345,6 +345,7 @@ fn prompt_manual_model(provider: &mentra::ProviderDescriptor) -> mentra::ModelIn
             display_name: None,
             description: Some("Entered manually".to_string()),
             created_at: None,
+            context_window: None,
         };
     }
 }

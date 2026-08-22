@@ -55,7 +55,15 @@ pub(crate) fn micro_compact_history(history: &[Message], keep_recent: usize) -> 
     compacted
 }
 
-pub(crate) fn estimated_request_tokens(messages: &[Message], system: Option<&str>) -> usize {
+/// Estimates how many tokens a request carrying `messages` and `system` costs.
+///
+/// This is the same estimate the runtime's own auto-compaction is evaluated
+/// against, exposed because a host has no other way to report context usage:
+/// a provider reports what a turn *cost* only after it has run, and a usage
+/// bar has to say what the next turn will cost before it is sent. It is an
+/// estimate — cheap, provider-neutral, and never a substitute for the token
+/// counts a response reports.
+pub fn estimated_request_tokens(messages: &[Message], system: Option<&str>) -> usize {
     let mut estimated =
         estimated_tokens_for_str(&serde_json::to_string(messages).unwrap_or_default());
     if let Some(system) = system {
@@ -104,4 +112,42 @@ fn tool_name_index(history: &[Message]) -> HashMap<String, String> {
 
 fn estimated_tokens_for_str(text: &str) -> usize {
     text.chars().count().div_ceil(4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ContentBlock;
+
+    #[test]
+    fn the_estimator_a_host_reports_with_is_the_one_compaction_uses() {
+        // A usage bar has to say what the *next* turn costs, before it is sent;
+        // a provider only reports what a turn cost once it has run. This is the
+        // only number available at that point, and it is the same one
+        // auto-compaction is evaluated against.
+        let history = vec![Message::user(ContentBlock::text("a".repeat(400)))];
+
+        let without_system = estimated_request_tokens(&history, None);
+        let with_system = estimated_request_tokens(&history, Some(&"b".repeat(400)));
+
+        assert!(without_system > 0);
+        assert!(
+            with_system > without_system,
+            "the system prompt is part of what the request will cost"
+        );
+    }
+
+    #[test]
+    fn keeping_every_tool_result_copies_the_history_unchanged() {
+        let history = vec![
+            Message::user(ContentBlock::text("go")),
+            Message::user(ContentBlock::ToolResult {
+                tool_use_id: "call".to_string(),
+                content: crate::tool::ToolResultContent::text("x".repeat(500)),
+                is_error: false,
+            }),
+        ];
+
+        assert_eq!(micro_compact_history(&history, usize::MAX), history);
+    }
 }
