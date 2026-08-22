@@ -137,12 +137,20 @@ pub enum SessionEvent {
         stored_records: usize,
     },
     /// Token usage report after a model response completes.
+    ///
+    /// `reasoning_tokens` and `thoughts_tokens` carry whichever breakdown the
+    /// provider reported, with the inclusion rules described on
+    /// [`AgentEvent::UsageReport`](crate::agent::AgentEvent::UsageReport).
     UsageReport {
         agent_id: String,
         input_tokens: u64,
         output_tokens: u64,
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
+        #[serde(default)]
+        reasoning_tokens: u64,
+        #[serde(default)]
+        thoughts_tokens: u64,
     },
     Notice {
         severity: NoticeSeverity,

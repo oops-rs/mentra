@@ -126,6 +126,8 @@ impl<'a> TurnRunner<'a> {
                     output_tokens: u.output_tokens.unwrap_or(0),
                     cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0),
                     cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0),
+                    reasoning_tokens: u.reasoning_tokens.unwrap_or(0),
+                    thoughts_tokens: u.thoughts_tokens.unwrap_or(0),
                 });
                 self.options
                     .record_tokens(u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0));

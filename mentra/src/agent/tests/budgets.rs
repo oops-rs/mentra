@@ -137,6 +137,57 @@ async fn token_budget_stops_gracefully_after_the_round_that_crosses_it() {
 }
 
 #[tokio::test]
+async fn a_usage_report_carries_the_reasoning_tokens_the_provider_broke_out() {
+    // Two providers report the cost of reasoning, and they mean different things
+    // by it: the Responses wire's `reasoning_tokens` is a slice *of*
+    // `output_tokens`, while Gemini's `thoughts_tokens` sits outside
+    // `candidates`. Collapsing them into one number would make any host that
+    // adds them up wrong for one provider or the other, so the report carries
+    // both exactly as `TokenUsage` does.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![text_stream_with_usage(
+            &model.id,
+            "done",
+            TokenUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(80),
+                reasoning_tokens: Some(64),
+                thoughts_tokens: Some(9),
+                ..Default::default()
+            },
+        )],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    agent
+        .run(vec![ContentBlock::text("go")], RunOptions::default())
+        .await
+        .expect("run completes");
+
+    let reports: Vec<_> = collect_events(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::UsageReport {
+                reasoning_tokens,
+                thoughts_tokens,
+                ..
+            } => Some((reasoning_tokens, thoughts_tokens)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(reports, vec![(64, 9)]);
+}
+
+#[tokio::test]
 async fn absent_token_budget_ignores_reported_usage() {
     // With `token_budget: None` (the default), no amount of reported usage stops
     // the run early — the seam is inert, reproducing today's behavior exactly.

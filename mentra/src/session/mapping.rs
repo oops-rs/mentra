@@ -143,12 +143,16 @@ fn map_event_inner(event: &AgentEvent, tool_names: &mut ToolNameIndex) -> Vec<Se
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
+            reasoning_tokens,
+            thoughts_tokens,
         } => vec![SessionEvent::UsageReport {
             agent_id: String::new(),
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
             cache_read_tokens: *cache_read_tokens,
             cache_creation_tokens: *cache_creation_tokens,
+            reasoning_tokens: *reasoning_tokens,
+            thoughts_tokens: *thoughts_tokens,
         }],
 
         // Events handled at Session level or intentionally silent at session layer.

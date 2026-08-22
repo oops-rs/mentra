@@ -148,11 +148,25 @@ pub enum AgentEvent {
         message: Message,
     },
     /// Token usage from a completed model response.
+    ///
+    /// `reasoning_tokens` and `thoughts_tokens` are the two ways a provider
+    /// breaks out what it spent thinking, and they do not mean the same thing:
+    /// the Responses wire reports `reasoning_tokens` as a slice already counted
+    /// inside `output_tokens`, while Gemini's `thoughts_tokens` is counted
+    /// outside its candidate tokens. They are carried separately so a host can
+    /// do the arithmetic its provider actually calls for; a provider that
+    /// reports neither — Anthropic bills thinking as ordinary output — leaves
+    /// both zero. [`ProviderDefinition::reports_reasoning_tokens`] and
+    /// `reports_thoughts_tokens` say which to expect.
+    ///
+    /// [`ProviderDefinition::reports_reasoning_tokens`]: crate::provider::ProviderDefinition::reports_reasoning_tokens
     UsageReport {
         input_tokens: u64,
         output_tokens: u64,
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
+        reasoning_tokens: u64,
+        thoughts_tokens: u64,
     },
     RunFinished,
     ToolExecutionProgress {

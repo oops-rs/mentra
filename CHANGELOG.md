@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### A usage report says what was spent thinking
+
+- `TokenUsage` has carried `reasoning_tokens` and `thoughts_tokens` since the
+  providers that report them were added, and both were dropped at the
+  four-field `AgentEvent::UsageReport`. A host watching the event stream could
+  see that a reasoning model cost more without being able to say how much of it
+  was reasoning.
+- Both now ride on `AgentEvent::UsageReport` and `SessionEvent::UsageReport`.
+  They stay two fields rather than one sum because the wires disagree about
+  what the number includes: the Responses wire reports `reasoning_tokens` as a
+  slice already inside `output_tokens`, Gemini reports `thoughts_tokens`
+  outside its candidate count, and Anthropic reports neither because it bills
+  thinking as ordinary output. `ProviderDefinition::reports_reasoning_tokens`
+  and `reports_thoughts_tokens` already say which to expect.
+- Matching on `UsageReport` without a `..` rest pattern needs the two new
+  fields.
+
 ### An agent keeps the tool results it read
 
 - `CompactionConfig::keep_recent_tool_results` defaulted to 3. The rewrite it
