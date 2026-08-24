@@ -60,6 +60,23 @@ pub enum NoticeSeverity {
 /// holding a non-finite float. It stays a `String` because that exact text is
 /// what a remembered rule's
 /// [`pattern`](crate::RuleKey::pattern) is matched against.
+///
+/// # Compatibility
+///
+/// This enum is deliberately **not** `#[non_exhaustive]`, and neither are its
+/// variants. The stream will keep growing — it has grown variants and fields
+/// already — and each growth is a source-breaking change a downstream `match`
+/// meets as a compile error. That error is the point. What consumes this
+/// stream is normalizing code that must account for every event to do its job,
+/// which is exactly the code a forced wildcard arm lets fall behind silently:
+/// with `#[non_exhaustive]`, a new variant compiles everywhere and renders
+/// nowhere, discovered at runtime as an event class that never appears. The
+/// attribute on each variant would also take away a host's ability to
+/// construct events at all, and hosts build them as fixtures to test their own
+/// rendering. Growth is announced in the changelog and carried by a
+/// semver-significant bump; the one-time `match` edit at upgrade is the cost,
+/// and it buys the compiler telling every consumer precisely where the stream
+/// changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {

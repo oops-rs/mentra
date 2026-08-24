@@ -68,6 +68,22 @@ impl ToolAuthorizationPreview {
 /// would read as a call that touches nothing, the one answer a policy must
 /// never be handed by accident. Where a classification may be absent, say so
 /// with an [`Option`].
+///
+/// # Wire format
+///
+/// The enums inside serialize in their derived form — PascalCase, externally
+/// tagged: `"ReplaySafe"`, `"External"`, `{"Custom":"network"}` — even though
+/// this type rides inside
+/// [`SessionEvent`](crate::session::SessionEvent), whose own tags and fields
+/// are snake_case. The mismatch is kept deliberately. The same five enums are
+/// shared with [`ToolAuthorizationPreview`], which has serialized this way
+/// since it shipped and is written verbatim into audit rows by the audit
+/// hook, so renaming their representation would change a released wire format
+/// and orphan recorded data — while reserializing them differently for this
+/// one field would have the same value print two ways in one API. One
+/// representation, consistent with itself, is the smaller surprise; a host
+/// parsing the event stream as JSON should expect PascalCase inside this
+/// field alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolClassification {
     pub capabilities: Vec<ToolCapability>,
