@@ -499,7 +499,8 @@ into the runtime under a namespaced `mcp__<server>__<tool>` name. Bridged tools
 run through the same authorization, result limiter, and paging path as builtin
 and custom tools.
 
-Two transports are supported, selected by which configuration type you register.
+Three transports are supported, selected by which configuration type you
+register.
 
 **stdio** spawns the server as a child process:
 
@@ -527,7 +528,47 @@ let runtime = Runtime::builder()
 # }
 ```
 
-**Legacy HTTP+SSE** reaches a hosted server over the network:
+**Streamable HTTP** reaches a hosted server over the network, and is the
+transport current MCP servers ship:
+
+```rust,no_run
+use mentra::{BuiltinProvider, McpStreamableHttpServerConfig, Runtime};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let runtime = Runtime::builder()
+    .with_provider(BuiltinProvider::Anthropic, std::env::var("ANTHROPIC_API_KEY")?)
+    .with_mcp_streamable_http_server(
+        McpStreamableHttpServerConfig::new("observability", "https://mcp.example.com/mcp")
+            .with_bearer_token(std::env::var("MCP_TOKEN")?),
+    )
+    .build_async()
+    .await?;
+# let _ = runtime;
+# Ok(())
+# }
+```
+
+Every JSON-RPC message is a `POST` to the one configured URL, sent with
+`Accept: application/json, text/event-stream` — a streamable-only server
+answers `406` to a request that does not offer both, because it chooses the
+framing per reply. The reply comes back on that same response, either as one
+JSON body or as an event stream the server opens in it. If `initialize` assigns
+an `Mcp-Session-Id`, every later request carries it and `shutdown` ends the
+session with a `DELETE`.
+
+Because a reply arrives on the response to the request that asked for it, this
+client needs no background reader and no pending-request map. It still matches
+each reply to its JSON-RPC id: on the streaming path a reply for a different id
+is skipped rather than returned, so a server cannot hand you another call's
+result by putting it on the wire first.
+
+Nothing is retried or replayed. A `tools/call` whose request may have reached
+the server but whose reply never arrived surfaces as
+`McpStreamableHttpError::RequestIndeterminate` — the tool may have run. A `4xx`
+is exempt, since those are rejections the server makes before dispatching the
+message; a `5xx` is not, because a server can fail after running the tool.
+
+**Legacy HTTP+SSE** reaches a hosted server that predates Streamable HTTP:
 
 ```rust,no_run
 use mentra::{BuiltinProvider, McpSseServerConfig, Runtime};
@@ -547,6 +588,8 @@ let runtime = Runtime::builder()
 ```
 
 A server that answers `404` on `/mcp` but serves `/sse` needs this transport.
+Reach for Streamable HTTP first; this one exists for servers that never
+implemented it.
 
 ### HTTP+SSE is not Streamable HTTP
 
