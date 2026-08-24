@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### `SessionEvent::MemoryUpdated` is emitted at last
+
+- The variant had been public since April while nothing sent it. The bridge
+  translating the runtime's `MemoryIngestFinished` into it was implemented and
+  tested from the start but registered nowhere, because the only hook list in
+  sight was the runtime's shared one — where a bridge holding one session's
+  channel would forward **every** agent's memory activity to whichever session
+  installed it.
+- The correct place existed all along: every session is already built on its
+  own `RuntimeHandle` clone, and each `with_*` step rebuilds that clone's
+  `MemoryEngine` from the hook list the clone carries. The bridge is now
+  appended to that per-session list in `create_session*` and `resume_session*`,
+  so a session's stream carries the memory events of exactly its own agents —
+  the session's agent and the subagents it spawns — and no other session's.
+- Behavior change for hosts: streams that never carried these events now do.
+  A successful ingest arrives as `MemoryUpdated { agent_id, stored_records }`
+  (including `stored_records: 0` for an ingest with nothing new to store), and
+  a failed ingest as a `Notice` with `Warning` severity.
+
 ### The other two MCP transports get the same pagination fixes
 
 - Review found the `tools/list` page-cap off-by-one and the unbounded tool

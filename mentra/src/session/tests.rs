@@ -3,6 +3,7 @@
     reason = "tests use unwrap to fail immediately on invalid fixtures"
 )]
 
+mod memory_events;
 mod terminal_output;
 
 use crate::session::event::*;

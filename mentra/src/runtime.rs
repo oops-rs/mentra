@@ -19,6 +19,7 @@ use crate::{
     provider::{Provider, ProviderRegistry},
     session::{
         Session, SessionEvent, SessionId, SessionMetadata,
+        hooks::SessionHookBridge,
         permission::{PendingPermissionStore, SessionToolAuthorizer},
     },
     tool::ExecutableTool,
@@ -712,6 +713,25 @@ impl Runtime {
         )
     }
 
+    /// The runtime's hook list plus a bridge into one session's event channel.
+    ///
+    /// Every session is built on its own [`RuntimeHandle`] clone, and each
+    /// `with_*` step rebuilds the handle's [`MemoryEngine`] from the hook list
+    /// the clone carries — so a hook appended here fires only for the agents
+    /// that run on this session's handle: the session's own agent and the
+    /// subagents it spawns. That containment is what makes registering the
+    /// bridge correct at all; on the runtime's shared list it would deliver
+    /// every agent's memory activity to whichever session installed it first.
+    ///
+    /// [`MemoryEngine`]: crate::memory::MemoryEngine
+    fn session_scoped_hooks(&self, event_tx: &broadcast::Sender<SessionEvent>) -> RuntimeHooks {
+        self.handle
+            .execution
+            .hooks
+            .clone()
+            .with_hook(SessionHookBridge::new(event_tx.clone()))
+    }
+
     fn build_session(
         &self,
         name: String,
@@ -728,14 +748,15 @@ impl Runtime {
         let (event_tx, _) = broadcast::channel(512);
         let rule_store = crate::session::RuleStore::new();
         let pending_permissions = PendingPermissionStore::new();
-        let session_handle =
-            self.handle
-                .with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
-                    self.handle.execution.tool_authorizer.clone(),
-                    event_tx.clone(),
-                    pending_permissions.clone(),
-                    rule_store.clone(),
-                )));
+        let session_handle = self
+            .handle
+            .with_hooks(self.session_scoped_hooks(&event_tx))
+            .with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
+                self.handle.execution.tool_authorizer.clone(),
+                event_tx.clone(),
+                pending_permissions.clone(),
+                rule_store.clone(),
+            )));
         let session_handle = match runtime_identifier {
             Some(identifier) => session_handle.with_runtime_identifier(identifier),
             None => session_handle,
@@ -799,14 +820,15 @@ impl Runtime {
         let (event_tx, _) = broadcast::channel(512);
         let rule_store = crate::session::RuleStore::new();
         let pending_permissions = PendingPermissionStore::new();
-        let session_handle =
-            self.handle
-                .with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
-                    self.handle.execution.tool_authorizer.clone(),
-                    event_tx.clone(),
-                    pending_permissions.clone(),
-                    rule_store.clone(),
-                )));
+        let session_handle = self
+            .handle
+            .with_hooks(self.session_scoped_hooks(&event_tx))
+            .with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
+                self.handle.execution.tool_authorizer.clone(),
+                event_tx.clone(),
+                pending_permissions.clone(),
+                rule_store.clone(),
+            )));
         let Some(state) = self.handle.store().load_agent(agent_id)? else {
             return Err(RuntimeError::Store(format!(
                 "No persisted agent with id '{agent_id}'"

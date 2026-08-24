@@ -193,20 +193,18 @@ pub enum SessionEvent {
     },
     /// How many records a memory ingest stored for an agent.
     ///
-    /// **Nothing emits this today.** A crate-internal hook bridge translates
-    /// the runtime's `MemoryIngestFinished` into this event and is fully
-    /// implemented and tested, but it is not registered anywhere, because
-    /// there is nowhere correct to register it yet: [`RuntimeHooks`] are built
-    /// once per runtime and shared by every session, while the channel this
-    /// event travels on belongs to a single session. Registering the bridge as
-    /// things stand would deliver every agent's memory activity to whichever
-    /// session happened to install it.
+    /// Emitted when a memory ingest finishes successfully for an agent running
+    /// on this session — the session's own agent after each completed turn,
+    /// and any subagent it spawned. `stored_records` can be `0`: an ingest
+    /// that found nothing new to store still reports that it ran. A failed
+    /// ingest arrives as a [`Notice`](Self::Notice) with
+    /// [`NoticeSeverity::Warning`] instead.
     ///
-    /// Documented rather than quietly left, so a host does not subscribe and
-    /// wait for something that cannot arrive. Wiring it needs per-session hook
-    /// routing, which is a design change rather than a missing call.
-    ///
-    /// [`RuntimeHooks`]: crate::runtime::RuntimeHooks
+    /// Only this session's agents reach this channel. Memory activity from
+    /// other sessions on the same runtime — or from an ingest a host drives
+    /// through the runtime directly — stays off the stream, so `agent_id`
+    /// distinguishes the session's own agent from its subagents, never one
+    /// session from another.
     MemoryUpdated {
         agent_id: String,
         stored_records: usize,
