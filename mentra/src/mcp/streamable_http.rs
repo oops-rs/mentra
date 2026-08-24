@@ -6,8 +6,8 @@
 //! server opens in that same response. Session continuity, when the server
 //! wants it, is an `Mcp-Session-Id` header rather than a URL parameter.
 //!
-//! See [`client`](crate::mcp::streamable_http::client) for the lifecycle and
-//! [`sse`](crate::mcp::sse) for the older transport this one supersedes.
+//! See [`client`] for the lifecycle and [`sse`](crate::mcp::sse) for the older
+//! transport this one supersedes.
 
 pub mod client;
 pub mod config;
