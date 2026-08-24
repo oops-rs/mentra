@@ -90,11 +90,86 @@ fn session_event_permission_requested_roundtrip() {
         tool_name: "shell".to_string(),
         description: "Execute shell command: rm -rf /tmp/foo".to_string(),
         preview: preview_json,
+        classification: Some(shell_classification()),
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "permission_requested");
     let deserialized: SessionEvent = serde_json::from_value(json).unwrap();
     assert_eq!(event, deserialized);
+}
+
+/// What a shell call is classified as, spelled out field by field so a change
+/// to any one of them shows up here.
+fn shell_classification() -> crate::tool::ToolClassification {
+    crate::tool::ToolClassification {
+        capabilities: vec![crate::tool::ToolCapability::ProcessExec],
+        side_effect_level: crate::tool::ToolSideEffectLevel::Process,
+        durability: crate::tool::ToolDurability::Ephemeral,
+        execution_category: crate::tool::ToolExecutionCategory::ExclusiveLocalMutation,
+        approval_category: crate::tool::ToolApprovalCategory::Process,
+    }
+}
+
+/// The whole point of the field: a host reading the event alone can tell a
+/// call that writes a local file from a call that reaches the network, and
+/// each classification field survives the round trip that a persisted event
+/// stream makes.
+#[test]
+fn a_permission_request_carries_every_classification_field() {
+    let classification = crate::tool::ToolClassification {
+        capabilities: vec![crate::tool::ToolCapability::Custom("network".to_string())],
+        side_effect_level: crate::tool::ToolSideEffectLevel::External,
+        durability: crate::tool::ToolDurability::Persistent,
+        execution_category: crate::tool::ToolExecutionCategory::BackgroundJob,
+        approval_category: crate::tool::ToolApprovalCategory::Background,
+    };
+    let event = SessionEvent::PermissionRequested {
+        request_id: "perm-1".to_string(),
+        tool_call_id: "tc-1".to_string(),
+        tool_name: "fetch_url".to_string(),
+        description: "Fetch https://example.com".to_string(),
+        preview: r#"{"url":"https://example.com"}"#.to_string(),
+        classification: Some(classification.clone()),
+    };
+
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["classification"]["side_effect_level"], "External");
+
+    let deserialized: SessionEvent = serde_json::from_value(json).unwrap();
+    let SessionEvent::PermissionRequested {
+        classification: restored,
+        ..
+    } = deserialized
+    else {
+        panic!("expected PermissionRequested");
+    };
+    assert_eq!(restored, Some(classification));
+}
+
+/// A host that persists this stream replays it after upgrading, and every
+/// event it stored before the field existed has no `classification` key at
+/// all. Without a serde default the replay fails outright, so the missing key
+/// has to read as "nobody recorded one".
+#[test]
+fn a_permission_request_stored_before_classification_existed_still_loads() {
+    let stored = serde_json::json!({
+        "type": "permission_requested",
+        "request_id": "perm-1",
+        "tool_call_id": "tc-1",
+        "tool_name": "shell",
+        "description": "Execute shell command: ls",
+        "preview": "{\"command\":\"ls\"}"
+    });
+
+    let event: SessionEvent = serde_json::from_value(stored).unwrap();
+    let SessionEvent::PermissionRequested { classification, .. } = event else {
+        panic!("expected PermissionRequested");
+    };
+    assert_eq!(
+        classification, None,
+        "an event recorded before the field existed knows nothing about the call, \
+         and must not be readable as a call that touches nothing"
+    );
 }
 
 #[test]
@@ -177,6 +252,7 @@ fn all_session_event_variants_serialize_with_type_tag() {
             tool_name: "shell".to_string(),
             description: "run command".to_string(),
             preview: "{}".to_string(),
+            classification: Some(shell_classification()),
         },
         SessionEvent::PermissionResolved {
             request_id: "p1".to_string(),
@@ -1056,6 +1132,104 @@ async fn tool_call_session_produces_tool_lifecycle_events() {
         has_tool_completed,
         "Expected ToolCompleted event for tool-1, got: {events:?}"
     );
+}
+
+/// A tool that reaches the network and says so. Nothing else in the run
+/// declares an external side effect, so a level read off the permission event
+/// can only have come from this descriptor.
+#[derive(Clone)]
+struct NetworkFetchTool;
+
+#[async_trait]
+impl ToolDefinition for NetworkFetchTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("fetch_url")
+            .description("Fetch a URL over the network")
+            .input_schema(json!({
+                "type": "object",
+                "properties": {}
+            }))
+            .capability(crate::tool::ToolCapability::Custom("network".to_string()))
+            .side_effect_level(crate::tool::ToolSideEffectLevel::External)
+            .approval_category(crate::tool::ToolApprovalCategory::Process)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for NetworkFetchTool {
+    async fn execute(&self, _ctx: ParallelToolContext, _input: serde_json::Value) -> ToolResult {
+        Ok("fetched".to_string())
+    }
+}
+
+/// The end-to-end claim: a level declared on a tool descriptor reaches a host
+/// subscribed to the session stream, without the host parsing the preview or
+/// keeping a table of tool names. This is what makes "allow edits, refuse the
+/// network" writable from the event alone.
+#[tokio::test]
+async fn a_prompted_call_reports_the_side_effect_level_its_tool_declared() {
+    let mock = MockRuntime::builder()
+        .with_tool_authorizer(PromptingAuthorizer)
+        .tool_calls([MockToolCall::new("fetch_url", json!({}))])
+        .text("fetched the page")
+        .build()
+        .unwrap();
+    mock.runtime().register_tool(NetworkFetchTool);
+
+    let mut session = mock
+        .runtime()
+        .create_session("classification-test", mock.model())
+        .unwrap();
+    let permissions = session.permission_handle();
+    let mut rx = session.subscribe();
+
+    let turn = tokio::spawn(async move {
+        session
+            .append_turn(vec![ContentBlock::text("fetch the page")])
+            .await
+    });
+
+    let (request_id, classification) = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a permission request should arrive")
+            .expect("the session stream should stay open");
+        if let SessionEvent::PermissionRequested {
+            request_id,
+            classification,
+            ..
+        } = event
+        {
+            break (request_id, classification);
+        }
+    };
+
+    let classification =
+        classification.expect("a permission request the session emits always carries one");
+    assert_eq!(
+        classification.side_effect_level,
+        crate::tool::ToolSideEffectLevel::External,
+        "the level the descriptor declared has to survive to the session stream"
+    );
+    assert_eq!(
+        classification.capabilities,
+        vec![crate::tool::ToolCapability::Custom("network".to_string())]
+    );
+    assert_eq!(
+        classification.approval_category,
+        crate::tool::ToolApprovalCategory::Process
+    );
+
+    permissions
+        .resolve_permission(&request_id, PermissionDecision::allow())
+        .unwrap();
+
+    let message = turn
+        .await
+        .expect("the turn task should finish")
+        .expect("the turn should succeed");
+    assert_eq!(message.text(), "fetched the page");
 }
 
 #[derive(Clone)]

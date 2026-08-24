@@ -33,6 +33,54 @@ pub struct ToolAuthorizationPreview {
     pub structured_input: Value,
 }
 
+impl ToolAuthorizationPreview {
+    /// What this call was classified as, without its input.
+    ///
+    /// The classification is the part a policy reasons about, and it is the
+    /// part that survives past the authorizer — see [`ToolClassification`].
+    pub fn classification(&self) -> ToolClassification {
+        self.into()
+    }
+}
+
+/// What the runtime worked out about a tool call before anyone was asked to
+/// approve it: what it can touch, how far its effects reach, whether it can be
+/// replayed, which scheduler lane it runs in, and which approval group it
+/// falls under.
+///
+/// This is [`ToolAuthorizationPreview`] with the call's input left off. The
+/// input already travels beside it wherever this type is carried, and the
+/// classification alone is what a policy matches on: "allow edits, refuse the
+/// network" is [`ToolSideEffectLevel::LocalState`] against
+/// [`ToolSideEffectLevel::External`], a distinction that no amount of reading
+/// tool names and parsing arguments recovers reliably.
+///
+/// Deliberately not [`Default`]: the zero value of every field here is its
+/// most permissive one, so a classification conjured from nothing would read
+/// as a call that touches nothing — the one answer a policy must never be
+/// handed by accident. Where a classification may be absent, say so with an
+/// [`Option`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolClassification {
+    pub capabilities: Vec<ToolCapability>,
+    pub side_effect_level: ToolSideEffectLevel,
+    pub durability: ToolDurability,
+    pub execution_category: ToolExecutionCategory,
+    pub approval_category: ToolApprovalCategory,
+}
+
+impl From<&ToolAuthorizationPreview> for ToolClassification {
+    fn from(preview: &ToolAuthorizationPreview) -> Self {
+        Self {
+            capabilities: preview.capabilities.clone(),
+            side_effect_level: preview.side_effect_level,
+            durability: preview.durability,
+            execution_category: preview.execution_category,
+            approval_category: preview.approval_category,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolAuthorizationDecision {
     pub outcome: ToolAuthorizationOutcome,

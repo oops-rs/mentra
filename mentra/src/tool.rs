@@ -19,7 +19,7 @@ use std::{collections::HashMap, sync::Arc};
 
 pub use authorization::{
     ToolAuthorizationDecision, ToolAuthorizationOutcome, ToolAuthorizationPreview,
-    ToolAuthorizationRequest, ToolAuthorizer,
+    ToolAuthorizationRequest, ToolAuthorizer, ToolClassification,
 };
 pub use descriptor::{
     ProviderToolSpec, RuntimeToolDescriptor, RuntimeToolDescriptorBuilder, ToolApprovalCategory,

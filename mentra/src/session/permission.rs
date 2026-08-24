@@ -364,6 +364,9 @@ impl ToolAuthorizer for SessionToolAuthorizer {
             tool_name: request.tool_name.clone(),
             description,
             preview,
+            // Nothing downstream can work this out again: this is the last
+            // layer holding the preview the authorizer was given.
+            classification: Some(request.preview.classification()),
         });
 
         let resolved = receiver
@@ -396,8 +399,8 @@ mod tests {
     use serde_json::json;
 
     use crate::tool::{
-        ToolApprovalCategory, ToolAuthorizationPreview, ToolCapability, ToolDurability,
-        ToolExecutionCategory, ToolSideEffectLevel,
+        ToolApprovalCategory, ToolAuthorizationPreview, ToolCapability, ToolClassification,
+        ToolDurability, ToolExecutionCategory, ToolSideEffectLevel,
     };
 
     #[derive(Clone)]
@@ -503,6 +506,60 @@ mod tests {
             .expect("authorization should resume")
             .expect("task should succeed");
         assert_eq!(decision.outcome, ToolAuthorizationOutcome::Allow);
+    }
+
+    /// The classification is the one thing on this event nothing downstream
+    /// can recompute: the session authorizer is the last layer holding the
+    /// preview, and everything past it sees only the event.
+    #[tokio::test]
+    async fn the_emitted_request_carries_the_classification_the_authorizer_saw() {
+        let (event_tx, mut rx) = broadcast::channel(8);
+        let pending = PendingPermissionStore::new();
+        let authorizer = SessionToolAuthorizer::new(
+            Some(Arc::new(PromptAuthorizer)),
+            event_tx,
+            pending.clone(),
+            RuleStore::new(),
+        );
+        let request = sample_request();
+
+        let authorize_task = tokio::spawn({
+            let authorizer = authorizer.clone();
+            let request = request.clone();
+            async move { authorizer.authorize(&request).await.unwrap() }
+        });
+
+        let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("permission request should arrive")
+            .expect("event should be present");
+        let SessionEvent::PermissionRequested {
+            request_id,
+            classification,
+            ..
+        } = event
+        else {
+            panic!("expected PermissionRequested, got {event:?}");
+        };
+
+        assert_eq!(
+            classification.as_ref(),
+            Some(&ToolClassification::from(&request.preview)),
+            "every classification field the authorizer was given has to reach the event"
+        );
+        assert_eq!(
+            classification.map(|classification| classification.side_effect_level),
+            Some(ToolSideEffectLevel::Process),
+            "a host reading only the event can tell a process launch from a local write"
+        );
+
+        pending
+            .remove(&request_id)
+            .expect("pending permission should be registered")
+            .sender
+            .send(PermissionDecision::allow())
+            .expect("decision send should succeed");
+        authorize_task.await.expect("task should succeed");
     }
 
     /// Runs one authorize-and-resolve round trip, answering with `decision`,

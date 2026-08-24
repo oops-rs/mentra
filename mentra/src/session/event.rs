@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::types::SessionId;
+use crate::tool::ToolClassification;
 
 pub type EventSeq = u64;
 
@@ -53,9 +54,12 @@ pub enum NoticeSeverity {
 
 /// Events emitted during a session lifecycle.
 ///
-/// `serde_json::Value` does not implement `Eq`, so the `preview` field in
-/// `PermissionRequested` is stored as a JSON `String` to preserve `Eq`
-/// derivation on the entire enum.
+/// The enum derives `Eq`, so every field of every variant has to. That is not
+/// what keeps [`PermissionRequested::preview`](Self::PermissionRequested) a
+/// `String`: `serde_json` does implement `Eq` for `Value`, a `Value` never
+/// holding a non-finite float. It stays a `String` because that exact text is
+/// what a remembered rule's
+/// [`pattern`](crate::RuleKey::pattern) is matched against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
@@ -112,9 +116,36 @@ pub enum SessionEvent {
         tool_call_id: String,
         tool_name: String,
         description: String,
-        /// JSON-encoded preview data. Stored as `String` because
-        /// `serde_json::Value` does not implement `Eq`.
+        /// The call's structured input, JSON-encoded.
+        ///
+        /// This is byte-for-byte the text a
+        /// [`RuleKey::pattern`](crate::RuleKey::pattern) is matched against, so
+        /// a host can write a remembered rule straight from what it showed the
+        /// user and know the rule will answer this call.
+        ///
+        /// It describes the call's arguments and nothing else — what the call
+        /// is allowed to do is `classification`, which is typed for the
+        /// purpose and needs no parsing.
         preview: String,
+        /// What the call was classified as before the approver was asked.
+        ///
+        /// A host subscribed to this stream can write a policy against what a
+        /// call *does* rather than against its name: "allow edits, refuse the
+        /// network" is [`ToolSideEffectLevel::LocalState`] against
+        /// [`ToolSideEffectLevel::External`], readable from this field alone.
+        ///
+        /// [`None`] only on an event deserialized from a stream recorded
+        /// before this field existed; every request a session emits carries
+        /// [`Some`]. It is an [`Option`] rather than a defaulted
+        /// [`ToolClassification`] because an absent classification is unknown,
+        /// not harmless — a default would let a replayed event read as a call
+        /// that touches nothing, and a policy has to decide for itself what to
+        /// do with one it cannot classify.
+        ///
+        /// [`ToolSideEffectLevel::LocalState`]: crate::tool::ToolSideEffectLevel::LocalState
+        /// [`ToolSideEffectLevel::External`]: crate::tool::ToolSideEffectLevel::External
+        #[serde(default)]
+        classification: Option<ToolClassification>,
     },
     PermissionResolved {
         request_id: String,
