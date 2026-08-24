@@ -39,6 +39,7 @@ pub mod manager;
 pub mod protocol;
 pub mod secret;
 pub mod sse;
+pub mod streamable_http;
 
 #[cfg(test)]
 mod registration_tests;
@@ -53,3 +54,6 @@ pub use secret::SecretString;
 pub use sse::client::{McpSseClient, McpSseError};
 pub use sse::config::{McpSseConfigError, McpSseLimits, McpSseServerConfig};
 pub use sse::endpoint::EndpointError;
+pub use streamable_http::config::{
+    McpStreamableHttpConfigError, McpStreamableHttpLimits, McpStreamableHttpServerConfig,
+};
