@@ -186,11 +186,16 @@ async fn a_protocol_version_that_cannot_be_a_header_falls_back_to_our_own() {
 #[tokio::test]
 async fn a_reply_answering_a_different_request_is_refused() {
     // A reply is identified by its id, never by being the next thing on the
-    // wire. Accepting a mismatched id would hand a caller another call's result.
+    // wire. Accepting a mismatched id would hand a caller another call's
+    // result. For a `tools/call` the refusal is reported as indeterminate
+    // rather than as the mismatch itself: the server answered 2xx, so the call
+    // reached it and may have run, and "do not retry this" is the part a
+    // caller must not lose. The precise diagnostic survives on the handshake
+    // methods, which are safe to repeat -- see the test below.
     let fixture = StreamableHttpFixture::start_with(
         ReplyMode::Json,
         ServerBehavior {
-            mismatch_tool_call_id: true,
+            mismatch_reply_id_on: Some("tools/call".to_string()),
             ..ServerBehavior::default()
         },
     );
@@ -201,10 +206,33 @@ async fn a_reply_answering_a_different_request_is_refused() {
         .await
         .expect_err("a reply for another request must not be accepted");
     assert!(
+        matches!(error, McpStreamableHttpError::RequestIndeterminate { .. }),
+        "expected an indeterminate call, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_mismatched_reply_to_a_handshake_request_keeps_its_diagnostic() {
+    // `tools/list` is idempotent, so there is nothing to be careful about and
+    // no reason to blur what went wrong. This is the half of the reply-id check
+    // that still names itself.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            mismatch_reply_id_on: Some("tools/list".to_string()),
+            ..ServerBehavior::default()
+        },
+    );
+    let config = McpStreamableHttpServerConfig::new("fixture", fixture.endpoint());
+
+    let error = McpStreamableHttpClient::connect(&config)
+        .await
+        .expect_err("a reply for another request must not be accepted");
+    assert!(
         matches!(
             error,
             McpStreamableHttpError::MismatchedReplyId {
-                method: "tools/call"
+                method: "tools/list"
             }
         ),
         "expected a mismatched reply id, got {error:?}"
@@ -219,7 +247,7 @@ async fn a_streamed_reply_answering_a_different_request_is_not_accepted() {
     let fixture = StreamableHttpFixture::start_with(
         ReplyMode::EventStream,
         ServerBehavior {
-            mismatch_tool_call_id: true,
+            mismatch_reply_id_on: Some("tools/call".to_string()),
             ..ServerBehavior::default()
         },
     );
@@ -387,5 +415,154 @@ async fn an_unreachable_endpoint_fails_rather_than_hanging() {
     assert!(
         matches!(error, McpStreamableHttpError::Transport(_)),
         "expected a transport failure, got {error:?}"
+    );
+}
+
+/// Limits small enough that a stalled server fails a test in milliseconds
+/// rather than sitting out the shipped minute-scale deadlines.
+fn brisk_limits() -> McpStreamableHttpLimits {
+    McpStreamableHttpLimits {
+        connect_timeout: Duration::from_millis(500),
+        initialize_timeout: Duration::from_millis(300),
+        list_tools_timeout: Duration::from_millis(300),
+        call_tool_timeout: Duration::from_millis(300),
+        stream_idle_timeout: Duration::from_millis(200),
+        ..McpStreamableHttpLimits::default()
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_notification_body_cannot_hang_the_handshake() {
+    // `send()` resolves on the response head and the body streams lazily, so a
+    // server that promises a body and then goes quiet stalls anything reading
+    // that body without a deadline of its own. This ran inside `connect`,
+    // which `RuntimeBuilder::build_async` calls serially with no timeout above
+    // it -- so one such server hung the entire runtime build.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            stall_after_headers_on: Some("notifications/initialized".to_string()),
+            ..ServerBehavior::default()
+        },
+    );
+    let config = McpStreamableHttpServerConfig::new("fixture", fixture.endpoint())
+        .with_limits(brisk_limits());
+
+    // The outer bound is the assertion: without one, a regression here does not
+    // fail the suite, it hangs it.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        McpStreamableHttpClient::connect(&config),
+    )
+    .await
+    .expect("connect must observe its own deadline rather than hang");
+
+    let error = outcome.expect_err("a server that never sends the body must fail the handshake");
+    assert!(
+        matches!(error, McpStreamableHttpError::Timeout(_)),
+        "expected a timeout, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stalled_json_reply_reports_the_call_as_indeterminate() {
+    // The server took the call and answered 200 with a Content-Length, then
+    // stopped. The tool may well have run, and the reply framing the server
+    // happened to pick must not change that answer.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            stall_after_headers_on: Some("tools/call".to_string()),
+            ..ServerBehavior::default()
+        },
+    );
+    let config = McpStreamableHttpServerConfig::new("fixture", fixture.endpoint())
+        .with_limits(brisk_limits());
+    let client = McpStreamableHttpClient::connect(&config)
+        .await
+        .expect("the handshake should complete");
+
+    let error = tokio::time::timeout(Duration::from_secs(10), client.call_tool("echo", None))
+        .await
+        .expect("the call must observe its own deadline rather than hang")
+        .expect_err("a reply that never arrives is not a success");
+
+    assert!(
+        matches!(error, McpStreamableHttpError::RequestIndeterminate { .. }),
+        "a call whose reply was lost may have run; got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_server_error_after_the_call_was_accepted_is_indeterminate() {
+    // A 5xx can be produced after the application has already run the tool.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            tool_call_status: Some(500),
+            ..ServerBehavior::default()
+        },
+    );
+    let client = connect(&fixture).await;
+
+    let error = client
+        .call_tool("echo", None)
+        .await
+        .expect_err("a 500 is not a successful call");
+    assert!(
+        matches!(error, McpStreamableHttpError::RequestIndeterminate { .. }),
+        "a 5xx can follow a tool that already ran; got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_client_error_on_the_call_is_a_definite_rejection() {
+    // The other half of the split: a 4xx is refused before dispatch, so the
+    // caller can retry without risking a second execution.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            tool_call_status: Some(401),
+            ..ServerBehavior::default()
+        },
+    );
+    let client = connect(&fixture).await;
+
+    let error = client
+        .call_tool("echo", None)
+        .await
+        .expect_err("a 401 is not a successful call");
+    assert!(
+        matches!(
+            error,
+            McpStreamableHttpError::HttpStatus { status, .. }
+                if status == reqwest::StatusCode::UNAUTHORIZED
+        ),
+        "a 4xx is refused before dispatch; got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_server_reported_tool_failure_stays_a_definite_answer() {
+    // The classification must not swallow the one case that *is* an answer: a
+    // JSON-RPC error means the tool ran and reported failure. Reporting that as
+    // indeterminate would tell a caller to treat a completed failure as a
+    // maybe.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            tool_call_fails: true,
+            ..ServerBehavior::default()
+        },
+    );
+    let client = connect(&fixture).await;
+
+    let error = client
+        .call_tool("echo", None)
+        .await
+        .expect_err("the server reported a tool failure");
+    assert!(
+        matches!(error, McpStreamableHttpError::JsonRpc(_)),
+        "a reported failure is a definite answer; got {error:?}"
     );
 }

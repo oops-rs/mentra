@@ -104,12 +104,26 @@ pub(crate) struct ServerBehavior {
     pub(crate) session_id: Option<String>,
     /// Answer `tools/call` with a JSON-RPC error instead of a result.
     pub(crate) tool_call_fails: bool,
-    /// Answer `tools/call` with an id that is not the one requested.
-    pub(crate) mismatch_tool_call_id: bool,
+    /// Answer this JSON-RPC method with an id that is not the one requested.
+    pub(crate) mismatch_reply_id_on: Option<String>,
     /// Answer every request with this HTTP status and an empty body.
     pub(crate) http_status: Option<u16>,
     /// The protocol version reported by `initialize`.
     pub(crate) protocol_version: Option<String>,
+    /// Write the response head for this JSON-RPC method, then stop.
+    ///
+    /// The head promises a body with `Content-Length` and none arrives, and the
+    /// connection stays open. This is the shape a client must survive and the
+    /// one no fixture here could produce: `reqwest` resolves `send()` on the
+    /// head, so any read of the body afterwards that is not itself bounded
+    /// waits forever.
+    pub(crate) stall_after_headers_on: Option<String>,
+    /// Answer `tools/call` with this HTTP status, after a successful handshake.
+    ///
+    /// Distinct from `http_status`, which applies to every request and so
+    /// cannot get past `initialize` -- which is why nothing could reach the
+    /// post-handshake failure classification.
+    pub(crate) tool_call_status: Option<u16>,
 }
 
 impl ServerBehavior {
@@ -133,6 +147,24 @@ fn answer(
         return write_raw(stream, status, "text/plain", "", &HashMap::new());
     }
 
+    if let Some(stall_on) = &behavior.stall_after_headers_on
+        && request.rpc_method().as_deref() == Some(stall_on.as_str())
+    {
+        // A head promising a body, and then silence. The connection is left
+        // open deliberately: closing it would give the client an EOF, which is
+        // the case that already worked.
+        let framing = if request.rpc_id().is_some() {
+            "application/json"
+        } else {
+            "text/plain"
+        };
+        let head =
+            format!("HTTP/1.1 200 OK\r\nContent-Type: {framing}\r\nContent-Length: 4096\r\n\r\n");
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.flush();
+        return true;
+    }
+
     // Session termination, which the client sends on shutdown.
     if request.method == "DELETE" {
         return write_raw(stream, 200, "text/plain", "", &HashMap::new());
@@ -146,6 +178,12 @@ fn answer(
     let Some(id) = request.rpc_id() else {
         return write_raw(stream, 202, "text/plain", "", &HashMap::new());
     };
+
+    if let Some(status) = behavior.tool_call_status
+        && method == "tools/call"
+    {
+        return write_raw(stream, status, "text/plain", "", &HashMap::new());
+    }
 
     let result = match method.as_str() {
         "initialize" => json!({
@@ -179,7 +217,7 @@ fn answer(
         }
     };
 
-    let reply_id = if behavior.mismatch_tool_call_id && method == "tools/call" {
+    let reply_id = if behavior.mismatch_reply_id_on.as_deref() == Some(method.as_str()) {
         json!(id + 1_000)
     } else {
         json!(id)

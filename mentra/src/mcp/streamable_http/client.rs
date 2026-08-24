@@ -377,12 +377,28 @@ impl McpStreamableHttpClient {
             self.adopt_session(response.headers());
         }
 
+        // Past this point the server has answered 2xx: the request reached the
+        // application and a `tools/call` may already have run. Everything that
+        // can go wrong between here and a parsed reply therefore leaves the
+        // caller unable to tell whether the tool ran, so it is classified once,
+        // here, rather than at each of the seven places it can fail.
+        self.read_reply(method, response, id)
+            .await
+            .map_err(|error| reply_failure(method, error))
+    }
+
+    /// Reads the reply the server put on this response.
+    async fn read_reply(
+        &self,
+        method: &'static str,
+        response: reqwest::Response,
+        id: u64,
+    ) -> Result<JsonValue, McpStreamableHttpError> {
         // A 202 means accepted-for-processing with no reply, which is correct
         // for a notification and a protocol violation in answer to a request.
-        // For a tools/call it is precisely the indeterminate case.
         if response.status() == reqwest::StatusCode::ACCEPTED {
             drain_bounded(response).await;
-            return Err(indeterminate(method));
+            return Err(McpStreamableHttpError::StreamClosed { method });
         }
 
         match reply_framing(&response)? {
@@ -400,13 +416,25 @@ impl McpStreamableHttpClient {
     /// Sends a JSON-RPC notification, which expects no reply.
     async fn notify(&self, method: &str, timeout: Duration) -> Result<(), McpStreamableHttpError> {
         let notification = serde_json::json!({"jsonrpc": "2.0", "method": method});
-        let response = tokio::time::timeout(timeout, self.post("POST", &notification))
+
+        // The deadline must cover the drain, not just the POST. `send()`
+        // resolves on the response *head* and the body streams lazily, so a
+        // server that promises a body with `Content-Length` and then goes
+        // quiet leaves an undeadlined drain waiting forever -- and this
+        // notification runs inside `connect`, which runs inside a serial loop
+        // in `RuntimeBuilder::build_async`. One such server would hang the
+        // whole runtime build rather than degrade its own connection.
+        let operation = async {
+            let response = self.post("POST", &notification).await?;
+            // A notification's 202 carries no body, but draining keeps the
+            // connection reusable for the rest of the handshake.
+            drain_bounded(response).await;
+            Ok(())
+        };
+
+        tokio::time::timeout(timeout, operation)
             .await
-            .map_err(|_| McpStreamableHttpError::Timeout(timeout))??;
-        // A notification's 202 carries no body, but draining keeps the
-        // connection reusable for the rest of the handshake.
-        drain_bounded(response).await;
-        Ok(())
+            .map_err(|_| McpStreamableHttpError::Timeout(timeout))?
     }
 
     /// `POST`s one JSON-RPC message and returns the accepted response.
@@ -590,12 +618,9 @@ impl McpStreamableHttpClient {
             }
         }
 
-        // The stream ended without the reply. For a tools/call the server may
-        // have run the tool before the stream died.
-        Err(match method {
-            "tools/call" => indeterminate(method),
-            _ => McpStreamableHttpError::StreamClosed { method },
-        })
+        // The stream ended without the reply. `reply_failure` decides what
+        // that means for the method that asked.
+        Err(McpStreamableHttpError::StreamClosed { method })
     }
 
     /// Performs the `initialize` handshake and the follow-up notification.
@@ -726,6 +751,29 @@ fn indeterminate(method: &str) -> McpStreamableHttpError {
         McpStreamableHttpError::StreamClosed {
             method: "the handshake",
         }
+    }
+}
+
+/// Converts a post-send failure into the certainty a caller needs.
+///
+/// Once the server has answered 2xx the request reached the application, so a
+/// `tools/call` may already have run: a body that never arrives, a reply in a
+/// framing this client cannot read, a stream that dies mid-flight and a reply
+/// that does not parse are all indistinguishable from "the tool ran and the
+/// answer was lost".
+///
+/// Two exceptions. A JSON-RPC error *is* the answer -- the tool ran and
+/// reported failure -- and an already-indeterminate error is left alone rather
+/// than re-wrapped.
+fn reply_failure(method: &str, error: McpStreamableHttpError) -> McpStreamableHttpError {
+    if method != "tools/call" {
+        return error;
+    }
+
+    match error {
+        McpStreamableHttpError::JsonRpc(_)
+        | McpStreamableHttpError::RequestIndeterminate { .. } => error,
+        _ => indeterminate(method),
     }
 }
 
