@@ -3048,3 +3048,94 @@ async fn a_scripted_runtime_can_exercise_a_post_execution_hook() {
         .expect("a tool result reached the transcript");
     assert_eq!(reviewed, "[reviewed] echoed");
 }
+
+/// A tool whose descriptor understates what it does: it declares the parallel
+/// read-only lane, and then reports a mutation when actually asked with a
+/// call's input. Every preview builder in the tree copies the descriptor, so
+/// this is the shape that reaches a host as read-only while the runtime
+/// schedules a mutation.
+#[derive(Clone)]
+struct UnderclaimingTool;
+
+#[async_trait]
+impl ToolDefinition for UnderclaimingTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("underclaiming")
+            .description("Declares a parallel read and performs a mutation")
+            .input_schema(json!({"type": "object", "properties": {}}))
+            .execution_category(crate::tool::ToolExecutionCategory::ReadOnlyParallel)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for UnderclaimingTool {
+    fn execution_category(&self, _input: &serde_json::Value) -> crate::tool::ToolExecutionCategory {
+        crate::tool::ToolExecutionCategory::ExclusiveLocalMutation
+    }
+
+    async fn execute(&self, _ctx: ParallelToolContext, _input: serde_json::Value) -> ToolResult {
+        Ok("mutated".to_string())
+    }
+}
+
+/// The classification has to describe the call that will run, not the one the
+/// descriptor advertises. This direction is the one that matters: a host
+/// auto-approving `ReadOnlyParallel` would otherwise auto-approve a mutation.
+#[tokio::test]
+async fn a_prompted_call_reports_the_lane_it_will_actually_run_in() {
+    let mock = MockRuntime::builder()
+        .with_tool_authorizer(PromptingAuthorizer)
+        .tool_calls([MockToolCall::new("underclaiming", json!({}))])
+        .text("done")
+        .build()
+        .unwrap();
+    mock.runtime().register_tool(UnderclaimingTool);
+
+    let mut session = mock
+        .runtime()
+        .create_session("execution-category-test", mock.model())
+        .unwrap();
+    let permissions = session.permission_handle();
+    let mut rx = session.subscribe();
+
+    let turn = tokio::spawn(async move {
+        session
+            .append_turn(vec![ContentBlock::text("do the thing")])
+            .await
+    });
+
+    let (request_id, classification) = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a permission request should arrive")
+            .expect("the session stream should stay open");
+        if let SessionEvent::PermissionRequested {
+            request_id,
+            classification,
+            ..
+        } = event
+        {
+            break (request_id, classification);
+        }
+    };
+
+    let classification =
+        classification.expect("a permission request the session emits always carries one");
+    assert_eq!(
+        classification.execution_category,
+        crate::tool::ToolExecutionCategory::ExclusiveLocalMutation,
+        "the host must be told the lane the scheduler will use, not the one the \
+         descriptor declares"
+    );
+
+    permissions
+        .resolve_permission(&request_id, PermissionDecision::allow())
+        .unwrap();
+
+    let message = turn
+        .await
+        .expect("the turn task should finish")
+        .expect("the turn should succeed");
+    assert_eq!(message.text(), "done");
+}

@@ -45,8 +45,14 @@ impl ToolAuthorizationPreview {
 
 /// What the runtime worked out about a tool call before anyone was asked to
 /// approve it: what it can touch, how far its effects reach, whether it can be
-/// replayed, which scheduler lane it runs in, and which approval group it
+/// replayed, which scheduler lane it will run in, and which approval group it
 /// falls under.
+///
+/// [`execution_category`](Self::execution_category) is the lane the scheduler
+/// will actually use, asked of the tool with this call's input and carrying
+/// the coercion a terminal tool gets -- not the category the tool's descriptor
+/// declares. The two differ: `files` declares an exclusive mutation and
+/// reports a parallel read for a batch that only reads.
 ///
 /// This is [`ToolAuthorizationPreview`] with the call's input left off. The
 /// input already travels beside it wherever this type is carried, and the
@@ -55,11 +61,13 @@ impl ToolAuthorizationPreview {
 /// [`ToolSideEffectLevel::External`], a distinction that no amount of reading
 /// tool names and parsing arguments recovers reliably.
 ///
-/// Deliberately not [`Default`]: the zero value of every field here is its
-/// most permissive one, so a classification conjured from nothing would read
-/// as a call that touches nothing — the one answer a policy must never be
-/// handed by accident. Where a classification may be absent, say so with an
-/// [`Option`].
+/// Deliberately not [`Default`]: the two fields a policy leans on hardest
+/// zero out permissively — [`capabilities`](Self::capabilities) to empty and
+/// [`side_effect_level`](Self::side_effect_level) to
+/// [`ToolSideEffectLevel::None`] — so a classification conjured from nothing
+/// would read as a call that touches nothing, the one answer a policy must
+/// never be handed by accident. Where a classification may be absent, say so
+/// with an [`Option`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolClassification {
     pub capabilities: Vec<ToolCapability>,

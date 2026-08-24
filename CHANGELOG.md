@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### A permission request names the lane a call will actually run in
+
+- `ToolClassification::execution_category` reported the category a tool's
+  descriptor *declares*, while the scheduler asks the tool with the call's
+  input and then coerces a terminal tool out of a parallel lane. Every preview
+  builder in the tree copied the static value, so the two could disagree — and
+  they already did on a builtin: `files` declares an exclusive mutation and
+  reports a parallel read for a batch that only reads.
+- In-tree that direction was conservative. The mirror shape is not, and it is
+  the one a host will write: a tool declaring `ReadOnlyParallel` while
+  returning a mutating category from `execution_category(input)` was reported
+  to the host as read-only-parallel while the runtime scheduled a mutation, so
+  a host auto-approving `ReadOnlyParallel` auto-approved it.
+- The authorization path now reads the scheduler's own answer rather than the
+  descriptor's, which fixes every tool at once instead of the preview builders
+  that remember to. Found by adversarial review of the field as it landed.
+
 ### The Streamable HTTP transport survives the servers it will meet
 
 Adversarial review of the transport as it landed turned up ten defects. The
@@ -132,6 +149,14 @@ its test fail rather than pass quietly.
   saying why rather than looking unfinished. Its three values cannot separate a
   local write from a process launch from a network call, which is the whole
   distinction this change is about; a host wanting that reads `classification`.
+- **Breaking**: `SessionEvent` is not `#[non_exhaustive]`, so a downstream
+  `PermissionRequested { .. }` pattern without a trailing `..`, or a literal
+  constructing the variant, stops compiling.
+- The classification describes the call as it stood when the approver was
+  asked. A pre-execution hook returning `Modify` runs afterwards and can
+  replace the input, so for an input-dependent classification the executed call
+  may classify differently — a host defeating its own policy, but previously
+  undocumented.
 
 ### A tool can be registered through a pointer
 
@@ -149,6 +174,15 @@ its test fail rather than pass quietly.
   host's tool to the approver as something other than what it is — so a test
   wraps a tool whose defaulted methods all return non-default values and
   asserts each one observed through the pointer is the inner tool's.
+- **Breaking, narrowly**: `Box` is `#[fundamental]`, so a downstream crate
+  could previously write `impl ToolDefinition for Box<ItsOwnTool>` and now
+  collides with mentra's blanket impl. There is no `Arc` equivalent, since the
+  orphan rules never permitted one. The pattern this breaks is precisely the
+  hand-written forwarding the change exists to replace.
+- Both trait definitions now carry the obligation in their own docs: adding a
+  method means adding it to `tool::forwarding`, because a new defaulted method
+  would compile and pass the suite while answering for the pointer instead of
+  the tool inside it.
 
 ### A stdio MCP config cannot print its credentials
 

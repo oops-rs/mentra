@@ -687,11 +687,23 @@ impl From<String> for ToolOutput {
 }
 
 /// Definition contract for custom tools exposed to models.
+///
+/// **Adding a method here means adding it to `tool::forwarding` too**, in both
+/// the `Box` and `Arc` impls. Those forward every method explicitly, and a new
+/// one with a default body would compile and pass the suite while silently
+/// answering for the pointer instead of the tool inside it.
 pub trait ToolDefinition: Send + Sync {
     fn descriptor(&self) -> RuntimeToolDescriptor;
 }
 
 /// Execution contract for custom tools exposed to models.
+///
+/// **Adding a method here means adding it to `tool::forwarding` too**, in both
+/// the `Box` and `Arc` impls. Those forward every method explicitly, and a new
+/// one with a default body would compile and pass the suite while silently
+/// answering for the pointer instead of the tool inside it -- which for
+/// [`authorization_preview`](Self::authorization_preview) means presenting a
+/// host's tool to the approver as something other than what it is.
 #[async_trait]
 pub trait ToolExecutor: ToolDefinition + Send + Sync {
     fn authorization_preview(

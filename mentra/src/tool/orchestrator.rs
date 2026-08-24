@@ -249,22 +249,45 @@ impl ToolRuntime {
         let Some(tool) = self.runtime.get_tool(&call.name) else {
             return ToolExecutionCategory::ExclusiveLocalMutation;
         };
+
+        let declared = tool.execution_category(&call.input);
+        let scheduled = self.scheduled_execution_category(call, &tool);
+        if scheduled != declared {
+            eprintln!(
+                "warning: tool '{}' is marked terminal but declared a parallel \
+                 execution category; coercing to exclusive scheduling",
+                call.name
+            );
+        }
+
+        scheduled
+    }
+
+    /// The lane a call will actually run in.
+    ///
+    /// The tool's category is asked for with the call's input, because a tool
+    /// may answer differently per call -- `files` reports a parallel read for a
+    /// batch that only reads. A terminal-marked tool is then never scheduled in
+    /// parallel whatever it declared, coerced rather than panicked, matching
+    /// the fallback-to-exclusive precedent above.
+    ///
+    /// The authorization path reads the same answer, so what a host is told a
+    /// call will do is what the scheduler then does. A preview built from the
+    /// tool's *static* descriptor could disagree -- and for a tool declaring a
+    /// parallel category while returning a mutating one, it would disagree in
+    /// the permissive direction.
+    fn scheduled_execution_category(
+        &self,
+        call: &ToolCall,
+        tool: &Arc<dyn ExecutableTool>,
+    ) -> ToolExecutionCategory {
         let category = tool.execution_category(&call.input);
         let terminal = self
             .runtime
             .get_tool_descriptor(&call.name)
             .is_some_and(|descriptor| descriptor.terminal);
 
-        // STATIC exclusivity: a terminal-marked tool is never scheduled in a
-        // parallel batch, regardless of its declared execution_category —
-        // coerce rather than panic, matching the existing fallback-to-exclusive
-        // precedent above.
         if terminal && category.allows_parallel() {
-            eprintln!(
-                "warning: tool '{}' is marked terminal but declared a parallel \
-                 execution category; coercing to exclusive scheduling",
-                call.name
-            );
             return ToolExecutionCategory::ExclusiveLocalMutation;
         }
 
@@ -680,6 +703,18 @@ impl ToolRuntime {
                     Some(error),
                 )));
             }
+        };
+
+        // A preview reports whichever category its builder chose, and every
+        // builder in the tree copies the tool's *static* declaration. The
+        // scheduler does not: it asks the tool with this call's input and then
+        // applies the terminal coercion. Answering the authorizer with the
+        // scheduler's answer is what makes the classification describe the call
+        // that will actually run, for every tool at once rather than for
+        // whichever preview builders remember to do it.
+        let preview = crate::tool::ToolAuthorizationPreview {
+            execution_category: self.scheduled_execution_category(call, tool),
+            ..preview
         };
 
         self.emit_tool_authorization_started(call, preview.clone())?;

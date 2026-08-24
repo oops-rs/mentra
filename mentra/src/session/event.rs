@@ -144,6 +144,14 @@ pub enum SessionEvent {
         /// network" is [`ToolSideEffectLevel::LocalState`] against
         /// [`ToolSideEffectLevel::External`], readable from this field alone.
         ///
+        /// It describes the call **as it stood when the approver was asked**.
+        /// A [`PreExecutionHook`] returning
+        /// [`HookDecision::Modify`](crate::runtime::HookDecision::Modify) runs
+        /// afterwards and can replace the input wholesale, and for a tool whose
+        /// classification depends on its input the executed call may then
+        /// classify differently. A host writing policy here and rewriting
+        /// inputs there is defeating its own policy, but nothing stops it.
+        ///
         /// [`None`] only on an event deserialized from a stream recorded
         /// before this field existed; every request a session emits carries
         /// [`Some`]. It is an [`Option`] rather than a defaulted
@@ -154,6 +162,7 @@ pub enum SessionEvent {
         ///
         /// [`ToolSideEffectLevel::LocalState`]: crate::tool::ToolSideEffectLevel::LocalState
         /// [`ToolSideEffectLevel::External`]: crate::tool::ToolSideEffectLevel::External
+        /// [`PreExecutionHook`]: crate::runtime::PreExecutionHook
         #[serde(default)]
         classification: Option<ToolClassification>,
     },
