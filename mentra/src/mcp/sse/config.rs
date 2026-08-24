@@ -9,7 +9,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use url::Url;
 
-use super::endpoint::{EndpointError, validate_stream_url};
+use super::endpoint::{EndpointError, is_loopback, validate_configured_url};
+// Re-exported so `mcp::sse::config::SecretString` keeps resolving now that the
+// type is shared with the Streamable HTTP transport.
+pub use crate::mcp::secret::SecretString;
 
 /// Default timeout for opening the SSE stream and reading its response head.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,46 +46,6 @@ pub const DEFAULT_MAX_ENDPOINT_BYTES: usize = 8 * 1024;
 /// only a page bound stops the walk. A server needing more pages than this to
 /// describe its tools is malfunctioning.
 pub const DEFAULT_MAX_TOOL_PAGES: usize = 1_000;
-
-/// A header value that is never rendered by `Debug` or `Display`.
-///
-/// Redaction is a property of this type rather than of each container, so every
-/// struct that derives `Debug` inherits it without a rule for contributors to
-/// remember.
-///
-/// This type deliberately does **not** implement [`serde::Serialize`]. Adding
-/// `#[derive(Serialize)]` to any struct holding one is therefore a compile
-/// error rather than a silent credential leak into a config dump, a state
-/// snapshot, or a session-persistence layer.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(transparent)]
-pub struct SecretString(String);
-
-impl SecretString {
-    /// Wraps a value that must not be logged.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Returns the wrapped value.
-    ///
-    /// This is the single grep-able point at which a secret becomes visible.
-    pub fn expose_secret(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for SecretString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SecretString([redacted])")
-    }
-}
-
-impl<T: Into<String>> From<T> for SecretString {
-    fn from(value: T) -> Self {
-        Self::new(value)
-    }
-}
 
 /// Timeouts and size limits for one SSE connection.
 ///
@@ -240,7 +203,7 @@ impl McpSseServerConfig {
             return Err(McpSseConfigError::EmptyName);
         }
 
-        let url = validate_stream_url(&self.url)?;
+        let url = validate_configured_url(&self.url)?;
 
         for (name, value) in &self.headers {
             if reqwest::header::HeaderName::try_from(name.as_str()).is_err() {
@@ -266,15 +229,5 @@ impl McpSseServerConfig {
         }
 
         Ok(url)
-    }
-}
-
-/// Reports whether a URL addresses the loopback interface.
-fn is_loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        None => false,
     }
 }

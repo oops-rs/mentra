@@ -10,6 +10,11 @@
 //! configured stream URL's scheme, host, and effective port. Anything else is
 //! refused rather than normalized, because every relaxation here is a way to
 //! redirect credentials to a host the operator never configured.
+//!
+//! [`resolve_endpoint`] is specific to that legacy handshake, but the checks on
+//! the *operator-configured* URL — [`validate_configured_url`] and
+//! [`is_loopback`] — apply to any HTTP MCP transport, so the Streamable HTTP
+//! client shares them rather than restating them.
 
 #[cfg(test)]
 mod tests;
@@ -48,11 +53,13 @@ pub enum EndpointError {
     },
 }
 
-/// Validates an operator-configured SSE stream URL.
+/// Validates an operator-configured URL for an HTTP MCP transport.
 ///
 /// This runs before any connection is opened so that a bad configuration fails
-/// at the boundary rather than mid-handshake.
-pub(crate) fn validate_stream_url(raw: &str) -> Result<Url, EndpointError> {
+/// at the boundary rather than mid-handshake. It is the SSE stream URL for the
+/// legacy transport and the MCP endpoint for Streamable HTTP; the checks are
+/// the same either way.
+pub(crate) fn validate_configured_url(raw: &str) -> Result<Url, EndpointError> {
     let url = Url::parse(raw.trim())
         .map_err(|_| EndpointError::Malformed("invalid URL syntax".to_string()))?;
     check_scheme(&url)?;
@@ -84,6 +91,20 @@ pub(crate) fn resolve_endpoint(stream_url: &Url, raw: &str) -> Result<Url, Endpo
     check_same_origin(stream_url, &endpoint)?;
 
     Ok(endpoint)
+}
+
+/// Reports whether a URL addresses the loopback interface.
+///
+/// Both HTTP transports use this for the same decision: a credential sent over
+/// plaintext `http://` never leaves the machine when the host is loopback, so
+/// that case is allowed where a remote plaintext host is refused.
+pub(crate) fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 /// Rejects any scheme outside the allowlist.

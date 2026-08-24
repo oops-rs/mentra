@@ -37,6 +37,7 @@ pub mod bridge;
 pub mod client;
 pub mod manager;
 pub mod protocol;
+pub mod secret;
 pub mod sse;
 
 #[cfg(test)]
@@ -48,6 +49,7 @@ pub use bridge::{McpBridgedTool, mcp_tool_name, parse_mcp_tool_name};
 pub use client::{McpClientError, McpStdioClient};
 pub use manager::{McpManager, McpServerStatus, McpServerSummary};
 pub use protocol::{McpServerConfig, McpToolDefinition};
+pub use secret::SecretString;
 pub use sse::client::{McpSseClient, McpSseError};
-pub use sse::config::{McpSseConfigError, McpSseLimits, McpSseServerConfig, SecretString};
+pub use sse::config::{McpSseConfigError, McpSseLimits, McpSseServerConfig};
 pub use sse::endpoint::EndpointError;

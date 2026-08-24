@@ -2,7 +2,7 @@
 
 use url::Url;
 
-use super::{EndpointError, resolve_endpoint, validate_stream_url};
+use super::{EndpointError, resolve_endpoint, validate_configured_url};
 
 /// The configured SSE URL every test resolves against.
 const BASE: &str = "https://good-host.example/sse";
@@ -253,32 +253,32 @@ fn rejects_a_padded_cross_origin_endpoint() {
 
 #[test]
 fn accepts_an_https_stream_url() {
-    let url = validate_stream_url("https://good-host.example/sse").expect("https is allowed");
+    let url = validate_configured_url("https://good-host.example/sse").expect("https is allowed");
     assert_eq!(url.scheme(), "https");
 }
 
 #[test]
 fn accepts_an_http_stream_url() {
-    let url = validate_stream_url("http://127.0.0.1:9000/sse").expect("http is allowed");
+    let url = validate_configured_url("http://127.0.0.1:9000/sse").expect("http is allowed");
     assert_eq!(url.scheme(), "http");
 }
 
 #[test]
 fn rejects_a_stream_url_with_an_unsupported_scheme() {
-    let error = validate_stream_url("ws://good-host.example/sse").expect_err("ws is rejected");
+    let error = validate_configured_url("ws://good-host.example/sse").expect_err("ws is rejected");
     assert!(matches!(error, EndpointError::UnsupportedScheme { .. }));
 }
 
 #[test]
 fn rejects_a_stream_url_with_embedded_credentials() {
-    let error = validate_stream_url("https://user:pass@good-host.example/sse")
+    let error = validate_configured_url("https://user:pass@good-host.example/sse")
         .expect_err("credentials are rejected");
     assert!(matches!(error, EndpointError::CredentialsInUrl));
 }
 
 #[test]
 fn rejects_a_stream_url_without_a_host() {
-    let error = validate_stream_url("file:///tmp/sse").expect_err("a hostless URL is rejected");
+    let error = validate_configured_url("file:///tmp/sse").expect_err("a hostless URL is rejected");
     assert!(matches!(
         error,
         EndpointError::UnsupportedScheme { .. } | EndpointError::MissingHost
@@ -287,7 +287,7 @@ fn rejects_a_stream_url_without_a_host() {
 
 #[test]
 fn rejects_an_unparseable_stream_url() {
-    let error = validate_stream_url("not a url").expect_err("garbage is rejected");
+    let error = validate_configured_url("not a url").expect_err("garbage is rejected");
     assert!(matches!(error, EndpointError::Malformed(_)));
 }
 

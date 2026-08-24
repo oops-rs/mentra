@@ -1,31 +1,14 @@
 //! Tests for SSE server configuration and secret redaction.
+//!
+//! [`SecretString`](crate::mcp::secret::SecretString) itself is covered in its
+//! own module; these cases assert that this configuration inherits its
+//! redaction.
 
-use super::{McpSseConfigError, McpSseServerConfig, SecretString};
+use super::{McpSseConfigError, McpSseServerConfig};
 
 // ---------------------------------------------------------------------------
 // Secret redaction
 // ---------------------------------------------------------------------------
-
-#[test]
-fn secret_debug_output_hides_the_value() {
-    let secret = SecretString::new("Bearer super-secret-token");
-    let rendered = format!("{secret:?}");
-    assert!(!rendered.contains("super-secret-token"), "got {rendered}");
-    assert_eq!(rendered, "SecretString([redacted])");
-}
-
-#[test]
-fn secret_alternate_debug_output_hides_the_value() {
-    let secret = SecretString::new("Bearer super-secret-token");
-    let rendered = format!("{secret:#?}");
-    assert!(!rendered.contains("super-secret-token"), "got {rendered}");
-}
-
-#[test]
-fn exposing_a_secret_returns_the_original_value() {
-    let secret = SecretString::new("Bearer token");
-    assert_eq!(secret.expose_secret(), "Bearer token");
-}
 
 #[test]
 fn config_debug_redacts_header_values_but_keeps_names() {
