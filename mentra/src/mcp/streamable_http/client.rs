@@ -73,6 +73,16 @@ use crate::mcp::sse::wire::{SseParser, SseWireError};
 /// The protocol revision this transport requests.
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// The revisions this client can actually speak.
+///
+/// Streamable HTTP was introduced in `2025-03-26`, so a server offering this
+/// transport cannot legitimately negotiate anything older. The specification
+/// says a client should disconnect when the server answers with a revision it
+/// does not support, and the alternative here is worse than disconnecting:
+/// sending that revision back in `MCP-Protocol-Version` on every later request
+/// while behaving as this client actually does.
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] = ["2025-06-18", "2025-03-26"];
+
 /// The `Accept` header every request carries.
 ///
 /// Both types are offered because the server chooses per reply. A server that
@@ -97,9 +107,6 @@ const MAX_DIAGNOSTIC_BODY_BYTES: usize = 8 * 1024;
 /// The id is echoed on every later request, so an unbounded one would let a
 /// server dictate the size of every request this client sends.
 const MAX_SESSION_ID_BYTES: usize = 512;
-
-/// Bound on the length of a server-reported protocol version.
-const MAX_PROTOCOL_VERSION_BYTES: usize = 64;
 
 /// Errors from the MCP Streamable HTTP client.
 ///
@@ -150,6 +157,13 @@ pub enum McpStreamableHttpError {
 
     #[error("MCP server advertised more than {limit} tools")]
     TooManyTools { limit: usize },
+
+    /// Rendered without the server's value, which is server-controlled text.
+    #[error(
+        "MCP server negotiated a protocol revision this client does not implement; \
+         it supports {supported}"
+    )]
+    UnsupportedProtocolVersion { supported: String },
 
     #[error("MCP server returned JSON-RPC error: {0}")]
     JsonRpc(JsonRpcError),
@@ -351,33 +365,64 @@ impl McpStreamableHttpClient {
         };
     }
 
-    /// Sends a JSON-RPC request and reads its reply from the same response.
+    /// Sends a JSON-RPC request, restarting the session if the server forgot it.
     async fn request<P: serde::Serialize, R: DeserializeOwned>(
         &self,
         method: &'static str,
         params: Option<P>,
         timeout: Duration,
     ) -> Result<R, McpStreamableHttpError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let params = params
             .map(serde_json::to_value)
             .transpose()
             .map_err(|error| McpStreamableHttpError::ParseError(error.to_string()))?
             .filter(|params| !params.is_null());
-        let request = JsonRpcRequest::new(id, method, params);
 
-        // One deadline covers the complete operation, so a peer cannot evade
-        // `call_tool_timeout` by accepting the connection and withholding
-        // either the response head or the stream it promised.
-        let result = match tokio::time::timeout(timeout, self.exchange(method, &request, id)).await
-        {
-            Ok(result) => result?,
-            Err(_) => return Err(request_timeout(method, timeout)),
+        // A server may forget a session at any time, and the specification
+        // requires the client to start a new one rather than give up. Without
+        // this, one expired session left every tool from that server broken
+        // for the runtime's whole life.
+        //
+        // Re-sending afterwards is safe even for a `tools/call`: a 404 for an
+        // unknown session is refused before the message is dispatched, so the
+        // tool did not run. The replacement carries a fresh id, because it is
+        // a request in a new session rather than a repeat within the old one.
+        let result = match self.attempt(method, params.clone(), timeout).await {
+            Err(McpStreamableHttpError::SessionExpired) => {
+                self.reestablish_session().await?;
+                self.attempt(method, params, timeout).await?
+            }
+            other => other?,
         };
 
         serde_json::from_value(result).map_err(|_| {
             McpStreamableHttpError::ParseError("response shape did not match MCP".to_string())
         })
+    }
+
+    /// One attempt at a request, with no session recovery.
+    ///
+    /// The recovery path in [`request`](Self::request) runs its replacement
+    /// handshake through this rather than through `request`, so a server that
+    /// answers the recovery itself with a session error cannot start the
+    /// recovery again. The impossibility is structural rather than a guard on
+    /// the method name.
+    async fn attempt(
+        &self,
+        method: &'static str,
+        params: Option<JsonValue>,
+        timeout: Duration,
+    ) -> Result<JsonValue, McpStreamableHttpError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = JsonRpcRequest::new(id, method, params);
+
+        // One deadline covers this whole attempt, so a peer cannot evade
+        // `call_tool_timeout` by accepting the connection and withholding
+        // either the response head or the stream it promised.
+        match tokio::time::timeout(timeout, self.exchange(method, &request, id)).await {
+            Ok(result) => result,
+            Err(_) => Err(request_timeout(method, timeout)),
+        }
     }
 
     /// Posts one request and returns the JSON-RPC result it answered with.
@@ -551,20 +596,28 @@ impl McpStreamableHttpClient {
 
     /// Records the negotiated protocol revision reported by `initialize`.
     ///
-    /// The reported version is server-controlled text destined for a header, so
-    /// an unusable one falls back to the revision this client requested rather
-    /// than being sent on.
-    fn adopt_protocol_version(&self, reported: &str) {
-        let protocol_version = HeaderValue::from_str(reported)
-            .ok()
-            .filter(|value| !value.is_empty() && value.len() <= MAX_PROTOCOL_VERSION_BYTES)
-            .or_else(|| Some(HeaderValue::from_static(PROTOCOL_VERSION)));
+    /// The reported revision has to match one this client actually implements,
+    /// or there is nothing honest to do with it: sending it back on every later
+    /// request would claim a protocol this code does not speak, and substituting
+    /// our own would claim agreement the server never gave.
+    ///
+    /// Because the match is against `&'static` constants, the value that ends up
+    /// in the header is one of ours rather than the server's text. No
+    /// server-controlled bytes reach a request header on this path at all.
+    fn adopt_protocol_version(&self, reported: &str) -> Result<(), McpStreamableHttpError> {
+        let negotiated = SUPPORTED_PROTOCOL_VERSIONS
+            .into_iter()
+            .find(|supported| *supported == reported)
+            .ok_or_else(|| McpStreamableHttpError::UnsupportedProtocolVersion {
+                supported: SUPPORTED_PROTOCOL_VERSIONS.join(", "),
+            })?;
 
         let mut session = lock_session(&self.session);
         *session = Session {
             id: session.id.clone(),
-            protocol_version,
+            protocol_version: Some(HeaderValue::from_static(negotiated)),
         };
+        Ok(())
     }
 
     /// Reads a whole `application/json` reply, bounded by the configured limit.
@@ -665,6 +718,16 @@ impl McpStreamableHttpClient {
 
     /// Performs the `initialize` handshake and the follow-up notification.
     async fn initialize(&mut self) -> Result<(), McpStreamableHttpError> {
+        let result = self.handshake().await?;
+        self.server_info = Some(result.server_info);
+        Ok(())
+    }
+
+    /// Runs the handshake exchange and reports what the server said.
+    ///
+    /// Takes `&self` because it runs again mid-conversation when a server
+    /// forgets the session, at which point nothing is holding a mutable borrow.
+    async fn handshake(&self) -> Result<McpInitializeResult, McpStreamableHttpError> {
         let params = McpInitializeParams {
             protocol_version: PROTOCOL_VERSION.to_string(),
             capabilities: serde_json::json!({}),
@@ -674,15 +737,33 @@ impl McpStreamableHttpClient {
             },
         };
 
-        let result: McpInitializeResult = self
-            .request("initialize", Some(params), self.limits.initialize_timeout)
+        let params = serde_json::to_value(params)
+            .map_err(|error| McpStreamableHttpError::ParseError(error.to_string()))?;
+        let raw = self
+            .attempt("initialize", Some(params), self.limits.initialize_timeout)
+            .await?;
+        let result: McpInitializeResult = serde_json::from_value(raw).map_err(|_| {
+            McpStreamableHttpError::ParseError("response shape did not match MCP".to_string())
+        })?;
+
+        self.adopt_protocol_version(&result.protocol_version)?;
+        self.notify("notifications/initialized", self.limits.initialize_timeout)
             .await?;
 
-        self.adopt_protocol_version(&result.protocol_version);
-        self.server_info = Some(result.server_info);
+        Ok(result)
+    }
 
-        self.notify("notifications/initialized", self.limits.initialize_timeout)
-            .await
+    /// Starts a new session after the server said it no longer knows the old one.
+    ///
+    /// The specification requires the replacement `initialize` to carry no
+    /// session at all, so the forgotten id is dropped first rather than sent to
+    /// a server that has already rejected it.
+    async fn reestablish_session(&self) -> Result<(), McpStreamableHttpError> {
+        {
+            let mut session = lock_session(&self.session);
+            *session = Session::default();
+        }
+        self.handshake().await.map(|_| ())
     }
 
     /// Walks the paginated `tools/list` cursor to the end.

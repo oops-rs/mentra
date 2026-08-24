@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -126,6 +127,23 @@ pub(crate) struct ServerBehavior {
     pub(crate) tool_pages: Option<usize>,
     /// Always hand back a `nextCursor`, so the walk only ends at a limit.
     pub(crate) paginates_forever: bool,
+    /// Forget the session once, the first time a `tools/call` presents one.
+    ///
+    /// A server may expire a session whenever it likes, and answers a request
+    /// carrying a stale id with `404`. Paired with `rotate_session` this is the
+    /// full sequence a client has to survive: reject, re-handshake, retry.
+    pub(crate) expire_first_tool_call: bool,
+    /// Reject *every* `tools/call` that presents a session.
+    ///
+    /// A recovery that could start another recovery would never return against
+    /// this server.
+    pub(crate) expire_every_tool_call: bool,
+    /// Issue a distinct session id per `initialize`, so a rotation is visible.
+    pub(crate) rotate_session: bool,
+    /// Whether the one-shot expiry above has already fired.
+    pub(crate) expired: Arc<AtomicBool>,
+    /// How many sessions have been issued, for `rotate_session`.
+    pub(crate) sessions_issued: Arc<AtomicUsize>,
     /// Answer `tools/call` with this HTTP status, after a successful handshake.
     ///
     /// Distinct from `http_status`, which applies to every request and so
@@ -191,6 +209,22 @@ fn answer(
         && method == "tools/call"
     {
         return write_raw(stream, status, "text/plain", "", &HashMap::new());
+    }
+
+    if behavior.expire_every_tool_call
+        && method == "tools/call"
+        && request.header("mcp-session-id").is_some()
+    {
+        return write_raw(stream, 404, "text/plain", "", &HashMap::new());
+    }
+
+    if behavior.expire_first_tool_call
+        && method == "tools/call"
+        && request.header("mcp-session-id").is_some()
+        && !behavior.expired.swap(true, Ordering::SeqCst)
+    {
+        // The id the client holds is one this server no longer knows.
+        return write_raw(stream, 404, "text/plain", "", &HashMap::new());
     }
 
     let result = match method.as_str() {
@@ -261,7 +295,13 @@ fn session_headers(method: &str, behavior: &ServerBehavior) -> HashMap<String, S
     if method == "initialize"
         && let Some(session_id) = &behavior.session_id
     {
-        headers.insert("Mcp-Session-Id".to_string(), session_id.clone());
+        let issued = behavior.sessions_issued.fetch_add(1, Ordering::SeqCst) + 1;
+        let session_id = if behavior.rotate_session {
+            format!("{session_id}-{issued}")
+        } else {
+            session_id.clone()
+        };
+        headers.insert("Mcp-Session-Id".to_string(), session_id);
     }
     headers
 }

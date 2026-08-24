@@ -160,10 +160,12 @@ async fn the_negotiated_protocol_version_rides_on_later_requests() {
 }
 
 #[tokio::test]
-async fn a_protocol_version_that_cannot_be_a_header_falls_back_to_our_own() {
-    // The reported version is server-controlled text that this client puts
-    // into a header on every later request. A newline in it would be request
-    // splitting; it is refused rather than forwarded.
+async fn a_protocol_version_this_client_cannot_speak_ends_the_handshake() {
+    // The reported revision would otherwise ride on every later request as
+    // `MCP-Protocol-Version`. Claiming a protocol this code does not implement
+    // is not better than refusing to connect, and this particular value --
+    // carrying a CRLF -- would be request splitting if it ever reached a
+    // header.
     let fixture = StreamableHttpFixture::start_with(
         ReplyMode::Json,
         ServerBehavior {
@@ -171,15 +173,49 @@ async fn a_protocol_version_that_cannot_be_a_header_falls_back_to_our_own() {
             ..ServerBehavior::default()
         },
     );
-    connect(&fixture).await;
+    let config = McpStreamableHttpServerConfig::new("fixture", fixture.endpoint());
 
+    let error = McpStreamableHttpClient::connect(&config)
+        .await
+        .expect_err("an unsupported revision must not be negotiated");
+    assert!(
+        matches!(
+            error,
+            McpStreamableHttpError::UnsupportedProtocolVersion { .. }
+        ),
+        "expected an unsupported revision, got {error:?}"
+    );
+    assert!(
+        !error.to_string().contains("X-Injected"),
+        "the server's value must not reach the error text: {error}"
+    );
+
+    for request in fixture.requests() {
+        assert_eq!(request.header("x-injected"), None);
+    }
+}
+
+#[tokio::test]
+async fn the_older_streamable_revision_is_still_accepted() {
+    // Streamable HTTP starts at 2025-03-26. A server negotiating it is not
+    // wrong, and refusing it would be exactly the unreachable-server failure
+    // this transport exists to remove.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            protocol_version: Some("2025-03-26".to_string()),
+            ..ServerBehavior::default()
+        },
+    );
+    let client = connect(&fixture).await;
+
+    assert_eq!(client.tools().len(), 1);
     for request in fixture.requests().iter().skip(1) {
         assert_eq!(
             request.header("mcp-protocol-version"),
-            Some(PROTOCOL_VERSION),
-            "an unusable reported version falls back to the requested one"
+            Some("2025-03-26"),
+            "the negotiated revision is what rides on later requests"
         );
-        assert_eq!(request.header("x-injected"), None);
     }
 }
 
@@ -702,4 +738,97 @@ async fn shutdown_forgets_the_session_it_ended() {
         after_first,
         "a second shutdown has nothing left to end"
     );
+}
+
+#[tokio::test]
+async fn a_forgotten_session_is_replaced_and_the_call_goes_through() {
+    // A server may expire a session at any time. Before this, the 404 came
+    // back as a bare error and every tool from that server stayed broken for
+    // the runtime's whole life -- one expiry was permanent.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            session_id: Some("sess".to_string()),
+            rotate_session: true,
+            expire_first_tool_call: true,
+            ..ServerBehavior::default()
+        },
+    );
+    let client = connect(&fixture).await;
+    assert_eq!(client.session_id().as_deref(), Some("sess-1"));
+
+    let result = client
+        .call_tool("echo", None)
+        .await
+        .expect("the call should survive the server forgetting the session");
+    assert_eq!(result.content[0].text.as_deref(), Some("echoed"));
+
+    assert_eq!(
+        client.session_id().as_deref(),
+        Some("sess-2"),
+        "the client should be holding the replacement session"
+    );
+
+    // The specification requires the replacement handshake to carry no
+    // session: sending the forgotten one to a server that just rejected it is
+    // the one thing that cannot work.
+    let initializes: Vec<_> = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.rpc_method().as_deref() == Some("initialize"))
+        .collect();
+    assert_eq!(
+        initializes.len(),
+        2,
+        "the session should have been replaced"
+    );
+    assert_eq!(
+        initializes[1].header("mcp-session-id"),
+        None,
+        "a replacement initialize must not carry the forgotten session"
+    );
+
+    // The retry is safe precisely because the 404 was a refusal before
+    // dispatch, so the tool ran exactly once despite two POSTs.
+    let calls = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+        .count();
+    assert_eq!(calls, 2, "one rejected before dispatch, one that ran");
+}
+
+#[tokio::test]
+async fn a_server_that_rejects_every_session_stops_rather_than_looping() {
+    // Recovery re-handshakes and re-sends once. If that re-send could itself
+    // start another recovery, this server -- which rejects every call that
+    // presents a session -- would keep it going forever. The replacement
+    // handshake runs through the non-recovering path, so it cannot.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            session_id: Some("sess".to_string()),
+            rotate_session: true,
+            expire_every_tool_call: true,
+            ..ServerBehavior::default()
+        },
+    );
+    let client = connect(&fixture).await;
+
+    let error = tokio::time::timeout(Duration::from_secs(10), client.call_tool("echo", None))
+        .await
+        .expect("a repeated expiry must terminate rather than loop")
+        .expect_err("every call is rejected, so none can succeed");
+    assert!(
+        matches!(error, McpStreamableHttpError::SessionExpired),
+        "expected the second rejection to be reported, got {error:?}"
+    );
+
+    // Exactly one replacement handshake: the original plus one recovery.
+    let initializes = fixture
+        .requests()
+        .into_iter()
+        .filter(|request| request.rpc_method().as_deref() == Some("initialize"))
+        .count();
+    assert_eq!(initializes, 2, "recovery must be attempted exactly once");
 }

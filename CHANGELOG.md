@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+### The Streamable HTTP transport survives the servers it will meet
+
+Adversarial review of the transport as it landed turned up ten defects. The
+two that mattered most were both reachable by an ordinary misbehaving server,
+and both traced to the same gap: the test fixture could not produce a server
+that stalls, so neither could be written as a test.
+
+- A notification's response body was drained outside the deadline wrapping its
+  POST. `send()` resolves on the response head and the body streams lazily, so
+  a server that promised a body and then went quiet left that drain waiting
+  forever — inside `connect`, which `RuntimeBuilder::build_async` calls
+  serially with no deadline above it. One such server hung the whole runtime
+  build rather than degrading its own connection.
+- A `tools/call` whose reply was lost on the `application/json` path was
+  reported as a definite failure. Six exits between an accepted POST and a
+  parsed reply bypassed the indeterminacy classification the event-stream path
+  applied to all of them, so the same physical event got opposite answers
+  depending only on which framing the server chose — and the stalled-read case
+  was not merely reachable but unavoidable, since `stream_idle_timeout` always
+  fires before `call_tool_timeout`. Since `McpBridgedTool` flattens the error
+  to its `Display`, and only `RequestIndeterminate` says "must not be retried
+  automatically", a model would retry a call that may have charged a card.
+  Both paths now classify in one place, exempting a JSON-RPC error, which *is*
+  the answer.
+- A server that forgot a session bricked itself permanently: the client
+  reported `SessionExpired` and stopped, no caller reconnected, and every tool
+  from that server stayed broken for the runtime's life. The specification
+  requires starting a new session, so the client now re-handshakes and re-sends
+  once. That is safe even for a `tools/call`, because a 404 for an unknown
+  session is a refusal before dispatch. The replacement handshake runs through
+  a non-recovering path, so a recovery cannot start another recovery.
+- The negotiated protocol revision is now checked against the ones this client
+  implements instead of being echoed back unread. A consequence worth having:
+  the header carries one of our own `&'static` constants, so no
+  server-controlled bytes reach a request header on that path at all.
+- Smaller: the `tools/list` page cap rejected a list exactly `max_tool_pages`
+  long (and `max_tool_pages: 1` rejected every server); nothing bounded the
+  list those pages accumulate into, so a server could push gigabytes through
+  the walk and be stopped by the allocator rather than a limit (`max_tools`
+  now bounds it); a session id is echoed on every request and so is now marked
+  sensitive and held to the specification's visible-ASCII rule; a handshake
+  failing after `initialize` orphaned the server-side session, and `shutdown`
+  left a dead id in place; and a refused redirect is no longer treated as proof
+  a call did not run, since a 303 answering a POST means the server processed
+  it.
+
+The fixture gained what it was missing — stalling, pagination, session expiry
+and rotation, and per-method failures — and the suite went from 18 tests to
+52. The two most important fixes were mutation-tested: reverting either makes
+its test fail rather than pass quietly.
+
 ### CI checks the code it was not checking
 
 - Every CI job ran without `--all-features`, so the `openai-oauth` feature was
