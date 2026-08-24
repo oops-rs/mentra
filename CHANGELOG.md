@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.19.0 / mentra-provider 0.6.0
+
 ### A pinned model learns its context window
 
 - `Runtime::resolve_model` synthesized a bare `ModelInfo` for
