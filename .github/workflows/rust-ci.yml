@@ -29,7 +29,7 @@ jobs:
           toolchain: "1.88.0"
 
       - name: Check workspace against the MSRV
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --all-features
 
   rust-ci:
     name: Format, Lint, and Test (${{ matrix.os }})
@@ -59,7 +59,32 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # A broken intra-doc link is invisible to every other job here: it is not
+      # a compile error and not a lint. Without this, published documentation
+      # can point at items that do not exist, or at private ones a reader
+      # cannot see, and nothing says so.
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features

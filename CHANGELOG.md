@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### CI checks the code it was not checking
+
+- Every CI job ran without `--all-features`, so the `openai-oauth` feature was
+  never compiled, linted, or tested there — 831 lines of credential-store code,
+  which is precisely the kind that should not ship on the strength of a local
+  run. Clippy, the tests, and the MSRV check now all pass `--all-features`; the
+  MSRV floor still holds with them enabled.
+- Nothing built the documentation, so a broken intra-doc link was invisible to
+  the whole pipeline: it is neither a compile error nor a lint. A `docs` job now
+  builds the workspace with `RUSTDOCFLAGS=-D warnings`, which is what would have
+  caught the seven links repaired just above — including one that named a field
+  on the wrong type.
+
 ### An MCP server can be reached over Streamable HTTP
 
 - Streamable HTTP replaced HTTP+SSE in protocol revision 2025-03-26, and
