@@ -11,10 +11,11 @@
 //! refused rather than normalized, because every relaxation here is a way to
 //! redirect credentials to a host the operator never configured.
 //!
-//! [`resolve_endpoint`] is specific to that legacy handshake, but the checks on
-//! the *operator-configured* URL — [`validate_configured_url`] and
-//! [`is_loopback`] — apply to any HTTP MCP transport, so the Streamable HTTP
-//! client shares them rather than restating them.
+//! `resolve_endpoint` is specific to that legacy handshake, but the checks on
+//! the *operator-configured* URL — `validate_configured_url` and
+//! `is_loopback` — apply to any HTTP MCP transport, so the Streamable HTTP
+//! client shares them rather than restating them. All three are crate-internal,
+//! so they are named here rather than linked.
 
 #[cfg(test)]
 mod tests;
