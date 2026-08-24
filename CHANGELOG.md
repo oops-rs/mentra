@@ -2,6 +2,104 @@
 
 ## Unreleased
 
+### An MCP server can be reached over Streamable HTTP
+
+- Streamable HTTP replaced HTTP+SSE in protocol revision 2025-03-26, and
+  current MCP servers are commonly streamable-only: they answer `404` on
+  `/sse` because they never implemented the older transport, and `406` on
+  `/mcp` because nothing in mentra sent an `Accept` header offering both reply
+  types. Such a server was reachable through neither existing transport, which
+  made an MCP integration impossible rather than degraded.
+- `McpStreamableHttpServerConfig` and `McpStreamableHttpClient` post every
+  JSON-RPC message to the one configured endpoint and read each reply from that
+  same response, whether the server answers with a single `application/json`
+  body or opens a `text/event-stream` in it. `RuntimeBuilder` gains
+  `with_mcp_streamable_http_server` and `with_mcp_streamable_http_servers`, and
+  `McpManager` gains `connect_streamable_http`; the tools bridge exactly as the
+  other two transports' do.
+- The session `initialize` assigns rides on every later request as
+  `Mcp-Session-Id`, and `shutdown` ends it. A server is free to use no session
+  at all, in which case none is invented and no header is sent.
+- The transport buys a structural simplification worth naming: because a reply
+  arrives on the response to the request that asked for it, this client needs
+  no background reader task, no pending-request map, and no window in which a
+  response can arrive before its own request future resolves — all of which the
+  legacy transport's single shared stream forces on its client. The reply's id
+  is still checked, because a reply carrying a different id answers a different
+  question. On the streaming path a mismatched id is skipped rather than
+  returned, so a server cannot hand a caller another call's result by putting
+  it on the wire first.
+- Two values arrive from the server and are then sent back on every request, so
+  both are bounded and validated: a session id must be a usable header value
+  within a length cap, and a reported protocol version that cannot be a header
+  falls back to the revision this client requested rather than being forwarded.
+  A newline in either would otherwise be request splitting.
+- Nothing is retried and nothing is replayed. A `tools/call` whose request may
+  have reached the server but whose reply never arrived reports
+  `McpStreamableHttpError::RequestIndeterminate`, so a caller can tell "may
+  have run" from "definitely did not". A `4xx` is exempt — those are rejections
+  the server makes before dispatching the message — where a `5xx` is not,
+  because a server can fail after running the tool.
+
+### A permission request says what the call would do
+
+- `ToolAuthorizer::authorize` saw the full classification mentra had already
+  computed — side-effect level, capabilities, durability, execution category,
+  approval category — and none of it survived to the session layer.
+  `SessionEvent::PermissionRequested` carried a `preview` field whose doc
+  comment called it "JSON-encoded preview data" while it was only the tool's
+  raw input JSON. So the one place a host is meant to write approval policy was
+  exactly the place the classification was thrown away, leaving a host to
+  re-derive it by matching tool names and parsing the input by hand.
+- `PermissionRequested` now carries `classification: Option<ToolClassification>`,
+  a new type that is the authorization preview with the call's input left off.
+  "Allow edits, refuse the network" is `ToolSideEffectLevel::LocalState`
+  against `ToolSideEffectLevel::External`, readable from that field alone.
+- The field is `Option` rather than a defaulted `ToolClassification` because an
+  absent classification is unknown, not harmless: a default would let an event
+  replayed from a stream recorded before this existed read as a call that
+  touches nothing. It carries `#[serde(default)]` so such a stream still
+  deserializes, and every request a live session emits carries `Some`.
+- `ToolQueued.mutability` stays hardcoded to `Unknown`, now with a comment
+  saying why rather than looking unfinished. Its three values cannot separate a
+  local write from a process launch from a network call, which is the whole
+  distinction this change is about; a host wanting that reads `classification`.
+
+### A tool can be registered through a pointer
+
+- `RuntimeBuilder::with_tool` takes its tool by value, and neither of
+  `ExecutableTool`'s sub-traits had a forwarding impl for `Box` or `Arc` — so a
+  host holding a tool behind a pointer, or wanting two runtimes to share one
+  instance, had no public path in. `ToolAuthorizer` had had exactly this
+  treatment for some time; the tool traits had not.
+- `ToolDefinition` and `ToolExecutor` are now implemented for `Box<T>` and
+  `Arc<T>` where `T: ?Sized`, so `Box<dyn ExecutableTool>` and a shared `Arc`
+  both register directly.
+- All eight methods forward explicitly, including every defaulted one. A method
+  that fell through to its trait default instead of the inner tool would be a
+  silent misrepresentation, and for `authorization_preview` it would present a
+  host's tool to the approver as something other than what it is — so a test
+  wraps a tool whose defaulted methods all return non-default values and
+  asserts each one observed through the pointer is the inner tool's.
+
+### A stdio MCP config cannot print its credentials
+
+- `McpSseServerConfig` wrapped its header values so a `Debug` could not print
+  them; `McpServerConfig` did not — and stdio servers are where MCP credentials
+  actually live, since the de-facto `.mcp.json` format puts tokens in `env`.
+  Anything that formatted a config for a log, an error, or a panic printed the
+  token, which a consumer could avoid for its own configs but not for one that
+  reached a `#[derive(Debug)]` struct holding it.
+- `McpServerConfig` now has a hand-written `Debug` that keeps the variable
+  names and replaces every value with `[redacted]`. The names are the half an
+  operator needs — "it has `GITHUB_TOKEN` set" is the useful part — and keeping
+  the field's type means this breaks nothing. `Serialize` is untouched, so a
+  config written back to disk still carries what it was given.
+- `SecretString` moved to `mcp::secret`, shared by both HTTP transports rather
+  than owned by the SSE one, and deliberately does not implement `Serialize`:
+  adding `#[derive(Serialize)]` to a struct holding one is a compile error
+  instead of a silent leak into a config dump or a persistence layer.
+
 ## 0.19.0 / mentra-provider 0.6.0
 
 ### A pinned model learns its context window
