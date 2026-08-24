@@ -6,6 +6,7 @@ mod coding;
 mod context;
 mod descriptor;
 mod files;
+mod forwarding;
 pub(crate) mod internal;
 mod model;
 mod orchestrator;
