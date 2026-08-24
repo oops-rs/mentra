@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### A dropped Streamable HTTP client tries to end its session
+
+- The other two MCP transports clean up locally on drop — the stdio client lets
+  its child die, the SSE client aborts its reader — and both are things `Drop`
+  can guarantee. Ending a Streamable HTTP session is a `DELETE` to the server,
+  and there was no `Drop` at all, so a host that dropped the manager without
+  `shutdown_all` left the server holding the session and its resources until
+  its own idle timeout: one leaked session per open/close cycle.
+- The client now spawns the `DELETE` best-effort on drop. That closes the
+  common case — a manager dropped while the runtime keeps running — and is
+  honest about the two it cannot close: nothing happens outside a Tokio
+  context, and a task spawned during runtime teardown may never be polled.
+  `shutdown` is documented as the only path that waits, because `Drop` cannot
+  await and no amount of effort here changes that.
+- Reported by a downstream host reviewing its own 0.20 upgrade, which chose to
+  report the gap rather than work around it.
+
 ### A tool schema without a `type` still has to receive an object
 
 - The input validator returned early when a root schema omitted `type`, and

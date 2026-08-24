@@ -337,6 +337,14 @@ impl McpStreamableHttpClient {
 
     /// Ends the session, if the server established one.
     ///
+    /// **Call this.** Unlike the other two transports, ending a session here is
+    /// a network round trip, and [`Drop`] cannot await one. Dropping the client
+    /// makes a best-effort attempt (see the `Drop` impl) that is skipped
+    /// entirely outside a Tokio context and may never be polled during runtime
+    /// teardown, so a bare drop can leave the server holding the session and its
+    /// resources until its own idle timeout — one leaked session per
+    /// open/close cycle. This is the only path that waits for the `DELETE`.
+    ///
     /// The specification lets a server refuse termination, so the outcome is
     /// deliberately ignored: there is nothing a caller could do about a server
     /// that declines to forget a session, and a shutdown path that can fail is
@@ -814,6 +822,44 @@ impl McpStreamableHttpClient {
 
         self.tools = tools;
         Ok(())
+    }
+}
+
+/// Best-effort session termination for a client dropped without
+/// [`shutdown`](McpStreamableHttpClient::shutdown).
+///
+/// The other two transports clean up *locally* on drop — the stdio client lets
+/// the child process die, the SSE client aborts its reader task — and both are
+/// things `Drop` can actually guarantee. Ending a Streamable HTTP session is a
+/// `DELETE` to the server, and `Drop` cannot await, so the request is spawned
+/// detached and never waited on.
+///
+/// That makes this a genuine improvement in the common case (a manager dropped
+/// while the runtime keeps running) and no guarantee at all in two others: it
+/// does nothing outside a Tokio context, and a task spawned during runtime
+/// teardown may never be polled. Neither is detectable from here, which is why
+/// this is documented as best-effort rather than presented as cleanup.
+impl Drop for McpStreamableHttpClient {
+    fn drop(&mut self) {
+        // Nothing to end: no session, or `shutdown` already cleared it.
+        if lock_session(&self.session).id.is_none() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        // Built here rather than in the task: `request_headers` borrows `self`,
+        // which is about to be gone.
+        let request = self
+            .http
+            .delete(self.endpoint.clone())
+            .headers(self.request_headers());
+        let timeout = self.limits.connect_timeout;
+
+        runtime.spawn(async move {
+            let _ = tokio::time::timeout(timeout, request.send()).await;
+        });
     }
 }
 

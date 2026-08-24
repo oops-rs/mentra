@@ -832,3 +832,58 @@ async fn a_server_that_rejects_every_session_stops_rather_than_looping() {
         .count();
     assert_eq!(initializes, 2, "recovery must be attempted exactly once");
 }
+
+#[tokio::test]
+async fn dropping_a_client_still_tries_to_end_its_session() {
+    // Ending a session here is a network round trip, which `Drop` cannot await.
+    // A host that drops the manager without `shutdown_all` would otherwise
+    // leave the server holding the session until its idle timeout — one leak
+    // per open/close cycle. Best-effort, but the common case is worth closing.
+    let fixture =
+        StreamableHttpFixture::start_with(ReplyMode::Json, ServerBehavior::with_session("sess-13"));
+    {
+        let client = connect(&fixture).await;
+        assert_eq!(client.session_id().as_deref(), Some("sess-13"));
+    }
+
+    // The DELETE is spawned detached, so wait for it rather than assuming it
+    // has already landed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let delete = loop {
+        if let Some(request) = fixture
+            .requests()
+            .into_iter()
+            .find(|request| request.method == "DELETE")
+        {
+            break request;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a dropped client should still attempt to end its session"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    assert_eq!(delete.target, "/mcp");
+    assert_eq!(delete.header("mcp-session-id"), Some("sess-13"));
+}
+
+#[tokio::test]
+async fn dropping_an_already_shut_down_client_sends_nothing_more() {
+    // `shutdown` clears the id, so the drop path has nothing left to do and
+    // cannot re-DELETE a session the server has already forgotten.
+    let fixture =
+        StreamableHttpFixture::start_with(ReplyMode::Json, ServerBehavior::with_session("sess-14"));
+    let after_shutdown = {
+        let client = connect(&fixture).await;
+        client.shutdown().await;
+        fixture.requests().len()
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        fixture.requests().len(),
+        after_shutdown,
+        "a client shut down cleanly must not send a second DELETE when dropped"
+    );
+}
