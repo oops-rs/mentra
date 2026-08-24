@@ -182,6 +182,22 @@ pub enum SessionEvent {
         extracted_facts_count: usize,
         summary_preview: String,
     },
+    /// How many records a memory ingest stored for an agent.
+    ///
+    /// **Nothing emits this today.** A crate-internal hook bridge translates
+    /// the runtime's `MemoryIngestFinished` into this event and is fully
+    /// implemented and tested, but it is not registered anywhere, because
+    /// there is nowhere correct to register it yet: [`RuntimeHooks`] are built
+    /// once per runtime and shared by every session, while the channel this
+    /// event travels on belongs to a single session. Registering the bridge as
+    /// things stand would deliver every agent's memory activity to whichever
+    /// session happened to install it.
+    ///
+    /// Documented rather than quietly left, so a host does not subscribe and
+    /// wait for something that cannot arrive. Wiring it needs per-session hook
+    /// routing, which is a design change rather than a missing call.
+    ///
+    /// [`RuntimeHooks`]: crate::runtime::RuntimeHooks
     MemoryUpdated {
         agent_id: String,
         stored_records: usize,
