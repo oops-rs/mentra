@@ -14,6 +14,10 @@
   builds the workspace with `RUSTDOCFLAGS=-D warnings`, which is what would have
   caught the seven links repaired just above — including one that named a field
   on the wrong type.
+- Nothing built the crate with its default features *off* either, though
+  `responses-websocket` is default-on specifically so a host that only streams
+  over HTTP+SSE can drop `tokio-tungstenite` from its tree. That configuration
+  could have stopped compiling without failing anything; a job now checks it.
 
 ### An MCP server can be reached over Streamable HTTP
 

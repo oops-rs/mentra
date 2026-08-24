@@ -64,6 +64,31 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features
 
+  no-default-features:
+    name: Default features off
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # `responses-websocket` is default-on and exists so a host that only
+      # streams over HTTP+SSE can turn it off and drop tokio-tungstenite from
+      # its tree. Nothing verified that configuration still builds, so the
+      # feature could stop serving its one purpose without failing anything.
+      # A compile check is the right cost here: the realistic breakage is a
+      # `#[cfg]` that stops lining up, not a behavioral difference.
+      - name: Check with default features off
+        run: cargo check --workspace --all-targets --no-default-features
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest
