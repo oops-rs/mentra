@@ -56,7 +56,9 @@ pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTas
 pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
 pub use mcp::{
     McpClientError, McpManager, McpServerConfig, McpServerStatus, McpServerSummary, McpSseClient,
-    McpSseConfigError, McpSseError, McpSseLimits, McpSseServerConfig,
+    McpSseConfigError, McpSseError, McpSseLimits, McpSseServerConfig, McpStreamableHttpClient,
+    McpStreamableHttpConfigError, McpStreamableHttpError, McpStreamableHttpLimits,
+    McpStreamableHttpServerConfig,
 };
 pub use runtime::{
     AgentStore, AuditStore, HybridRuntimeStore, LeaseStore, NewTask, PermissionRuleStore, RunStore,

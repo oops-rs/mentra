@@ -6,14 +6,20 @@
 //!
 //! # Transports
 //!
-//! Two transports are supported, chosen by which configuration type you use:
+//! Three transports are supported, chosen by which configuration type you use:
 //!
 //! - **stdio** — [`McpServerConfig`] spawns a child process and speaks JSON-RPC
 //!   over its standard input and output.
+//! - **Streamable HTTP** — [`McpStreamableHttpServerConfig`] posts every
+//!   JSON-RPC message to one configured URL and reads each reply from that same
+//!   response, either as a single JSON body or as an event stream the server
+//!   opens in it. This is the transport from protocol revision 2025-03-26 and
+//!   later, and the one current servers ship; reach for it first.
 //! - **legacy HTTP+SSE** — [`McpSseServerConfig`] opens a long-lived
 //!   `text/event-stream` `GET` and posts JSON-RPC messages to a second URL that
-//!   the server names. This is the transport from protocol revision
-//!   2024-11-05, not Streamable HTTP; see [`McpSseClient`] for the distinction.
+//!   the server names. This is the transport from protocol revision 2024-11-05,
+//!   which Streamable HTTP replaced; a server that answers `404` on `/mcp` but
+//!   serves `/sse` needs it. See [`McpSseClient`] for the full distinction.
 //!
 //! # Architecture
 //!
@@ -25,6 +31,8 @@
 //!   shared by both transports
 //! - [`client`](crate::mcp::client) — stdio transport client for a single MCP
 //!   server process
+//! - [`streamable_http`](crate::mcp::streamable_http) — Streamable HTTP
+//!   transport client
 //! - [`sse`](crate::mcp::sse) — legacy HTTP+SSE transport client
 //! - [`bridge`](crate::mcp::bridge) — wraps MCP tools as Mentra
 //!   [`ExecutableTool`] instances
@@ -56,6 +64,7 @@ pub use secret::SecretString;
 pub use sse::client::{McpSseClient, McpSseError};
 pub use sse::config::{McpSseConfigError, McpSseLimits, McpSseServerConfig};
 pub use sse::endpoint::EndpointError;
+pub use streamable_http::client::{McpStreamableHttpClient, McpStreamableHttpError};
 pub use streamable_http::config::{
     McpStreamableHttpConfigError, McpStreamableHttpLimits, McpStreamableHttpServerConfig,
 };

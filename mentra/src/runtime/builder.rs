@@ -2,7 +2,7 @@ use std::{any::Any, path::Path, sync::Arc};
 
 use crate::{
     compaction::CompactionEngine,
-    mcp::{McpManager, McpServerConfig, McpSseServerConfig},
+    mcp::{McpManager, McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig},
     provider::{Provider, ProviderRegistry, ResponsesTransport},
     runtime::{
         RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks, RuntimePolicy, RuntimeStore,
@@ -23,6 +23,7 @@ use super::{McpServerSummary, Runtime};
 enum McpRegistration {
     Stdio(Box<McpServerConfig>),
     Sse(Box<McpSseServerConfig>),
+    StreamableHttp(Box<McpStreamableHttpServerConfig>),
 }
 
 impl McpRegistration {
@@ -31,6 +32,7 @@ impl McpRegistration {
         match self {
             Self::Stdio(config) => &config.name,
             Self::Sse(config) => &config.name,
+            Self::StreamableHttp(config) => &config.name,
         }
     }
 }
@@ -273,6 +275,53 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers an MCP server reached over the Streamable HTTP transport.
+    ///
+    /// This is the transport current MCP servers ship, and the one to reach for
+    /// unless a server is known to serve only the legacy `/sse` path. Every tool
+    /// the server advertises is bridged into the runtime under a namespaced
+    /// name; use
+    /// [`McpStreamableHttpClient`](crate::mcp::McpStreamableHttpClient) directly
+    /// when a host needs to apply its own allowlist before anything is
+    /// registered.
+    ///
+    /// ```rust,no_run
+    /// use mentra::{BuiltinProvider, McpStreamableHttpServerConfig, Runtime};
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = Runtime::builder()
+    ///     .with_provider(BuiltinProvider::Anthropic, "sk-...")
+    ///     .with_mcp_streamable_http_server(
+    ///         McpStreamableHttpServerConfig::new("observability", "https://mcp.example.com/mcp")
+    ///             .with_bearer_token("<token>"),
+    ///     )
+    ///     .build_async()
+    ///     .await?;
+    /// # let _ = runtime;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_mcp_streamable_http_server(
+        mut self,
+        config: McpStreamableHttpServerConfig,
+    ) -> Self {
+        self.mcp_configs
+            .push(McpRegistration::StreamableHttp(Box::new(config)));
+        self
+    }
+
+    /// Registers multiple Streamable HTTP MCP servers to connect to during build.
+    pub fn with_mcp_streamable_http_servers(
+        mut self,
+        configs: impl IntoIterator<Item = McpStreamableHttpServerConfig>,
+    ) -> Self {
+        self.mcp_configs.extend(
+            configs
+                .into_iter()
+                .map(|config| McpRegistration::StreamableHttp(Box::new(config))),
+        );
+        self
+    }
+
     /// Registers a builtin provider when an API key is present.
     pub fn with_optional_provider(
         mut self,
@@ -462,6 +511,10 @@ impl RuntimeBuilder {
                         .map_err(|error| error.to_string()),
                     McpRegistration::Sse(config) => manager
                         .connect_sse(config)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    McpRegistration::StreamableHttp(config) => manager
+                        .connect_streamable_http(config)
                         .await
                         .map_err(|error| error.to_string()),
                 };

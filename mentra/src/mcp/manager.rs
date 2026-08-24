@@ -8,6 +8,8 @@ use super::client::{McpClientError, McpStdioClient};
 use super::protocol::{McpServerConfig, McpToolDefinition};
 use super::sse::client::{McpSseClient, McpSseError};
 use super::sse::config::McpSseServerConfig;
+use super::streamable_http::client::{McpStreamableHttpClient, McpStreamableHttpError};
+use super::streamable_http::config::McpStreamableHttpServerConfig;
 
 /// Status of an MCP server connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub struct McpServerSummary {
 enum TransportClient {
     Stdio(Arc<McpStdioClient>),
     Sse(Arc<McpSseClient>),
+    StreamableHttp(Arc<McpStreamableHttpClient>),
 }
 
 impl TransportClient {
@@ -55,6 +58,7 @@ impl TransportClient {
         match self {
             Self::Stdio(client) => client.server_info().map(|info| info.version.clone()),
             Self::Sse(client) => client.server_info().map(|info| info.version.clone()),
+            Self::StreamableHttp(client) => client.server_info().map(|info| info.version.clone()),
         }
     }
 
@@ -63,6 +67,7 @@ impl TransportClient {
         match self {
             Self::Stdio(client) => client.shutdown().await,
             Self::Sse(client) => client.shutdown().await,
+            Self::StreamableHttp(client) => client.shutdown().await,
         }
     }
 
@@ -75,6 +80,9 @@ impl TransportClient {
         match self {
             Self::Stdio(client) => McpToolClient::call_tool(&**client, tool_name, arguments).await,
             Self::Sse(client) => McpToolClient::call_tool(&**client, tool_name, arguments).await,
+            Self::StreamableHttp(client) => {
+                McpToolClient::call_tool(&**client, tool_name, arguments).await
+            }
         }
     }
 
@@ -87,6 +95,9 @@ impl TransportClient {
                     McpBridgedTool::new(server_name.to_string(), tool.clone(), client.clone())
                 }
                 Self::Sse(client) => {
+                    McpBridgedTool::new(server_name.to_string(), tool.clone(), client.clone())
+                }
+                Self::StreamableHttp(client) => {
                     McpBridgedTool::new(server_name.to_string(), tool.clone(), client.clone())
                 }
             })
@@ -150,6 +161,31 @@ impl McpManager {
 
         let tools = client.tools().to_vec();
         let client = TransportClient::Sse(Arc::new(client));
+
+        Ok(self.register(config.name.clone(), client, tools))
+    }
+
+    /// Connect to an MCP server over the Streamable HTTP transport and discover
+    /// its tools.
+    ///
+    /// This is the transport current MCP servers ship; a server that answers
+    /// `404` on a legacy `/sse` path needs this rather than
+    /// [`connect_sse`](Self::connect_sse). Returns the bridged tools ready for
+    /// registration, exactly as [`connect`](Self::connect) does for stdio.
+    pub async fn connect_streamable_http(
+        &mut self,
+        config: &McpStreamableHttpServerConfig,
+    ) -> Result<Vec<McpBridgedTool>, McpStreamableHttpError> {
+        self.disconnect(&config.name).await;
+
+        let client = McpStreamableHttpClient::connect(config)
+            .await
+            .inspect_err(|error| {
+                self.errors.insert(config.name.clone(), error.to_string());
+            })?;
+
+        let tools = client.tools().to_vec();
+        let client = TransportClient::StreamableHttp(Arc::new(client));
 
         Ok(self.register(config.name.clone(), client, tools))
     }

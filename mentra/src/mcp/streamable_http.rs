@@ -9,4 +9,7 @@
 //! See [`client`](crate::mcp::streamable_http::client) for the lifecycle and
 //! [`sse`](crate::mcp::sse) for the older transport this one supersedes.
 
+pub mod client;
 pub mod config;
+#[cfg(test)]
+pub(crate) mod testing;

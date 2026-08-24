@@ -14,6 +14,7 @@ use crate::tool::{
 use super::client::McpStdioClient;
 use super::protocol::{McpToolCallResult, McpToolDefinition};
 use super::sse::client::McpSseClient;
+use super::streamable_http::client::McpStreamableHttpClient;
 
 /// The transport-independent surface [`McpBridgedTool`] needs from a client.
 ///
@@ -40,6 +41,7 @@ mod sealed {
 
     impl Sealed for super::McpStdioClient {}
     impl Sealed for super::McpSseClient {}
+    impl Sealed for super::McpStreamableHttpClient {}
 
     #[cfg(test)]
     impl Sealed for crate::mcp::tests::SuccessfulMcpClient {}
@@ -66,6 +68,19 @@ impl McpToolClient for McpSseClient {
         arguments: Option<Value>,
     ) -> Result<McpToolCallResult, String> {
         McpSseClient::call_tool(self, tool_name, arguments)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait]
+impl McpToolClient for McpStreamableHttpClient {
+    async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<Value>,
+    ) -> Result<McpToolCallResult, String> {
+        McpStreamableHttpClient::call_tool(self, tool_name, arguments)
             .await
             .map_err(|error| error.to_string())
     }
