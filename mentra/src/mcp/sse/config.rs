@@ -47,6 +47,13 @@ pub const DEFAULT_MAX_ENDPOINT_BYTES: usize = 8 * 1024;
 /// describe its tools is malfunctioning.
 pub const DEFAULT_MAX_TOOL_PAGES: usize = 1_000;
 
+/// Default cap on how many tools a server may advertise in total.
+///
+/// The page cap bounds the round trips and `max_event_bytes` bounds each
+/// event, but nothing bounded the list they accumulate into. Well past what
+/// any real server exposes.
+pub const DEFAULT_MAX_TOOLS: usize = 4_096;
+
 /// Timeouts and size limits for one SSE connection.
 ///
 /// These are separated from the operator-facing fields of
@@ -70,6 +77,8 @@ pub struct McpSseLimits {
     pub max_endpoint_bytes: usize,
     /// Bound on how many `tools/list` pages are followed.
     pub max_tool_pages: usize,
+    /// Bound on how many tools a server may advertise in total.
+    pub max_tools: usize,
 }
 
 impl Default for McpSseLimits {
@@ -83,6 +92,7 @@ impl Default for McpSseLimits {
             max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
             max_endpoint_bytes: DEFAULT_MAX_ENDPOINT_BYTES,
             max_tool_pages: DEFAULT_MAX_TOOL_PAGES,
+            max_tools: DEFAULT_MAX_TOOLS,
         }
     }
 }

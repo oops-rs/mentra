@@ -227,6 +227,57 @@ async fn walks_every_page_of_a_paginated_tools_list() {
     );
 }
 
+/// The cap says how many pages may be followed, so a list exactly that long is
+/// within it. Checking the count before another page is asked for refused a
+/// server for reaching a limit it was allowed to reach — and made
+/// `max_tool_pages: 1` reject every server alive.
+#[tokio::test(flavor = "multi_thread")]
+async fn accepts_a_tools_list_exactly_as_long_as_the_page_limit() {
+    let server = SseTestServer::start();
+    let mut config = config(&server);
+    config.limits = McpSseLimits {
+        max_tool_pages: 2,
+        ..McpSseLimits::default()
+    };
+    let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
+
+    server.wait_for_stream();
+    server.send_endpoint("/messages/?session_id=abc");
+    server.wait_for_posts(1);
+    server.send_message(&initialize_result(1));
+
+    server.wait_for_posts(3);
+    server.send_message(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{"name": "first", "inputSchema": {"type": "object"}}],
+            "nextCursor": "page-2"
+        }
+    }));
+
+    // The second page is the last: no cursor, so nothing further is asked for
+    // and the limit is never exceeded.
+    server.wait_for_posts(4);
+    server.send_message(&tools_result(
+        3,
+        json!([{"name": "second", "inputSchema": {"type": "object"}}]),
+    ));
+
+    let client = tokio::time::timeout(std::time::Duration::from_secs(10), connecting)
+        .await
+        .expect("the handshake should not hang")
+        .expect("no panic")
+        .expect("a list exactly at the page limit is within it");
+
+    let names: Vec<&str> = client
+        .tools()
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["first", "second"]);
+}
+
 /// A server that keeps returning a cursor must not loop forever. Cursors are
 /// opaque, so a repeat cannot be detected by value; only a page bound stops it.
 #[tokio::test(flavor = "multi_thread")]

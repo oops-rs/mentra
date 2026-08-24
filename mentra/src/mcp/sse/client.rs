@@ -118,6 +118,9 @@ pub enum McpSseError {
     #[error("MCP SSE server kept paginating tools/list past {limit} pages")]
     TooManyToolPages { limit: usize },
 
+    #[error("MCP SSE server advertised more than {limit} tools")]
+    TooManyTools { limit: usize },
+
     #[error("MCP SSE server returned JSON-RPC error: {0}")]
     JsonRpc(JsonRpcError),
 
@@ -469,18 +472,31 @@ impl McpSseClient {
             tools.extend(page.tools);
 
             pages += 1;
-            if pages >= self.limits.max_tool_pages {
-                // A server that keeps handing back a cursor would otherwise
-                // loop forever, growing the tool list without bound. The
-                // cursor is opaque, so a repeat cannot be detected by value.
-                return Err(McpSseError::TooManyToolPages {
-                    limit: self.limits.max_tool_pages,
+            if tools.len() > self.limits.max_tools {
+                // The page count and each page were bounded; the list they
+                // accumulate into was not, so a server willing to fill every
+                // page could be stopped by the allocator rather than a limit.
+                return Err(McpSseError::TooManyTools {
+                    limit: self.limits.max_tools,
                 });
             }
 
             match page.next_cursor {
                 // A missing or empty cursor means the last page.
-                Some(next) if !next.is_empty() => cursor = Some(next),
+                Some(next) if !next.is_empty() => {
+                    // Checked only when another page is actually asked for, so
+                    // a list exactly `max_tool_pages` long is accepted rather
+                    // than refused for reaching the limit it may reach. A
+                    // server that keeps handing back a cursor would otherwise
+                    // loop forever; the cursor is opaque, so a repeat cannot be
+                    // detected by value.
+                    if pages >= self.limits.max_tool_pages {
+                        return Err(McpSseError::TooManyToolPages {
+                            limit: self.limits.max_tool_pages,
+                        });
+                    }
+                    cursor = Some(next);
+                }
                 _ => break,
             }
         }

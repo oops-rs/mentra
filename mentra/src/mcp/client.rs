@@ -28,6 +28,12 @@ const CALL_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 /// only a page bound stops the walk.
 const MAX_TOOL_PAGES: usize = 1_000;
 
+/// Cap on how many tools a server may advertise in total.
+///
+/// The page cap bounds the round trips; nothing bounded the list they
+/// accumulate into. Well past what any real server exposes.
+const MAX_TOOLS: usize = 4_096;
+
 /// Errors from the MCP stdio client.
 #[derive(Debug, thiserror::Error)]
 pub enum McpClientError {
@@ -54,6 +60,9 @@ pub enum McpClientError {
 
     #[error("MCP server kept paginating tools/list past {limit} pages")]
     TooManyToolPages { limit: usize },
+
+    #[error("MCP server advertised more than {limit} tools")]
+    TooManyTools { limit: usize },
 
     #[error("MCP client is already shut down")]
     Shutdown,
@@ -290,17 +299,26 @@ impl McpStdioClient {
             all_tools.extend(result.tools);
 
             pages += 1;
-            if pages >= MAX_TOOL_PAGES {
-                // A server that keeps handing back a cursor would otherwise
-                // loop forever, growing the tool list without bound. Cursors
-                // are opaque, so a repeat cannot be detected by value.
-                return Err(McpClientError::TooManyToolPages {
-                    limit: MAX_TOOL_PAGES,
-                });
+            if all_tools.len() > MAX_TOOLS {
+                // The page count was bounded; the list they accumulate into
+                // was not.
+                return Err(McpClientError::TooManyTools { limit: MAX_TOOLS });
             }
 
             match result.next_cursor {
-                Some(next) if !next.is_empty() => cursor = Some(next),
+                Some(next) if !next.is_empty() => {
+                    // Checked only when another page is actually asked for, so
+                    // a list exactly `MAX_TOOL_PAGES` long is accepted rather
+                    // than refused for reaching the limit it may reach.
+                    // Cursors are opaque, so a repeat cannot be detected by
+                    // value; only this bound stops an endless walk.
+                    if pages >= MAX_TOOL_PAGES {
+                        return Err(McpClientError::TooManyToolPages {
+                            limit: MAX_TOOL_PAGES,
+                        });
+                    }
+                    cursor = Some(next);
+                }
                 _ => break,
             }
         }

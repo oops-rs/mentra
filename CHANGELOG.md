@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### The other two MCP transports get the same pagination fixes
+
+- Review found the `tools/list` page-cap off-by-one and the unbounded tool
+  accumulation in the new Streamable HTTP client and noted both were copied
+  from the older code. They were: the stdio and legacy HTTP+SSE clients carried
+  the identical two bugs, so fixing only the newest transport would have left
+  the two that ship today wrong.
+- All three now check the page cap only when another page is actually asked
+  for, so a list exactly `max_tool_pages` long is accepted rather than refused
+  for reaching the limit it may reach — and a cap of `1` no longer rejects
+  every server alive. All three bound the total number of advertised tools
+  (`max_tools`, defaulting to 4096), which the page and per-page byte caps
+  never did.
+- **Breaking**: `McpSseLimits` gains a `max_tools` field, so an exhaustive
+  struct literal needs `..Default::default()`.
+
 ### A permission request names the lane a call will actually run in
 
 - `ToolClassification::execution_category` reported the category a tool's
