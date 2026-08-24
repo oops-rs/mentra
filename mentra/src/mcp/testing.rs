@@ -39,6 +39,16 @@ impl CapturedRequest {
             .as_u64()
     }
 
+    /// Returns the `params.cursor` of the captured body, if it has one.
+    pub(crate) fn rpc_cursor(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(&self.body)
+            .ok()?
+            .get("params")?
+            .get("cursor")?
+            .as_str()
+            .map(str::to_string)
+    }
+
     /// Returns a header value by its lowercase name.
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(String::as_str)

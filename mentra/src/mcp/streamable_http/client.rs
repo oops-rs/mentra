@@ -148,6 +148,9 @@ pub enum McpStreamableHttpError {
     #[error("MCP server kept paginating tools/list past {limit} pages")]
     TooManyToolPages { limit: usize },
 
+    #[error("MCP server advertised more than {limit} tools")]
+    TooManyTools { limit: usize },
+
     #[error("MCP server returned JSON-RPC error: {0}")]
     JsonRpc(JsonRpcError),
 
@@ -256,8 +259,18 @@ impl McpStreamableHttpClient {
             server_name: config.name.clone(),
         };
 
-        client.initialize().await?;
-        client.discover_tools().await?;
+        // A failure after `initialize` has to hand the session back. The
+        // server has already allocated one by then, and dropping the client
+        // sends no DELETE, so the session would sit on the server until it
+        // timed out on its own.
+        if let Err(error) = client.initialize().await {
+            client.shutdown().await;
+            return Err(error);
+        }
+        if let Err(error) = client.discover_tools().await {
+            client.shutdown().await;
+            return Err(error);
+        }
 
         Ok(client)
     }
@@ -327,6 +340,15 @@ impl McpStreamableHttpClient {
                 .send(),
         )
         .await;
+
+        // Forget the id whatever the server said. Keeping it would let a
+        // second shutdown re-DELETE a session that is already gone, and would
+        // let a later call present credentials for one that no longer exists.
+        let mut session = lock_session(&self.session);
+        *session = Session {
+            id: None,
+            protocol_version: session.protocol_version.clone(),
+        };
     }
 
     /// Sends a JSON-RPC request and reads its reply from the same response.
@@ -500,7 +522,25 @@ impl McpStreamableHttpClient {
         let id = headers
             .get(SESSION_HEADER)
             .filter(|value| !value.is_empty() && value.len() <= MAX_SESSION_ID_BYTES)
-            .cloned();
+            // The specification restricts a session id to visible ASCII. The
+            // parser upstream already rejects CR and LF, so this is not what
+            // stands between us and request splitting -- it stops a value that
+            // an intermediary disagreeing about obs-text could read
+            // differently from us.
+            .filter(|value| {
+                value
+                    .as_bytes()
+                    .iter()
+                    .all(|byte| (0x21..=0x7e).contains(byte))
+            })
+            .map(|value| {
+                // The id authenticates the session on every later request, so
+                // it is as sensitive as the token beside it: redacted in
+                // `Debug` output and never HPACK-indexed.
+                let mut value = value.clone();
+                value.set_sensitive(true);
+                value
+            });
 
         let mut session = lock_session(&self.session);
         *session = Session {
@@ -661,18 +701,32 @@ impl McpStreamableHttpClient {
             tools.extend(page.tools);
 
             pages += 1;
-            if pages >= self.limits.max_tool_pages {
-                // A server that keeps handing back a cursor would otherwise
-                // loop forever, growing the tool list without bound. The cursor
-                // is opaque, so a repeat cannot be detected by value.
-                return Err(McpStreamableHttpError::TooManyToolPages {
-                    limit: self.limits.max_tool_pages,
+            if tools.len() > self.limits.max_tools {
+                // The page count and each page's size were bounded; the total
+                // was not. A server willing to fill every page could push
+                // gigabytes through this loop and be killed by the allocator
+                // rather than by a limit.
+                return Err(McpStreamableHttpError::TooManyTools {
+                    limit: self.limits.max_tools,
                 });
             }
 
             match page.next_cursor {
                 // A missing or empty cursor means the last page.
-                Some(next) if !next.is_empty() => cursor = Some(next),
+                Some(next) if !next.is_empty() => {
+                    // Checked only once another page is actually asked for, so
+                    // a list exactly `max_tool_pages` long is accepted rather
+                    // than refused for having reached the limit it is allowed
+                    // to reach. A server that keeps handing back a cursor would
+                    // otherwise loop forever; the cursor is opaque, so a repeat
+                    // cannot be detected by value.
+                    if pages >= self.limits.max_tool_pages {
+                        return Err(McpStreamableHttpError::TooManyToolPages {
+                            limit: self.limits.max_tool_pages,
+                        });
+                    }
+                    cursor = Some(next);
+                }
                 _ => break,
             }
         }
@@ -792,8 +846,11 @@ fn classify_failure(method: &str, error: McpStreamableHttpError) -> McpStreamabl
 
     match &error {
         McpStreamableHttpError::HttpStatus { status, .. } if status.is_client_error() => error,
+        // A redirect is deliberately *not* here. RFC 9110 15.4.4 makes a 303
+        // answering a POST the server saying it processed the request and put
+        // the result elsewhere; refusing to follow it is right, calling it
+        // "definitely did not run" is not.
         McpStreamableHttpError::SessionExpired
-        | McpStreamableHttpError::RedirectRefused
         | McpStreamableHttpError::Config(_)
         | McpStreamableHttpError::Endpoint(_) => error,
         _ => indeterminate(method),

@@ -566,3 +566,140 @@ async fn a_server_reported_tool_failure_stays_a_definite_answer() {
         "a reported failure is a definite answer; got {error:?}"
     );
 }
+
+#[tokio::test]
+async fn a_tool_list_exactly_at_the_page_limit_is_accepted() {
+    // The cap says how many pages may be followed, so a list that is exactly
+    // that long is within it. Checking the count before asking for another
+    // page rejected a server for reaching a limit it was allowed to reach --
+    // and made `max_tool_pages: 1` refuse every server alive.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            tool_pages: Some(3),
+            ..ServerBehavior::default()
+        },
+    );
+    let config = McpStreamableHttpServerConfig::new("fixture", fixture.endpoint()).with_limits(
+        McpStreamableHttpLimits {
+            max_tool_pages: 3,
+            ..McpStreamableHttpLimits::default()
+        },
+    );
+
+    let client = McpStreamableHttpClient::connect(&config)
+        .await
+        .expect("a list exactly at the page limit is within it");
+    assert_eq!(client.tools().len(), 3, "every page should be collected");
+}
+
+#[tokio::test]
+async fn a_single_page_limit_still_admits_a_single_page_server() {
+    // The degenerate case the off-by-one made impossible.
+    let fixture = StreamableHttpFixture::start(ReplyMode::Json);
+    let config = McpStreamableHttpServerConfig::new("fixture", fixture.endpoint()).with_limits(
+        McpStreamableHttpLimits {
+            max_tool_pages: 1,
+            ..McpStreamableHttpLimits::default()
+        },
+    );
+
+    let client = McpStreamableHttpClient::connect(&config)
+        .await
+        .expect("one page is not more than one page");
+    assert_eq!(client.tools().len(), 1);
+}
+
+#[tokio::test]
+async fn a_server_that_never_stops_paginating_is_refused() {
+    // A cursor is opaque, so a server repeating one cannot be caught by value.
+    // The page cap is the only thing that ends this walk.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            paginates_forever: true,
+            ..ServerBehavior::default()
+        },
+    );
+    let config = McpStreamableHttpServerConfig::new("fixture", fixture.endpoint()).with_limits(
+        McpStreamableHttpLimits {
+            max_tool_pages: 4,
+            ..McpStreamableHttpLimits::default()
+        },
+    );
+
+    let error = McpStreamableHttpClient::connect(&config)
+        .await
+        .expect_err("an endless walk must be stopped");
+    assert!(
+        matches!(error, McpStreamableHttpError::TooManyToolPages { limit: 4 }),
+        "expected the page cap to stop it, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_server_advertising_more_tools_than_the_cap_is_refused() {
+    // Each page was bounded and the page count was bounded; the list they
+    // accumulate into was not.
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            paginates_forever: true,
+            ..ServerBehavior::default()
+        },
+    );
+    let config = McpStreamableHttpServerConfig::new("fixture", fixture.endpoint()).with_limits(
+        McpStreamableHttpLimits {
+            max_tools: 2,
+            ..McpStreamableHttpLimits::default()
+        },
+    );
+
+    let error = McpStreamableHttpClient::connect(&config)
+        .await
+        .expect_err("an unbounded tool list must be stopped");
+    assert!(
+        matches!(error, McpStreamableHttpError::TooManyTools { limit: 2 }),
+        "expected the total-tools cap to stop it, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_id_outside_visible_ascii_is_not_adopted() {
+    // The specification restricts a session id to 0x21-0x7E. A value carrying
+    // a space or obs-text is one an intermediary may read differently than we
+    // do, so it is dropped rather than echoed on every later request.
+    let fixture =
+        StreamableHttpFixture::start_with(ReplyMode::Json, ServerBehavior::with_session("sess 42"));
+    let client = connect(&fixture).await;
+
+    assert_eq!(
+        client.session_id(),
+        None,
+        "a session id outside visible ASCII must not be adopted"
+    );
+    for request in fixture.requests().iter().skip(1) {
+        assert_eq!(request.header("mcp-session-id"), None);
+    }
+}
+
+#[tokio::test]
+async fn shutdown_forgets_the_session_it_ended() {
+    // Keeping the id would let a second shutdown re-DELETE a session that is
+    // already gone, and would let a later call present credentials for one
+    // that no longer exists.
+    let fixture =
+        StreamableHttpFixture::start_with(ReplyMode::Json, ServerBehavior::with_session("sess-9"));
+    let client = connect(&fixture).await;
+
+    client.shutdown().await;
+    assert_eq!(client.session_id(), None, "the session is gone");
+
+    let after_first = fixture.requests().len();
+    client.shutdown().await;
+    assert_eq!(
+        fixture.requests().len(),
+        after_first,
+        "a second shutdown has nothing left to end"
+    );
+}

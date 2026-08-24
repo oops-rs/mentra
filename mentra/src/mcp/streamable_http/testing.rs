@@ -118,6 +118,14 @@ pub(crate) struct ServerBehavior {
     /// head, so any read of the body afterwards that is not itself bounded
     /// waits forever.
     pub(crate) stall_after_headers_on: Option<String>,
+    /// Serve `tools/list` as this many pages, chained by `nextCursor`.
+    ///
+    /// `None` serves one page with no cursor. The walk was previously untested
+    /// in either direction, which is how an off-by-one in its page cap
+    /// survived.
+    pub(crate) tool_pages: Option<usize>,
+    /// Always hand back a `nextCursor`, so the walk only ends at a limit.
+    pub(crate) paginates_forever: bool,
     /// Answer `tools/call` with this HTTP status, after a successful handshake.
     ///
     /// Distinct from `http_status`, which applies to every request and so
@@ -194,13 +202,29 @@ fn answer(
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "fixture", "version": "9.9.9"},
         }),
-        "tools/list" => json!({
-            "tools": [{
-                "name": "echo",
-                "description": "Echoes its argument",
-                "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
-            }],
-        }),
+        "tools/list" => {
+            // The cursor carries the page index, so the fixture stays
+            // stateless across the connection.
+            let served = request
+                .rpc_cursor()
+                .and_then(|cursor| cursor.strip_prefix("page-").map(str::to_string))
+                .and_then(|index| index.parse::<usize>().ok())
+                .unwrap_or(0);
+            let total = behavior.tool_pages.unwrap_or(1);
+            let more = behavior.paginates_forever || served + 1 < total;
+
+            let mut page = json!({
+                "tools": [{
+                    "name": format!("echo{}", if served == 0 { String::new() } else { served.to_string() }),
+                    "description": "Echoes its argument",
+                    "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
+                }],
+            });
+            if more {
+                page["nextCursor"] = json!(format!("page-{}", served + 1));
+            }
+            page
+        }
         "tools/call" => {
             if behavior.tool_call_fails {
                 return write_reply(

@@ -47,6 +47,15 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// describe its tools is malfunctioning.
 pub const DEFAULT_MAX_TOOL_PAGES: usize = 1_000;
 
+/// Default cap on how many tools a server may advertise in total.
+///
+/// The page cap bounds how many round trips a walk makes and
+/// `max_response_bytes` bounds each page, but nothing bounded the list they
+/// accumulate into: a server willing to fill every page could push gigabytes
+/// through the walk and be stopped by the allocator rather than by a limit.
+/// Well past what any real server exposes.
+pub const DEFAULT_MAX_TOOLS: usize = 4_096;
+
 /// Headers this transport sets per request, which a configuration may not
 /// also supply.
 ///
@@ -79,6 +88,8 @@ pub struct McpStreamableHttpLimits {
     pub max_response_bytes: usize,
     /// Bound on how many `tools/list` pages are followed.
     pub max_tool_pages: usize,
+    /// Bound on how many tools a server may advertise in total.
+    pub max_tools: usize,
 }
 
 impl Default for McpStreamableHttpLimits {
@@ -92,6 +103,7 @@ impl Default for McpStreamableHttpLimits {
             max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_tool_pages: DEFAULT_MAX_TOOL_PAGES,
+            max_tools: DEFAULT_MAX_TOOLS,
         }
     }
 }
