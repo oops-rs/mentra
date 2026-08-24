@@ -1,5 +1,8 @@
 //! JSON-RPC 2.0 and MCP protocol types.
 
+#[cfg(test)]
+mod tests;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -163,7 +166,15 @@ pub struct McpToolCallResult {
 // ---------------------------------------------------------------------------
 
 /// Configuration for a single MCP server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Security
+///
+/// [`env`](Self::env) is where the de-facto `.mcp.json` format puts server
+/// credentials, so its values never reach `Debug` output: the rendering keeps
+/// the variable names, which is what an operator needs to see, and replaces
+/// every value. [`Serialize`] is unaffected — a config written back to disk
+/// still carries the values it was given.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Display name for the server.
     pub name: String,
@@ -173,9 +184,57 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub args: Vec<String>,
     /// Extra environment variables.
+    ///
+    /// Values are redacted by `Debug`; see the type's security note.
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
     /// Working directory for the spawned process.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+}
+
+/// Renders every field except the environment values.
+///
+/// Written by hand rather than derived so that formatting a config for a log,
+/// an error, or a panic cannot print a token. The remaining fields stay visible
+/// because `command` and `args` are how an operator identifies which server the
+/// configuration describes.
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &RedactedEnv(&self.env))
+            .field("cwd", &self.cwd)
+            .finish()
+    }
+}
+
+/// Renders environment variable names with their values replaced.
+struct RedactedEnv<'a>(&'a std::collections::HashMap<String, String>);
+
+impl std::fmt::Debug for RedactedEnv<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Sorted because `HashMap` iteration order varies between processes,
+        // and a diagnostic that reorders itself between runs is harder to read
+        // and harder to diff.
+        let mut names: Vec<&str> = self.0.keys().map(String::as_str).collect();
+        names.sort_unstable();
+
+        let mut map = f.debug_map();
+        for name in names {
+            map.entry(&name, &Redacted);
+        }
+        map.finish()
+    }
+}
+
+/// Stands in for a value that must not be printed.
+struct Redacted;
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
 }
