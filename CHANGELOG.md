@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### A tool schema without a `type` still has to receive an object
+
+- The input validator returned early when a root schema omitted `type`, and
+  `required` is skipped for a non-object — correct JSON Schema, and useless for
+  a tool call, whose arguments are an object by every provider's contract. A
+  schema declaring `properties` and `required` but no `type` therefore let a
+  bare string reach the tool unchallenged.
+- It only shows up for a binding whose schema arrives as *data* rather than
+  code — a workspace manifest — because a schema written in Rust alongside the
+  tool always says `type`. Reported by a downstream host that had kept a
+  hand-written is-an-object guard for exactly this reason.
+- The check is deliberately narrow: root only, and only when the schema shows
+  object intent by declaring `properties` or `required`. An empty schema, or
+  `true`, still accepts anything, because a schema that describes nothing is
+  not describing an object either.
+
 ## 0.20.0
 
 ### `SessionEvent::MemoryUpdated` is emitted at last

@@ -17,11 +17,44 @@ use serde_json::Value;
 /// Validates `input` against `schema`, returning what a model should be told.
 pub(crate) fn validate_tool_input(schema: &Value, input: &Value) -> Result<(), String> {
     let mut errors = Vec::new();
+    if let Some(error) = root_shape_error(schema, input) {
+        // Nothing below the root can be checked against a value that is not
+        // the shape the root describes.
+        return Err(error);
+    }
     check(schema, input, "", &mut errors);
     if errors.is_empty() {
         return Ok(());
     }
     Err(errors.join("; "))
+}
+
+/// Rejects a call whose arguments are not an object, for a root schema that
+/// describes one without saying `type`.
+///
+/// A schema that declares `properties` or `required` is describing an object
+/// whether or not it spells that out, and `required` is otherwise skipped for a
+/// non-object -- which is correct JSON Schema and wrong for a tool call, whose
+/// arguments are an object by every provider's contract. Without this, a schema
+/// that omitted `type` let a bare string or array through untouched, and a host
+/// binding a schema that arrives as *data* rather than code had to re-check the
+/// shape itself.
+///
+/// Deliberately narrow. It applies at the root only, and only when the schema
+/// shows object intent: an empty schema, or `true`, still accepts anything,
+/// because a schema that describes nothing is not describing an object either.
+fn root_shape_error(schema: &Value, input: &Value) -> Option<String> {
+    let schema = schema.as_object()?;
+    if schema.contains_key("type") || input.is_object() {
+        return None;
+    }
+    if !schema.contains_key("properties") && !schema.contains_key("required") {
+        return None;
+    }
+    Some(format!(
+        "input should be an object, got {}",
+        json_type_name(input)
+    ))
 }
 
 fn check(schema: &Value, value: &Value, path: &str, errors: &mut Vec<String>) {
@@ -270,5 +303,67 @@ mod tests {
         assert!(error.contains("'path' is required"), "{error}");
         assert!(error.contains("'limit'"), "{error}");
         assert!(error.contains("'mode'"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod root_shape_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A tool binding whose schema arrives as data rather than code — a
+    /// workspace manifest — may omit `type` at the root. `required` is skipped
+    /// for a non-object, which is correct JSON Schema and useless here: the
+    /// program behind the tool receives arguments it never agreed to accept.
+    #[test]
+    fn a_schema_without_a_type_still_requires_an_object() {
+        let schema = json!({
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        });
+
+        let error = validate_tool_input(&schema, &json!("just a string"))
+            .expect_err("a string cannot satisfy a schema describing properties");
+        assert!(
+            error.contains("should be an object"),
+            "the message should say what was wrong: {error}"
+        );
+
+        assert_eq!(
+            validate_tool_input(&schema, &json!({"path": "a.rs"})),
+            Ok(()),
+            "an object satisfying the schema still passes"
+        );
+        assert!(
+            validate_tool_input(&schema, &json!({})).is_err(),
+            "and `required` is now actually enforced for such a schema"
+        );
+    }
+
+    /// The narrowness is the point: a schema that describes nothing is not
+    /// describing an object, so it keeps accepting anything. Rejecting here
+    /// would turn a valid call into a failure over a keyword that was never
+    /// written.
+    #[test]
+    fn a_schema_that_describes_nothing_still_accepts_anything() {
+        for schema in [json!({}), json!(true), json!({"description": "free-form"})] {
+            for input in [json!("text"), json!(7), json!([1, 2]), json!(null)] {
+                assert_eq!(
+                    validate_tool_input(&schema, &input),
+                    Ok(()),
+                    "schema {schema} must not reject {input}"
+                );
+            }
+        }
+    }
+
+    /// A root that does say `type` keeps reporting through the existing path,
+    /// which already names the declared type.
+    #[test]
+    fn a_declared_root_type_is_reported_by_the_type_check() {
+        let schema = json!({"type": "object", "properties": {}});
+        let error =
+            validate_tool_input(&schema, &json!([])).expect_err("an array is not an object");
+        assert!(error.contains("should be object"), "got {error}");
     }
 }
