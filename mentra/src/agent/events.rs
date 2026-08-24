@@ -156,10 +156,12 @@ pub enum AgentEvent {
     /// outside its candidate tokens. They are carried separately so a host can
     /// do the arithmetic its provider actually calls for; a provider that
     /// reports neither — Anthropic bills thinking as ordinary output — leaves
-    /// both zero. [`ProviderDefinition::reports_reasoning_tokens`] and
-    /// `reports_thoughts_tokens` say which to expect.
+    /// both zero. [`ProviderCapabilities::reports_reasoning_tokens`] and
+    /// [`reports_thoughts_tokens`](crate::provider::ProviderCapabilities::reports_thoughts_tokens)
+    /// say which to expect, reached through
+    /// [`ProviderDefinition::capabilities`](crate::provider::ProviderDefinition::capabilities).
     ///
-    /// [`ProviderDefinition::reports_reasoning_tokens`]: crate::provider::ProviderDefinition::reports_reasoning_tokens
+    /// [`ProviderCapabilities::reports_reasoning_tokens`]: crate::provider::ProviderCapabilities::reports_reasoning_tokens
     UsageReport {
         input_tokens: u64,
         output_tokens: u64,

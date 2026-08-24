@@ -690,7 +690,8 @@ impl Runtime {
     /// Creates a new session wrapping a freshly spawned agent with explicit config and
     /// an optional project identifier.
     ///
-    /// The `project_id` is threaded into the [`SessionPermissionHandle`] so that
+    /// The `project_id` is threaded into the
+    /// [`SessionPermissionHandle`](crate::SessionPermissionHandle) so that
     /// permission rules are scoped to the project when a [`PermissionRuleStore`] is
     /// attached.
     pub fn create_session_full(
@@ -785,7 +786,8 @@ impl Runtime {
     /// Resumes a previously persisted agent, wraps it in a session, and associates
     /// the session with an optional project identifier.
     ///
-    /// The `project_id` is threaded into the [`SessionPermissionHandle`] so that
+    /// The `project_id` is threaded into the
+    /// [`SessionPermissionHandle`](crate::SessionPermissionHandle) so that
     /// permission rules are scoped to the project when a [`PermissionRuleStore`] is
     /// attached.
     pub fn resume_session_with_project(

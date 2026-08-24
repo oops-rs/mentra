@@ -254,7 +254,7 @@ impl ProviderRegistry {
     /// has been registered.
     ///
     /// The default is the first embedding-capable provider registered. To look up a
-    /// specific provider use [`embedding_provider_for`].
+    /// specific provider use [`embedding_provider_for`](Self::embedding_provider_for).
     pub fn embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
         self.default_embedding_provider
             .as_ref()

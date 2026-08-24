@@ -200,7 +200,7 @@ pub struct RunOptions {
     /// [`provider_retry`](Self::provider_retry) holds the rest.
     ///
     /// **Retries are model requests.** Each attempt increments the same counter
-    /// [`model_budget`](Self::model_budget) bounds, so a run with both set can
+    /// [`model_budget`](field@Self::model_budget) bounds, so a run with both set can
     /// exhaust its model budget on retries and end in
     /// [`ModelBudgetExceeded`](crate::error::RuntimeError::ModelBudgetExceeded)
     /// without the model ever having answered. That is deliberate:
@@ -229,7 +229,7 @@ pub struct RunOptions {
     /// reproduces mentra's built-in round loop exactly.
     pub round_strategy: Option<Arc<dyn crate::agent::RoundStrategy>>,
     /// A **soft** aggregate token bound on this run's reported usage, distinct
-    /// from [`model_budget`](Self::model_budget) (which caps the number of
+    /// from [`model_budget`](field@Self::model_budget) (which caps the number of
     /// provider *requests*, not tokens).
     ///
     /// Token usage is only known once a round's response has streamed in full

@@ -632,7 +632,8 @@ pub type ToolResult = Result<String, String>;
 /// never interprets it. `terminate` asks the run to end as the value of this
 /// tool's own execution: a first-class successor to
 /// [`ToolContext::request_idle`] for terminal actions, honored only when the
-/// call executes in an exclusive lane (see [`RuntimeToolDescriptorBuilder::terminal`]).
+/// call executes in an exclusive lane (see
+/// [`RuntimeToolDescriptorBuilder::terminal`](crate::tool::RuntimeToolDescriptorBuilder::terminal)).
 ///
 /// Tool-level failures keep using the existing `Err(String)` channel on
 /// [`ToolExecutor::execute_output`] / [`ToolExecutor::execute_mut_output`];
