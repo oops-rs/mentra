@@ -2,7 +2,10 @@ use std::{
     collections::VecDeque,
     io::{Read, Write},
     net::TcpListener,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -18,7 +21,11 @@ use mentra::{
     runtime::{
         CommandOutput, CommandRequest, RuntimeExecutor, RuntimePolicy, VolatileRuntimeStore,
     },
-    tool::{ParallelToolContext, ToolContext, ToolDefinition, ToolExecutor, ToolResult, ToolSpec},
+    tool::{
+        ExecutableTool, ParallelToolContext, ToolAuthorizationDecision, ToolAuthorizationPreview,
+        ToolAuthorizationRequest, ToolAuthorizer, ToolContext, ToolDefinition, ToolExecutor,
+        ToolResult, ToolSideEffectLevel, ToolSpec,
+    },
 };
 use serde_json::{Value, json};
 
@@ -799,6 +806,176 @@ async fn a_tool_can_name_the_executor_a_command_runs_on() {
         log.0.lock().expect("target log poisoned").as_slice(),
         [Some("mac".to_string())]
     );
+}
+
+/// The registration shape the pointer-forwarding impls exist for, written from
+/// outside the crate: `with_tool` takes a tool *by value*, so a host holding
+/// one behind a pointer — a `Box<dyn ExecutableTool>` it picked at runtime, or
+/// an `Arc` it wants two runtimes to share — had no public path in and had to
+/// hand-forward eight methods to get one.
+///
+/// Two claims, and compiling is only the first. The second is that
+/// `authorization_preview` survives the trip: it is defaulted, and a wrapper
+/// that fell back to the default would hand the approver a preview rebuilt
+/// from the descriptor instead of the one the tool wrote — the tool presenting
+/// as something other than what it is. So the tool below reports a side effect
+/// its descriptor does not, and the authorizer is asked what it actually saw.
+#[tokio::test]
+async fn a_runtime_builder_takes_a_boxed_or_shared_tool() {
+    #[derive(Default)]
+    struct CountingTool {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ToolDefinition for CountingTool {
+        fn descriptor(&self) -> ToolSpec {
+            // Says `None` by omission, which is what the defaulted
+            // `authorization_preview` would report in place of the override.
+            ToolSpec::builder("counting_tool")
+                .description("Count executions across every runtime holding it")
+                .input_schema(json!({ "type": "object", "properties": {} }))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for CountingTool {
+        fn authorization_preview(
+            &self,
+            ctx: &ParallelToolContext,
+            input: &Value,
+        ) -> Result<ToolAuthorizationPreview, String> {
+            let descriptor = self.descriptor();
+            Ok(ToolAuthorizationPreview {
+                working_directory: ctx.working_directory().to_path_buf(),
+                capabilities: descriptor.capabilities,
+                side_effect_level: ToolSideEffectLevel::External,
+                durability: descriptor.durability,
+                execution_category: descriptor.execution_category,
+                approval_category: descriptor.approval_category,
+                raw_input: input.clone(),
+                structured_input: input.clone(),
+            })
+        }
+
+        async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+            Ok(format!(
+                "call {}",
+                self.calls.fetch_add(1, Ordering::SeqCst) + 1
+            ))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct PreviewLog(Arc<Mutex<Vec<ToolAuthorizationPreview>>>);
+
+    #[async_trait]
+    impl ToolAuthorizer for PreviewLog {
+        async fn authorize(
+            &self,
+            request: &ToolAuthorizationRequest,
+        ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+            self.0
+                .lock()
+                .expect("preview log poisoned")
+                .push(request.preview.clone());
+            Ok(ToolAuthorizationDecision::allow())
+        }
+    }
+
+    // The signature a host writes when the tool it registers is not known until
+    // run time. Naming `ExecutableTool` from outside is part of the claim.
+    fn runtime_with_tool<T>(provider: ScriptedProvider, authorizer: PreviewLog, tool: T) -> Runtime
+    where
+        T: ExecutableTool + 'static,
+    {
+        Runtime::builder()
+            .with_runtime_identifier(format!("public-api-{}", now_nanos()))
+            .with_store(VolatileRuntimeStore::new())
+            .with_provider_instance(provider)
+            .with_policy(RuntimePolicy::permissive())
+            .with_tool_authorizer(authorizer)
+            .with_tool(tool)
+            .build()
+            .expect("build runtime")
+    }
+
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let previews = PreviewLog::default();
+
+    let one_turn_calling_the_tool = |reply: &str| {
+        let provider = ScriptedProvider::new(model.provider.clone(), vec![model.clone()]);
+        provider.push_turns(vec![
+            Turn::ToolCalls(vec![ScriptedToolCall::new("counting_tool", json!({}))]),
+            Turn::Text(reply.to_string()),
+        ]);
+        provider
+    };
+
+    let boxed: Box<dyn ExecutableTool> = Box::new(CountingTool::default());
+    let boxed_runtime = runtime_with_tool(
+        one_turn_calling_the_tool("boxed done"),
+        previews.clone(),
+        boxed,
+    );
+    assert_eq!(
+        boxed_runtime
+            .tool_descriptor("counting_tool")
+            .expect("the boxed tool registered under its own name")
+            .provider
+            .name,
+        "counting_tool",
+    );
+    let mut agent = boxed_runtime
+        .spawn("boxed-agent", model.clone())
+        .expect("spawn boxed-tool agent");
+    assert_eq!(
+        agent
+            .send(vec![ContentBlock::text("go")])
+            .await
+            .expect("boxed tool run completes")
+            .text(),
+        "boxed done",
+    );
+
+    // One tool instance, two runtimes — the case that previously had no public
+    // path at all, leaving a host to route through shell commands instead.
+    let shared = Arc::new(CountingTool::default());
+    for host in ["first-host", "second-host"] {
+        let runtime = runtime_with_tool(
+            one_turn_calling_the_tool(&format!("{host} done")),
+            previews.clone(),
+            Arc::clone(&shared),
+        );
+        let mut agent = runtime
+            .spawn(host, model.clone())
+            .expect("spawn shared-tool agent");
+        assert_eq!(
+            agent
+                .send(vec![ContentBlock::text("go")])
+                .await
+                .expect("shared tool run completes")
+                .text(),
+            format!("{host} done"),
+        );
+    }
+    assert_eq!(
+        shared.calls.load(Ordering::SeqCst),
+        2,
+        "both runtimes drove the same tool instance, not a copy each",
+    );
+
+    let seen = previews.0.lock().expect("preview log poisoned").clone();
+    assert_eq!(seen.len(), 3, "every call was put to the authorizer");
+    for preview in seen {
+        assert_eq!(
+            preview.side_effect_level,
+            ToolSideEffectLevel::External,
+            "the pointer forwarded authorization_preview instead of falling \
+             back to the descriptor-derived default",
+        );
+    }
 }
 
 fn now_nanos() -> u128 {
