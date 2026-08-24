@@ -93,6 +93,16 @@ pub enum SessionEvent {
         tool_call_id: String,
         tool_name: String,
         summary: String,
+        /// Always [`ToolMutability::Unknown`] today.
+        ///
+        /// A queued call is announced while the provider stream is still being
+        /// decoded, from a content block that carries an id, a name and input
+        /// JSON and nothing about the tool behind them. A host that needs to
+        /// know what a call would do reads
+        /// [`PermissionRequested::classification`](Self::PermissionRequested),
+        /// which is both typed and finer: it separates a local write from a
+        /// process launch from a network call, where this field's three values
+        /// cannot.
         mutability: ToolMutability,
         input_json: String,
     },

@@ -292,7 +292,29 @@ fn map_teammate_updated(teammate: &TeamMemberSummary) -> Vec<SessionEvent> {
     }]
 }
 
-#[allow(dead_code)] // exposed for session-handle enrichment in upcoming tasks
+/// Collapses a classification into the read-only/mutating split.
+///
+/// Nothing calls this: [`SessionEvent::ToolQueued`] reports
+/// [`ToolMutability::Unknown`] instead, and does so on purpose.
+///
+/// Two facts stand in the way of wiring it. The first is that the classifying
+/// data is not here. `ToolUseReady` is derived while the provider stream is
+/// decoded, from a content block carrying an id, a name and input JSON;
+/// neither it nor the forwarder that maps it holds a tool registry, so
+/// reaching a descriptor's side effect level means threading a lookup into the
+/// per-event path.
+///
+/// The second is that the answer would not be worth the wiring. This function
+/// reads `Process` and `External` as the same `Mutating`, which cannot say
+/// whether a call wrote a local file or opened a socket — the distinction a
+/// host most needs. That distinction is available, typed, on
+/// [`SessionEvent::PermissionRequested`]'s
+/// [`classification`](crate::tool::ToolClassification): a call worth deciding
+/// about is a call that was asked about.
+///
+/// Kept because the mapping it encodes is the right one if `ToolQueued` ever
+/// does learn what it queued.
+#[allow(dead_code)]
 pub(crate) fn classify_mutability(
     side_effect_level: ToolSideEffectLevel,
     execution_category: ToolExecutionCategory,
