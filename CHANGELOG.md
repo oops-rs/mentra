@@ -96,6 +96,29 @@
   `true`, still accepts anything, because a schema that describes nothing is
   not describing an object either.
 
+### A delegating parent can now give a subagent its own tools, model, and system prompt
+
+- `DisposableSubagentTemplate::from_agent` cloned the parent's whole
+  `AgentConfig`, and `spawn_subagent` took no arguments, so a delegating
+  parent could vary a child's bounds through `child_run_options` but never its
+  tool profile, model, or system prompt.
+- `DisposableSubagentTemplate` gets `with_tool_profile`, `with_model`, and
+  `with_system`, each overriding one field of the parent clone before
+  spawning. `spawn_subagent_from` is the template-taking sibling of
+  `spawn_subagent` at every level that already reaches it — `Agent`,
+  `ToolContext`, `ParallelToolContext`, and `Session` — each paired with a
+  `disposable_subagent_template` accessor to build the override from. The
+  depth-guard, hidden-tool, and subagent-system-prompt-suffix treatment is
+  untouched and applies the same way regardless of which fields were
+  overridden.
+- `with_model` resolves its provider against the runtime inside
+  `spawn_subagent_from`, the same lookup `Agent::set_model` makes for the same
+  reason, so a model naming an unregistered provider fails there rather than
+  silently running the child on the parent's provider.
+- Asked for by a downstream host that wants to run a cheap read-only triage
+  child beside a full-capability fixer without re-implementing subagent
+  spawning to get there.
+
 ## 0.20.0
 
 ### `SessionEvent::MemoryUpdated` is emitted at last
