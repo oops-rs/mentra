@@ -153,18 +153,19 @@ pub(super) fn fsync_dir(dir: &Path) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// Maps an identifier onto a filesystem-safe directory name, injectively:
-/// an id made of unambiguous filename characters is used as-is, anything
-/// else (and anything that could collide with an encoded name) becomes
-/// `x-` plus its bytes in hex.
+/// Maps an identifier onto a filesystem-safe directory name, injectively
+/// even on case-insensitive filesystems: an id that is already a tame
+/// lowercase filename is used as-is; everything else becomes `x-` plus its
+/// bytes in lowercase hex.
+///
+/// Injectivity: two plain ids are distinct strings over an alphabet with
+/// one spelling per character, so they never collide even where the
+/// filesystem folds case; two encoded ids collide only if their bytes do;
+/// and the forms never cross, because a plain id is barred from starting
+/// with `x-`. Mixed case routes to the encoding for exactly that reason —
+/// `Agent` and `agent` must not share a directory on macOS or Windows.
 pub(super) fn encode_component(id: &str) -> String {
-    let plain = !id.is_empty()
-        && !id.starts_with('.')
-        && !id.starts_with("x-")
-        && id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
-    if plain {
+    if is_plain_component(id) {
         return id.to_string();
     }
     let mut encoded = String::with_capacity(2 + id.len() * 2);
@@ -174,6 +175,29 @@ pub(super) fn encode_component(id: &str) -> String {
         let _ = write!(&mut encoded, "{byte:02x}");
     }
     encoded
+}
+
+fn is_plain_component(id: &str) -> bool {
+    if id.is_empty() || id.starts_with('.') || id.ends_with('.') || id.starts_with("x-") {
+        return false;
+    }
+    let tame = id
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'));
+    if !tame {
+        return false;
+    }
+    // Windows reserves device names regardless of extension: `con` and
+    // `con.log` both name the console.
+    let stem = id.split('.').next().unwrap_or(id);
+    !is_windows_reserved_device(stem)
+}
+
+fn is_windows_reserved_device(stem: &str) -> bool {
+    matches!(stem, "con" | "prn" | "aux" | "nul")
+        || (stem.len() == 4
+            && (stem.starts_with("com") || stem.starts_with("lpt"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
 
 fn parent_dir(path: &Path) -> Result<&Path, RuntimeError> {

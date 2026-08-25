@@ -459,6 +459,74 @@ fn an_id_needing_encoding_still_round_trips() {
 }
 
 #[test]
+fn ids_differing_only_by_case_get_distinct_directories() {
+    // macOS and Windows fold case in filenames, so `Agent` and `agent`
+    // sharing a directory would silently merge two agents. Mixed case
+    // routes to the hex encoding instead.
+    let store = FileRuntimeStore::new(temp_root("case"));
+    assert_ne!(store.agent_dir("Agent"), store.agent_dir("agent"));
+
+    store
+        .create_agent(&agent_record("Agent"), &AgentMemoryState::default())
+        .expect("create Agent");
+    store
+        .create_agent(&agent_record("agent"), &AgentMemoryState::default())
+        .expect("create agent");
+
+    assert_eq!(
+        store
+            .load_agent("Agent")
+            .expect("load Agent")
+            .expect("Agent present")
+            .record
+            .id,
+        "Agent"
+    );
+    assert_eq!(
+        store
+            .load_agent("agent")
+            .expect("load agent")
+            .expect("agent present")
+            .record
+            .id,
+        "agent"
+    );
+    assert_eq!(store.list_agents().expect("list agents").len(), 2);
+}
+
+#[test]
+fn hazardous_names_route_to_the_encoded_form() {
+    let store = FileRuntimeStore::new(temp_root("hazard"));
+    // Windows device names (with or without extension), a trailing dot,
+    // anything shaped like an encoded name, mixed case, and dotfiles all
+    // take the hex path.
+    for id in [
+        "con", "con.log", "com1", "lpt9", "foo.", "x-6162", "Agent", ".hidden",
+    ] {
+        let dir_name = store
+            .agent_dir(id)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("dir name")
+            .to_string();
+        assert!(
+            dir_name.starts_with("x-"),
+            "'{id}' must be encoded, got '{dir_name}'"
+        );
+    }
+    // A tame id stays readable on disk, and com0/lpt0 are not reserved.
+    for id in ["agent-1", "com0", "lpt0", "foo.log", "conx"] {
+        let dir_name = store
+            .agent_dir(id)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("dir name")
+            .to_string();
+        assert_eq!(dir_name, id, "'{id}' needs no encoding");
+    }
+}
+
+#[test]
 fn a_file_from_a_newer_schema_is_refused_not_misread() {
     let store = FileRuntimeStore::new(temp_root("schema"));
     store
