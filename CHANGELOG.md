@@ -104,17 +104,28 @@
   tool profile, model, or system prompt.
 - `DisposableSubagentTemplate` gets `with_tool_profile`, `with_model`, and
   `with_system`, each overriding one field of the parent clone before
-  spawning. `spawn_subagent_from` is the template-taking sibling of
+  spawning — a plain override, not an enforced narrowing: nothing stops a
+  child spawned with fewer tools from itself spawning a grandchild with more
+  than it has. `spawn_subagent_from` is the template-taking sibling of
   `spawn_subagent` at every level that already reaches it — `Agent`,
   `ToolContext`, `ParallelToolContext`, and `Session` — each paired with a
   `disposable_subagent_template` accessor to build the override from. The
   depth-guard, hidden-tool, and subagent-system-prompt-suffix treatment is
   untouched and applies the same way regardless of which fields were
   overridden.
-- `with_model` resolves its provider against the runtime inside
+- A template now records the agent (and runtime) it was built from, and every
+  `spawn_subagent_from` refuses one built from a different agent or a
+  different runtime with the new `RuntimeError::SubagentTemplateMismatch` —
+  otherwise the receiver would announce and register a child actually wired
+  to the template's original source, escaping the receiver's own policy.
+- `with_model`'s provider resolves against the runtime inside
   `spawn_subagent_from`, the same lookup `Agent::set_model` makes for the same
   reason, so a model naming an unregistered provider fails there rather than
-  silently running the child on the parent's provider.
+  silently running the child on the parent's provider; a `ModelInfo` left
+  with no `context_window` gets one filled in from that provider's own model
+  listing when the listing knows it. `spawn_subagent_from` is async because
+  of that lookup — `spawn_subagent` has no override to look up and stays
+  synchronous.
 - Asked for by a downstream host that wants to run a cheap read-only triage
   child beside a full-capability fixer without re-implementing subagent
   spawning to get there.

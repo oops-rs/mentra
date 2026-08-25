@@ -22,10 +22,21 @@ const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent working for another age
 /// same model, tool profile, and system prompt — which is what makes the
 /// default (no overrides) path byte-identical to the parent spawning a plain
 /// subagent. `with_tool_profile`, `with_model`, and `with_system` each replace
-/// one field of that clone so a delegating parent can hand a child a narrower
-/// tool roster, a cheaper model, or a different system prompt without losing
-/// the depth-guard and bounds-inheritance treatment [`spawn`](Self::spawn)
-/// applies uniformly on top, regardless of which fields were overridden.
+/// one field of that clone so a delegating parent can hand a child a
+/// different tool roster, a cheaper model, or a different system prompt
+/// without losing the depth-guard and bounds-inheritance treatment
+/// [`spawn`](Self::spawn) applies uniformly on top, regardless of which
+/// fields were overridden.
+///
+/// Each `with_*` is a plain override, not an enforced narrowing: nothing here
+/// checks a new tool profile against the parent's, so a child spawned with
+/// fewer tools than its parent can still spawn its own grandchild with more
+/// than it has itself, simply by calling `with_tool_profile` with a wider
+/// profile than the one it was given. Confining what a whole delegation chain
+/// may grant — a policy, not a mechanism — is left to the caller (see
+/// `with_child_policy` in a host like basis) rather than built in here, since
+/// enforcing it here would need profile-intersection machinery this type does
+/// not have.
 #[derive(Clone)]
 #[must_use = "a template does nothing on its own -- spawn it with spawn_subagent_from, \
               or the override methods called on it are silently discarded"]
@@ -104,7 +115,10 @@ impl DisposableSubagentTemplate {
     /// This overrides `config.tool_profile` only — the spawn-level hidden-tools
     /// set (which always hides the `task` intrinsic from a subagent) is a
     /// separate mechanism applied by [`spawn`](Self::spawn) regardless of this
-    /// override, exactly as for the un-overridden clone.
+    /// override, exactly as for the un-overridden clone. It replaces the
+    /// parent's profile outright rather than narrowing it: passing a wider
+    /// `tool_profile` than the parent's own hands the child more tools than
+    /// the parent has (see the type-level docs).
     #[must_use = "with_tool_profile returns a new template rather than mutating in place; \
                   a discarded return value leaves the override applied to nothing"]
     pub fn with_tool_profile(mut self, tool_profile: ToolProfile) -> Self {
@@ -123,6 +137,16 @@ impl DisposableSubagentTemplate {
     /// through `spawn_subagent_from` looks it up in the model's provider's own
     /// listing rather than leaving it unset; `spawn_subagent` never reaches
     /// this path, since it has no way to set an override at all.
+    ///
+    /// Everything else in `config` — including
+    /// `config.provider_request_options` (reasoning effort, and other
+    /// provider-specific request options) — travels with the parent's clone
+    /// unchanged, even when `model` names a different provider family than
+    /// the parent's own. [`Agent::set_model`](super::Agent::set_model) has the
+    /// same behavior for the same reason: those options are a property of
+    /// the agent's configured intent, not of any one provider, and it is the
+    /// caller's job to know whether the destination provider understands
+    /// them.
     #[must_use = "with_model returns a new template rather than mutating in place; \
                   a discarded return value leaves the override applied to nothing"]
     pub fn with_model(mut self, model: ModelInfo) -> Self {
