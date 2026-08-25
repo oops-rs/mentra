@@ -131,22 +131,7 @@ impl AgentStore for FileRuntimeStore {
             return Ok(None);
         };
         let agent_file: AgentFile = parse_versioned(&contents, AGENT_FILE)?;
-
-        let Some(state_contents) = fs_util::read_optional(&dir.join(STATE_FILE))? else {
-            return Err(RuntimeError::Store(format!(
-                "Agent '{agent_id}' is missing persisted memory"
-            )));
-        };
-        let state_file: StateFile = parse_versioned(&state_contents, STATE_FILE)?;
-        let entries = transcript_log::read_log(&dir.join(TRANSCRIPT_FILE))?;
-        let memory = compose_memory(state_file, &entries)?;
-
-        Ok(Some(LoadedAgentState {
-            record: agent_file.record,
-            memory,
-            created_at: Some(agent_file.created_at),
-            updated_at: Some(agent_file.updated_at),
-        }))
+        Ok(Some(finish_load(&dir, agent_file)?))
     }
 
     fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError> {
@@ -205,10 +190,7 @@ impl AgentStore for FileRuntimeStore {
                 continue;
             };
             let agent_file: AgentFile = parse_versioned(&contents, AGENT_FILE)?;
-            let loaded = self.load_agent(&agent_file.record.id)?.ok_or_else(|| {
-                RuntimeError::Store(format!("Agent '{}' disappeared", agent_file.record.id))
-            })?;
-            agents.push(loaded);
+            agents.push(finish_load(&dir, agent_file)?);
         }
 
         agents.sort_by(|a, b| (a.created_at, &a.record.id).cmp(&(b.created_at, &b.record.id)));
@@ -283,6 +265,32 @@ impl FileRuntimeStore {
         }
         Ok(())
     }
+}
+
+/// Completes a load whose record file is already parsed: reads the memory
+/// snapshot and the entry log out of `dir` and assembles the loaded state.
+/// Shared by [`AgentStore::load_agent`] and the listing walk, so a listed
+/// agent is parsed once rather than twice.
+fn finish_load(
+    dir: &std::path::Path,
+    agent_file: AgentFile,
+) -> Result<LoadedAgentState, RuntimeError> {
+    let Some(state_contents) = fs_util::read_optional(&dir.join(STATE_FILE))? else {
+        return Err(RuntimeError::Store(format!(
+            "Agent '{}' is missing persisted memory",
+            agent_file.record.id
+        )));
+    };
+    let state_file: StateFile = parse_versioned(&state_contents, STATE_FILE)?;
+    let entries = transcript_log::read_log(&dir.join(TRANSCRIPT_FILE))?;
+    let memory = compose_memory(state_file, &entries)?;
+
+    Ok(LoadedAgentState {
+        record: agent_file.record,
+        memory,
+        created_at: Some(agent_file.created_at),
+        updated_at: Some(agent_file.updated_at),
+    })
 }
 
 /// Every transcript entry a memory snapshot references: the live tree and,
