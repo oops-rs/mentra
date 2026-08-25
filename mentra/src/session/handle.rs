@@ -6,7 +6,10 @@ use tokio::sync::broadcast;
 
 use crate::{
     AgentTranscript, ContentBlock, Message, Role,
-    agent::{Agent, AgentEvent, AgentEventTapGuard, FinalOutput, TerminalOutputSpec},
+    agent::{
+        Agent, AgentEvent, AgentEventTapGuard, DisposableSubagentTemplate, FinalOutput,
+        TerminalOutputSpec,
+    },
     error::RuntimeError,
     runtime::{PermissionRuleStore, RunOptions, is_transient_runtime_error},
     session::{
@@ -621,7 +624,60 @@ impl Session {
         prompt: &str,
         options: RunOptions,
     ) -> Result<SubagentHandle, RuntimeError> {
-        let mut subagent = self.agent.spawn_subagent()?;
+        let subagent = self.agent.spawn_subagent()?;
+        self.detach_subagent(name, prompt, subagent, options)
+    }
+
+    /// A template starting from an exact clone of this session's agent's own
+    /// config — the same clone [`spawn_subagent`](Self::spawn_subagent)
+    /// spawns from — for a host that wants to override the child's tool
+    /// profile, model, or system prompt before spawning it via
+    /// [`spawn_subagent_from`](Self::spawn_subagent_from) or
+    /// [`spawn_subagent_from_with_options`](Self::spawn_subagent_from_with_options).
+    pub fn disposable_subagent_template(&self) -> DisposableSubagentTemplate {
+        self.agent.disposable_subagent_template()
+    }
+
+    /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
+    /// spawns from a template the caller built (and possibly overrode) rather
+    /// than an exact clone of this session's agent's own config, on
+    /// [`RunOptions::default`].
+    pub async fn spawn_subagent_from(
+        &mut self,
+        name: &str,
+        prompt: &str,
+        template: DisposableSubagentTemplate,
+    ) -> Result<SubagentHandle, RuntimeError> {
+        self.spawn_subagent_from_with_options(name, prompt, template, RunOptions::default())
+            .await
+    }
+
+    /// The template-taking sibling of
+    /// [`spawn_subagent_with_options`](Self::spawn_subagent_with_options):
+    /// spawns from a template the caller built (and possibly overrode) and
+    /// runs it on caller-supplied `options`, with the same bounds-inheritance
+    /// treatment.
+    pub async fn spawn_subagent_from_with_options(
+        &mut self,
+        name: &str,
+        prompt: &str,
+        template: DisposableSubagentTemplate,
+        options: RunOptions,
+    ) -> Result<SubagentHandle, RuntimeError> {
+        let subagent = self.agent.spawn_subagent_from(template)?;
+        self.detach_subagent(name, prompt, subagent, options)
+    }
+
+    /// Registers, announces, and detaches an already-spawned subagent — the
+    /// shared tail of every `spawn_subagent*` variant, which differ only in
+    /// how the [`Agent`] they hand here was built.
+    fn detach_subagent(
+        &mut self,
+        name: &str,
+        prompt: &str,
+        mut subagent: Agent,
+        options: RunOptions,
+    ) -> Result<SubagentHandle, RuntimeError> {
         let agent_id = subagent.id().to_string();
         let summary = self.agent.register_subagent(&subagent);
 

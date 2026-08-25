@@ -59,7 +59,7 @@ pub use round_strategy::{
 };
 use runner::TurnRunner;
 pub use steering::{QueueMode, SteeringHandle};
-pub(crate) use subagent::DisposableSubagentTemplate;
+pub use subagent::DisposableSubagentTemplate;
 use terminal_output::TerminalToolGate;
 pub use terminal_output::{FinalOutput, TerminalOutputSpec};
 pub use wait::{AgentWaitFuture, AgentWaitHandle};

@@ -1,7 +1,7 @@
 use std::{borrow::Cow, collections::HashSet, sync::Arc};
 
 use crate::{
-    Role,
+    ModelInfo, Role,
     error::RuntimeError,
     provider::Provider,
     runtime::{RuntimeIntrinsicTool, handle::RuntimeHandle},
@@ -9,14 +9,25 @@ use crate::{
 
 use super::{
     Agent, AgentConfig, AgentSpawnOptions, SpawnedAgentStatus, SpawnedAgentSummary,
-    TeammateIdentity,
+    TeammateIdentity, ToolProfile,
 };
 
 const SUBAGENT_MAX_ROUNDS: usize = 30;
 const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent working for another agent. Solve the delegated task, use tools when helpful, and finish with a concise final answer for the parent agent.";
 
+/// A parent agent's blueprint for a disposable child, cloned from its own
+/// config and overridable before spawning.
+///
+/// [`from_agent`](Self::from_agent) starts from an exact copy of the parent —
+/// same model, tool profile, and system prompt — which is what makes the
+/// default (no overrides) path byte-identical to the parent spawning a plain
+/// subagent. `with_tool_profile`, `with_model`, and `with_system` each replace
+/// one field of that clone so a delegating parent can hand a child a narrower
+/// tool roster, a cheaper model, or a different system prompt without losing
+/// the depth-guard and bounds-inheritance treatment [`spawn`](Self::spawn)
+/// applies uniformly on top, regardless of which fields were overridden.
 #[derive(Clone)]
-pub(crate) struct DisposableSubagentTemplate {
+pub struct DisposableSubagentTemplate {
     runtime: RuntimeHandle,
     model: String,
     context_window: Option<usize>,
@@ -25,6 +36,13 @@ pub(crate) struct DisposableSubagentTemplate {
     provider: Arc<dyn Provider>,
     hidden_tools: HashSet<String>,
     teammate_identity: Option<TeammateIdentity>,
+    /// Pending replacement for `model`/`context_window`/`provider`, applied by
+    /// [`spawn`](Self::spawn) once it can resolve `model.provider` against the
+    /// runtime and report failure through the `Result` it already returns —
+    /// the same failure mode [`Agent::set_model`](super::Agent::set_model)
+    /// reports for the same lookup, kept here rather than in `with_model`
+    /// itself so the builder chain stays infallible.
+    model_override: Option<ModelInfo>,
 }
 
 impl DisposableSubagentTemplate {
@@ -38,7 +56,38 @@ impl DisposableSubagentTemplate {
             provider: Arc::clone(&agent.provider),
             hidden_tools: agent.hidden_tools.clone(),
             teammate_identity: agent.teammate_identity.clone(),
+            model_override: None,
         }
+    }
+
+    /// Replaces the tool profile the spawned child's config carries.
+    ///
+    /// This overrides `config.tool_profile` only — the spawn-level hidden-tools
+    /// set (which always hides the `task` intrinsic from a subagent) is a
+    /// separate mechanism applied by [`spawn`](Self::spawn) regardless of this
+    /// override, exactly as for the un-overridden clone.
+    pub fn with_tool_profile(mut self, tool_profile: ToolProfile) -> Self {
+        self.config.tool_profile = tool_profile;
+        self
+    }
+
+    /// Replaces the model (and, if it names a different provider, the
+    /// provider) the spawned child runs on.
+    ///
+    /// Resolution against the runtime's registered providers happens in
+    /// [`spawn`](Self::spawn), which can fail and already returns a `Result`.
+    pub fn with_model(mut self, model: ModelInfo) -> Self {
+        self.model_override = Some(model);
+        self
+    }
+
+    /// Replaces the system prompt the spawned child's config carries, before
+    /// [`spawn`](Self::spawn) appends the standard subagent instructions —
+    /// the same suffix treatment the un-overridden clone's system prompt
+    /// receives.
+    pub fn with_system(mut self, system: impl Into<String>) -> Self {
+        self.config.system = Some(system.into());
+        self
     }
 
     pub(crate) fn spawn(&self) -> Result<Agent, RuntimeError> {
@@ -50,13 +99,28 @@ impl DisposableSubagentTemplate {
             self.config.system.as_deref().map(Cow::Borrowed),
         ));
 
+        let (model, context_window, provider) = match &self.model_override {
+            Some(model) => {
+                let provider = self
+                    .runtime
+                    .get_provider(Some(&model.provider))
+                    .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?;
+                (model.id.clone(), model.context_window, provider)
+            }
+            None => (
+                self.model.clone(),
+                self.context_window,
+                Arc::clone(&self.provider),
+            ),
+        };
+
         Agent::new(
             self.runtime.clone(),
-            self.model.clone(),
-            self.context_window,
+            model,
+            context_window,
             format!("{}::task", self.parent_name),
             config,
-            Arc::clone(&self.provider),
+            provider,
             AgentSpawnOptions {
                 hidden_tools,
                 max_rounds: Some(SUBAGENT_MAX_ROUNDS),
@@ -69,6 +133,16 @@ impl DisposableSubagentTemplate {
 impl Agent {
     pub(crate) fn spawn_subagent(&self) -> Result<Self, RuntimeError> {
         self.disposable_subagent_template().spawn()
+    }
+
+    /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
+    /// spawns from a template the caller built (and possibly overrode) rather
+    /// than an exact clone of this agent's own config.
+    pub(crate) fn spawn_subagent_from(
+        &self,
+        template: DisposableSubagentTemplate,
+    ) -> Result<Self, RuntimeError> {
+        template.spawn()
     }
 
     pub(crate) fn disposable_subagent_template(&self) -> DisposableSubagentTemplate {

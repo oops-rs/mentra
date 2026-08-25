@@ -272,6 +272,25 @@ impl ToolContext<'_> {
         self.agent.spawn_subagent()
     }
 
+    /// A template starting from an exact clone of this agent's own config —
+    /// the same clone [`spawn_subagent`](Self::spawn_subagent) spawns from —
+    /// for a caller that wants to override the child's tool profile, model,
+    /// or system prompt before spawning it via
+    /// [`spawn_subagent_from`](Self::spawn_subagent_from).
+    pub fn disposable_subagent_template(&self) -> DisposableSubagentTemplate {
+        self.agent.disposable_subagent_template()
+    }
+
+    /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
+    /// spawns from a template the caller built (and possibly overrode) rather
+    /// than an exact clone of this agent's own config.
+    pub fn spawn_subagent_from(
+        &self,
+        template: DisposableSubagentTemplate,
+    ) -> Result<crate::agent::Agent, RuntimeError> {
+        self.agent.spawn_subagent_from(template)
+    }
+
     /// Records a spawned subagent and announces it on the parent's stream.
     ///
     /// Emitting is part of registering here, where for the `task` intrinsic
@@ -607,6 +626,25 @@ impl ParallelToolContext {
 
     pub fn spawn_subagent(&self) -> Result<crate::agent::Agent, RuntimeError> {
         self.subagent_template.spawn()
+    }
+
+    /// A template starting from an exact clone of the spawning agent's own
+    /// config — the same clone [`spawn_subagent`](Self::spawn_subagent)
+    /// spawns from — for a caller that wants to override the child's tool
+    /// profile, model, or system prompt before spawning it via
+    /// [`spawn_subagent_from`](Self::spawn_subagent_from).
+    pub fn disposable_subagent_template(&self) -> DisposableSubagentTemplate {
+        self.subagent_template.clone()
+    }
+
+    /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
+    /// spawns from a template the caller built (and possibly overrode) rather
+    /// than an exact clone of the spawning agent's own config.
+    pub fn spawn_subagent_from(
+        &self,
+        template: DisposableSubagentTemplate,
+    ) -> Result<crate::agent::Agent, RuntimeError> {
+        template.spawn()
     }
 
     /// [`RunOptions`](crate::runtime::RunOptions) for a run this tool spawns —
