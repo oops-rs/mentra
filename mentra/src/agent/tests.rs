@@ -11,6 +11,7 @@ mod runtime_tasks;
 mod runtime_tools;
 mod runtime_volatile_store;
 mod steering;
+mod subagent_template;
 mod support;
 mod terminal_output;
 mod tool_output;

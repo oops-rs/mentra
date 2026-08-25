@@ -2670,6 +2670,47 @@ async fn spawn_subagent_with_options_puts_the_subagent_under_them() {
 }
 
 #[tokio::test]
+async fn spawn_subagent_from_with_options_puts_the_subagent_under_them() {
+    // The template-taking sibling of `spawn_subagent_with_options`: bounds
+    // inheritance must hold on this path exactly as it does on the plain one,
+    // even with no template override in play.
+    let mock = MockRuntime::builder()
+        .text("never reached")
+        .build()
+        .unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session("host-spawn-from-bounded", mock.model())
+        .unwrap();
+    let mut events = session.subscribe();
+    let template = session.disposable_subagent_template();
+
+    let cancellation = CancellationToken::default();
+    let turn_options = RunOptions {
+        cancellation: Some(cancellation.clone()),
+        ..RunOptions::default()
+    };
+    cancellation.cancel();
+
+    session
+        .spawn_subagent_from_with_options("research", "go", template, turn_options.child())
+        .await
+        .unwrap();
+
+    let (status, _) = next_subagent_outcome(&mut events).await;
+    assert_eq!(
+        status,
+        TaskLifecycleStatus::Failed,
+        "the supplied options must reach the detached run on the template-taking path too"
+    );
+    assert_eq!(
+        mock.recorded_requests().await.len(),
+        0,
+        "the cancelled subagent never reached the provider"
+    );
+}
+
+#[tokio::test]
 async fn a_session_can_be_renamed_after_it_is_minted() {
     // A host that opens a session before it knows what the conversation is
     // about was otherwise stuck with whatever placeholder it guessed.

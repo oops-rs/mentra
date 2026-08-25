@@ -5887,3 +5887,79 @@ async fn a_tool_that_registers_a_subagent_announces_it() {
 
     assert_eq!(lifecycle, vec!["spawned", "finished"]);
 }
+
+#[tokio::test]
+async fn a_tool_can_spawn_a_subagent_from_a_template_it_narrowed() {
+    // ToolContext::spawn_subagent_from is the template-taking sibling of
+    // spawn_subagent: a delegating tool starts from
+    // disposable_subagent_template() (an exact clone of the parent, same as
+    // spawn_subagent uses) and overrides it, something spawn_subagent alone
+    // cannot express.
+    struct DelegatingTool;
+
+    #[async_trait]
+    impl crate::tool::ToolDefinition for DelegatingTool {
+        fn descriptor(&self) -> crate::tool::ToolSpec {
+            crate::tool::ToolSpec::builder("delegate")
+                .description("delegates to a child with a narrowed tool profile")
+                .input_schema(json!({"type": "object", "properties": {}}))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl crate::tool::ToolExecutor for DelegatingTool {
+        async fn execute_mut(
+            &self,
+            ctx: crate::tool::ToolContext<'_>,
+            _input: serde_json::Value,
+        ) -> crate::tool::ToolResult {
+            let template = ctx
+                .disposable_subagent_template()
+                .with_tool_profile(ToolProfile::only(["echo_tool"]));
+            let child = ctx
+                .spawn_subagent_from(template)
+                .map_err(|error| error.to_string())?;
+
+            Ok(format!(
+                "echo_tool={} probe_tool={}",
+                child.can_use_tool("echo_tool"),
+                child.can_use_tool("probe_tool"),
+            ))
+        }
+    }
+
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "delegate", "{}"),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(DelegatingTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("delegate it")])
+        .await
+        .expect("the run completes");
+
+    let requests = provider_handle.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        request_contains_tool_result(&requests[1], "echo_tool=true"),
+        "the allowlisted tool must be usable on the child"
+    );
+    assert!(
+        request_contains_tool_result(&requests[1], "probe_tool=false"),
+        "a tool outside the narrowed allowlist must be blocked on the child"
+    );
+}
