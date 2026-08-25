@@ -272,11 +272,13 @@ impl ToolContext<'_> {
         self.agent.spawn_subagent()
     }
 
-    /// A template starting from an exact clone of this agent's own config —
-    /// the same clone [`spawn_subagent`](Self::spawn_subagent) spawns from —
-    /// for a caller that wants to override the child's tool profile, model,
-    /// or system prompt before spawning it via
-    /// [`spawn_subagent_from`](Self::spawn_subagent_from).
+    /// A template cloned from this agent's own config exactly as it stands at
+    /// this call — the same snapshot [`spawn_subagent`](Self::spawn_subagent)
+    /// takes when it is called — for a caller that wants to override the
+    /// child's tool profile, model, or system prompt before spawning it via
+    /// [`spawn_subagent_from`](Self::spawn_subagent_from). A later change to
+    /// this agent (e.g. `set_model`) does not reach back into a template
+    /// already taken.
     pub fn disposable_subagent_template(&self) -> DisposableSubagentTemplate {
         self.agent.disposable_subagent_template()
     }
@@ -627,11 +629,15 @@ impl ParallelToolContext {
         self.subagent_template.spawn()
     }
 
-    /// A template starting from an exact clone of the spawning agent's own
-    /// config — the same clone [`spawn_subagent`](Self::spawn_subagent)
-    /// spawns from — for a caller that wants to override the child's tool
-    /// profile, model, or system prompt before spawning it via
-    /// [`spawn_subagent_from`](Self::spawn_subagent_from).
+    /// A clone of the template captured when this parallel-safe execution was
+    /// dispatched — from the agent's config as it stood then, not as of this
+    /// call — for a caller that wants to override the child's tool profile,
+    /// model, or system prompt before spawning it via
+    /// [`spawn_subagent_from`](Self::spawn_subagent_from). Unlike
+    /// [`ToolContext::disposable_subagent_template`], which builds a fresh
+    /// snapshot from a live `&Agent` on every call, this context holds no
+    /// live agent at all: `subagent_template` is captured once, at dispatch,
+    /// and every call here just clones that same stored value.
     pub fn disposable_subagent_template(&self) -> DisposableSubagentTemplate {
         self.subagent_template.clone()
     }

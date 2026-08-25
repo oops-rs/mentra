@@ -633,12 +633,15 @@ impl Session {
             .await
     }
 
-    /// A template starting from an exact clone of this session's agent's own
-    /// config — the same clone [`spawn_subagent`](Self::spawn_subagent)
-    /// spawns from — for a host that wants to override the child's tool
-    /// profile, model, or system prompt before spawning it via
+    /// A template cloned from this session's agent's own config exactly as it
+    /// stands at this call — the same snapshot
+    /// [`spawn_subagent`](Self::spawn_subagent) takes when it is called — for
+    /// a host that wants to override the child's tool profile, model, or
+    /// system prompt before spawning it via
     /// [`spawn_subagent_from`](Self::spawn_subagent_from) or
     /// [`spawn_subagent_from_with_options`](Self::spawn_subagent_from_with_options).
+    /// A later change to the agent (e.g. `set_model`) does not reach back
+    /// into a template already taken.
     pub fn disposable_subagent_template(&self) -> DisposableSubagentTemplate {
         self.agent.disposable_subagent_template()
     }
