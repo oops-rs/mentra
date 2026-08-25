@@ -5,6 +5,7 @@ pub(crate) mod handle;
 mod hybrid_store;
 mod intrinsic;
 mod skill;
+mod sqlite_store;
 mod store;
 pub(crate) mod task;
 mod task_board;
@@ -41,9 +42,9 @@ pub(crate) use handle::RuntimeHandle;
 pub use hybrid_store::HybridRuntimeStore;
 pub(crate) use intrinsic::RuntimeIntrinsicTool;
 pub use skill::{SkillInfo, SkillLoadError};
+pub use sqlite_store::SqliteRuntimeStore;
 pub use store::{
-    AgentStore, AuditStore, LeaseStore, PermissionRuleStore, RunStore, RuntimeStore,
-    SqliteRuntimeStore, TaskStore,
+    AgentStore, AuditStore, LeaseStore, PermissionRuleStore, RunStore, RuntimeStore, TaskStore,
 };
 pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot};
 pub(crate) use task::TaskIntrinsicTool;
