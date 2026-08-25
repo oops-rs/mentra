@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.21.0
 
 ### An applied compaction survives a failed summary write
 
