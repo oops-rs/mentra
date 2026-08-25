@@ -10,6 +10,10 @@ use super::{DeliveryState, VolatileRuntimeStore};
 struct BackgroundJobEntry {
     task: BackgroundTaskSummary,
     notification_state: DeliveryState,
+    /// When this entry was last upserted, as a store-local sequence number —
+    /// the in-memory stand-in for the SQLite store's `updated_at` column,
+    /// with strictly finer resolution than its one-second timestamps.
+    updated_seq: u64,
 }
 
 /// Background-task notifications keyed by `(agent_id, task_id)`, mirroring
@@ -17,6 +21,7 @@ struct BackgroundJobEntry {
 #[derive(Default)]
 pub(super) struct BackgroundState {
     jobs: HashMap<(String, String), BackgroundJobEntry>,
+    next_seq: u64,
 }
 
 fn notification_state_from_raw(value: i64) -> DeliveryState {
@@ -50,11 +55,15 @@ impl BackgroundStore for VolatileRuntimeStore {
         task: &BackgroundTaskSummary,
         notification_state: i64,
     ) -> Result<(), RuntimeError> {
-        self.lock().background.jobs.insert(
+        let mut state = self.lock();
+        state.background.next_seq += 1;
+        let updated_seq = state.background.next_seq;
+        state.background.jobs.insert(
             (agent_id.to_string(), task.id.clone()),
             BackgroundJobEntry {
                 task: task.clone(),
                 notification_state: notification_state_from_raw(notification_state),
+                updated_seq,
             },
         );
         Ok(())
@@ -65,22 +74,35 @@ impl BackgroundStore for VolatileRuntimeStore {
         agent_id: &str,
     ) -> Result<Vec<BackgroundNotification>, RuntimeError> {
         let mut state = self.lock();
+        // Completion order, id tie-break — the default store's
+        // `ORDER BY updated_at, id`. Map iteration order would batch two
+        // finished tasks in an arbitrary order.
+        let mut pending: Vec<(&(String, String), &mut BackgroundJobEntry)> = state
+            .background
+            .jobs
+            .iter_mut()
+            .filter(|((aid, _), entry)| {
+                aid == agent_id && entry.notification_state == DeliveryState::Pending
+            })
+            .collect();
+        pending.sort_by(|((_, id_a), entry_a), ((_, id_b), entry_b)| {
+            (entry_a.updated_seq, id_a).cmp(&(entry_b.updated_seq, id_b))
+        });
+
         let mut out = Vec::new();
-        for ((aid, _id), entry) in state.background.jobs.iter_mut() {
-            if aid == agent_id && entry.notification_state == DeliveryState::Pending {
-                entry.notification_state = DeliveryState::Inflight;
-                out.push(BackgroundNotification {
-                    task_id: entry.task.id.clone(),
-                    command: entry.task.command.clone(),
-                    cwd: entry.task.cwd.clone(),
-                    status: entry.task.status.clone(),
-                    output_preview: entry
-                        .task
-                        .output_preview
-                        .clone()
-                        .unwrap_or_else(|| "(no output)".to_string()),
-                });
-            }
+        for (_, entry) in pending {
+            entry.notification_state = DeliveryState::Inflight;
+            out.push(BackgroundNotification {
+                task_id: entry.task.id.clone(),
+                command: entry.task.command.clone(),
+                cwd: entry.task.cwd.clone(),
+                status: entry.task.status.clone(),
+                output_preview: entry
+                    .task
+                    .output_preview
+                    .clone()
+                    .unwrap_or_else(|| "(no output)".to_string()),
+            });
         }
         Ok(out)
     }
