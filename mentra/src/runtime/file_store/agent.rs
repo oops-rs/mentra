@@ -15,8 +15,8 @@ use crate::{
 
 use super::{
     super::store::{AgentStore, LoadedAgentState, PersistedAgentRecord, now_secs},
-    FileRuntimeStore, RuntimeError, SCHEMA_VERSION, fs_util, lock_unpoisoned, store_error,
-    transcript_log,
+    FileRuntimeStore, RuntimeError, SCHEMA_VERSION, fs_util, lock_unpoisoned, parse_versioned,
+    store_error, to_pretty_json, transcript_log,
 };
 
 const AGENT_FILE: &str = "agent.json";
@@ -353,27 +353,4 @@ fn transcript_from(
             .map(resolve)
             .collect::<Result<_, _>>()?,
     ))
-}
-
-fn parse_versioned<T: serde::de::DeserializeOwned>(
-    contents: &str,
-    file: &str,
-) -> Result<T, RuntimeError> {
-    #[derive(Deserialize)]
-    struct SchemaOnly {
-        schema: u32,
-    }
-    let schema: SchemaOnly = serde_json::from_str(contents)
-        .map_err(|error| store_error(&format!("parse {file}"), error))?;
-    if schema.schema > SCHEMA_VERSION {
-        return Err(RuntimeError::Store(format!(
-            "{file} schema {} is newer than this build understands ({SCHEMA_VERSION})",
-            schema.schema
-        )));
-    }
-    serde_json::from_str(contents).map_err(|error| store_error(&format!("parse {file}"), error))
-}
-
-fn to_pretty_json<T: Serialize>(value: &T) -> Result<String, RuntimeError> {
-    serde_json::to_string_pretty(value).map_err(|error| RuntimeError::Store(error.to_string()))
 }

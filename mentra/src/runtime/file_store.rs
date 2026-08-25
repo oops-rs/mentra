@@ -177,3 +177,28 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn store_error(context: &str, error: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Store(format!("{context}: {error}"))
 }
+
+/// Parses a whole-file JSON payload after checking its `schema` field, so a
+/// file written by a newer layout is refused by name rather than misread.
+fn parse_versioned<T: serde::de::DeserializeOwned>(
+    contents: &str,
+    file: &str,
+) -> Result<T, RuntimeError> {
+    #[derive(serde::Deserialize)]
+    struct SchemaOnly {
+        schema: u32,
+    }
+    let schema: SchemaOnly = serde_json::from_str(contents)
+        .map_err(|error| store_error(&format!("parse {file}"), error))?;
+    if schema.schema > SCHEMA_VERSION {
+        return Err(RuntimeError::Store(format!(
+            "{file} schema {} is newer than this build understands ({SCHEMA_VERSION})",
+            schema.schema
+        )));
+    }
+    serde_json::from_str(contents).map_err(|error| store_error(&format!("parse {file}"), error))
+}
+
+fn to_pretty_json<T: serde::Serialize>(value: &T) -> Result<String, RuntimeError> {
+    serde_json::to_string_pretty(value).map_err(|error| RuntimeError::Store(error.to_string()))
+}

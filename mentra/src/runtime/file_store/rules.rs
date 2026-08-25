@@ -9,7 +9,7 @@ use crate::session::{PermissionRuleScope, permission::RememberedRule};
 
 use super::{
     super::store::PermissionRuleStore, FileRuntimeStore, RuntimeError, SCHEMA_VERSION, fs_util,
-    lock_unpoisoned, store_error,
+    lock_unpoisoned, parse_versioned, to_pretty_json,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -95,18 +95,10 @@ impl PermissionRuleStore for FileRuntimeStore {
 
 impl FileRuntimeStore {
     fn read_rules(&self) -> Result<Vec<StoredRule>, RuntimeError> {
-        let path = self.rules_path();
-        let Some(contents) = fs_util::read_optional(&path)? else {
+        let Some(contents) = fs_util::read_optional(&self.rules_path())? else {
             return Ok(Vec::new());
         };
-        let file: RulesFile = serde_json::from_str(&contents)
-            .map_err(|error| store_error(&format!("parse '{}'", path.display()), error))?;
-        if file.schema > SCHEMA_VERSION {
-            return Err(RuntimeError::Store(format!(
-                "rules.json schema {} is newer than this build understands ({SCHEMA_VERSION})",
-                file.schema
-            )));
-        }
+        let file: RulesFile = parse_versioned(&contents, "rules.json")?;
         Ok(file.rules)
     }
 
@@ -115,9 +107,7 @@ impl FileRuntimeStore {
             schema: SCHEMA_VERSION,
             rules,
         };
-        let contents = serde_json::to_string_pretty(&file)
-            .map_err(|error| RuntimeError::Store(error.to_string()))?;
-        fs_util::atomic_replace(&self.rules_path(), contents.as_bytes())
+        fs_util::atomic_replace(&self.rules_path(), to_pretty_json(&file)?.as_bytes())
     }
 }
 

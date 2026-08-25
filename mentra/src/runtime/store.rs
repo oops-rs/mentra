@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -17,7 +17,6 @@ use crate::{
     session::permission::RememberedRule,
     team::TeamStore,
 };
-use std::path::Path;
 
 use super::error::RuntimeError;
 
