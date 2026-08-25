@@ -2634,6 +2634,11 @@ async fn spawn_subagent_with_options_puts_the_subagent_under_them() {
     // The opt-in variant is how a host reaches `RunOptions::child` for a
     // detached subagent. Tripped before the spawn so the outcome does not depend
     // on winning a race with the provider.
+    //
+    // spawn_subagent_with_options delegates through
+    // spawn_subagent_from_with_options on an un-overridden template, so this
+    // one test covers bounds inheritance for both -- there is only one
+    // implementation to hold it.
     let mock = MockRuntime::builder()
         .text("never reached")
         .build()
@@ -2661,47 +2666,6 @@ async fn spawn_subagent_with_options_puts_the_subagent_under_them() {
         status,
         TaskLifecycleStatus::Failed,
         "the supplied options must reach the detached run"
-    );
-    assert_eq!(
-        mock.recorded_requests().await.len(),
-        0,
-        "the cancelled subagent never reached the provider"
-    );
-}
-
-#[tokio::test]
-async fn spawn_subagent_from_with_options_puts_the_subagent_under_them() {
-    // The template-taking sibling of `spawn_subagent_with_options`: bounds
-    // inheritance must hold on this path exactly as it does on the plain one,
-    // even with no template override in play.
-    let mock = MockRuntime::builder()
-        .text("never reached")
-        .build()
-        .unwrap();
-    let mut session = mock
-        .runtime()
-        .create_session("host-spawn-from-bounded", mock.model())
-        .unwrap();
-    let mut events = session.subscribe();
-    let template = session.disposable_subagent_template();
-
-    let cancellation = CancellationToken::default();
-    let turn_options = RunOptions {
-        cancellation: Some(cancellation.clone()),
-        ..RunOptions::default()
-    };
-    cancellation.cancel();
-
-    session
-        .spawn_subagent_from_with_options("research", "go", template, turn_options.child())
-        .await
-        .unwrap();
-
-    let (status, _) = next_subagent_outcome(&mut events).await;
-    assert_eq!(
-        status,
-        TaskLifecycleStatus::Failed,
-        "the supplied options must reach the detached run on the template-taking path too"
     );
     assert_eq!(
         mock.recorded_requests().await.len(),

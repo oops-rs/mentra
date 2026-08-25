@@ -253,14 +253,9 @@ impl Agent {
         self.disposable_subagent_template().spawn()
     }
 
-    /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
-    /// spawns from a template the caller built (and possibly overrode) rather
-    /// than an exact clone of this agent's own config, after confirming this
-    /// agent actually is the template's source (see
-    /// [`DisposableSubagentTemplate::verify_source`]). Async, unlike
-    /// `spawn_subagent`: an overridden model with no context window set may
-    /// need a round trip to its provider's model listing (see
-    /// [`DisposableSubagentTemplate::spawn_from`]).
+    /// Forwards to [`DisposableSubagentTemplate::spawn_from`] after verifying
+    /// the template's source (see
+    /// [`DisposableSubagentTemplate::verify_source`]).
     pub(crate) async fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,

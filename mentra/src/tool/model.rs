@@ -281,11 +281,8 @@ impl ToolContext<'_> {
         self.agent.disposable_subagent_template()
     }
 
-    /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
-    /// spawns from a template the caller built (and possibly overrode) rather
-    /// than an exact clone of this agent's own config. Async, unlike
-    /// `spawn_subagent`: an overridden model with no context window set may
-    /// need a round trip to its provider's model listing.
+    /// Forwards to [`Agent::spawn_subagent_from`](crate::agent::Agent::spawn_subagent_from)
+    /// after verifying the template's source.
     pub async fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,
@@ -639,13 +636,11 @@ impl ParallelToolContext {
         self.subagent_template.clone()
     }
 
-    /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
-    /// spawns from a template the caller built (and possibly overrode) rather
-    /// than an exact clone of the spawning agent's own config, after
-    /// confirming this context's agent actually is the template's source
-    /// (see [`DisposableSubagentTemplate::verify_source`]). Async, unlike
-    /// `spawn_subagent`: an overridden model with no context window set may
-    /// need a round trip to its provider's model listing.
+    /// Forwards to [`DisposableSubagentTemplate::spawn_from`] after verifying
+    /// the template's source (see
+    /// [`DisposableSubagentTemplate::verify_source`]) -- inlined rather than
+    /// routed through `Agent`, since a parallel-lane tool has no live `&Agent`
+    /// to route it through.
     pub async fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,

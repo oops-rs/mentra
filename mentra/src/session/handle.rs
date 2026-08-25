@@ -624,8 +624,13 @@ impl Session {
         prompt: &str,
         options: RunOptions,
     ) -> Result<SubagentHandle, RuntimeError> {
-        let subagent = self.agent.spawn_subagent()?;
-        self.detach_subagent(name, prompt, subagent, options)
+        // Delegates through the template-taking path on an un-overridden
+        // template rather than duplicating it: this is what makes "spawns
+        // byte-identically to spawn_subagent_from with a plain template" true
+        // by construction instead of by two implementations staying in sync.
+        let template = self.disposable_subagent_template();
+        self.spawn_subagent_from_with_options(name, prompt, template, options)
+            .await
     }
 
     /// A template starting from an exact clone of this session's agent's own
@@ -638,10 +643,8 @@ impl Session {
         self.agent.disposable_subagent_template()
     }
 
-    /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
-    /// spawns from a template the caller built (and possibly overrode) rather
-    /// than an exact clone of this session's agent's own config, on
-    /// [`RunOptions::default`].
+    /// Forwards to [`spawn_subagent_from_with_options`](Self::spawn_subagent_from_with_options)
+    /// on [`RunOptions::default`], after verifying the template's source.
     pub async fn spawn_subagent_from(
         &mut self,
         name: &str,
@@ -652,11 +655,9 @@ impl Session {
             .await
     }
 
-    /// The template-taking sibling of
-    /// [`spawn_subagent_with_options`](Self::spawn_subagent_with_options):
-    /// spawns from a template the caller built (and possibly overrode) and
-    /// runs it on caller-supplied `options`, with the same bounds-inheritance
-    /// treatment.
+    /// Forwards to [`Agent::spawn_subagent_from`](crate::agent::Agent::spawn_subagent_from)
+    /// after verifying the template's source, then detaches the result the
+    /// same way [`spawn_subagent_with_options`](Self::spawn_subagent_with_options) does.
     pub async fn spawn_subagent_from_with_options(
         &mut self,
         name: &str,
