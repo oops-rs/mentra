@@ -176,7 +176,13 @@ async fn default_template_spawns_byte_identically_to_spawn_subagent() {
         via_spawn_subagent.context_window(),
         via_template.context_window()
     );
-    assert_eq!(via_spawn_subagent.config(), via_template.config());
+    // AgentConfig has no PartialEq (it holds an f32 temperature, and its
+    // default workspace/team/task dirs are per-call-unique under cfg(test)),
+    // so compare its serialized shape instead -- AgentConfig is Serialize.
+    assert_eq!(
+        serde_json::to_value(via_spawn_subagent.config()).expect("serialize config"),
+        serde_json::to_value(via_template.config()).expect("serialize config")
+    );
     assert_eq!(via_spawn_subagent.max_rounds(), via_template.max_rounds());
 
     for tool in ["read", "grep", "write", "task"] {

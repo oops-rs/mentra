@@ -301,7 +301,7 @@ fn default_transcript_dir() -> PathBuf {
         .join(format!("process-{}-{suffix}", std::process::id()))
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub system: Option<String>,
     pub tool_choice: Option<ToolChoice>,
