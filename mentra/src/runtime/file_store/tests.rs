@@ -536,6 +536,40 @@ fn permission_rules_round_trip_across_scopes_and_reopen() {
 }
 
 #[test]
+fn repeated_saves_keep_one_copy_of_each_rule() {
+    let store = FileRuntimeStore::new(temp_root("rules-dedup"));
+    let remembered = [
+        rule("shell", true, PermissionRuleScope::Session),
+        rule("read", false, PermissionRuleScope::Project),
+        rule("write", false, PermissionRuleScope::Global),
+    ];
+
+    // Every save carries the session's whole remembered set, project and
+    // global rules included — this used to duplicate the non-session rows
+    // once per save.
+    for _ in 0..4 {
+        store
+            .save_rules("session-1", Some("proj-x"), &remembered)
+            .expect("save rules");
+    }
+
+    let loaded = store
+        .load_rules("session-1", Some("proj-x"))
+        .expect("load rules");
+    assert_eq!(loaded.len(), 3, "each rule loads exactly once: {loaded:?}");
+
+    let on_disk: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(store.rules_path()).expect("read rules.json"),
+    )
+    .expect("parse rules.json");
+    assert_eq!(
+        on_disk["rules"].as_array().expect("rules array").len(),
+        3,
+        "the file holds one copy of each rule"
+    );
+}
+
+#[test]
 fn saving_rules_replaces_only_that_sessions_session_scope() {
     let store = FileRuntimeStore::new(temp_root("rules-replace"));
     store

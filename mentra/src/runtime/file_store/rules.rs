@@ -18,7 +18,7 @@ struct RulesFile {
     rules: Vec<StoredRule>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq)]
 struct StoredRule {
     session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,15 +34,25 @@ impl PermissionRuleStore for FileRuntimeStore {
         rules: &[RememberedRule],
     ) -> Result<(), RuntimeError> {
         let _guard = lock_unpoisoned(&self.rules_lock);
-        let mut stored = self.read_rules()?;
+        // Saves arrive carrying the session's whole remembered set — project
+        // and global rules included — on every call, so writing them
+        // verbatim duplicated the non-session rows once per save. The file
+        // is rewritten deduplicated by exact row identity, mirroring the
+        // SQLite store's load-time UNION semantics.
+        let mut stored = dedup_rows(self.read_rules()?);
         stored.retain(|entry| {
             !(entry.session_id == session_id && entry.rule.scope == PermissionRuleScope::Session)
         });
-        stored.extend(rules.iter().map(|rule| StoredRule {
-            session_id: session_id.to_string(),
-            project_id: project_id.map(str::to_string),
-            rule: rule.clone(),
-        }));
+        for rule in rules {
+            let row = StoredRule {
+                session_id: session_id.to_string(),
+                project_id: project_id.map(str::to_string),
+                rule: rule.clone(),
+            };
+            if !stored.contains(&row) {
+                stored.push(row);
+            }
+        }
         self.write_rules(stored)
     }
 
@@ -51,7 +61,7 @@ impl PermissionRuleStore for FileRuntimeStore {
         session_id: &str,
         project_id: Option<&str>,
     ) -> Result<Vec<RememberedRule>, RuntimeError> {
-        Ok(self
+        let applicable = self
             .read_rules()?
             .into_iter()
             .filter(|entry| match entry.rule.scope {
@@ -61,8 +71,18 @@ impl PermissionRuleStore for FileRuntimeStore {
                 }
                 PermissionRuleScope::Global => true,
             })
-            .map(|entry| entry.rule)
-            .collect())
+            .map(|entry| entry.rule);
+
+        // Defensive twin of the save-side dedup, and what the SQLite UNION
+        // does: a file that somehow carries duplicates still loads each rule
+        // once.
+        let mut rules: Vec<RememberedRule> = Vec::new();
+        for rule in applicable {
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+        }
+        Ok(rules)
     }
 
     fn clear_rules(&self, session_id: &str) -> Result<(), RuntimeError> {
@@ -99,4 +119,15 @@ impl FileRuntimeStore {
             .map_err(|error| RuntimeError::Store(error.to_string()))?;
         fs_util::atomic_replace(&self.rules_path(), contents.as_bytes())
     }
+}
+
+/// Collapses exact duplicate rows, keeping first occurrences in order.
+fn dedup_rows(rows: Vec<StoredRule>) -> Vec<StoredRule> {
+    let mut out: Vec<StoredRule> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !out.contains(&row) {
+            out.push(row);
+        }
+    }
+    out
 }
