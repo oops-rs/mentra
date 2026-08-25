@@ -73,12 +73,16 @@ pub(super) fn append_lines(path: &Path, lines: &[String]) -> Result<(), RuntimeE
     }
 
     let append = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(path)?;
-        drop_truncated_tail(&mut file)?;
+        // The tail repair uses its own read+write handle: on Windows an
+        // append-mode handle carries FILE_APPEND_DATA without
+        // FILE_WRITE_DATA, so set_len on it fails. The append itself then
+        // goes through a plain append handle, whose writes stay atomic at
+        // the end of the file.
+        if existed {
+            let mut repair = OpenOptions::new().read(true).write(true).open(path)?;
+            drop_truncated_tail(&mut repair)?;
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         file.write_all(buffer.as_bytes())?;
         file.sync_all()
     })();
@@ -91,7 +95,8 @@ pub(super) fn append_lines(path: &Path, lines: &[String]) -> Result<(), RuntimeE
 
 /// Truncates `file` back to just past its last newline when its final line
 /// is incomplete. The dropped bytes belong to a write that never finished,
-/// so no reader ever saw them as committed.
+/// so no reader ever saw them as committed. `file` must be open for both
+/// reading and writing — not appending — or `set_len` fails on Windows.
 fn drop_truncated_tail(file: &mut File) -> std::io::Result<()> {
     let len = file.metadata()?.len();
     if len == 0 {
