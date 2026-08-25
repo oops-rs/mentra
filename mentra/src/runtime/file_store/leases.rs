@@ -41,8 +41,11 @@ impl LeaseStore for FileRuntimeStore {
         std::fs::create_dir_all(&dir)
             .map_err(|error| store_error(&format!("create '{}'", dir.display()), error))?;
         let path = dir.join(format!("{}.lock", fs_util::encode_component(key)));
+        // truncate(false): the file's only job is to exist and be lockable;
+        // its (empty) contents are never rewritten.
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&path)
             .map_err(|error| store_error(&format!("open '{}'", path.display()), error))?;
