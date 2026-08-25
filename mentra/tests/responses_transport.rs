@@ -1,14 +1,7 @@
 //! Which transport a runtime's Responses requests go out on, and what happens
 //! when a provider cannot serve the one it was handed.
 
-use std::{
-    fs,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use mentra::{
@@ -18,11 +11,9 @@ use mentra::{
         ProviderError, ProviderEvent, ProviderEventStream, ProviderId, ProviderRequestOptions,
         Request, ResponsesTransport,
     },
-    runtime::SqliteRuntimeStore,
+    runtime::VolatileRuntimeStore,
 };
 use tokio::sync::mpsc;
-
-static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Answers one short text turn and remembers the options it was handed.
 ///
@@ -114,19 +105,10 @@ impl Provider for RecordingProvider {
     }
 }
 
-fn temp_store() -> SqliteRuntimeStore {
-    let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "mentra-responses-transport-{timestamp}-{unique}.sqlite"
-    ));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("create temp dir");
-    }
-    SqliteRuntimeStore::new(path)
+/// Transport selection needs no persistence: an isolated in-memory store per
+/// runtime keeps these tests independent and leaves nothing behind.
+fn temp_store() -> VolatileRuntimeStore {
+    VolatileRuntimeStore::new()
 }
 
 /// A runtime around `provider`, optionally told which transport to use.

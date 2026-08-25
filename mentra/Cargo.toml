@@ -19,8 +19,14 @@ categories = ["asynchronous", "development-tools"]
 # left to mentra-provider's own default (which is why the dependency below sets
 # `default-features = false`) so a host that only ever streams over HTTP+SSE can
 # turn it off here and drop tokio-tungstenite from its tree.
-default = ["responses-websocket"]
+default = ["responses-websocket", "store-sqlite"]
 responses-websocket = ["mentra-provider/responses-websocket"]
+# Default-on for the same reason as the websocket transport: every caller who
+# linked mentra before this feature existed had the SQLite store, and an
+# upgrade must not quietly swap their persistence backend. Turning it off
+# drops rusqlite (and its bundled SQLite) from the tree; the builder's
+# default persistent store is then the file-backed one.
+store-sqlite = ["dep:rusqlite", "dep:windows-sys"]
 openai-oauth = ["dep:ring"]
 test-utils = []
 
@@ -41,7 +47,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 base64 = "0.22.1"
 serde_yaml_ng = "0.10"
 directories = "6.0.0"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 thiserror = "2.0.18"
 strum = { version = "0.27", features = ["derive"] }
 libc = "0.2"
@@ -64,9 +70,9 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 tokio = { version = "1.50.0", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"], optional = true }
 
 [[bench]]
 name = "long_session"
 harness = false
-required-features = ["test-utils"]
+required-features = ["test-utils", "store-sqlite"]

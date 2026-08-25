@@ -60,10 +60,12 @@ pub use mcp::{
     McpStreamableHttpConfigError, McpStreamableHttpError, McpStreamableHttpLimits,
     McpStreamableHttpServerConfig,
 };
+#[cfg(feature = "store-sqlite")]
+pub use runtime::HybridRuntimeStore;
 pub use runtime::{
-    AgentStore, AuditStore, FileRuntimeStore, HybridRuntimeStore, LeaseStore, NewTask,
-    PermissionRuleStore, RunStore, Runtime, RuntimeBuilder, RuntimePolicy, ShellValidationMode,
-    SkillInfo, SkillLoadError, TaskBoard, TaskBoardError, TaskPatch, TaskStore,
+    AgentStore, AuditStore, FileRuntimeStore, LeaseStore, NewTask, PermissionRuleStore, RunStore,
+    Runtime, RuntimeBuilder, RuntimePolicy, ShellValidationMode, SkillInfo, SkillLoadError,
+    TaskBoard, TaskBoardError, TaskPatch, TaskStore,
 };
 pub use session::{
     PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore, Session,

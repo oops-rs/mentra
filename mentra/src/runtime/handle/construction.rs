@@ -82,14 +82,21 @@ fn clone_tooling_services(tooling: &ToolingServices) -> ToolingServices {
 impl RuntimeHandle {
     /// Assembles a handle around the default store, without opening it.
     ///
+    /// The default persistent store is SQLite-backed when the `store-sqlite`
+    /// feature is on (the default), and the file-backed store under the same
+    /// default path policy when it is off.
+    ///
     /// A builder may replace the store before it settles, so nothing here may
-    /// touch the database: constructing a [`SqliteRuntimeStore`] only records a
-    /// path, and the first `open()` is what creates the directory and runs the
-    /// schema. Recovery is deferred to
-    /// [`prepare_recovery`](Self::prepare_recovery), which the builder calls
-    /// once on whichever store the caller kept.
+    /// touch the disk: constructing either default only records a path, and
+    /// the first write (or recovery) is what creates anything. Recovery is
+    /// deferred to [`prepare_recovery`](Self::prepare_recovery), which the
+    /// builder calls once on whichever store the caller kept.
     pub fn new(runtime_intrinsics_enabled: bool) -> Self {
-        let store: Arc<dyn RuntimeStore> = Arc::new(SqliteRuntimeStore::default());
+        #[cfg(feature = "store-sqlite")]
+        let store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::runtime::sqlite_store::SqliteRuntimeStore::default());
+        #[cfg(not(feature = "store-sqlite"))]
+        let store: Arc<dyn RuntimeStore> = Arc::new(crate::runtime::FileRuntimeStore::default());
         let executor: Arc<dyn RuntimeExecutor> = Arc::new(LocalRuntimeExecutor);
         let policy = Arc::new(RuntimePolicy::default());
         let hooks = RuntimeHooks::new().with_hook(AuditHook);

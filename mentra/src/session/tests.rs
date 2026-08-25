@@ -314,9 +314,11 @@ fn all_session_event_variants_serialize_with_type_tag() {
 
 // ---- Task 2 lifecycle tests ----
 
+#[cfg(feature = "store-sqlite")]
+use crate::runtime::{AgentStore, SqliteRuntimeStore};
 use crate::{
     ContentBlock,
-    runtime::{AgentStore, CancellationToken, RunOptions, SqliteRuntimeStore},
+    runtime::{CancellationToken, RunOptions},
     test::MockRuntime,
 };
 
@@ -1383,6 +1385,7 @@ async fn session_preserves_tool_events_after_many_token_deltas() {
     );
 }
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn resume_session_restores_state() {
     use crate::runtime::SqliteRuntimeStore;
@@ -1849,6 +1852,7 @@ async fn compaction_events_appear_in_session_stream_and_session_continues() {
 
 // ---- Task 2A.6: Session resume continuity ----
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn resume_session_with_permission_rules_restores_rules() {
     use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
@@ -1955,6 +1959,7 @@ async fn resume_session_with_permission_rules_restores_rules() {
     let _ = std::fs::remove_dir_all(&unique);
 }
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn session_set_model_updates_active_and_persisted_model() {
     let unique = unique_test_base_dir("set-model");
@@ -2293,6 +2298,7 @@ async fn full_scenario_prompt_shell_file_events_end_to_end() {
 
 // ---- Task 1: project_id support in PermissionRuleStore ----
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn load_rules_with_project_id_returns_all_applicable_scopes() {
     use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
@@ -2420,6 +2426,7 @@ async fn load_rules_with_project_id_returns_all_applicable_scopes() {
 
 // ---- Task 3: Cross-session permission inheritance integration tests ----
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn project_scoped_rules_are_visible_across_sessions() {
     use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
@@ -2471,6 +2478,7 @@ async fn project_scoped_rules_are_visible_across_sessions() {
     let _ = std::fs::remove_file(&store_path);
 }
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn global_scoped_rules_are_visible_to_all_sessions() {
     use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
@@ -2521,6 +2529,7 @@ async fn global_scoped_rules_are_visible_to_all_sessions() {
     let _ = std::fs::remove_file(&store_path);
 }
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn session_scoped_rules_are_not_visible_to_other_sessions() {
     use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
@@ -2750,6 +2759,7 @@ async fn sessions_can_be_listed_per_workspace_on_one_runtime() {
     );
 }
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn a_persisted_agent_reports_when_it_was_written() {
     use crate::runtime::SessionOptions;

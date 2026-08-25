@@ -26,7 +26,6 @@ use crate::{
             RuntimePolicy, read_limited_file,
         },
         error::RuntimeError,
-        sqlite_store::SqliteRuntimeStore,
         store::RuntimeStore,
         task::{self, TaskAccess},
     },

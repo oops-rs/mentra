@@ -1,3 +1,7 @@
+//! Shared scripted-provider scaffolding for the agent runtime tests. Some
+//! helpers are only exercised by the `store-sqlite`-gated suites.
+#![cfg_attr(not(feature = "store-sqlite"), allow(dead_code))]
+
 use std::{
     collections::VecDeque,
     sync::{

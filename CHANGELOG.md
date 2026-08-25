@@ -23,6 +23,23 @@
   mentra's runtime already holds; the file store adds atomic writes, not
   cross-process locks.
 
+### SQLite is now behind a default-on `store-sqlite` feature
+
+- Default-on for the same reason `responses-websocket` is: every existing
+  dependant had the SQLite store, and an upgrade must not quietly swap their
+  persistence backend. Nothing changes for anyone on default features.
+- With the feature off, rusqlite and its bundled SQLite leave the tree, and
+  `SqliteRuntimeStore`, `HybridRuntimeStore`, and `SqliteHybridMemoryStore`
+  with them; the builder's default persistent store becomes
+  `FileRuntimeStore` under the same per-workspace default path policy the
+  SQLite database used. Long-term memory search (the FTS index) is what
+  keeps SQLite around: hosts that use it, or the other SQLite-only
+  subsystems (durable tasks, teams, background jobs, audit, cross-process
+  leases), keep the feature on.
+- A host that already builds with `default-features = false` and re-enables
+  what it needs picks the cut for itself; `cargo test --no-default-features`
+  is the supported configuration and runs in this repo's checks.
+
 ### A dropped Streamable HTTP client tries to end its session
 
 - The other two MCP transports clean up locally on drop — the stdio client lets

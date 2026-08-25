@@ -85,6 +85,7 @@ async fn memory_updated_does_not_cross_between_sessions() {
     );
 }
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn a_resumed_session_still_emits_memory_updated() {
     use crate::runtime::SqliteRuntimeStore;

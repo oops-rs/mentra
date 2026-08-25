@@ -11,9 +11,10 @@ use std::{
 
 use serde_json::json;
 
+#[cfg(feature = "store-sqlite")]
+use crate::runtime::{HybridRuntimeStore, SqliteRuntimeStore};
 use crate::runtime::{
-    HybridRuntimeStore, RuntimeError, SqliteRuntimeStore, TaskIntrinsicTool, TaskStateSnapshot,
-    TaskStore, VolatileRuntimeStore,
+    RuntimeError, TaskIntrinsicTool, TaskStateSnapshot, TaskStore, VolatileRuntimeStore,
 };
 
 use super::{
@@ -29,13 +30,18 @@ static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[test]
 fn concurrent_intrinsic_creates_serialize_through_task_store_mutate() {
-    assert_concurrent_creates(SqliteRuntimeStore::new(
-        temp_path("mentra-task-concurrent-sqlite".to_string()).with_extension("sqlite"),
-    ));
     assert_concurrent_creates(VolatileRuntimeStore::new());
     assert_concurrent_creates(crate::runtime::FileRuntimeStore::new(temp_path(
         "mentra-task-concurrent-file".to_string(),
     )));
+}
+
+#[cfg(feature = "store-sqlite")]
+#[test]
+fn concurrent_intrinsic_creates_serialize_through_sqlite_task_stores() {
+    assert_concurrent_creates(SqliteRuntimeStore::new(
+        temp_path("mentra-task-concurrent-sqlite".to_string()).with_extension("sqlite"),
+    ));
     assert_concurrent_creates(HybridRuntimeStore::new(
         temp_path("mentra-task-concurrent-hybrid".to_string()).with_extension("sqlite"),
     ));
@@ -510,7 +516,7 @@ fn teammate_cannot_edit_task_dependencies() {
 }
 
 struct TaskHarness {
-    store: SqliteRuntimeStore,
+    store: crate::runtime::FileRuntimeStore,
     namespace: PathBuf,
 }
 
@@ -588,10 +594,8 @@ fn temp_namespace(label: &str) -> PathBuf {
     path
 }
 
-fn temp_store(label: &str) -> SqliteRuntimeStore {
-    SqliteRuntimeStore::new(
-        temp_path(format!("mentra-task-store-{label}")).with_extension("sqlite"),
-    )
+fn temp_store(label: &str) -> crate::runtime::FileRuntimeStore {
+    crate::runtime::FileRuntimeStore::new(temp_path(format!("mentra-task-store-{label}")))
 }
 
 fn temp_path(label: String) -> PathBuf {

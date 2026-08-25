@@ -1,5 +1,6 @@
 mod compaction;
 mod engine;
+#[cfg(feature = "store-sqlite")]
 mod hybrid_store;
 pub(crate) mod journal;
 
@@ -10,4 +11,5 @@ pub use engine::{
     MemoryRecordKind, MemorySearchMode, MemorySearchRequest, MemoryStore, SearchRequest,
 };
 pub(crate) use engine::{build_search_query, recalled_memory_message};
+#[cfg(feature = "store-sqlite")]
 pub use hybrid_store::SqliteHybridMemoryStore;

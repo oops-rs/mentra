@@ -23,8 +23,8 @@ use crate::{
 use super::error::RuntimeError;
 use super::store::{
     AgentStore, AuditStore, LeaseStore, LoadedAgentState, PermissionRuleStore,
-    PersistedAgentRecord, RunStore, TaskStateSnapshot, TaskStore, default_store_dir, from_json,
-    maybe_json, next_id, now_secs, to_json,
+    PersistedAgentRecord, RunStore, TaskStateSnapshot, TaskStore, default_store_dir, next_id,
+    now_secs,
 };
 
 const DELIVERY_PENDING: i64 = 0;
@@ -1475,6 +1475,18 @@ impl SqliteRuntimeStore {
         }
         Ok(())
     }
+}
+
+fn to_json<T: serde::Serialize>(value: &T) -> Result<String, RuntimeError> {
+    serde_json::to_string(value).map_err(|error| RuntimeError::Store(error.to_string()))
+}
+
+fn maybe_json<T: serde::Serialize>(value: &Option<T>) -> Result<Option<String>, RuntimeError> {
+    value.as_ref().map(to_json).transpose()
+}
+
+fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, RuntimeError> {
+    serde_json::from_str(value).map_err(|error| RuntimeError::Store(error.to_string()))
 }
 
 fn sqlite_error(error: rusqlite::Error) -> RuntimeError {

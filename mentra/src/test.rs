@@ -19,7 +19,7 @@ use crate::{
         ProviderEventStream, ProviderId, Request, Response, Role,
         provider_event_stream_from_response,
     },
-    runtime::{PostExecutionHook, PreExecutionHook, SqliteRuntimeStore, VolatileRuntimeStore},
+    runtime::{PostExecutionHook, PreExecutionHook, VolatileRuntimeStore},
     tool::ToolAuthorizer,
 };
 
@@ -93,7 +93,8 @@ pub struct MockRuntimeBuilder {
     model: ModelInfo,
     turns: Vec<MockTurn>,
     runtime_identifier: String,
-    store: Option<SqliteRuntimeStore>,
+    #[cfg(feature = "store-sqlite")]
+    store: Option<crate::runtime::SqliteRuntimeStore>,
     policy: RuntimePolicy,
     tool_authorizer: Option<Box<dyn ToolAuthorizer>>,
     pre_hook: Option<Box<dyn PreExecutionHook>>,
@@ -111,6 +112,7 @@ impl Default for MockRuntimeBuilder {
             model: ModelInfo::new("mock-model", BuiltinProvider::OpenAI),
             turns: Vec::new(),
             runtime_identifier,
+            #[cfg(feature = "store-sqlite")]
             store: None,
             policy: RuntimePolicy::permissive(),
             tool_authorizer: None,
@@ -138,7 +140,8 @@ impl MockRuntimeBuilder {
     ///
     /// The caller owns the path, and therefore owns cleaning it up. The
     /// default leaves nothing to clean up.
-    pub fn with_store(mut self, store: SqliteRuntimeStore) -> Self {
+    #[cfg(feature = "store-sqlite")]
+    pub fn with_store(mut self, store: crate::runtime::SqliteRuntimeStore) -> Self {
         self.store = Some(store);
         self
     }
@@ -236,10 +239,17 @@ impl MockRuntimeBuilder {
         // nanosecond in the system temp directory, which left one file behind
         // per mock and — when two mocks read the same tick — handed both the
         // same database, where the second one's agent lease was already held.
-        builder = match self.store {
-            Some(store) => builder.with_store(store),
-            None => builder.with_store(VolatileRuntimeStore::new()),
-        };
+        #[cfg(feature = "store-sqlite")]
+        {
+            builder = match self.store {
+                Some(store) => builder.with_store(store),
+                None => builder.with_store(VolatileRuntimeStore::new()),
+            };
+        }
+        #[cfg(not(feature = "store-sqlite"))]
+        {
+            builder = builder.with_store(VolatileRuntimeStore::new());
+        }
 
         if let Some(hook) = self.pre_hook {
             builder = builder.with_pre_hook(hook);

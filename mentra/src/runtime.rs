@@ -3,9 +3,11 @@ pub(crate) mod control;
 mod error;
 mod file_store;
 pub(crate) mod handle;
+#[cfg(feature = "store-sqlite")]
 mod hybrid_store;
 mod intrinsic;
 mod skill;
+#[cfg(feature = "store-sqlite")]
 mod sqlite_store;
 mod store;
 pub(crate) mod task;
@@ -41,9 +43,11 @@ pub use control::{
 pub use error::{ErrorCategory, RuntimeError};
 pub use file_store::FileRuntimeStore;
 pub(crate) use handle::RuntimeHandle;
+#[cfg(feature = "store-sqlite")]
 pub use hybrid_store::HybridRuntimeStore;
 pub(crate) use intrinsic::RuntimeIntrinsicTool;
 pub use skill::{SkillInfo, SkillLoadError};
+#[cfg(feature = "store-sqlite")]
 pub use sqlite_store::SqliteRuntimeStore;
 pub use store::{
     AgentStore, AuditStore, LeaseStore, PermissionRuleStore, RunStore, RuntimeStore, TaskStore,

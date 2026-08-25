@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     agent::{AgentConfig, AgentStatus, SpawnedAgentSummary, TeammateIdentity},
@@ -242,18 +242,6 @@ impl<T> RuntimeStore for T where
 {
 }
 
-pub(crate) fn to_json<T: Serialize>(value: &T) -> Result<String, RuntimeError> {
-    serde_json::to_string(value).map_err(|error| RuntimeError::Store(error.to_string()))
-}
-
-pub(crate) fn maybe_json<T: Serialize>(value: &Option<T>) -> Result<Option<String>, RuntimeError> {
-    value.as_ref().map(to_json).transpose()
-}
-
-pub(crate) fn from_json<T: DeserializeOwned>(value: &str) -> Result<T, RuntimeError> {
-    serde_json::from_str(value).map_err(|error| RuntimeError::Store(error.to_string()))
-}
-
 pub(crate) fn next_id(prefix: &str) -> String {
     let counter = NEXT_STORE_ID.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}-{:x}-{:x}", now_nanos(), counter)
@@ -299,16 +287,22 @@ pub(crate) fn default_store_dir() -> PathBuf {
     dir
 }
 
-/// The database paths of every default store constructed on this thread.
+/// The paths every default store constructed on this thread would create:
+/// the SQLite database with `store-sqlite` on, the file store's `agents`
+/// directory with it off.
 ///
-/// Only `open()` creates the directory holding one, so an untouched default
-/// store leaves nothing at these paths.
+/// Only the first open or recovery creates anything at one, so an untouched
+/// default store leaves nothing at these paths.
 #[cfg(test)]
 pub(crate) fn default_store_paths_on_this_thread() -> Vec<PathBuf> {
+    #[cfg(feature = "store-sqlite")]
+    let file_name = "runtime.sqlite";
+    #[cfg(not(feature = "store-sqlite"))]
+    let file_name = "agents";
     DEFAULT_STORE_DIRS.with(|dirs| {
         dirs.borrow()
             .iter()
-            .map(|dir| dir.join("runtime.sqlite"))
+            .map(|dir| dir.join(file_name))
             .collect()
     })
 }

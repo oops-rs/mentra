@@ -1,3 +1,7 @@
+#![cfg(feature = "store-sqlite")]
+//! Gated on `store-sqlite`: these scenarios exercise the runtime against its
+//! SQLite store; the file store's coverage lives in `runtime::file_store`.
+
 use std::{
     collections::VecDeque,
     fs,
