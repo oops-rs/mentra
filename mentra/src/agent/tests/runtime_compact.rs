@@ -1188,6 +1188,94 @@ async fn a_provider_that_says_the_request_is_too_long_gets_a_compacted_one() {
 }
 
 #[tokio::test]
+async fn overflow_recovery_survives_a_store_that_refuses_the_summary_write() {
+    // The file store refuses long-term memory, and the compaction summary is
+    // a long-term memory record. A recovery whose compaction is already
+    // applied must not be failed by that refusal — it used to be, which
+    // turned "context overflow on the file store" into a dead run instead of
+    // a recovered one, with the ContextCompacted announcement skipped too.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let long_output = "x".repeat(400);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            // First turn builds enough history that the overflow compaction
+            // has a prefix to replace.
+            tool_use_stream(&model.id, "tool-1", "echo_tool", r#"{"value":"one"}"#),
+            text_stream(&model.id, "first answer"),
+            // Second turn: the provider refuses the request as too long, and
+            // accepts the retry sent after compacting.
+            super::support::StreamScript::Failure(ProviderError::ContextLengthExceeded {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: "prompt is too long".to_string(),
+            }),
+            text_stream(&model.id, "answered after compacting"),
+        ],
+    )
+    .with_capabilities(ProviderCapabilities {
+        supports_history_compaction: true,
+        ..Default::default()
+    });
+
+    provider
+        .push_compact_response(Ok(CompactionResponse {
+            output: vec![CompactionInputItem::CompactionSummary {
+                content: "Summary of previous work".to_string(),
+            }],
+        }))
+        .await;
+
+    let runtime = Runtime::empty_builder()
+        .with_store(crate::runtime::FileRuntimeStore::new(temp_dir(
+            "file-store-overflow",
+        )))
+        .with_provider_instance(provider)
+        .with_tool(StaticTool::success("echo_tool", &long_output))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: None,
+                    mode: CompactionMode::PreferRemote,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }])
+        .await
+        .expect("first turn builds history");
+
+    let mut events = agent.subscribe_events();
+    let message = agent
+        .send(vec![ContentBlock::Text {
+            text: "and again".to_string(),
+        }])
+        .await
+        .expect("the run recovers even though the summary write is refused");
+    assert_eq!(message.text(), "answered after compacting");
+
+    let collected = collect_events(&mut events);
+    let compacted = collected
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ContextCompacted { .. }));
+    assert!(
+        compacted,
+        "the applied compaction is still announced, got {collected:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_second_overflow_after_compacting_is_not_retried_again() {
     // Compacting twice does not make a request that is still too long fit, and
     // a loop here would grind the transcript away one summary at a time.

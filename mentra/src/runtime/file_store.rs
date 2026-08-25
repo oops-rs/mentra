@@ -60,8 +60,10 @@
 //! - **Long-term memory** is refused with an error naming the fix: durable
 //!   memory search is what the SQLite FTS index is for, and a "long-term"
 //!   memory that silently forgot on restart would be worse than saying no.
-//!   Automatic recall and ingest degrade gracefully (the engine swallows
-//!   store errors); the memory tools report the error text.
+//!   The runtime degrades gracefully around the refusal: automatic recall
+//!   and ingest carry on without records, and an applied compaction whose
+//!   summary write is refused still stands (the failure is reported through
+//!   the memory hook events); the memory tools report the error text.
 
 mod agent;
 mod delegated;

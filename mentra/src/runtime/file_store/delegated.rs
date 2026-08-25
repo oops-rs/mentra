@@ -224,8 +224,10 @@ impl MemoryStore for FileRuntimeStore {
 /// Long-term memory is refused rather than kept volatile: a durable store
 /// whose "long-term" memory silently vanished on restart would be lying,
 /// and the search quality the memory engine is built around is the SQLite
-/// FTS index. The engine swallows this error on its automatic paths, so
-/// runs proceed without recall; the memory tools surface the text.
+/// FTS index. The runtime degrades around this error on its automatic
+/// paths — recall and ingest proceed without records, and an applied
+/// compaction survives its refused summary write — while the memory tools
+/// surface the text.
 fn memory_unavailable() -> RuntimeError {
     RuntimeError::Store(
         "FileRuntimeStore does not persist long-term memory; enable mentra's `store-sqlite` \

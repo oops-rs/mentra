@@ -175,11 +175,30 @@ impl Agent {
                     });
             return Ok(None);
         }
-        self.runtime.memory_engine().store_compaction_summary(
+        // The compaction is applied and persisted at this point; the summary
+        // record is a memory-search artifact layered on top, not part of the
+        // transcript the model continues from. A store that cannot take it —
+        // the file store refuses long-term memory outright — must not undo a
+        // recovery that already happened: propagating this error used to fail
+        // a context-overflow recovery outright, and on the swallowing (auto)
+        // path it skipped the snapshot sync, the applied hook, and the
+        // ContextCompacted event for a compaction that was in effect. Degrade
+        // instead: report through the memory hook channel and carry on.
+        if let Err(error) = self.runtime.memory_engine().store_compaction_summary(
             self.id(),
             self.memory.revision(),
             &summary.render_for_handoff(),
-        )?;
+        ) {
+            let _ =
+                self.runtime
+                    .emit_hook(crate::runtime::RuntimeHookEvent::MemoryIngestFinished {
+                        agent_id: self.id().to_string(),
+                        source_revision: self.memory.revision(),
+                        success: false,
+                        stored_records: 0,
+                        error: Some(error.to_string()),
+                    });
+        }
         self.sync_memory_snapshot();
         let _ = self
             .runtime
