@@ -130,6 +130,21 @@ impl RuntimeHandle {
             .get_provider(id)
     }
 
+    /// Reports whether `self` and `other` are handles onto the same running
+    /// [`Runtime`](crate::Runtime), rather than two runtimes that merely
+    /// share configuration.
+    ///
+    /// No field here is a stable per-instance identifier: `runtime_instance_id`
+    /// is scoped to the *process*, so every runtime built in one process
+    /// shares it, and `persisted_runtime_identifier` defaults to the same
+    /// string for every runtime that never set one. Identity is read off the
+    /// state a clone of one runtime's handle shares with its original instead
+    /// — `Arc::ptr_eq` is `true` exactly when both handles trace back to the
+    /// same `RuntimeHandle::new` call.
+    pub(crate) fn same_runtime_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.provider_registry, &other.provider_registry)
+    }
+
     /// The Responses transport this runtime chose for every request it makes,
     /// or `None` when it left the choice to each request's own options.
     pub(crate) fn responses_transport(&self) -> Option<crate::provider::ResponsesTransport> {

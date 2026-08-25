@@ -2711,6 +2711,44 @@ async fn spawn_subagent_from_with_options_puts_the_subagent_under_them() {
 }
 
 #[tokio::test]
+async fn spawn_subagent_from_refuses_a_template_from_a_different_session() {
+    // A template built from one session's agent must not spawn through a
+    // different session, even one on its own separate runtime with an agent
+    // of the same name -- the receiver's policy, tools, and runtime state
+    // must never be silently substituted for the template's actual source.
+    let mock_a = MockRuntime::builder()
+        .text("never reached")
+        .build()
+        .unwrap();
+    let session_a = mock_a
+        .runtime()
+        .create_session("session-a", mock_a.model())
+        .unwrap();
+    let template = session_a.disposable_subagent_template();
+
+    let mock_b = MockRuntime::builder()
+        .text("never reached")
+        .build()
+        .unwrap();
+    let mut session_b = mock_b
+        .runtime()
+        .create_session("session-b", mock_b.model())
+        .unwrap();
+
+    let error = session_b
+        .spawn_subagent_from("research", "go", template)
+        .await
+        .expect_err("a template from session_a must not spawn through session_b");
+    assert!(
+        matches!(
+            error,
+            crate::error::RuntimeError::SubagentTemplateMismatch { .. }
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn a_session_can_be_renamed_after_it_is_minted() {
     // A host that opens a session before it knows what the conversation is
     // about was otherwise stuck with whatever placeholder it guessed.

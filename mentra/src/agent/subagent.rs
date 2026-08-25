@@ -29,6 +29,19 @@ const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent working for another age
 #[derive(Clone)]
 pub struct DisposableSubagentTemplate {
     runtime: RuntimeHandle,
+    /// The `Agent::id` of the agent [`from_agent`](Self::from_agent) was
+    /// built from, checked by [`verify_source`](Self::verify_source) against
+    /// whichever agent actually tries to spawn from this template.
+    ///
+    /// A template is a value with no lifetime tied to its source: nothing
+    /// stops it from crossing to a different agent, session, or runtime than
+    /// the one it was cloned from. Spawning it there would wire the "child"
+    /// to the template's original runtime, name, and teammate identity while
+    /// the receiver announces and registers it as its own — escaping the
+    /// receiver's policy entirely once the runtimes differ. Every
+    /// `spawn_subagent_from` entry point must verify the source before
+    /// calling [`spawn`](Self::spawn).
+    source_agent_id: String,
     model: String,
     context_window: Option<usize>,
     parent_name: String,
@@ -49,6 +62,7 @@ impl DisposableSubagentTemplate {
     pub(crate) fn from_agent(agent: &Agent) -> Self {
         Self {
             runtime: agent.runtime.clone(),
+            source_agent_id: agent.id.clone(),
             model: agent.model.clone(),
             context_window: agent.context_window,
             parent_name: agent.name.clone(),
@@ -58,6 +72,29 @@ impl DisposableSubagentTemplate {
             teammate_identity: agent.teammate_identity.clone(),
             model_override: None,
         }
+    }
+
+    /// Confirms `receiver_agent_id`, on `receiver_runtime`, is the agent (and
+    /// runtime) this template was built from — the check every
+    /// `spawn_subagent_from` entry point runs before
+    /// [`spawn`](Self::spawn), so a template handed to a different agent,
+    /// session, or runtime is refused by name rather than silently spawning a
+    /// child wired to its original source instead of its actual receiver.
+    pub(crate) fn verify_source(
+        &self,
+        receiver_agent_id: &str,
+        receiver_runtime: &RuntimeHandle,
+    ) -> Result<(), RuntimeError> {
+        if self.source_agent_id == receiver_agent_id
+            && self.runtime.same_runtime_as(receiver_runtime)
+        {
+            return Ok(());
+        }
+
+        Err(RuntimeError::SubagentTemplateMismatch {
+            template_source: self.source_agent_id.clone(),
+            receiver: receiver_agent_id.to_string(),
+        })
     }
 
     /// Replaces the tool profile the spawned child's config carries.
@@ -137,11 +174,14 @@ impl Agent {
 
     /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
     /// spawns from a template the caller built (and possibly overrode) rather
-    /// than an exact clone of this agent's own config.
+    /// than an exact clone of this agent's own config, after confirming this
+    /// agent actually is the template's source (see
+    /// [`DisposableSubagentTemplate::verify_source`]).
     pub(crate) fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,
     ) -> Result<Self, RuntimeError> {
+        template.verify_source(&self.id, &self.runtime)?;
         template.spawn()
     }
 

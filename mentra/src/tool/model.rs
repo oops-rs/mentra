@@ -639,11 +639,14 @@ impl ParallelToolContext {
 
     /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
     /// spawns from a template the caller built (and possibly overrode) rather
-    /// than an exact clone of the spawning agent's own config.
+    /// than an exact clone of the spawning agent's own config, after
+    /// confirming this context's agent actually is the template's source
+    /// (see [`DisposableSubagentTemplate::verify_source`]).
     pub fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,
     ) -> Result<crate::agent::Agent, RuntimeError> {
+        template.verify_source(&self.agent_id, &self.runtime)?;
         template.spawn()
     }
 

@@ -83,6 +83,14 @@ pub enum RuntimeError {
     },
     #[error("malformed provider event: {0}")]
     MalformedProviderEvent(String),
+    #[error(
+        "subagent template built from '{template_source}' cannot be spawned by '{receiver}': \
+         a template is only spawnable by the agent (on the same runtime) it was built from"
+    )]
+    SubagentTemplateMismatch {
+        template_source: String,
+        receiver: String,
+    },
 }
 
 impl RuntimeError {
@@ -119,6 +127,7 @@ impl RuntimeError {
             | Self::MalformedProviderEvent(_)
             | Self::InvalidTask(_)
             | Self::InvalidTeam(_)
+            | Self::SubagentTemplateMismatch { .. }
             // Naming an entry that is not there is a caller mistake; retrying
             // with the same id gets the same answer.
             | Self::Branch(_) => ErrorCategory::Terminal,
@@ -214,6 +223,30 @@ mod tests {
         );
         assert_eq!(
             RuntimeError::ModelBudgetExceeded(50).category(),
+            ErrorCategory::Terminal,
+        );
+    }
+
+    #[test]
+    fn display_names_both_parties_of_a_subagent_template_mismatch() {
+        let error = RuntimeError::SubagentTemplateMismatch {
+            template_source: "agent-a".to_string(),
+            receiver: "agent-b".to_string(),
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("agent-a"));
+        assert!(message.contains("agent-b"));
+    }
+
+    #[test]
+    fn subagent_template_mismatch_is_terminal() {
+        assert_eq!(
+            RuntimeError::SubagentTemplateMismatch {
+                template_source: "agent-a".to_string(),
+                receiver: "agent-b".to_string(),
+            }
+            .category(),
             ErrorCategory::Terminal,
         );
     }

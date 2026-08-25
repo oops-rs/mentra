@@ -187,3 +187,64 @@ async fn default_template_spawns_byte_identically_to_spawn_subagent() {
         );
     }
 }
+
+#[tokio::test]
+async fn spawn_subagent_from_refuses_a_template_from_a_different_agent() {
+    // A template is a value with no lifetime tied to its source agent:
+    // nothing but this check stops one agent's template from being handed to
+    // a sibling agent on the same runtime, which would otherwise announce and
+    // register a child that is actually wired to the other agent's name and
+    // config.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let agent_a = runtime
+        .spawn("agent-a", model.clone())
+        .expect("spawn agent a");
+    let agent_b = runtime.spawn("agent-b", model).expect("spawn agent b");
+
+    let template = agent_a.disposable_subagent_template();
+
+    match agent_b.spawn_subagent_from(template) {
+        Err(RuntimeError::SubagentTemplateMismatch { .. }) => {}
+        Err(other) => panic!("unexpected error: {other}"),
+        Ok(_) => panic!("a template from agent_a must not spawn through agent_b"),
+    }
+}
+
+#[tokio::test]
+async fn spawn_subagent_from_refuses_a_template_from_a_different_runtime() {
+    // Two runtimes can spawn agents with coincidentally-equal names (and, in
+    // a resumed-agent scenario, even the same persisted id); the runtime
+    // check is what still catches a template crossing between them.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+
+    let provider_a = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
+    let runtime_a = Runtime::empty_builder()
+        .with_provider_instance(provider_a)
+        .build()
+        .expect("build runtime a");
+    let agent_a = runtime_a
+        .spawn("agent", model.clone())
+        .expect("spawn agent on runtime a");
+
+    let provider_b = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
+    let runtime_b = Runtime::empty_builder()
+        .with_provider_instance(provider_b)
+        .build()
+        .expect("build runtime b");
+    let agent_b = runtime_b
+        .spawn("agent", model)
+        .expect("spawn agent on runtime b");
+
+    let template = agent_a.disposable_subagent_template();
+
+    match agent_b.spawn_subagent_from(template) {
+        Err(RuntimeError::SubagentTemplateMismatch { .. }) => {}
+        Err(other) => panic!("unexpected error: {other}"),
+        Ok(_) => panic!("a template from runtime_a must not spawn through runtime_b"),
+    }
+}
