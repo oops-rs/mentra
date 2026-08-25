@@ -47,13 +47,15 @@
 //! store without a database (issue #28's cut: those subsystems stay on the
 //! SQLite store, behind the `store-sqlite` feature):
 //!
-//! - **Tasks, teams, background jobs, leases** are kept in process memory,
+//! - **Tasks, teams, and background jobs** are kept in process memory,
 //!   through the same mechanism [`VolatileRuntimeStore`] uses, and vanish
 //!   with the process. Tasks and team state are working coordination inside
 //!   one runtime; background processes die with the process that spawned
-//!   them, so their notification queues do too. Leases therefore guard only
-//!   within one store's clones — cross-process single-writer exclusion needs
-//!   the SQLite store.
+//!   them, so their notification queues do too.
+//! - **Leases** are advisory OS file locks under `leases/` — real
+//!   cross-process exclusion, released automatically when the holding
+//!   process dies (see the `leases` module for why the TTL is ignored and
+//!   lock files are never unlinked).
 //! - **Audit events** are accepted and discarded, as the volatile store
 //!   does: the trait has no reader, so refusing the write would only break
 //!   hosts that emit events, without making anything more durable.
@@ -68,6 +70,7 @@
 mod agent;
 mod delegated;
 mod fs_util;
+mod leases;
 mod rules;
 mod runs;
 #[cfg(test)]
@@ -103,6 +106,9 @@ pub struct FileRuntimeStore {
     transcript_logs: Arc<Mutex<HashMap<String, Arc<Mutex<TranscriptLogIndex>>>>>,
     /// Serializes read-modify-write cycles on `rules.json`.
     rules_lock: Arc<Mutex<()>>,
+    /// The OS file locks this store currently holds as leases; dropping an
+    /// entry (or the whole store, or the process) releases the lock.
+    held_leases: Arc<Mutex<HashMap<String, leases::HeldLease>>>,
     /// Serializes appends to `runs.jsonl`.
     runs_lock: Arc<Mutex<()>>,
 }
@@ -116,6 +122,7 @@ impl FileRuntimeStore {
             volatile: VolatileRuntimeStore::new(),
             transcript_logs: Arc::new(Mutex::new(HashMap::new())),
             rules_lock: Arc::new(Mutex::new(())),
+            held_leases: Arc::new(Mutex::new(HashMap::new())),
             runs_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -145,6 +152,10 @@ impl FileRuntimeStore {
 
     pub(crate) fn runs_path(&self) -> PathBuf {
         self.root.join("runs.jsonl")
+    }
+
+    pub(crate) fn leases_dir(&self) -> PathBuf {
+        self.root.join("leases")
     }
 
     /// The shared per-agent transcript-log index handle.

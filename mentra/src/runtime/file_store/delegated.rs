@@ -1,9 +1,9 @@
 //! The subsystems the file store deliberately does not put on disk (see the
-//! module docs for the reasoning per trait): tasks, teams, background jobs,
-//! and leases run through the embedded volatile mechanism; audit events are
+//! module docs for the reasoning per trait): tasks, teams, and background
+//! jobs run through the embedded volatile mechanism; audit events are
 //! accepted and discarded; long-term memory is refused by name.
 
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use crate::{
     background::{BackgroundNotification, BackgroundStore, BackgroundTaskSummary},
@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    super::store::{AuditStore, LeaseStore, TaskStateSnapshot, TaskStore},
+    super::store::{AuditStore, TaskStateSnapshot, TaskStore},
     FileRuntimeStore, RuntimeError,
 };
 use crate::runtime::TaskItem;
@@ -153,16 +153,6 @@ impl BackgroundStore for FileRuntimeStore {
 
     fn requeue_background_notifications(&self, agent_id: &str) -> Result<(), RuntimeError> {
         self.volatile.requeue_background_notifications(agent_id)
-    }
-}
-
-impl LeaseStore for FileRuntimeStore {
-    fn acquire_lease(&self, key: &str, owner: &str, ttl: Duration) -> Result<bool, RuntimeError> {
-        self.volatile.acquire_lease(key, owner, ttl)
-    }
-
-    fn release_lease(&self, key: &str, owner: &str) -> Result<(), RuntimeError> {
-        self.volatile.release_lease(key, owner)
     }
 }
 

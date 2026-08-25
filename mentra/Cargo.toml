@@ -49,6 +49,10 @@ serde_yaml_ng = "0.10"
 directories = "6.0.0"
 rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 thiserror = "2.0.18"
+# Advisory OS file locks for the file store's agent leases: flock/LockFileEx
+# released automatically when the holding process dies, which is exactly the
+# lifetime a resume lease wants.
+fs2 = "0.4"
 strum = { version = "0.27", features = ["derive"] }
 libc = "0.2"
 regex = "1.12.2"

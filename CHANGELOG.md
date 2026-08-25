@@ -13,12 +13,14 @@
   temp file and rename; a crash leaves at most a truncated final transcript
   line, which the reader skips, or an ignored temp file. Every file carries
   a `schema` field (currently 1).
-- Deliberately not on disk, per trait: tasks, teams, background jobs, and
-  leases stay in process memory (the volatile store's mechanism — so leases
-  exclude only within one process); audit events are accepted and
-  discarded; long-term memory is refused with an error naming the fix
-  (`store-sqlite`), because a "long-term" memory that forgot on restart
-  would be worse than saying no. The module docs carry the full reasoning.
+- Leases are advisory OS file locks under `leases/` — real cross-process
+  exclusion for agent resume, released automatically when the holding
+  process dies. Deliberately not on disk, per trait: tasks, teams, and
+  background jobs stay in process memory (the volatile store's mechanism);
+  audit events are accepted and discarded; long-term memory is refused with
+  an error naming the fix (`store-sqlite`), because a "long-term" memory
+  that forgot on restart would be worse than saying no. The module docs
+  carry the full reasoning.
 - Concurrency stance is the SQLite store's: one writer per agent, which
   mentra's runtime already holds; the file store adds atomic writes, not
   cross-process locks.

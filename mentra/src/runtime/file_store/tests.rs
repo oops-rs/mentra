@@ -716,22 +716,56 @@ fn long_term_memory_is_refused_with_the_fix_named() {
 }
 
 #[test]
-fn leases_and_tasks_work_in_process() {
-    let store = FileRuntimeStore::new(temp_root("volatile"));
+fn leases_exclude_independent_stores_until_released() {
+    let root = temp_root("leases");
+    let first = FileRuntimeStore::new(&root);
+    // An independently constructed store on the same root holds the OS
+    // lock the way another process would.
+    let second = FileRuntimeStore::new(&root);
+    let ttl = Duration::from_secs(3600);
 
     assert!(
-        store
-            .acquire_lease("agent:x", "owner-1", Duration::from_secs(60))
+        first
+            .acquire_lease("agent:x", "runtime-1", ttl)
             .expect("acquire")
     );
     assert!(
-        !store
-            .acquire_lease("agent:x", "owner-2", Duration::from_secs(60))
-            .expect("second acquire"),
-        "a clone-shared lease excludes a second owner in this process"
+        !first
+            .acquire_lease("agent:x", "runtime-1", ttl)
+            .expect("re-acquire"),
+        "a held lease refuses even its own owner, as the SQLite store does"
     );
-    store.release_lease("agent:x", "owner-1").expect("release");
+    assert!(
+        !second
+            .acquire_lease("agent:x", "runtime-2", ttl)
+            .expect("contended acquire"),
+        "the file lock excludes an independent store on the same root"
+    );
 
+    // Releasing under the wrong owner changes nothing.
+    first
+        .release_lease("agent:x", "runtime-9")
+        .expect("mismatched release");
+    assert!(
+        !second
+            .acquire_lease("agent:x", "runtime-2", ttl)
+            .expect("still held")
+    );
+
+    first
+        .release_lease("agent:x", "runtime-1")
+        .expect("release");
+    assert!(
+        second
+            .acquire_lease("agent:x", "runtime-2", ttl)
+            .expect("acquire after release"),
+        "a released lease is immediately acquirable elsewhere"
+    );
+}
+
+#[test]
+fn tasks_work_in_process() {
+    let store = FileRuntimeStore::new(temp_root("volatile"));
     let namespace = std::path::Path::new("/tasks/example");
     store
         .replace_tasks(namespace, &[])
