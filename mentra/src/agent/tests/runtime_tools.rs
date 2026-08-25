@@ -5919,6 +5919,7 @@ async fn a_tool_can_spawn_a_subagent_from_a_template_it_narrowed() {
                 .with_tool_profile(ToolProfile::only(["echo_tool"]));
             let child = ctx
                 .spawn_subagent_from(template)
+                .await
                 .map_err(|error| error.to_string())?;
 
             Ok(format!(

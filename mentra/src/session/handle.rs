@@ -664,7 +664,7 @@ impl Session {
         template: DisposableSubagentTemplate,
         options: RunOptions,
     ) -> Result<SubagentHandle, RuntimeError> {
-        let subagent = self.agent.spawn_subagent_from(template)?;
+        let subagent = self.agent.spawn_subagent_from(template).await?;
         self.detach_subagent(name, prompt, subagent, options)
     }
 

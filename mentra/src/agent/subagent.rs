@@ -115,8 +115,14 @@ impl DisposableSubagentTemplate {
     /// Replaces the model (and, if it names a different provider, the
     /// provider) the spawned child runs on.
     ///
-    /// Resolution against the runtime's registered providers happens in
-    /// [`spawn`](Self::spawn), which can fail and already returns a `Result`.
+    /// Resolution against the runtime's registered providers happens when the
+    /// template is actually spawned, which can fail and already returns a
+    /// `Result`. When `model.context_window` is left `None` — the default
+    /// from [`ModelInfo::new`], as opposed to a `ModelInfo` read back from
+    /// [`Runtime::list_models`](crate::Runtime::list_models) — spawning
+    /// through `spawn_subagent_from` looks it up in the model's provider's own
+    /// listing rather than leaving it unset; `spawn_subagent` never reaches
+    /// this path, since it has no way to set an override at all.
     #[must_use = "with_model returns a new template rather than mutating in place; \
                   a discarded return value leaves the override applied to nothing"]
     pub fn with_model(mut self, model: ModelInfo) -> Self {
@@ -136,6 +142,49 @@ impl DisposableSubagentTemplate {
     }
 
     pub(crate) fn spawn(&self) -> Result<Agent, RuntimeError> {
+        self.build_agent(self.model_override.clone())
+    }
+
+    /// The `spawn_subagent_from` family's spawn step: like [`spawn`](Self::spawn),
+    /// but first fills in an overridden model's context window from the
+    /// runtime's model listing when the caller left it unset.
+    ///
+    /// `ModelInfo::new(id, provider)` defaults `context_window` to `None`, so
+    /// a hand-built override passed to
+    /// [`with_model`](Self::with_model) — as opposed to one read back from
+    /// [`Runtime::list_models`](crate::Runtime::list_models) — would otherwise
+    /// silently degrade window-relative compaction for the child even when
+    /// the runtime's own listing knows the real number. `spawn` (used only by
+    /// `spawn_subagent`, which has no way to set an override) stays
+    /// synchronous and does not do this lookup.
+    pub(crate) async fn spawn_from(&self) -> Result<Agent, RuntimeError> {
+        let model_override = match self.model_override.clone() {
+            Some(model) if model.context_window.is_none() => {
+                Some(self.listed_context_window(model).await)
+            }
+            other => other,
+        };
+        self.build_agent(model_override)
+    }
+
+    /// Looks `model` up in its provider's model listing and copies over the
+    /// context window the listing reports, leaving `model` unchanged if the
+    /// provider is unregistered, the listing call fails, or the listing does
+    /// not mention this model id -- `spawn_from` still spawns the child in
+    /// each of those cases, just without the fallback.
+    async fn listed_context_window(&self, mut model: ModelInfo) -> ModelInfo {
+        if let Some(provider) = self.runtime.get_provider(Some(&model.provider))
+            && let Ok(listed_models) = provider.list_models().await
+            && let Some(listed) = listed_models
+                .into_iter()
+                .find(|listed| listed.id == model.id)
+        {
+            model.context_window = listed.context_window;
+        }
+        model
+    }
+
+    fn build_agent(&self, model_override: Option<ModelInfo>) -> Result<Agent, RuntimeError> {
         let mut hidden_tools = self.hidden_tools.clone();
         hidden_tools.insert(RuntimeIntrinsicTool::Task.to_string());
 
@@ -144,13 +193,13 @@ impl DisposableSubagentTemplate {
             self.config.system.as_deref().map(Cow::Borrowed),
         ));
 
-        let (model, context_window, provider) = match &self.model_override {
+        let (model, context_window, provider) = match model_override {
             Some(model) => {
                 let provider = self
                     .runtime
                     .get_provider(Some(&model.provider))
                     .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?;
-                (model.id.clone(), model.context_window, provider)
+                (model.id, model.context_window, provider)
             }
             None => (
                 self.model.clone(),
@@ -184,13 +233,16 @@ impl Agent {
     /// spawns from a template the caller built (and possibly overrode) rather
     /// than an exact clone of this agent's own config, after confirming this
     /// agent actually is the template's source (see
-    /// [`DisposableSubagentTemplate::verify_source`]).
-    pub(crate) fn spawn_subagent_from(
+    /// [`DisposableSubagentTemplate::verify_source`]). Async, unlike
+    /// `spawn_subagent`: an overridden model with no context window set may
+    /// need a round trip to its provider's model listing (see
+    /// [`DisposableSubagentTemplate::spawn_from`]).
+    pub(crate) async fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,
     ) -> Result<Self, RuntimeError> {
         template.verify_source(&self.id, &self.runtime)?;
-        template.spawn()
+        template.spawn_from().await
     }
 
     pub(crate) fn disposable_subagent_template(&self) -> DisposableSubagentTemplate {

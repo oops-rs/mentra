@@ -30,6 +30,7 @@ async fn narrowed_tool_profile_restricts_the_childs_roster_and_keeps_task_hidden
         .with_tool_profile(ToolProfile::only(["read", "grep", "task"]));
     let child = parent
         .spawn_subagent_from(template)
+        .await
         .expect("spawn from an overridden template");
 
     assert!(
@@ -81,6 +82,7 @@ async fn overridden_model_reaches_the_childs_config_and_routing() {
         .with_model(cheap_model.clone());
     let mut child = parent
         .spawn_subagent_from(template)
+        .await
         .expect("spawn from an overridden template");
 
     assert_eq!(child.model(), cheap_model.id);
@@ -101,6 +103,42 @@ async fn overridden_model_reaches_the_childs_config_and_routing() {
 }
 
 #[tokio::test]
+async fn overridden_model_with_no_context_window_gets_the_runtime_listed_one() {
+    // ModelInfo::new defaults context_window to None, so a hand-built
+    // with_model override -- as opposed to one read back from
+    // Runtime::list_models -- would otherwise silently degrade
+    // window-relative compaction for the child, even though the runtime's
+    // own listing knows the real number.
+    let parent_model = model_info("parent-model", BuiltinProvider::Anthropic);
+    let mut listed_cheap_model = ModelInfo::new("cheap-model", BuiltinProvider::Anthropic);
+    listed_cheap_model.context_window = Some(8_192);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![parent_model.clone(), listed_cheap_model],
+        vec![],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let parent = runtime.spawn("parent", parent_model).expect("spawn parent");
+
+    // The override itself carries no context_window.
+    let hand_built_override = ModelInfo::new("cheap-model", BuiltinProvider::Anthropic);
+    assert_eq!(hand_built_override.context_window, None);
+
+    let template = parent
+        .disposable_subagent_template()
+        .with_model(hand_built_override);
+    let child = parent
+        .spawn_subagent_from(template)
+        .await
+        .expect("spawn from an overridden template");
+
+    assert_eq!(child.context_window(), Some(8_192));
+}
+
+#[tokio::test]
 async fn overridden_model_naming_an_unregistered_provider_fails_at_spawn() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
@@ -115,7 +153,7 @@ async fn overridden_model_naming_an_unregistered_provider_fails_at_spawn() {
         .disposable_subagent_template()
         .with_model(ghost_model);
 
-    match parent.spawn_subagent_from(template) {
+    match parent.spawn_subagent_from(template).await {
         Err(RuntimeError::ProviderNotFound(_)) => {}
         Err(other) => panic!("unexpected error: {other}"),
         Ok(_) => panic!("no provider is registered for the overridden model"),
@@ -147,6 +185,7 @@ async fn overridden_system_still_carries_the_subagent_suffix() {
         .with_system("You are a narrow triage worker.");
     let overridden = parent
         .spawn_subagent_from(template)
+        .await
         .expect("spawn from an overridden template");
 
     assert_eq!(
@@ -168,6 +207,7 @@ async fn default_template_spawns_byte_identically_to_spawn_subagent() {
     let via_spawn_subagent = parent.spawn_subagent().expect("spawn via spawn_subagent");
     let via_template = parent
         .spawn_subagent_from(parent.disposable_subagent_template())
+        .await
         .expect("spawn via an un-overridden template");
 
     assert_eq!(via_spawn_subagent.name(), via_template.name());
@@ -214,7 +254,7 @@ async fn spawn_subagent_from_refuses_a_template_from_a_different_agent() {
 
     let template = agent_a.disposable_subagent_template();
 
-    match agent_b.spawn_subagent_from(template) {
+    match agent_b.spawn_subagent_from(template).await {
         Err(RuntimeError::SubagentTemplateMismatch { .. }) => {}
         Err(other) => panic!("unexpected error: {other}"),
         Ok(_) => panic!("a template from agent_a must not spawn through agent_b"),
@@ -248,7 +288,7 @@ async fn spawn_subagent_from_refuses_a_template_from_a_different_runtime() {
 
     let template = agent_a.disposable_subagent_template();
 
-    match agent_b.spawn_subagent_from(template) {
+    match agent_b.spawn_subagent_from(template).await {
         Err(RuntimeError::SubagentTemplateMismatch { .. }) => {}
         Err(other) => panic!("unexpected error: {other}"),
         Ok(_) => panic!("a template from runtime_a must not spawn through runtime_b"),

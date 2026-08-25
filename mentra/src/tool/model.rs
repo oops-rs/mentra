@@ -283,12 +283,14 @@ impl ToolContext<'_> {
 
     /// The template-taking sibling of [`spawn_subagent`](Self::spawn_subagent):
     /// spawns from a template the caller built (and possibly overrode) rather
-    /// than an exact clone of this agent's own config.
-    pub fn spawn_subagent_from(
+    /// than an exact clone of this agent's own config. Async, unlike
+    /// `spawn_subagent`: an overridden model with no context window set may
+    /// need a round trip to its provider's model listing.
+    pub async fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,
     ) -> Result<crate::agent::Agent, RuntimeError> {
-        self.agent.spawn_subagent_from(template)
+        self.agent.spawn_subagent_from(template).await
     }
 
     /// Records a spawned subagent and announces it on the parent's stream.
@@ -641,13 +643,15 @@ impl ParallelToolContext {
     /// spawns from a template the caller built (and possibly overrode) rather
     /// than an exact clone of the spawning agent's own config, after
     /// confirming this context's agent actually is the template's source
-    /// (see [`DisposableSubagentTemplate::verify_source`]).
-    pub fn spawn_subagent_from(
+    /// (see [`DisposableSubagentTemplate::verify_source`]). Async, unlike
+    /// `spawn_subagent`: an overridden model with no context window set may
+    /// need a round trip to its provider's model listing.
+    pub async fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,
     ) -> Result<crate::agent::Agent, RuntimeError> {
         template.verify_source(&self.agent_id, &self.runtime)?;
-        template.spawn()
+        template.spawn_from().await
     }
 
     /// [`RunOptions`](crate::runtime::RunOptions) for a run this tool spawns —
