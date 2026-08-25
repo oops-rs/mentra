@@ -80,14 +80,17 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # `responses-websocket` is default-on and exists so a host that only
-      # streams over HTTP+SSE can turn it off and drop tokio-tungstenite from
-      # its tree. Nothing verified that configuration still builds, so the
-      # feature could stop serving its one purpose without failing anything.
-      # A compile check is the right cost here: the realistic breakage is a
-      # `#[cfg]` that stops lining up, not a behavioral difference.
-      - name: Check with default features off
-        run: cargo check --workspace --all-targets --no-default-features
+      # `responses-websocket` and `store-sqlite` are default-on and exist so
+      # a host can turn them off — dropping tokio-tungstenite, or rusqlite
+      # and its bundled SQLite. With the features off the crate does not just
+      # build differently, it behaves differently: the builder's default
+      # persistent store becomes the file-backed one, and the
+      # store-parameterized suites run against it. Tests, not a compile
+      # check, are what keep that configuration honest. `-p mentra` rather
+      # than `--workspace`: the examples crate turns the defaults back on,
+      # and feature unification would quietly re-enable them everywhere.
+      - name: Test with default features off
+        run: cargo test -p mentra --no-default-features
 
   docs:
     name: Documentation

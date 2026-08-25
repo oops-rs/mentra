@@ -13,7 +13,7 @@ use crate::{
     agent::{AgentConfig, AgentEvent, CompactionConfig, CompactionTrigger},
     compaction::{CompactionExecutionMode, CompactionMode},
     provider::{CompactionInputItem, CompactionResponse, ProviderCapabilities, Request},
-    runtime::{Runtime, SqliteRuntimeStore},
+    runtime::Runtime,
     tool::{
         ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolOutput, ToolSideEffectLevel,
         ToolSpec,
@@ -23,8 +23,8 @@ use crate::{
 use crate::provider::ProviderError;
 
 use super::support::{
-    ScriptedProvider, SessionGenerator, StaticTool, erroring_stream, model_info, text_stream,
-    tool_use_stream,
+    PersistentStore, ScriptedProvider, SessionGenerator, StaticTool, erroring_stream, model_info,
+    text_stream, tool_use_stream,
 };
 
 /// A tool whose output is long enough to trigger micro-compaction's
@@ -832,7 +832,7 @@ async fn resumed_session_continues_after_compaction() {
     let transcript_dir = temp_dir("resume-after-compact");
 
     // Use a persistent store so we can reopen it after dropping the runtime.
-    let store = temp_sqlite_store("resume-after-compact");
+    let store = temp_persistent_store("resume-after-compact");
 
     // Phase 1 — run 15 turns with a low threshold to ensure at least one
     // compaction fires, then drop agent + runtime to persist state.
@@ -896,7 +896,7 @@ async fn resumed_session_continues_after_compaction() {
     }
 
     // Clear leases so the second runtime can acquire the agent.
-    clear_sqlite_leases(&store);
+    clear_leases(&store);
 
     // Phase 2 — rebuild runtime with the same store and resume the agent.
     {
@@ -1006,25 +1006,34 @@ async fn compaction_chain_preserves_context_across_cycles() {
     );
 }
 
-fn temp_sqlite_store(label: &str) -> SqliteRuntimeStore {
+fn temp_persistent_store(label: &str) -> PersistentStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "mentra-runtime-compact-{label}-{timestamp}-{unique}.sqlite"
+        "mentra-runtime-compact-{label}-{timestamp}-{unique}.store"
     ));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create temp dir");
     }
-    SqliteRuntimeStore::new(path)
+    PersistentStore::new(path)
 }
 
-fn clear_sqlite_leases(store: &SqliteRuntimeStore) {
+/// Simulates the previous lease holder having died, so a second runtime on
+/// the same store can resume: a SQL DELETE for the SQLite store, dropping
+/// the held OS locks for the file store.
+#[cfg(feature = "store-sqlite")]
+fn clear_leases(store: &PersistentStore) {
     let conn = rusqlite::Connection::open(store.path()).expect("open store");
     conn.execute("DELETE FROM leases", [])
         .expect("clear leases");
+}
+
+#[cfg(not(feature = "store-sqlite"))]
+fn clear_leases(store: &PersistentStore) {
+    store.release_all_leases();
 }
 
 fn tool_result_contents(request: &Request<'_>) -> Vec<String> {

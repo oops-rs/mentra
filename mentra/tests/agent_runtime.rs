@@ -1,7 +1,3 @@
-#![cfg(feature = "store-sqlite")]
-//! Gated on `store-sqlite`: these scenarios exercise the runtime against its
-//! SQLite store; the file store's coverage lives in `runtime::file_store`.
-
 use std::{
     collections::VecDeque,
     fs,
@@ -13,7 +9,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use mentra::runtime::{ProviderRetry, RunOptions, SqliteRuntimeStore};
+use mentra::runtime::{ProviderRetry, RunOptions};
+
+#[cfg(not(feature = "store-sqlite"))]
+use mentra::runtime::FileRuntimeStore as PersistentStore;
+/// The persistent store this build defaults to, so these scenarios run in
+/// both feature configurations against the store that build actually ships.
+#[cfg(feature = "store-sqlite")]
+use mentra::runtime::SqliteRuntimeStore as PersistentStore;
 use mentra::{
     AgentConfig, BuiltinProvider, ContentBlock, Message, Role, Runtime,
     agent::{AgentEvent, AgentStatus, RoundContext, RoundDecision, RoundStrategy},
@@ -512,7 +515,7 @@ fn test_runtime(provider: ScriptedProvider) -> Runtime {
         .expect("build runtime")
 }
 
-fn temp_store(label: &str) -> SqliteRuntimeStore {
+fn temp_store(label: &str) -> PersistentStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -524,7 +527,7 @@ fn temp_store(label: &str) -> SqliteRuntimeStore {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create temp dir");
     }
-    SqliteRuntimeStore::new(path)
+    PersistentStore::new(path)
 }
 
 fn model_info(id: &str, provider: impl Into<ProviderId>) -> ModelInfo {

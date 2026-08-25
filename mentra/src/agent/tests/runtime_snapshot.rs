@@ -12,12 +12,12 @@ use crate::{
     AgentConfig, BackgroundTaskStatus, BuiltinProvider, ContentBlock, Role,
     agent::{AgentSnapshot, AgentStatus, TeamAutonomyConfig, TeamConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::{Runtime, RuntimePolicy, SqliteRuntimeStore},
+    runtime::{Runtime, RuntimePolicy},
 };
 
 use super::support::{
-    ScriptedProvider, background_success_command, command_input_json, controlled_stream,
-    model_info, ok_stream, text_stream,
+    PersistentStore, ScriptedProvider, background_success_command, command_input_json,
+    controlled_stream, model_info, ok_stream, text_stream,
 };
 
 #[tokio::test]
@@ -339,14 +339,14 @@ async fn snapshot_updates_when_background_task_finishes() {
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
-fn temp_store(label: &str) -> SqliteRuntimeStore {
+fn temp_store(label: &str) -> PersistentStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
-        "mentra-runtime-store-{label}-{timestamp}-{unique}.sqlite"
+    PersistentStore::new(std::env::temp_dir().join(format!(
+        "mentra-runtime-store-{label}-{timestamp}-{unique}.store"
     )))
 }
 

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### An applied compaction survives a failed summary write
+
+- `store_compaction_summary` ran with `?` after the compaction had already
+  been applied and persisted, so a store whose memory writes fail — the new
+  file store refuses them by design, and any custom store can error — turned
+  a successful context-overflow recovery into a dead run; on the
+  auto-compaction path the same error silently skipped the snapshot sync,
+  the applied hook, and the `ContextCompacted` event for a compaction that
+  was in effect. The summary is a memory-search artifact layered on the
+  applied compaction, so its failure now degrades: reported through the
+  memory hook events, and the turn carries on.
+
+### Background notifications batch in completion order on the volatile store
+
+- The SQLite store batches background-task notifications
+  `ORDER BY updated_at, id`; the volatile store walked its `HashMap`, so two
+  finished tasks could be reported in an arbitrary order. It now drains by
+  upsert sequence with an id tie-break, matching the persistent stores.
+
 ### A file-backed `RuntimeStore` that links no database
 
 - `FileRuntimeStore` persists agents as plain files under one root the host
@@ -39,8 +58,10 @@
   subsystems (durable tasks, teams, background jobs, audit, cross-process
   leases), keep the feature on.
 - A host that already builds with `default-features = false` and re-enables
-  what it needs picks the cut for itself; `cargo test --no-default-features`
-  is the supported configuration and runs in this repo's checks.
+  what it needs picks the cut for itself. CI runs
+  `cargo test -p mentra --no-default-features`, with the runtime suites
+  parameterized over the build's default persistent store, so the
+  feature-off configuration is tested rather than merely compiled.
 
 ### A dropped Streamable HTTP client tries to end its session
 

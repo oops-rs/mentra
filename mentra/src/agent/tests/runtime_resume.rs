@@ -17,7 +17,7 @@ use crate::{
     TranscriptKind,
     agent::{AgentConfig, AgentSnapshot, AgentStatus, TeamConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::{AgentStore, Runtime, SqliteRuntimeStore},
+    runtime::{AgentStore, Runtime},
     team::{TeamMemberStatus, TeamMessage, TeamStore},
     tool::{
         ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolOutput, ToolResult,
@@ -25,7 +25,9 @@ use crate::{
     },
 };
 
-use super::support::{ScriptedProvider, controlled_stream, erroring_stream, model_info, ok_stream};
+use super::support::{
+    PersistentStore, ScriptedProvider, controlled_stream, erroring_stream, model_info, ok_stream,
+};
 
 #[tokio::test]
 async fn runtime_startup_preserves_memory_until_resume_and_resume_rolls_back_pending_turn() {
@@ -795,7 +797,7 @@ async fn resume_wakes_revived_teammate_for_persisted_inbox_work() {
     drop(initial_runtime);
     clear_leases(&store);
 
-    <SqliteRuntimeStore as TeamStore>::append_team_message(
+    <PersistentStore as TeamStore>::append_team_message(
         &store,
         team_dir.as_path(),
         "alice",
@@ -1088,19 +1090,19 @@ fn responses_reasoning_tool_stream(
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
-fn temp_store(label: &str) -> SqliteRuntimeStore {
+fn temp_store(label: &str) -> PersistentStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "mentra-runtime-resume-{label}-{timestamp}-{unique}.sqlite"
+        "mentra-runtime-resume-{label}-{timestamp}-{unique}.store"
     ));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create temp dir");
     }
-    SqliteRuntimeStore::new(path)
+    PersistentStore::new(path)
 }
 
 fn temp_team_dir(label: &str) -> std::path::PathBuf {
@@ -1122,10 +1124,19 @@ fn team_config(team_dir: std::path::PathBuf) -> TeamConfig {
     }
 }
 
-fn clear_leases(store: &SqliteRuntimeStore) {
+/// Simulates the previous lease holder having died, so a second runtime on
+/// the same store can resume: a SQL DELETE for the SQLite store, dropping
+/// the held OS locks for the file store.
+#[cfg(feature = "store-sqlite")]
+fn clear_leases(store: &PersistentStore) {
     let conn = rusqlite::Connection::open(store.path()).expect("open store");
     conn.execute("DELETE FROM leases", [])
         .expect("clear leases");
+}
+
+#[cfg(not(feature = "store-sqlite"))]
+fn clear_leases(store: &PersistentStore) {
+    store.release_all_leases();
 }
 
 async fn wait_for_recorded_requests(provider: &ScriptedProvider, expected: usize) {

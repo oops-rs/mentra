@@ -10,13 +10,12 @@ use crate::{
     agent::{AgentConfig, CompactionConfig, TaskConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent},
     runtime::{
-        NewTask, Runtime, SqliteRuntimeStore, TaskItem, TaskPatch, TaskStatus, TaskStore,
-        task::TASK_REMINDER_TEXT,
+        NewTask, Runtime, TaskItem, TaskPatch, TaskStatus, TaskStore, task::TASK_REMINDER_TEXT,
     },
 };
 
 use super::super::TeammateIdentity;
-use super::support::{ScriptedProvider, erroring_stream, model_info, ok_stream};
+use super::support::{PersistentStore, ScriptedProvider, erroring_stream, model_info, ok_stream};
 
 #[test]
 fn task_board_exposes_typed_lead_operations_and_agent_namespace() {
@@ -490,13 +489,13 @@ fn temp_tasks_dir(label: &str) -> PathBuf {
     path
 }
 
-fn temp_store(label: &str) -> SqliteRuntimeStore {
+fn temp_store(label: &str) -> PersistentStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
-        "mentra-task-runtime-store-{label}-{timestamp}-{unique}.sqlite"
+    PersistentStore::new(std::env::temp_dir().join(format!(
+        "mentra-task-runtime-store-{label}-{timestamp}-{unique}.store"
     )))
 }

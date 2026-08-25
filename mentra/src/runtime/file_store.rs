@@ -169,6 +169,15 @@ impl FileRuntimeStore {
     fn forget_transcript_log(&self, agent_id: &str) {
         lock_unpoisoned(&self.transcript_logs).remove(agent_id);
     }
+
+    /// Drops every lease this store holds, playing the part of the previous
+    /// holding process having died. The store-parameterized suites hand one
+    /// store to two runtimes in sequence and use this the way their SQLite
+    /// variant DELETEs lease rows.
+    #[cfg(all(test, not(feature = "store-sqlite")))]
+    pub(crate) fn release_all_leases(&self) {
+        lock_unpoisoned(&self.held_leases).clear();
+    }
 }
 
 impl Default for FileRuntimeStore {

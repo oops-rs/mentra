@@ -17,6 +17,14 @@ use crate::runtime::{
     RuntimeError, TaskIntrinsicTool, TaskStateSnapshot, TaskStore, VolatileRuntimeStore,
 };
 
+/// The persistent store this build defaults to — the same seam the agent
+/// suites use, so the task harness exercises the SQLite task SQL under
+/// default features and the file store's task board without them.
+#[cfg(feature = "store-sqlite")]
+type PersistentStore = SqliteRuntimeStore;
+#[cfg(not(feature = "store-sqlite"))]
+type PersistentStore = crate::runtime::FileRuntimeStore;
+
 use super::{
     TaskAccess, TaskItem,
     input::{
@@ -516,7 +524,7 @@ fn teammate_cannot_edit_task_dependencies() {
 }
 
 struct TaskHarness {
-    store: crate::runtime::FileRuntimeStore,
+    store: PersistentStore,
     namespace: PathBuf,
 }
 
@@ -594,8 +602,8 @@ fn temp_namespace(label: &str) -> PathBuf {
     path
 }
 
-fn temp_store(label: &str) -> crate::runtime::FileRuntimeStore {
-    crate::runtime::FileRuntimeStore::new(temp_path(format!("mentra-task-store-{label}")))
+fn temp_store(label: &str) -> PersistentStore {
+    PersistentStore::new(temp_path(format!("mentra-task-store-{label}")))
 }
 
 fn temp_path(label: String) -> PathBuf {

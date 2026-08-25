@@ -1,6 +1,4 @@
-//! Shared scripted-provider scaffolding for the agent runtime tests. Some
-//! helpers are only exercised by the `store-sqlite`-gated suites.
-#![cfg_attr(not(feature = "store-sqlite"), allow(dead_code))]
+//! Shared scripted-provider scaffolding for the agent runtime tests.
 
 use std::{
     collections::VecDeque,
@@ -500,3 +498,14 @@ impl SessionGenerator {
         self.scripts
     }
 }
+
+/// The persistent store this build defaults to: SQLite with `store-sqlite`
+/// (the default features), the file store without it. Suites that exercise
+/// runtime persistence run against this seam in both configurations, so
+/// `cargo test --no-default-features` covers the store that build actually
+/// ships; only tests that inspect the SQLite database directly, or need
+/// subsystems only it persists, stay behind the feature.
+#[cfg(feature = "store-sqlite")]
+pub(super) type PersistentStore = crate::runtime::SqliteRuntimeStore;
+#[cfg(not(feature = "store-sqlite"))]
+pub(super) type PersistentStore = crate::runtime::FileRuntimeStore;

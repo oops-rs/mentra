@@ -16,25 +16,28 @@ use tokio::time::{Duration, sleep};
 use crate::{
     BackgroundTaskStatus, BuiltinProvider, ContentBlock, FileToolProfile, Message, Role,
     agent::{
-        Agent, AgentConfig, AgentEvent, MemoryConfig, SpawnedAgentStatus, TaskConfig,
-        TeamAutonomyConfig, TeamConfig, ToolProfile, WorkspaceConfig,
+        Agent, AgentConfig, AgentEvent, SpawnedAgentStatus, TaskConfig, TeamAutonomyConfig,
+        TeamConfig, ToolProfile, WorkspaceConfig,
     },
-    memory::{MemoryRecord, MemoryRecordKind, MemoryStore},
     provider::{
         ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, Request, ToolChoice,
         ToolSearchMode,
     },
     runtime::{
-        CancellationToken, HybridRuntimeStore, RunOptions, Runtime, RuntimeError, RuntimePolicy,
-        SqliteRuntimeStore, TaskIntrinsicTool,
+        CancellationToken, RunOptions, Runtime, RuntimeError, RuntimePolicy, TaskIntrinsicTool,
         control::{HookDecision, PreExecutionContext, PreExecutionHook},
         task::{self, TaskAccess},
     },
     team::{TeamMemberStatus, TeamMessageKind, TeamProtocolStatus},
 };
+#[cfg(feature = "store-sqlite")]
+use crate::{
+    agent::MemoryConfig,
+    memory::{MemoryRecord, MemoryRecordKind, MemoryStore},
+};
 
 use super::support::{
-    ProbeTool, ScriptedProvider, StaticTool, StopTrippingTool, StreamScript,
+    PersistentStore, ProbeTool, ScriptedProvider, StaticTool, StopTrippingTool, StreamScript,
     background_failure_command, background_success_command, command_input_json,
     command_input_with_working_directory_json, controlled_stream, erroring_stream, model_info,
     ok_stream, shell_pwd_command,
@@ -717,6 +720,9 @@ async fn shell_working_directory_overrides_default_routing() {
     ));
 }
 
+// Inspects the audit_events table directly, and audit persistence is a
+// SQLite-only subsystem (the file store deliberately discards events).
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn shell_tool_is_denied_by_default_policy_and_audited() {
     let model = model_info("model", BuiltinProvider::Anthropic);
@@ -2544,6 +2550,7 @@ async fn deferred_tool_choice_reaches_provider_request_unchanged() {
     );
 }
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn memory_search_tool_returns_provenance_fields() {
     let store = hybrid_temp_store("memory-search-tool");
@@ -2605,6 +2612,7 @@ async fn memory_search_tool_returns_provenance_fields() {
     assert!(result[0]["why_retrieved"].as_str().is_some());
 }
 
+#[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn memory_forget_tool_rejects_cross_agent_record_ids() {
     let store = hybrid_temp_store("memory-forget-cross-agent");
@@ -5163,18 +5171,19 @@ fn temp_team_dir(label: &str) -> PathBuf {
     path
 }
 
-fn temp_store(label: &str) -> SqliteRuntimeStore {
+fn temp_store(label: &str) -> PersistentStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    SqliteRuntimeStore::new(std::env::temp_dir().join(format!(
-        "mentra-runtime-store-{label}-{timestamp}-{unique}.sqlite"
+    PersistentStore::new(std::env::temp_dir().join(format!(
+        "mentra-runtime-store-{label}-{timestamp}-{unique}.store"
     )))
 }
 
-fn hybrid_temp_store(label: &str) -> HybridRuntimeStore {
+#[cfg(feature = "store-sqlite")]
+fn hybrid_temp_store(label: &str) -> crate::runtime::HybridRuntimeStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5183,7 +5192,7 @@ fn hybrid_temp_store(label: &str) -> HybridRuntimeStore {
     let base_dir = std::env::temp_dir().join(format!(
         "mentra-runtime-hybrid-store-{label}-{timestamp}-{unique}"
     ));
-    HybridRuntimeStore::with_memory_path(
+    crate::runtime::HybridRuntimeStore::with_memory_path(
         base_dir.join("runtime.sqlite"),
         base_dir.join("memory.sqlite"),
     )
@@ -5212,7 +5221,7 @@ fn autonomous_team_config(
 }
 
 fn create_task(
-    store: &SqliteRuntimeStore,
+    store: &PersistentStore,
     tasks_dir: &Path,
     subject: &str,
     owner: &str,
@@ -5222,7 +5231,7 @@ fn create_task(
 }
 
 fn create_task_with_directory(
-    store: &SqliteRuntimeStore,
+    store: &PersistentStore,
     tasks_dir: &Path,
     subject: &str,
     owner: &str,
@@ -5251,7 +5260,7 @@ fn workspace_config(base_dir: &Path) -> WorkspaceConfig {
     }
 }
 
-fn load_task(store: &SqliteRuntimeStore, tasks_dir: &Path, task_id: u64) -> serde_json::Value {
+fn load_task(store: &PersistentStore, tasks_dir: &Path, task_id: u64) -> serde_json::Value {
     serde_json::from_str(
         &task::execute_with_store(
             store,
@@ -5283,17 +5292,16 @@ async fn wait_for_recorded_requests(provider: &ScriptedProvider, expected: usize
 }
 
 async fn wait_for_background_task_status(
-    store: &SqliteRuntimeStore,
+    store: &PersistentStore,
     agent_id: &str,
     task_id: &str,
     expected_status: BackgroundTaskStatus,
 ) {
     for _ in 0..BACKGROUND_WAIT_ATTEMPTS {
-        let tasks =
-            <SqliteRuntimeStore as crate::background::BackgroundStore>::load_background_tasks(
-                store, agent_id,
-            )
-            .expect("load background tasks");
+        let tasks = <PersistentStore as crate::background::BackgroundStore>::load_background_tasks(
+            store, agent_id,
+        )
+        .expect("load background tasks");
         if tasks
             .iter()
             .any(|task| task.id == task_id && task.status == expected_status)
@@ -5307,16 +5315,15 @@ async fn wait_for_background_task_status(
 }
 
 async fn wait_for_background_task_record(
-    store: &SqliteRuntimeStore,
+    store: &PersistentStore,
     agent_id: &str,
     expected_count: usize,
 ) {
     for _ in 0..BACKGROUND_WAIT_ATTEMPTS {
-        let tasks =
-            <SqliteRuntimeStore as crate::background::BackgroundStore>::load_background_tasks(
-                store, agent_id,
-            )
-            .expect("load background tasks");
+        let tasks = <PersistentStore as crate::background::BackgroundStore>::load_background_tasks(
+            store, agent_id,
+        )
+        .expect("load background tasks");
         if tasks.len() == expected_count {
             return;
         }
@@ -5338,12 +5345,7 @@ async fn wait_for_teammate_status(agent: &Agent, expected: TeamMemberStatus) {
     panic!("timed out waiting for teammate status {expected:?}");
 }
 
-async fn wait_for_task_owner(
-    store: &SqliteRuntimeStore,
-    tasks_dir: &Path,
-    task_id: u64,
-    owner: &str,
-) {
+async fn wait_for_task_owner(store: &PersistentStore, tasks_dir: &Path, task_id: u64, owner: &str) {
     for _ in 0..500 {
         if load_task(store, tasks_dir, task_id)["owner"].as_str() == Some(owner) {
             return;
