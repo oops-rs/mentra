@@ -33,6 +33,9 @@ fn concurrent_intrinsic_creates_serialize_through_task_store_mutate() {
         temp_path("mentra-task-concurrent-sqlite".to_string()).with_extension("sqlite"),
     ));
     assert_concurrent_creates(VolatileRuntimeStore::new());
+    assert_concurrent_creates(crate::runtime::FileRuntimeStore::new(temp_path(
+        "mentra-task-concurrent-file".to_string(),
+    )));
     assert_concurrent_creates(HybridRuntimeStore::new(
         temp_path("mentra-task-concurrent-hybrid".to_string()).with_extension("sqlite"),
     ));

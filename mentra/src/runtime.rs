@@ -1,6 +1,7 @@
 mod builder;
 pub(crate) mod control;
 mod error;
+mod file_store;
 pub(crate) mod handle;
 mod hybrid_store;
 mod intrinsic;
@@ -38,6 +39,7 @@ pub use control::{
     is_transient_provider_error, is_transient_runtime_error,
 };
 pub use error::{ErrorCategory, RuntimeError};
+pub use file_store::FileRuntimeStore;
 pub(crate) use handle::RuntimeHandle;
 pub use hybrid_store::HybridRuntimeStore;
 pub(crate) use intrinsic::RuntimeIntrinsicTool;

@@ -113,6 +113,18 @@ impl AgentTranscript {
         transcript
     }
 
+    /// Rebuilds a transcript from stored parts: the active path in order,
+    /// root to leaf, and the archived entries in their stored order.
+    ///
+    /// The persistence counterpart of the wire deserializer: missing parent
+    /// links on the active path are filled the same way, so a transcript
+    /// loaded from a store equals the one that was saved.
+    pub(crate) fn from_parts(items: Vec<TranscriptItem>, archive: Vec<TranscriptItem>) -> Self {
+        let mut transcript = Self { items, archive };
+        transcript.link_active_path();
+        transcript
+    }
+
     pub fn from_messages(messages: Vec<Message>) -> Self {
         Self::new(
             messages

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### A file-backed `RuntimeStore` that links no database
+
+- `FileRuntimeStore` persists agents as plain files under one root the host
+  names: `agents/<id>/agent.json` (the record), `state.json` (working memory
+  by entry id), `transcript.jsonl` (one entry per line, append-only — the
+  tree is the parent pointers, and abandoned branches stay greppable),
+  `leaf` (the active entry id), plus `rules.json` and a `runs.jsonl` event
+  log at the root. Appends fsync at commit points; replaces go through a
+  temp file and rename; a crash leaves at most a truncated final transcript
+  line, which the reader skips, or an ignored temp file. Every file carries
+  a `schema` field (currently 1).
+- Deliberately not on disk, per trait: tasks, teams, background jobs, and
+  leases stay in process memory (the volatile store's mechanism — so leases
+  exclude only within one process); audit events are accepted and
+  discarded; long-term memory is refused with an error naming the fix
+  (`store-sqlite`), because a "long-term" memory that forgot on restart
+  would be worse than saying no. The module docs carry the full reasoning.
+- Concurrency stance is the SQLite store's: one writer per agent, which
+  mentra's runtime already holds; the file store adds atomic writes, not
+  cross-process locks.
+
 ### A dropped Streamable HTTP client tries to end its session
 
 - The other two MCP transports clean up locally on drop — the stdio client lets

@@ -7,4 +7,4 @@ mod store;
 mod tests;
 
 pub(crate) use ops::{AgentMemory, CompactionOutcome};
-pub(crate) use state::{AgentMemoryState, PendingTurnState};
+pub(crate) use state::{AgentMemoryState, CompactionState, PendingTurnState, RunMemoryState};
