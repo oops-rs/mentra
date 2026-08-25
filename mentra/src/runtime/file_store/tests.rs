@@ -376,6 +376,45 @@ fn delete_agent_removes_everything_and_deleting_absent_succeeds() {
 }
 
 #[test]
+fn a_crashed_delete_leaves_the_shape_readers_already_ignore() {
+    let store = FileRuntimeStore::new(temp_root("partial-delete"));
+    let memory = AgentMemoryState::default();
+    store
+        .create_agent(
+            &agent_record("agent-1"),
+            &memory_with(transcript_of(&["x"])),
+        )
+        .expect("create agent-1");
+    store
+        .create_agent(&agent_record("agent-2"), &memory)
+        .expect("create agent-2");
+
+    // The state a delete interrupted between its two steps leaves behind:
+    // agent.json gone, the rest of the directory still there.
+    std::fs::remove_file(store.agent_dir("agent-1").join("agent.json"))
+        .expect("simulate the crash point");
+
+    assert!(
+        store
+            .load_agent("agent-1")
+            .expect("load half-deleted agent")
+            .is_none(),
+        "a record-less directory is not an agent"
+    );
+    let ids: Vec<_> = store
+        .list_agents()
+        .expect("listing survives a half-deleted agent")
+        .into_iter()
+        .map(|loaded| loaded.record.id)
+        .collect();
+    assert_eq!(ids, vec!["agent-2".to_string()]);
+
+    // Deleting the remains finishes the job.
+    store.delete_agent("agent-1").expect("finish the delete");
+    assert!(!store.agent_dir("agent-1").exists());
+}
+
+#[test]
 fn list_agents_orders_by_creation_and_filters_by_runtime() {
     let store = FileRuntimeStore::new(temp_root("list"));
     let memory = AgentMemoryState::default();

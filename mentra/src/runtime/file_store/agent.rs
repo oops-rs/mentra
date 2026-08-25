@@ -131,6 +131,23 @@ impl AgentStore for FileRuntimeStore {
     fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError> {
         self.forget_transcript_log(agent_id);
         let dir = self.agent_dir(agent_id);
+
+        // agent.json is the commit point of creation, so it goes first on
+        // deletion too: a delete that crashes midway then leaves the same
+        // record-less directory readers already ignore, never a listed
+        // agent with half its files gone.
+        let agent_path = dir.join(AGENT_FILE);
+        match std::fs::remove_file(&agent_path) {
+            Ok(()) => fs_util::fsync_dir(&dir)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(store_error(
+                    &format!("remove '{}'", agent_path.display()),
+                    error,
+                ));
+            }
+        }
+
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => fs_util::fsync_dir(&self.agents_dir()),
             // The caller's goal is that the agent be gone; it already is.
