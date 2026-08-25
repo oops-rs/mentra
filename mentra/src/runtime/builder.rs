@@ -94,8 +94,14 @@ impl RuntimeBuilder {
     /// supplies its own never has the machine-wide default database created
     /// underneath it.
     pub fn with_store(self, store: impl RuntimeStore + 'static) -> Self {
+        self.with_shared_store(std::sync::Arc::new(store))
+    }
+
+    /// Crate-internal twin of [`with_store`](Self::with_store) for a store
+    /// handed over already type-erased.
+    pub(crate) fn with_shared_store(self, store: std::sync::Arc<dyn RuntimeStore>) -> Self {
         Self {
-            handle: self.handle.rebind_store(std::sync::Arc::new(store)),
+            handle: self.handle.rebind_store(store),
             provider_registry: self.provider_registry,
             mcp_configs: self.mcp_configs,
         }
