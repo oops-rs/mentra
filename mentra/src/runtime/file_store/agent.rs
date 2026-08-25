@@ -70,11 +70,32 @@ struct RunFile {
 
 impl AgentStore for FileRuntimeStore {
     fn prepare_recovery(&self) -> Result<(), RuntimeError> {
+        // With the SQLite store compiled out, an existing runtime.sqlite in
+        // this root means previous sessions live in a database this build
+        // cannot read. Starting an empty file store beside it would look
+        // exactly like silent data loss, so name the situation and the two
+        // ways out instead. With the feature on, the check would misfire:
+        // both defaults share this root, and running the file store beside
+        // a SQLite database is then a legitimate arrangement.
+        #[cfg(not(feature = "store-sqlite"))]
+        {
+            let sqlite_db = self.root().join("runtime.sqlite");
+            if sqlite_db.exists() {
+                return Err(RuntimeError::Store(format!(
+                    "'{}' holds an existing SQLite runtime store, but this build compiled \
+                     mentra without the `store-sqlite` feature; enable that feature to keep \
+                     reading it, or point the file store at a different root",
+                    sqlite_db.display()
+                )));
+            }
+        }
+
         // Mirrors what opening the SQLite database does at build time: the
         // store's home is created and writable, so a misconfigured root
         // fails the build rather than the first turn. The queues the SQLite
         // store reconciles here (team inbox, background notifications) are
-        // in-process for this store and start empty.
+        // in-process for this store and start empty, and a lease dies with
+        // the process that held it.
         let agents_dir = self.agents_dir();
         std::fs::create_dir_all(&agents_dir)
             .map_err(|error| store_error(&format!("create '{}'", agents_dir.display()), error))

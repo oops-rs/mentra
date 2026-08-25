@@ -773,6 +773,26 @@ fn tasks_work_in_process() {
     assert!(store.load_tasks(namespace).expect("load tasks").is_empty());
 }
 
+#[cfg(not(feature = "store-sqlite"))]
+#[test]
+fn an_existing_sqlite_store_is_diagnosed_not_shadowed() {
+    // A root that holds runtime.sqlite is a workspace whose sessions live
+    // in a database this build cannot read. Starting an empty file store
+    // beside it would look exactly like data loss; the build must fail
+    // with the diagnosis instead.
+    let root = temp_root("migration");
+    std::fs::create_dir_all(&root).expect("create root");
+    std::fs::write(root.join("runtime.sqlite"), b"SQLite format 3\0").expect("plant database");
+
+    let store = FileRuntimeStore::new(&root);
+    let error = store
+        .prepare_recovery()
+        .expect_err("an unreadable existing store must be named, not shadowed");
+    let message = error.to_string();
+    assert!(message.contains("runtime.sqlite"), "{message}");
+    assert!(message.contains("store-sqlite"), "{message}");
+}
+
 #[test]
 fn prepare_recovery_creates_the_store_home() {
     let root = temp_root("recovery");
