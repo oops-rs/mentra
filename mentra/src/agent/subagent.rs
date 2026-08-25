@@ -27,6 +27,8 @@ const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent working for another age
 /// the depth-guard and bounds-inheritance treatment [`spawn`](Self::spawn)
 /// applies uniformly on top, regardless of which fields were overridden.
 #[derive(Clone)]
+#[must_use = "a template does nothing on its own -- spawn it with spawn_subagent_from, \
+              or the override methods called on it are silently discarded"]
 pub struct DisposableSubagentTemplate {
     runtime: RuntimeHandle,
     /// The `Agent::id` of the agent [`from_agent`](Self::from_agent) was
@@ -103,6 +105,8 @@ impl DisposableSubagentTemplate {
     /// set (which always hides the `task` intrinsic from a subagent) is a
     /// separate mechanism applied by [`spawn`](Self::spawn) regardless of this
     /// override, exactly as for the un-overridden clone.
+    #[must_use = "with_tool_profile returns a new template rather than mutating in place; \
+                  a discarded return value leaves the override applied to nothing"]
     pub fn with_tool_profile(mut self, tool_profile: ToolProfile) -> Self {
         self.config.tool_profile = tool_profile;
         self
@@ -113,6 +117,8 @@ impl DisposableSubagentTemplate {
     ///
     /// Resolution against the runtime's registered providers happens in
     /// [`spawn`](Self::spawn), which can fail and already returns a `Result`.
+    #[must_use = "with_model returns a new template rather than mutating in place; \
+                  a discarded return value leaves the override applied to nothing"]
     pub fn with_model(mut self, model: ModelInfo) -> Self {
         self.model_override = Some(model);
         self
@@ -122,6 +128,8 @@ impl DisposableSubagentTemplate {
     /// [`spawn`](Self::spawn) appends the standard subagent instructions —
     /// the same suffix treatment the un-overridden clone's system prompt
     /// receives.
+    #[must_use = "with_system returns a new template rather than mutating in place; \
+                  a discarded return value leaves the override applied to nothing"]
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.config.system = Some(system.into());
         self
