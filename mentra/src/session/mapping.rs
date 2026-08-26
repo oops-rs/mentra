@@ -111,6 +111,14 @@ fn map_event_inner(event: &AgentEvent, tool_names: &mut ToolNameIndex) -> Vec<Se
 
         AgentEvent::ContextCompacted { details } => map_compaction(details),
 
+        AgentEvent::RequestToolResultsElided { details } => {
+            vec![SessionEvent::RequestToolResultsElided {
+                agent_id: details.agent_id.clone(),
+                configured_keep_recent_tool_results: details.configured_keep_recent_tool_results,
+                results: details.results.clone(),
+            }]
+        }
+
         AgentEvent::SubagentSpawned { agent } => map_subagent(agent, TaskLifecycleStatus::Spawned),
         AgentEvent::SubagentFinished { agent } => map_subagent_finished(agent),
 
@@ -578,6 +586,40 @@ mod tests {
             SessionEvent::CompactionCompleted { .. }
         ));
         assert_eq!(seq, 2);
+    }
+
+    #[test]
+    fn request_tool_result_elision_maps_without_losing_details() {
+        let details = crate::agent::RequestToolResultElision {
+            agent_id: "a1".to_string(),
+            configured_keep_recent_tool_results: 2,
+            results: vec![crate::agent::ElidedToolResult {
+                tool_call_id: "tc-1".to_string(),
+                tool_name: Some("read_file".to_string()),
+                is_error: false,
+                original_content_bytes: 4096,
+            }],
+        };
+        let event = AgentEvent::RequestToolResultsElided {
+            details: details.clone(),
+        };
+        let mut seq = 7;
+
+        let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
+
+        assert_eq!(
+            mapped,
+            vec![(
+                7,
+                SessionEvent::RequestToolResultsElided {
+                    agent_id: details.agent_id,
+                    configured_keep_recent_tool_results: details
+                        .configured_keep_recent_tool_results,
+                    results: details.results,
+                }
+            )]
+        );
+        assert_eq!(seq, 8);
     }
 
     #[test]

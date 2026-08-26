@@ -2,7 +2,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -10,10 +10,13 @@ use serde_json::{Value, json};
 
 use crate::{
     BuiltinProvider, ContentBlock, Message, Role, TranscriptKind,
-    agent::{AgentConfig, AgentEvent, CompactionConfig, CompactionTrigger},
+    agent::{
+        AgentConfig, AgentEvent, CompactionConfig, CompactionTrigger, ElidedToolResult,
+        RequestToolResultElision,
+    },
     compaction::{CompactionExecutionMode, CompactionMode},
     provider::{CompactionInputItem, CompactionResponse, ProviderCapabilities, Request},
-    runtime::Runtime,
+    runtime::{ProviderRetry, RunOptions, Runtime},
     tool::{
         ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolOutput, ToolSideEffectLevel,
         ToolSpec,
@@ -79,6 +82,10 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
             tool_use_stream(&model.id, "tool-2", "echo_tool", r#"{"value":"two"}"#),
             tool_use_stream(&model.id, "tool-3", "echo_tool", r#"{"value":"three"}"#),
             tool_use_stream(&model.id, "tool-4", "echo_tool", r#"{"value":"four"}"#),
+            super::support::StreamScript::Failure(ProviderError::Retryable {
+                message: "transient refusal".to_string(),
+                delay: None,
+            }),
             text_stream(&model.id, "done"),
         ],
     );
@@ -96,18 +103,26 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
             AgentConfig {
                 compaction: CompactionConfig {
                     keep_recent_tool_results: 2,
-                    auto_compact_threshold_tokens: None,
                     ..Default::default()
                 },
                 ..Default::default()
             },
         )
         .unwrap();
+    let agent_id = agent.id().to_string();
+    let mut events = agent.subscribe_events();
 
     agent
-        .send(vec![ContentBlock::Text {
-            text: "hello".to_string(),
-        }])
+        .run(
+            vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+            RunOptions::default().with_provider_retry(ProviderRetry {
+                base_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                retry_after_cap: Duration::ZERO,
+            }),
+        )
         .await
         .unwrap();
 
@@ -121,8 +136,13 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
     );
 
     let requests = provider_handle.recorded_requests().await;
-    assert_eq!(requests.len(), 5);
-    let final_tool_results = tool_result_contents(&requests[4]);
+    assert_eq!(requests.len(), 6);
+    let first_final_attempt = tool_result_contents(&requests[4]);
+    let final_tool_results = tool_result_contents(&requests[5]);
+    assert_eq!(
+        first_final_attempt, final_tool_results,
+        "a transport retry reuses the already-projected request"
+    );
     assert_eq!(
         final_tool_results,
         vec![
@@ -130,6 +150,47 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
             "[Previous: used echo_tool]".to_string(),
             long_output.clone(),
             long_output,
+        ]
+    );
+
+    let elisions = collect_events(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::RequestToolResultsElided { details } => Some(details),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        elisions,
+        vec![
+            RequestToolResultElision {
+                agent_id: agent_id.clone(),
+                configured_keep_recent_tool_results: 2,
+                results: vec![ElidedToolResult {
+                    tool_call_id: "tool-1".to_string(),
+                    tool_name: Some("echo_tool".to_string()),
+                    is_error: false,
+                    original_content_bytes: 140,
+                }],
+            },
+            RequestToolResultElision {
+                agent_id,
+                configured_keep_recent_tool_results: 2,
+                results: vec![
+                    ElidedToolResult {
+                        tool_call_id: "tool-1".to_string(),
+                        tool_name: Some("echo_tool".to_string()),
+                        is_error: false,
+                        original_content_bytes: 140,
+                    },
+                    ElidedToolResult {
+                        tool_call_id: "tool-2".to_string(),
+                        tool_name: Some("echo_tool".to_string()),
+                        is_error: false,
+                        original_content_bytes: 140,
+                    },
+                ],
+            },
         ]
     );
 }

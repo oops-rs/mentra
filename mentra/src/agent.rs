@@ -49,8 +49,8 @@ pub use config::{
 };
 pub use events::{
     AgentEvent, AgentSnapshot, AgentStatus, CompactionDetails, CompactionTrigger,
-    ContextCompactionDetails, ContextCompactionTrigger, PendingToolUseSummary, SpawnedAgentStatus,
-    SpawnedAgentSummary,
+    ContextCompactionDetails, ContextCompactionTrigger, ElidedToolResult, PendingToolUseSummary,
+    RequestToolResultElision, SpawnedAgentStatus, SpawnedAgentSummary,
 };
 pub use pending::PendingAssistantTurn;
 pub use round_strategy::{

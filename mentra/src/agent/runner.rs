@@ -14,7 +14,8 @@ use crate::{
 };
 
 use super::{
-    Agent, AgentEvent, AgentStatus, PendingAssistantTurn,
+    Agent, AgentEvent, AgentStatus, ElidedToolResult, PendingAssistantTurn,
+    RequestToolResultElision,
     pending::InvalidToolUse,
     round_strategy::{
         ReasoningChange, RoundAdjustment, RoundBoundary, RoundContext, RoundDecision,
@@ -368,7 +369,30 @@ impl<'a> TurnRunner<'a> {
     ) -> Result<(crate::provider::ProviderEventStream, usize), RuntimeError> {
         let provider = self.agent.provider.clone();
         let tools = self.agent.tools();
-        let mut request_history = self.agent.micro_compacted_history();
+        let projection = self.agent.micro_compacted_history();
+        let mut request_elision = if projection.elided_tool_results.is_empty() {
+            None
+        } else {
+            Some(RequestToolResultElision {
+                agent_id: self.agent.id().to_string(),
+                configured_keep_recent_tool_results: self
+                    .agent
+                    .config
+                    .compaction
+                    .keep_recent_tool_results,
+                results: projection
+                    .elided_tool_results
+                    .into_iter()
+                    .map(|result| ElidedToolResult {
+                        tool_call_id: result.tool_use_id,
+                        tool_name: result.tool_name,
+                        is_error: result.is_error,
+                        original_content_bytes: result.original_content_bytes,
+                    })
+                    .collect(),
+            })
+        };
+        let mut request_history = projection.messages;
         if let Some(recalled) = self.recalled_memory_message(&request_history).await {
             request_history.push(recalled);
         }
@@ -405,6 +429,12 @@ impl<'a> TurnRunner<'a> {
                     model: self.agent.model().to_string(),
                     attempt,
                 })?;
+            if attempt == 1
+                && let Some(details) = request_elision.take()
+            {
+                self.agent
+                    .emit_event(AgentEvent::RequestToolResultsElided { details });
+            }
             match provider.stream(request.clone()).await {
                 Ok(stream) => {
                     self.agent

@@ -5,7 +5,8 @@ use crate::{
     compaction::compaction_request_from_agent,
     error::{ErrorCategory, RuntimeError},
     memory::{
-        estimated_request_tokens, micro_compact_history, required_tail_start_for_continuation,
+        MicroCompactedHistory, estimated_request_tokens, micro_compact_history,
+        required_tail_start_for_continuation,
     },
 };
 
@@ -15,7 +16,7 @@ const AUTO_COMPACT_MAX_ATTEMPTS: u32 = 3;
 const AUTO_COMPACT_RETRY_DELAY_MS: u64 = 500;
 
 impl Agent {
-    pub(crate) fn micro_compacted_history(&self) -> Vec<Message> {
+    pub(crate) fn micro_compacted_history(&self) -> MicroCompactedHistory {
         micro_compact_history(
             self.history(),
             self.config.compaction.keep_recent_tool_results,
@@ -35,8 +36,8 @@ impl Agent {
             return Ok(());
         };
 
-        let messages = self.micro_compacted_history();
-        if self.estimated_request_tokens(&messages) <= threshold {
+        let projection = self.micro_compacted_history();
+        if self.estimated_request_tokens(&projection.messages) <= threshold {
             return Ok(());
         }
 

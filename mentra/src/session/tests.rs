@@ -190,6 +190,29 @@ fn session_event_compaction_completed_roundtrip() {
 }
 
 #[test]
+fn session_event_request_tool_result_elision_roundtrip() {
+    let event = SessionEvent::RequestToolResultsElided {
+        agent_id: "agent-1".to_string(),
+        configured_keep_recent_tool_results: 2,
+        results: vec![crate::agent::ElidedToolResult {
+            tool_call_id: "tc-1".to_string(),
+            tool_name: Some("read_file".to_string()),
+            is_error: false,
+            original_content_bytes: 4096,
+        }],
+    };
+
+    let json = serde_json::to_value(&event).unwrap();
+
+    assert_eq!(json["type"], "request_tool_results_elided");
+    assert_eq!(json["agent_id"], "agent-1");
+    assert_eq!(json["results"][0]["tool_call_id"], "tc-1");
+    assert!(json.get("details").is_none());
+    let deserialized: SessionEvent = serde_json::from_value(json).unwrap();
+    assert_eq!(event, deserialized);
+}
+
+#[test]
 fn session_event_task_updated_roundtrip() {
     let event = SessionEvent::TaskUpdated {
         task_id: "bg-1".to_string(),
@@ -279,6 +302,16 @@ fn all_session_event_variants_serialize_with_type_tag() {
             resulting_transcript_len: 7,
             extracted_facts_count: 0,
             summary_preview: String::new(),
+        },
+        SessionEvent::RequestToolResultsElided {
+            agent_id: "a1".to_string(),
+            configured_keep_recent_tool_results: 2,
+            results: vec![crate::agent::ElidedToolResult {
+                tool_call_id: "tc-1".to_string(),
+                tool_name: Some("read_file".to_string()),
+                is_error: false,
+                original_content_bytes: 1024,
+            }],
         },
         SessionEvent::MemoryUpdated {
             agent_id: "a1".to_string(),
@@ -1023,6 +1056,8 @@ use crate::{
 
 struct EchoTool;
 
+struct LongResultTool;
+
 #[async_trait]
 impl ToolDefinition for EchoTool {
     fn descriptor(&self) -> ToolSpec {
@@ -1040,6 +1075,23 @@ impl ToolDefinition for EchoTool {
 impl ToolExecutor for EchoTool {
     async fn execute(&self, _ctx: ParallelToolContext, _input: serde_json::Value) -> ToolResult {
         Ok("echoed".to_string())
+    }
+}
+
+#[async_trait]
+impl ToolDefinition for LongResultTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("long_result")
+            .description("Return a result large enough for request-only elision")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for LongResultTool {
+    async fn execute(&self, _ctx: ParallelToolContext, _input: serde_json::Value) -> ToolResult {
+        Ok("x".repeat(140))
     }
 }
 
@@ -1134,6 +1186,71 @@ async fn tool_call_session_produces_tool_lifecycle_events() {
     assert!(
         has_tool_completed,
         "Expected ToolCompleted event for tool-1, got: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn request_tool_result_elision_reaches_the_session_stream() {
+    let mock = MockRuntime::builder()
+        .tool_calls([MockToolCall::new("long_result", json!({})).with_id("tool-1")])
+        .tool_calls([MockToolCall::new("long_result", json!({})).with_id("tool-2")])
+        .tool_calls([MockToolCall::new("long_result", json!({})).with_id("tool-3")])
+        .tool_calls([MockToolCall::new("long_result", json!({})).with_id("tool-4")])
+        .text("done")
+        .build()
+        .unwrap();
+    mock.runtime().register_tool(LongResultTool);
+    let mut session = mock
+        .runtime()
+        .create_session_with_config(
+            "elision-session",
+            mock.model(),
+            AgentConfig {
+                compaction: crate::agent::CompactionConfig {
+                    keep_recent_tool_results: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let agent_id = session.agent_id().to_string();
+    let mut rx = session.subscribe();
+
+    let message = session
+        .append_turn(vec![ContentBlock::text("run the tools")])
+        .await
+        .unwrap();
+
+    assert_eq!(message.text(), "done");
+    let elisions = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            SessionEvent::RequestToolResultsElided {
+                agent_id,
+                configured_keep_recent_tool_results,
+                results,
+            } => Some((agent_id, configured_keep_recent_tool_results, results)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(elisions.len(), 2, "one event per changed request");
+    assert_eq!(elisions[0].0, agent_id);
+    assert_eq!(elisions[0].1, 2);
+    assert_eq!(
+        elisions[0]
+            .2
+            .iter()
+            .map(|result| result.tool_call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-1"]
+    );
+    assert_eq!(
+        elisions[1]
+            .2
+            .iter()
+            .map(|result| result.tool_call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-1", "tool-2"]
     );
 }
 
@@ -2216,6 +2333,7 @@ async fn full_scenario_prompt_shell_file_events_end_to_end() {
             SessionEvent::TaskUpdated { .. } => "task_updated",
             SessionEvent::CompactionStarted { .. } => "compaction_started",
             SessionEvent::CompactionCompleted { .. } => "compaction_completed",
+            SessionEvent::RequestToolResultsElided { .. } => "request_tool_results_elided",
             SessionEvent::MemoryUpdated { .. } => "memory_updated",
             SessionEvent::Branched { .. } => "branched",
             SessionEvent::Notice { .. } => "notice",

@@ -69,6 +69,36 @@ pub struct CompactionDetails {
 pub type ContextCompactionTrigger = CompactionTrigger;
 pub type ContextCompactionDetails = CompactionDetails;
 
+/// One tool result whose body was replaced in a provider-request projection.
+///
+/// The original body remains in the canonical transcript and is deliberately
+/// absent here: observability must not duplicate potentially sensitive tool
+/// output into event logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElidedToolResult {
+    pub tool_call_id: String,
+    /// `None` when the result cannot be correlated with a preceding tool call.
+    pub tool_name: Option<String>,
+    pub is_error: bool,
+    /// UTF-8 bytes for text, or compact serialized JSON bytes for structured content.
+    pub original_content_bytes: usize,
+}
+
+/// Request-only tool-result elision applied by a finite
+/// [`CompactionConfig::keep_recent_tool_results`](super::CompactionConfig::keep_recent_tool_results).
+///
+/// One value describes one freshly built logical request. Transport retries
+/// reuse that request and do not produce another value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestToolResultElision {
+    pub agent_id: String,
+    /// The configured recent-suffix threshold, not the total number of full
+    /// results in the request. Older payloads of at most 100 bytes also survive.
+    pub configured_keep_recent_tool_results: usize,
+    /// Ordered as the rewritten results appear in the request history.
+    pub results: Vec<ElidedToolResult>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentSnapshot {
     pub status: AgentStatus,
@@ -92,6 +122,13 @@ pub enum AgentEvent {
     RunStarted,
     ContextCompacted {
         details: CompactionDetails,
+    },
+    /// Old tool-result bodies were replaced only in the next provider request.
+    ///
+    /// The canonical transcript is unchanged. Emitted once per freshly built
+    /// logical request, and only when at least one result was actually changed.
+    RequestToolResultsElided {
+        details: RequestToolResultElision,
     },
     SubagentSpawned {
         agent: SpawnedAgentSummary,

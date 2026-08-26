@@ -4,14 +4,35 @@ use crate::{ContentBlock, Message, Role};
 
 const MICRO_COMPACT_MIN_CONTENT_LEN: usize = 100;
 
-pub(crate) fn micro_compact_history(history: &[Message], keep_recent: usize) -> Vec<Message> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MicroCompactedToolResult {
+    pub(crate) tool_use_id: String,
+    pub(crate) tool_name: Option<String>,
+    pub(crate) is_error: bool,
+    pub(crate) original_content_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MicroCompactedHistory {
+    pub(crate) messages: Vec<Message>,
+    pub(crate) elided_tool_results: Vec<MicroCompactedToolResult>,
+}
+
+pub(crate) fn micro_compact_history(
+    history: &[Message],
+    keep_recent: usize,
+) -> MicroCompactedHistory {
     if keep_recent == usize::MAX {
-        return history.to_vec();
+        return MicroCompactedHistory {
+            messages: history.to_vec(),
+            elided_tool_results: Vec::new(),
+        };
     }
 
     let mut compacted = history.to_vec();
     let tool_names = tool_name_index(&compacted);
     let mut tool_results = Vec::new();
+    let mut elided_tool_results = Vec::new();
 
     for (message_index, message) in compacted.iter().enumerate() {
         if message.role != Role::User {
@@ -26,7 +47,10 @@ pub(crate) fn micro_compact_history(history: &[Message], keep_recent: usize) -> 
     }
 
     if tool_results.len() <= keep_recent {
-        return compacted;
+        return MicroCompactedHistory {
+            messages: compacted,
+            elided_tool_results,
+        };
     }
 
     let compact_count = tool_results.len() - keep_recent;
@@ -34,7 +58,7 @@ pub(crate) fn micro_compact_history(history: &[Message], keep_recent: usize) -> 
         let Some(ContentBlock::ToolResult {
             tool_use_id,
             content,
-            ..
+            is_error,
         }) = compacted[message_index].content.get_mut(block_index)
         else {
             continue;
@@ -44,15 +68,25 @@ pub(crate) fn micro_compact_history(history: &[Message], keep_recent: usize) -> 
             continue;
         }
 
-        let tool_name = tool_names
-            .get(tool_use_id.as_str())
-            .map(String::as_str)
-            .unwrap_or("tool");
+        let original_content_bytes = content.len();
+        let tool_name = tool_names.get(tool_use_id.as_str()).cloned();
         content.clear();
-        content.push_str(&format!("[Previous: used {tool_name}]"));
+        content.push_str(&format!(
+            "[Previous: used {}]",
+            tool_name.as_deref().unwrap_or("tool")
+        ));
+        elided_tool_results.push(MicroCompactedToolResult {
+            tool_use_id: tool_use_id.clone(),
+            tool_name,
+            is_error: *is_error,
+            original_content_bytes,
+        });
     }
 
-    compacted
+    MicroCompactedHistory {
+        messages: compacted,
+        elided_tool_results,
+    }
 }
 
 /// Estimates how many tokens a request carrying `messages` and `system` costs.
@@ -148,6 +182,75 @@ mod tests {
             }),
         ];
 
-        assert_eq!(micro_compact_history(&history, usize::MAX), history);
+        let projected = micro_compact_history(&history, usize::MAX);
+
+        assert_eq!(projected.messages, history);
+        assert!(projected.elided_tool_results.is_empty());
+    }
+
+    #[test]
+    fn elision_report_contains_only_results_that_were_rewritten() {
+        let long = "x".repeat(101);
+        let short = "y".repeat(100);
+        let history = vec![
+            Message::assistant(ContentBlock::ToolUse {
+                id: "long-old".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({}),
+            }),
+            Message::user(ContentBlock::ToolResult {
+                tool_use_id: "long-old".to_string(),
+                content: crate::tool::ToolResultContent::text(long.clone()),
+                is_error: true,
+            }),
+            Message::assistant(ContentBlock::ToolUse {
+                id: "short-old".to_string(),
+                name: "stat_file".to_string(),
+                input: serde_json::json!({}),
+            }),
+            Message::user(ContentBlock::ToolResult {
+                tool_use_id: "short-old".to_string(),
+                content: crate::tool::ToolResultContent::text(short.clone()),
+                is_error: false,
+            }),
+            Message::assistant(ContentBlock::ToolUse {
+                id: "long-recent".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({}),
+            }),
+            Message::user(ContentBlock::ToolResult {
+                tool_use_id: "long-recent".to_string(),
+                content: crate::tool::ToolResultContent::text(long),
+                is_error: false,
+            }),
+        ];
+
+        let projected = micro_compact_history(&history, 1);
+
+        assert_eq!(
+            projected.elided_tool_results,
+            vec![MicroCompactedToolResult {
+                tool_use_id: "long-old".to_string(),
+                tool_name: Some("read_file".to_string()),
+                is_error: true,
+                original_content_bytes: 101,
+            }]
+        );
+        assert_eq!(
+            projected.messages[1].content,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "long-old".to_string(),
+                content: crate::tool::ToolResultContent::text("[Previous: used read_file]"),
+                is_error: true,
+            }]
+        );
+        assert_eq!(
+            projected.messages[3].content, history[3].content,
+            "the selected 100-byte result stays whole"
+        );
+        assert_eq!(
+            projected.messages[5].content, history[5].content,
+            "the recent suffix stays whole"
+        );
     }
 }
