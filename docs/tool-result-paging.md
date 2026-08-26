@@ -185,15 +185,17 @@ results, which no longer need to be reasoned about as exceptions.
 
 - **Compaction**: a page is an ordinary tool result; micro-compaction elides
   old pages exactly as it elides old results. The two compose: paging bounds
-  each insertion, `keep_recent_tool_results` bounds how many insertions
-  stay.
+  each insertion, while a finite `keep_recent_tool_results` keeps a newest
+  suffix whole and marker-elides eligible older pages. The finite count is not
+  an overall request-size bound: short old pages, markers, and non-tool history
+  still accumulate.
 - **Parallel tool calls**: pages are per-`tool_use_id`; six parallel
   oversized results each arrive as their own page 1. Worst-case insertion
   per round becomes `parallel_calls × page_bytes` instead of unbounded.
 - **`is_error` results**: paged the same way; error text can be oversized
   too.
-- **Non-text content**: only `ContentBlock::ToolResult { content: String }`
-  is paged; nothing else is touched.
+- **Non-text content**: only `ContentBlock::ToolResult` values carrying
+  `ToolResultContent::Text` are paged; nothing else is touched.
 
 ## What this deliberately does not do
 

@@ -14,7 +14,8 @@ MSRV: Rust 1.88.
 - builtin `shell`, `background_run`, `check_background`, and `files` tools
 - builtin `task` subagents with isolated child context and parent-side tracking
 - persistent agent teams with `team_spawn`, `team_send`, `broadcast`, `team_read_inbox`, and generic request-response protocols via `team_request`, `team_respond`, and `team_list_requests`
-- three-layer context compaction with silent tool-result shrinking, auto-summary compaction, and a builtin `compact` tool
+- context management with optional request-only tool-result elision (disabled
+  by default), auto-summary compaction, and a builtin `compact` tool
 - Model Context Protocol servers over stdio and the legacy HTTP+SSE transport, with their tools bridged into the runtime
 - agent events and snapshots for CLI or UI watchers
 - Anthropic provider support
@@ -752,11 +753,29 @@ Agents automatically recall from long-term memory by default. When you use `Runt
 
 ## Context Compaction
 
-Agents compact context by default:
+Mentra has two separate aggregate context mechanisms:
 
-- old tool results are micro-compacted in outbound requests
-- when estimated request context exceeds roughly 50k tokens, Mentra writes the full transcript to the default transcript directory and replaces older history with a model-generated summary
-- the model can also call the builtin `compact` tool explicitly
+- **Summary compaction** is enabled by default. When estimated request context
+  crosses its threshold, Mentra writes the full transcript to the default
+  transcript directory and replaces older history with a model-generated
+  summary. The default threshold is 75% of a known model context window, with
+  50k tokens as the fallback when the window is unknown. The model can also call
+  the builtin `compact` tool explicitly. This changes canonical history and
+  emits the normal compaction events.
+- **Request-only tool-result elision** is disabled by default. Setting
+  `keep_recent_tool_results` to a finite `N` leaves the newest `N` projected
+  results unchanged and replaces eligible older payloads over 100 bytes with
+  `[Previous: used <tool>]` in each main model request. The canonical transcript
+  is unchanged by this projection. Each changed projection emits
+  `AgentEvent::RequestToolResultsElided`; a `Session` maps the same facts to
+  `SessionEvent::RequestToolResultsElided`.
+
+A finite recent count is a lossy heuristic, not a byte or token limit: recent
+results remain unbounded, short old results survive, and markers accumulate.
+Use it only when old results are disposable. Use tool-result paging when a large
+result must stay retrievable while the model sees bounded windows. Paging is
+text-only and runs after the output limiter; to use its default 64 KiB threshold,
+raise the limiter above its default 50 KiB cap.
 
 You can tune or disable this per-agent with `CompactionConfig`:
 
@@ -766,6 +785,7 @@ use mentra::agent::{AgentConfig, CompactionConfig};
 let config = AgentConfig {
     compaction: CompactionConfig {
         auto_compact_threshold_tokens: Some(75_000),
+        auto_compact_threshold_percent: Some(80),
         ..Default::default()
     },
     ..Default::default()

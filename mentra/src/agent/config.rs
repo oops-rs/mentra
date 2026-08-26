@@ -64,17 +64,26 @@ impl Default for TeamConfig {
     }
 }
 
+/// Controls request-only tool-result elision and canonical summary compaction.
+///
+/// These mechanisms are separate. Request-only elision changes a cloned main
+/// model request and does not further change the persisted transcript. Summary
+/// compaction replaces canonical transcript items and persists the result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactionConfig {
-    /// How many of the most recent tool results keep their full content when
-    /// the history is rebuilt for a provider request.
+    /// How many of the most recent tool results remain unchanged when the
+    /// history is rebuilt for a provider request.
     ///
     /// Every older result larger than 100 bytes is replaced by a
-    /// `[Previous: used <tool>]` marker. That rewrite runs before *every*
-    /// request, at any context size, so a low value silently costs the model
-    /// the file it read three tool calls ago. `usize::MAX` disables the
-    /// rewrite entirely and is the default: an agent that reads files needs
-    /// what it read. Lower it only for a workload whose tool results are
+    /// `[Previous: used <tool>]` marker. That rewrite runs before every main
+    /// model request, at any context size, and the projected history is also
+    /// what the auto-compaction threshold measures. Each changed request emits
+    /// [`AgentEvent::RequestToolResultsElided`](crate::agent::AgentEvent::RequestToolResultsElided).
+    ///
+    /// This is a count heuristic, not a request-size bound: the newest results
+    /// can be arbitrarily large, old results of at most 100 bytes survive, and
+    /// non-tool content is unaffected. `usize::MAX` disables the rewrite and is
+    /// the default. Lower it only for a workload whose old tool results are
     /// genuinely disposable.
     pub keep_recent_tool_results: usize,
     /// The token count above which a run compacts, when the model's context

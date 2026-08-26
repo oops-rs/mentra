@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Finite tool-result elision is visible to hosts
+
+- A finite `CompactionConfig::keep_recent_tool_results` still replaces eligible
+  old request-projection payloads with `[Previous: used <tool>]`, without
+  changing the canonical transcript. Each changed logical request now emits
+  `AgentEvent::RequestToolResultsElided`, carrying the configured threshold and
+  ordered call metadata without copying result bodies into the event stream.
+  Transport retries reuse the projection and do not duplicate the event.
+- The same facts reach session-based hosts through the distinct
+  `SessionEvent::RequestToolResultsElided`. This is intentionally not a
+  `ContextCompacted` event: those events continue to mean that a summary
+  replaced canonical transcript items.
+- The marker policy and oldest-first selection remain unchanged for explicit
+  finite values, including values restored from persisted agent configuration.
+  Head/tail truncation remains the output limiter's job; retrievable sequential
+  text windows remain the paging layer's job.
+- Adding variants to the exhaustive `AgentEvent` and `SessionEvent` enums is a
+  source-breaking API change. Since 0.21.0 is already published, this must ship
+  in 0.22.0; Basis must add its corresponding event mapping when it upgrades.
+
 ## 0.21.0
 
 ### An applied compaction survives a failed summary write
@@ -743,9 +765,9 @@ its test fail rather than pass quietly.
   The threshold that is supposed to decide when history is too large,
   `auto_compact_threshold_tokens`, never entered into it.
 - The default is now `usize::MAX` — the value the function already treated as
-  off, short-circuiting before it copies anything. A harness whose tool results
-  are genuinely disposable can still lower it; a harness that reads files no
-  longer has to know to.
+  off, short-circuiting before it indexes tool results or rewrites anything. A
+  harness whose tool results are genuinely disposable can still lower it; a
+  harness that reads files no longer has to know to.
 
 ### A host chooses how long to wait for a rate limit
 

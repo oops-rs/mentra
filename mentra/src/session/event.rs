@@ -211,8 +211,8 @@ pub enum SessionEvent {
     /// Old tool-result bodies were replaced in one provider-request projection.
     ///
     /// Unlike [`CompactionCompleted`](Self::CompactionCompleted), this does not
-    /// describe a canonical transcript rewrite. The original tool results remain
-    /// available in the transcript and in their execution events.
+    /// describe a canonical transcript rewrite. The pre-projection content in
+    /// the canonical transcript is unchanged.
     RequestToolResultsElided {
         agent_id: String,
         /// The configured recent-suffix threshold, not the total number of full
