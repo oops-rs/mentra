@@ -6,7 +6,7 @@ pub(crate) mod journal;
 
 pub use compaction::estimated_request_tokens;
 pub(crate) use compaction::{
-    MicroCompactedHistory, micro_compact_history, required_tail_start_for_continuation,
+    ProjectedToolResultHistory, project_tool_result_history, required_tail_start_for_continuation,
 };
 pub use engine::{
     IngestOutcome, IngestRequest, MemoryCursor, MemoryEngine, MemoryHit, MemoryRecord,

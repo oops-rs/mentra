@@ -64,7 +64,23 @@ impl Default for TeamConfig {
     }
 }
 
-/// Controls request-only tool-result elision and canonical summary compaction.
+/// A hard aggregate budget for tool-result content in a main model request.
+///
+/// This counts only final provider-neutral [`ToolResultContent`](crate::tool::ToolResultContent)
+/// body bytes. It is not a total request or wire-size limit. Recent results
+/// receive allocation priority but remain inside `max_bytes`; text previews
+/// include their omission separator in `max_preview_bytes`.
+///
+/// There is deliberately no [`Default`] implementation: enabling a lossy
+/// policy requires a host to state every byte limit explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectedToolResultBudget {
+    pub max_bytes: usize,
+    pub prioritize_recent_results: usize,
+    pub max_preview_bytes: usize,
+}
+
+/// Controls request-only tool-result projection and canonical summary compaction.
 ///
 /// These mechanisms are separate. Request-only elision changes a cloned main
 /// model request and does not further change the persisted transcript. Summary
@@ -75,9 +91,10 @@ pub struct CompactionConfig {
     /// history is rebuilt for a provider request.
     ///
     /// Every older result larger than 100 bytes is replaced by a
-    /// `[Previous: used <tool>]` marker. That rewrite runs before every main
-    /// model request, at any context size, and the projected history is also
-    /// what the auto-compaction threshold measures. Each changed request emits
+    /// `[Previous: used <tool>]` marker. When
+    /// `projected_tool_result_budget` is `None`, that rewrite runs before every
+    /// main model request, at any context size, and the projected history is
+    /// also what the auto-compaction threshold measures. Each changed request emits
     /// [`AgentEvent::RequestToolResultsElided`](crate::agent::AgentEvent::RequestToolResultsElided).
     ///
     /// This is a count heuristic, not a request-size bound: the newest results
@@ -86,6 +103,14 @@ pub struct CompactionConfig {
     /// the default. Lower it only for a workload whose old tool results are
     /// genuinely disposable.
     pub keep_recent_tool_results: usize,
+    /// Optional strict aggregate budget for projected tool-result bodies.
+    ///
+    /// When set, this policy is used exclusively and
+    /// `keep_recent_tool_results` is not consulted. `None` preserves the exact
+    /// legacy recent-count behavior. Budgeting adds no retrieval mechanism;
+    /// tool-result paging remains an independent, live-agent-only feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_tool_result_budget: Option<ProjectedToolResultBudget>,
     /// The token count above which a run compacts, when the model's context
     /// window is unknown.
     ///
@@ -118,6 +143,7 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             keep_recent_tool_results: usize::MAX,
+            projected_tool_result_budget: None,
             auto_compact_threshold_tokens: Some(50_000),
             auto_compact_threshold_percent: default_auto_compact_threshold_percent(),
             transcript_dir: default_transcript_dir(),
@@ -449,6 +475,59 @@ mod tests {
         let compaction = CompactionConfig::default();
 
         assert_eq!(compaction.keep_recent_tool_results, usize::MAX);
+        assert_eq!(compaction.projected_tool_result_budget, None);
+        assert!(
+            serde_json::to_value(compaction)
+                .unwrap()
+                .get("projected_tool_result_budget")
+                .is_none(),
+            "the disabled additive policy preserves the pre-0.22 JSON shape"
+        );
+    }
+
+    #[test]
+    fn compaction_config_without_the_budget_field_keeps_legacy_policy() {
+        let mut stored = serde_json::to_value(CompactionConfig {
+            keep_recent_tool_results: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("projected_tool_result_budget");
+
+        let restored: CompactionConfig = serde_json::from_value(stored).unwrap();
+
+        assert_eq!(restored.keep_recent_tool_results, 2);
+        assert_eq!(restored.projected_tool_result_budget, None);
+    }
+
+    #[test]
+    fn projected_tool_result_budget_round_trips_zero_and_nonzero_limits() {
+        for projected_tool_result_budget in [
+            ProjectedToolResultBudget {
+                max_bytes: 0,
+                prioritize_recent_results: 0,
+                max_preview_bytes: 0,
+            },
+            ProjectedToolResultBudget {
+                max_bytes: 32 * 1024,
+                prioritize_recent_results: 4,
+                max_preview_bytes: 2048,
+            },
+        ] {
+            let config = CompactionConfig {
+                keep_recent_tool_results: 1,
+                projected_tool_result_budget: Some(projected_tool_result_budget),
+                ..Default::default()
+            };
+
+            let restored: CompactionConfig =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+
+            assert_eq!(restored, config);
+        }
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::types::SessionId;
-use crate::{agent::ElidedToolResult, tool::ToolClassification};
+use crate::{
+    agent::{ElidedToolResult, RequestToolResultElisionPolicy},
+    tool::ToolClassification,
+};
 
 pub type EventSeq = u64;
 
@@ -208,16 +211,18 @@ pub enum SessionEvent {
         extracted_facts_count: usize,
         summary_preview: String,
     },
-    /// Old tool-result bodies were replaced in one provider-request projection.
+    /// Tool-result bodies were reduced in one provider-request projection.
     ///
     /// Unlike [`CompactionCompleted`](Self::CompactionCompleted), this does not
     /// describe a canonical transcript rewrite. The pre-projection content in
     /// the canonical transcript is unchanged.
     RequestToolResultsElided {
         agent_id: String,
-        /// The configured recent-suffix threshold, not the total number of full
-        /// results in this request.
-        configured_keep_recent_tool_results: usize,
+        policy: RequestToolResultElisionPolicy,
+        /// Sum across all canonical result bodies, including unchanged results and all roles.
+        canonical_tool_result_content_bytes: usize,
+        /// Sum across all projected result bodies, including generated content.
+        projected_tool_result_content_bytes: usize,
         results: Vec<ElidedToolResult>,
     },
     /// How many records a memory ingest stored for an agent.

@@ -69,9 +69,42 @@ pub struct CompactionDetails {
 pub type ContextCompactionTrigger = CompactionTrigger;
 pub type ContextCompactionDetails = CompactionDetails;
 
-/// One tool result whose body was replaced in a provider-request projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultContentKind {
+    /// Canonical content was text, possibly already shaped by limiting or paging.
+    Text,
+    /// Canonical content was a complete structured JSON value.
+    Structured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultElisionAction {
+    /// Canonical text head and tail survive around an omission separator.
+    Preview,
+    /// No canonical body bytes survive, but a descriptive tool marker does.
+    Marker,
+    /// No canonical body bytes survive; the body is `…` or empty text.
+    Omitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RequestToolResultElisionPolicy {
+    KeepRecent {
+        configured_keep_recent_tool_results: usize,
+    },
+    ByteBudget {
+        configured_max_bytes: usize,
+        configured_prioritize_recent_results: usize,
+        configured_max_preview_bytes: usize,
+    },
+}
+
+/// One tool result whose canonical body was reduced in a request projection.
 ///
-/// The original body remains in the canonical transcript and is deliberately
+/// The canonical body remains in the transcript and is deliberately
 /// absent here: observability must not duplicate potentially sensitive tool
 /// output into event logs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,21 +113,25 @@ pub struct ElidedToolResult {
     /// `None` when the result cannot be correlated with a preceding tool call.
     pub tool_name: Option<String>,
     pub is_error: bool,
+    pub canonical_content_kind: ToolResultContentKind,
+    pub action: ToolResultElisionAction,
     /// UTF-8 bytes for text, or compact serialized JSON bytes for structured content.
-    pub original_content_bytes: usize,
+    pub canonical_content_bytes: usize,
+    pub projected_content_bytes: usize,
 }
 
-/// Request-only tool-result elision applied by a finite
-/// [`CompactionConfig::keep_recent_tool_results`](super::CompactionConfig::keep_recent_tool_results).
+/// Request-only tool-result elision applied by a recent-count or byte-budget policy.
 ///
 /// One value describes one freshly built logical request. Transport retries
 /// reuse that request and do not produce another value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestToolResultElision {
     pub agent_id: String,
-    /// The configured recent-suffix threshold, not the total number of full
-    /// results in the request. Older payloads of at most 100 bytes also survive.
-    pub configured_keep_recent_tool_results: usize,
+    pub policy: RequestToolResultElisionPolicy,
+    /// Sum of every canonical tool-result body, including unchanged results and all roles.
+    pub canonical_tool_result_content_bytes: usize,
+    /// Sum of every projected tool-result body, including generated content.
+    pub projected_tool_result_content_bytes: usize,
     /// Ordered as the rewritten results appear in the request history.
     pub results: Vec<ElidedToolResult>,
 }
@@ -123,7 +160,7 @@ pub enum AgentEvent {
     ContextCompacted {
         details: CompactionDetails,
     },
-    /// Old tool-result bodies were replaced only in the next provider request.
+    /// Tool-result bodies were reduced only in the next provider request.
     ///
     /// The canonical transcript is unchanged. Emitted once per freshly built
     /// logical request, and only when at least one result was actually changed.

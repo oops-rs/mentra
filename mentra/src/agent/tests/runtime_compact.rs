@@ -12,7 +12,8 @@ use crate::{
     BuiltinProvider, ContentBlock, Message, Role, TranscriptKind,
     agent::{
         AgentConfig, AgentEvent, CompactionConfig, CompactionTrigger, ElidedToolResult,
-        RequestToolResultElision,
+        ProjectedToolResultBudget, RequestToolResultElision, RequestToolResultElisionPolicy,
+        ToolResultContentKind, ToolResultElisionAction,
     },
     compaction::{CompactionExecutionMode, CompactionMode},
     provider::{CompactionInputItem, CompactionResponse, ProviderCapabilities, Request},
@@ -165,29 +166,47 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
         vec![
             RequestToolResultElision {
                 agent_id: agent_id.clone(),
-                configured_keep_recent_tool_results: 2,
+                policy: RequestToolResultElisionPolicy::KeepRecent {
+                    configured_keep_recent_tool_results: 2,
+                },
+                canonical_tool_result_content_bytes: 3 * 140,
+                projected_tool_result_content_bytes: 2 * 140 + "[Previous: used echo_tool]".len(),
                 results: vec![ElidedToolResult {
                     tool_call_id: "tool-1".to_string(),
                     tool_name: Some("echo_tool".to_string()),
                     is_error: false,
-                    original_content_bytes: 140,
+                    canonical_content_kind: ToolResultContentKind::Text,
+                    action: ToolResultElisionAction::Marker,
+                    canonical_content_bytes: 140,
+                    projected_content_bytes: "[Previous: used echo_tool]".len(),
                 }],
             },
             RequestToolResultElision {
                 agent_id,
-                configured_keep_recent_tool_results: 2,
+                policy: RequestToolResultElisionPolicy::KeepRecent {
+                    configured_keep_recent_tool_results: 2,
+                },
+                canonical_tool_result_content_bytes: 4 * 140,
+                projected_tool_result_content_bytes: 2 * 140
+                    + 2 * "[Previous: used echo_tool]".len(),
                 results: vec![
                     ElidedToolResult {
                         tool_call_id: "tool-1".to_string(),
                         tool_name: Some("echo_tool".to_string()),
                         is_error: false,
-                        original_content_bytes: 140,
+                        canonical_content_kind: ToolResultContentKind::Text,
+                        action: ToolResultElisionAction::Marker,
+                        canonical_content_bytes: 140,
+                        projected_content_bytes: "[Previous: used echo_tool]".len(),
                     },
                     ElidedToolResult {
                         tool_call_id: "tool-2".to_string(),
                         tool_name: Some("echo_tool".to_string()),
                         is_error: false,
-                        original_content_bytes: 140,
+                        canonical_content_kind: ToolResultContentKind::Text,
+                        action: ToolResultElisionAction::Marker,
+                        canonical_content_bytes: 140,
+                        projected_content_bytes: "[Previous: used echo_tool]".len(),
                     },
                 ],
             },
@@ -195,8 +214,126 @@ async fn micro_compaction_only_rewrites_old_tool_results_in_requests() {
     );
 }
 
+#[tokio::test]
+async fn byte_budget_projects_once_per_logical_request_and_never_registers_a_reader() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let long_output = "x".repeat(140);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "tool-1", "echo_tool", r#"{"value":"one"}"#),
+            tool_use_stream(&model.id, "tool-2", "echo_tool", r#"{"value":"two"}"#),
+            tool_use_stream(&model.id, "tool-3", "echo_tool", r#"{"value":"three"}"#),
+            tool_use_stream(&model.id, "tool-4", "echo_tool", r#"{"value":"four"}"#),
+            super::support::StreamScript::Failure(ProviderError::Retryable {
+                message: "transient refusal".to_string(),
+                delay: None,
+            }),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(StaticTool::success("echo_tool", &long_output))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    // Budget mode wins; this deliberately conflicting legacy
+                    // value would otherwise marker-elide every result.
+                    keep_recent_tool_results: 0,
+                    projected_tool_result_budget: Some(ProjectedToolResultBudget {
+                        max_bytes: 300,
+                        prioritize_recent_results: 1,
+                        max_preview_bytes: 60,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = agent.subscribe_events();
+
+    agent
+        .run(
+            vec![ContentBlock::text("hello")],
+            RunOptions::default().with_provider_retry(ProviderRetry {
+                base_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                retry_after_cap: Duration::ZERO,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let requests = provider_handle.recorded_requests().await;
+    assert_eq!(requests.len(), 6);
+    assert_eq!(requests[4].messages, requests[5].messages);
+    assert!(!tool_names(&requests[5]).contains("read_tool_result"));
+    assert_eq!(
+        agent.history()[2],
+        Message::user(ContentBlock::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            content: long_output.into(),
+            is_error: false,
+        }),
+        "the canonical transcript remains unchanged"
+    );
+
+    let elisions = collect_events(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::RequestToolResultsElided { details } => Some(details),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        elisions.len(),
+        2,
+        "estimation and the transport retry emit no duplicate"
+    );
+    for details in &elisions {
+        assert_eq!(
+            details.policy,
+            RequestToolResultElisionPolicy::ByteBudget {
+                configured_max_bytes: 300,
+                configured_prioritize_recent_results: 1,
+                configured_max_preview_bytes: 60,
+            }
+        );
+        assert!(details.projected_tool_result_content_bytes <= 300);
+    }
+    assert_eq!(elisions[0].canonical_tool_result_content_bytes, 3 * 140);
+    assert_eq!(elisions[0].projected_tool_result_content_bytes, 260);
+    assert_eq!(
+        elisions[0]
+            .results
+            .iter()
+            .map(|result| result.tool_call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-1", "tool-2"]
+    );
+    assert_eq!(elisions[1].canonical_tool_result_content_bytes, 4 * 140);
+    assert_eq!(elisions[1].projected_tool_result_content_bytes, 300);
+    assert_eq!(
+        elisions[1]
+            .results
+            .iter()
+            .map(|result| result.tool_call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-1", "tool-2", "tool-3"]
+    );
+}
+
 // M3 test 5: micro-compaction rewrites old tool results only in the
-// *request projection* (`micro_compacted_history`, a fresh clone of the
+// *request projection* (`projected_tool_result_history`, a fresh clone of the
 // transcript's `Message`s built on every `stream_turn`) — it never touches
 // the canonical `TranscriptItem`s themselves, so the details a host attached
 // to the collapsed call survive on the stored item even though the outgoing

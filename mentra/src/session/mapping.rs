@@ -114,7 +114,9 @@ fn map_event_inner(event: &AgentEvent, tool_names: &mut ToolNameIndex) -> Vec<Se
         AgentEvent::RequestToolResultsElided { details } => {
             vec![SessionEvent::RequestToolResultsElided {
                 agent_id: details.agent_id.clone(),
-                configured_keep_recent_tool_results: details.configured_keep_recent_tool_results,
+                policy: details.policy.clone(),
+                canonical_tool_result_content_bytes: details.canonical_tool_result_content_bytes,
+                projected_tool_result_content_bytes: details.projected_tool_result_content_bytes,
                 results: details.results.clone(),
             }]
         }
@@ -592,12 +594,21 @@ mod tests {
     fn request_tool_result_elision_maps_without_losing_details() {
         let details = crate::agent::RequestToolResultElision {
             agent_id: "a1".to_string(),
-            configured_keep_recent_tool_results: 2,
+            policy: crate::agent::RequestToolResultElisionPolicy::ByteBudget {
+                configured_max_bytes: 2048,
+                configured_prioritize_recent_results: 2,
+                configured_max_preview_bytes: 512,
+            },
+            canonical_tool_result_content_bytes: 4096,
+            projected_tool_result_content_bytes: 512,
             results: vec![crate::agent::ElidedToolResult {
                 tool_call_id: "tc-1".to_string(),
                 tool_name: Some("read_file".to_string()),
                 is_error: false,
-                original_content_bytes: 4096,
+                canonical_content_kind: crate::agent::ToolResultContentKind::Text,
+                action: crate::agent::ToolResultElisionAction::Preview,
+                canonical_content_bytes: 4096,
+                projected_content_bytes: 512,
             }],
         };
         let event = AgentEvent::RequestToolResultsElided {
@@ -613,8 +624,11 @@ mod tests {
                 7,
                 SessionEvent::RequestToolResultsElided {
                     agent_id: details.agent_id,
-                    configured_keep_recent_tool_results: details
-                        .configured_keep_recent_tool_results,
+                    policy: details.policy,
+                    canonical_tool_result_content_bytes: details
+                        .canonical_tool_result_content_bytes,
+                    projected_tool_result_content_bytes: details
+                        .projected_tool_result_content_bytes,
                     results: details.results,
                 }
             )]

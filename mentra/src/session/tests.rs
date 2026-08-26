@@ -193,12 +193,21 @@ fn session_event_compaction_completed_roundtrip() {
 fn session_event_request_tool_result_elision_roundtrip() {
     let event = SessionEvent::RequestToolResultsElided {
         agent_id: "agent-1".to_string(),
-        configured_keep_recent_tool_results: 2,
+        policy: crate::agent::RequestToolResultElisionPolicy::ByteBudget {
+            configured_max_bytes: 2048,
+            configured_prioritize_recent_results: 2,
+            configured_max_preview_bytes: 512,
+        },
+        canonical_tool_result_content_bytes: 4096,
+        projected_tool_result_content_bytes: 512,
         results: vec![crate::agent::ElidedToolResult {
             tool_call_id: "tc-1".to_string(),
             tool_name: Some("read_file".to_string()),
             is_error: false,
-            original_content_bytes: 4096,
+            canonical_content_kind: crate::agent::ToolResultContentKind::Text,
+            action: crate::agent::ToolResultElisionAction::Preview,
+            canonical_content_bytes: 4096,
+            projected_content_bytes: 512,
         }],
     };
 
@@ -206,7 +215,9 @@ fn session_event_request_tool_result_elision_roundtrip() {
 
     assert_eq!(json["type"], "request_tool_results_elided");
     assert_eq!(json["agent_id"], "agent-1");
+    assert_eq!(json["policy"]["kind"], "byte_budget");
     assert_eq!(json["results"][0]["tool_call_id"], "tc-1");
+    assert_eq!(json["results"][0]["action"], "preview");
     assert!(json.get("details").is_none());
     let deserialized: SessionEvent = serde_json::from_value(json).unwrap();
     assert_eq!(event, deserialized);
@@ -305,12 +316,19 @@ fn all_session_event_variants_serialize_with_type_tag() {
         },
         SessionEvent::RequestToolResultsElided {
             agent_id: "a1".to_string(),
-            configured_keep_recent_tool_results: 2,
+            policy: crate::agent::RequestToolResultElisionPolicy::KeepRecent {
+                configured_keep_recent_tool_results: 2,
+            },
+            canonical_tool_result_content_bytes: 1024,
+            projected_tool_result_content_bytes: 24,
             results: vec![crate::agent::ElidedToolResult {
                 tool_call_id: "tc-1".to_string(),
                 tool_name: Some("read_file".to_string()),
                 is_error: false,
-                original_content_bytes: 1024,
+                canonical_content_kind: crate::agent::ToolResultContentKind::Text,
+                action: crate::agent::ToolResultElisionAction::Marker,
+                canonical_content_bytes: 1024,
+                projected_content_bytes: 24,
             }],
         },
         SessionEvent::MemoryUpdated {
@@ -1227,15 +1245,21 @@ async fn request_tool_result_elision_reaches_the_session_stream() {
         .filter_map(|event| match event {
             SessionEvent::RequestToolResultsElided {
                 agent_id,
-                configured_keep_recent_tool_results,
+                policy,
                 results,
-            } => Some((agent_id, configured_keep_recent_tool_results, results)),
+                ..
+            } => Some((agent_id, policy, results)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(elisions.len(), 2, "one event per changed request");
     assert_eq!(elisions[0].0, agent_id);
-    assert_eq!(elisions[0].1, 2);
+    assert!(matches!(
+        elisions[0].1,
+        crate::agent::RequestToolResultElisionPolicy::KeepRecent {
+            configured_keep_recent_tool_results: 2
+        }
+    ));
     assert_eq!(
         elisions[0]
             .2
