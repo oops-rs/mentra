@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.22.0
 
 ### Projected tool results can be observed and hard-bounded
 
@@ -34,9 +34,10 @@
 - Adding the public config field and variants to the exhaustive `AgentEvent` and
   `SessionEvent` enums is a source-breaking API change. Since 0.21.0 is already
   published, this must ship in 0.22.0; Basis must add its corresponding event
-  mapping when it upgrades. Pre-0.22 persisted agents load with the budget off,
-  but an older binary ignores a configured budget and immediately loses the
-  cap; saving that record can then remove the unknown field from persisted JSON.
+  mapping when it upgrades, and older serialized-event readers reject the new
+  session-event tag. Pre-0.22 persisted agents load with the budget off, but an
+  older binary ignores a configured budget and immediately loses the cap;
+  saving that record can then remove the unknown field from persisted JSON.
   Budgeted persisted agents therefore require Mentra 0.22 or later.
 
 ### Documentation warnings are CI-clean
@@ -44,6 +45,11 @@
 - Public rustdoc no longer links to private subagent-template helpers, and the
   SQLite store links to the public `RuntimeStore` path. This fixes the
   warnings-denied documentation job without suppressing its diagnostics.
+
+### Release scope
+
+- `mentra-provider` has no source changes and remains at 0.6.0. This release
+  publishes only `mentra` 0.22.0.
 
 ## 0.21.0
 

@@ -56,7 +56,8 @@ This repository is a small workspace:
 * [`examples/`](./examples): runnable examples built on top of the runtime.
 * [`docs/`](./docs): design notes and feature-specific documentation.
 
-Publish `mentra-provider` first, then `mentra`.
+When a release changes both crates, publish `mentra-provider` first and then
+`mentra`. A runtime-only release publishes only `mentra`.
 
 ## Example
 
@@ -64,7 +65,7 @@ Add Mentra and Tokio to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mentra = "0.10.0"
+mentra = "0.22.0"
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -160,10 +161,12 @@ Thanks for helping improve Mentra.
 Before sending changes, run the same checks as CI:
 
 ```bash
-cargo +1.88.0 check --workspace --all-targets
+cargo +1.88.0 check --workspace --all-targets --all-features
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo test -p mentra --no-default-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
 ## Supported Rust Version
