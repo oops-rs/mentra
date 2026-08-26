@@ -94,10 +94,11 @@ The floor pass walks newest to oldest. For each result:
 3. Otherwise use the three-byte Unicode ellipsis `…` when it fits.
 4. Otherwise use empty text.
 
-This pass spends from the aggregate cap. It means one recent result does not
-consume the budget before older call/result pairs can receive an honest marker.
-When even the marker floor cannot fit, lower-priority older results degrade to
-ellipsis or empty bodies. No generated content lives outside the named cap.
+This pass spends from the aggregate cap. It means one recent whole body does
+not consume the budget before older call/result pairs can receive an honest
+marker; the recent result's own floor is still allocated first. When even the
+marker floor cannot fit, lower-priority older results degrade to ellipsis or
+empty bodies. No generated content lives outside the named cap.
 
 The upgrade pass has three newest-to-oldest tiers:
 
@@ -117,9 +118,14 @@ not an unchanged whole body.
 Structured content is atomic. It is either the original valid JSON value or
 whole text marker, ellipsis, or empty text. No JSON fragment is emitted.
 
-The preview separator is exactly `\n…[omitted]…\n`. The bytes left after that
-separator are split evenly (the head receives the odd byte), then rounded down
-to complete UTF-8 scalar boundaries for the longest fitting prefix and suffix.
+For a text result, define `preview_limit` as the minimum of
+`max_preview_bytes`, `current_body_bytes + remaining_budget`, and one byte less
+than the canonical body (when the canonical body is nonempty). The preview
+separator is exactly `\n…[omitted]…\n`. The bytes in `preview_limit` left after
+that 17-byte separator are split evenly (the head receives the odd byte), then
+rounded down to complete UTF-8 scalar boundaries for the longest fitting prefix
+and suffix. The unused rounding slack is deliberately not rebalanced.
+
 A preview is valid only when it retains at least one complete scalar at each
 end, omits at least one complete scalar between them, is shorter than the
 canonical body, and is strictly longer than the result's current floor. If any
