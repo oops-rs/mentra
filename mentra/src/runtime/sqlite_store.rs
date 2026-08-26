@@ -359,7 +359,7 @@ impl BackgroundStore for SqliteRuntimeStore {
 }
 
 #[derive(Clone)]
-/// SQLite-backed [`RuntimeStore`] implementation used by default.
+/// SQLite-backed [`RuntimeStore`](crate::runtime::RuntimeStore) implementation used by default.
 pub struct SqliteRuntimeStore {
     path: PathBuf,
 }

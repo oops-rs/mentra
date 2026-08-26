@@ -18,14 +18,14 @@ const SUBAGENT_SYSTEM_PROMPT: &str = "You are a subagent working for another age
 /// A parent agent's blueprint for a disposable child, cloned from its own
 /// config and overridable before spawning.
 ///
-/// [`from_agent`](Self::from_agent) starts from an exact copy of the parent —
+/// The internal `from_agent` constructor starts from an exact copy of the parent —
 /// same model, tool profile, and system prompt — which is what makes the
 /// default (no overrides) path byte-identical to the parent spawning a plain
 /// subagent. `with_tool_profile`, `with_model`, and `with_system` each replace
 /// one field of that clone so a delegating parent can hand a child a
 /// different tool roster, a cheaper model, or a different system prompt
 /// without losing the depth-guard and bounds-inheritance treatment
-/// [`spawn`](Self::spawn) applies uniformly on top, regardless of which
+/// the internal spawn path applies uniformly on top, regardless of which
 /// fields were overridden.
 ///
 /// Each `with_*` is a plain override, not an enforced narrowing: nothing here
@@ -114,7 +114,7 @@ impl DisposableSubagentTemplate {
     ///
     /// This overrides `config.tool_profile` only — the spawn-level hidden-tools
     /// set (which always hides the `task` intrinsic from a subagent) is a
-    /// separate mechanism applied by [`spawn`](Self::spawn) regardless of this
+    /// separate mechanism applied by the internal spawn path regardless of this
     /// override, exactly as for the un-overridden clone. It replaces the
     /// parent's profile outright rather than narrowing it: passing a wider
     /// `tool_profile` than the parent's own hands the child more tools than
@@ -155,7 +155,7 @@ impl DisposableSubagentTemplate {
     }
 
     /// Replaces the system prompt the spawned child's config carries, before
-    /// [`spawn`](Self::spawn) appends the standard subagent instructions —
+    /// the internal spawn path appends the standard subagent instructions —
     /// the same suffix treatment the un-overridden clone's system prompt
     /// receives.
     #[must_use = "with_system returns a new template rather than mutating in place; \

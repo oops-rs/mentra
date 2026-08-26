@@ -283,8 +283,7 @@ impl ToolContext<'_> {
         self.agent.disposable_subagent_template()
     }
 
-    /// Forwards to [`Agent::spawn_subagent_from`](crate::agent::Agent::spawn_subagent_from)
-    /// after verifying the template's source.
+    /// Spawns through the agent's source-verifying template path.
     pub async fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,
@@ -642,11 +641,9 @@ impl ParallelToolContext {
         self.subagent_template.clone()
     }
 
-    /// Forwards to [`DisposableSubagentTemplate::spawn_from`] after verifying
-    /// the template's source (see
-    /// [`DisposableSubagentTemplate::verify_source`]) -- inlined rather than
-    /// routed through `Agent`, since a parallel-lane tool has no live `&Agent`
-    /// to route it through.
+    /// Verifies the template's source and then uses its internal spawn path —
+    /// inlined rather than routed through `Agent`, since a parallel-lane tool
+    /// has no live `&Agent` to route it through.
     pub async fn spawn_subagent_from(
         &self,
         template: DisposableSubagentTemplate,

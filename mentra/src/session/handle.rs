@@ -658,9 +658,9 @@ impl Session {
             .await
     }
 
-    /// Forwards to [`Agent::spawn_subagent_from`](crate::agent::Agent::spawn_subagent_from)
-    /// after verifying the template's source, then detaches the result the
-    /// same way [`spawn_subagent_with_options`](Self::spawn_subagent_with_options) does.
+    /// Spawns through the agent's source-verifying template path, then detaches
+    /// the result the same way
+    /// [`spawn_subagent_with_options`](Self::spawn_subagent_with_options) does.
     pub async fn spawn_subagent_from_with_options(
         &mut self,
         name: &str,
