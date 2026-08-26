@@ -457,15 +457,37 @@ async fn resolves_concurrent_calls_whose_responses_arrive_in_reverse_order() {
     // Both calls must be in flight before either is answered.
     server.wait_for_posts(5);
 
+    // Task spawn order is not poll order: on Windows the second future can
+    // reserve the lower JSON-RPC id. Derive the correlation from what actually
+    // reached the wire instead of assigning ids to source-code order.
+    let call_ids = server
+        .posts()
+        .into_iter()
+        .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+        .map(|request| {
+            let body: serde_json::Value =
+                serde_json::from_str(&request.body).expect("tool call body is JSON");
+            let query = body["params"]["arguments"]["q"]
+                .as_str()
+                .expect("fixture call carries q")
+                .to_string();
+            let id = body["id"].as_u64().expect("fixture call carries an id");
+            (query, id)
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(call_ids.len(), 2);
+    let first_id = call_ids["one"];
+    let second_id = call_ids["two"];
+
     // Answer the second request first: the stream carries no ordering guarantee.
     server.send_message(&json!({
         "jsonrpc": "2.0",
-        "id": 4,
+        "id": second_id,
         "result": {"content": [{"type": "text", "text": "second"}], "isError": false}
     }));
     server.send_message(&json!({
         "jsonrpc": "2.0",
-        "id": 3,
+        "id": first_id,
         "result": {"content": [{"type": "text", "text": "first"}], "isError": false}
     }));
 
