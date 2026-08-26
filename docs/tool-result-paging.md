@@ -59,20 +59,21 @@ Three rules:
    window.]
    ```
 
-   Line numbers are **absolute over the full result** on every page, so
+   Line numbers are **absolute over the retained post-limiter result** on every page, so
    anything the model quotes or cites by line survives paging unchanged.
 
-3. **The event stream keeps full fidelity.** `AgentEvent::ToolExecutionFinished`
-   carries the complete, unpaged `ContentBlock::ToolResult` exactly as today.
-   Consumers that reconstruct evidence, ledgers, or telemetry from events
-   (the Nous evidence pipeline does exactly this) observe no change
-   whatsoever. Paging shapes the *model's view*, never the record.
+3. **Paging does not change the event stream.**
+   `AgentEvent::ToolExecutionFinished` carries the pre-paging result: after the
+   runtime output limiter, but before post-execution hooks and paging. Consumers
+   that reconstruct evidence, ledgers, or telemetry from events observe no
+   paging-specific change. The event is not necessarily raw tool output or the
+   same content that hooks later place in canonical history.
 
 ### The built-in `read_tool_result` tool
 
 Registered on the runtime the first time an agent with paging enabled is
-constructed, and offered to an agent only while that agent has paging
-enabled. Schema:
+constructed, and eligible to be offered while that agent has paging enabled;
+its tool profile can still hide it. Schema:
 
 ```json
 {
@@ -88,9 +89,9 @@ Behaviour:
 
 - Returns the window starting at `start_line`, at most `page_bytes`, cut on
   a line boundary, with the same trailer format (or `…[end of result]`).
-- Serves **only results recorded by this agent's own run** — an unknown
-  `tool_use_id` is an ordinary tool error, and one agent can never read
-  another agent's results.
+- Serves **only results recorded by this same live agent instance** — across
+  later sends, but never from another agent or after drop/resume. An unknown
+  `tool_use_id` is an ordinary tool error.
 - Its own results are bounded by construction (`page_bytes`) and are never
   paged recursively.
 - It costs a tool call from the run's tool budget — that is the honest
@@ -148,12 +149,17 @@ backstop, which is what the adoption plan below already assumes.
 
 ### Storage
 
-Full results for the current run are retained in an in-memory per-agent map
+Post-limiter text for the live agent is retained in an in-memory per-agent map
 `tool_use_id -> Arc<str>` populated at insertion time, dropped when the
 agent is dropped. Only results that were actually paged are retained; a
 result delivered whole is already in the transcript. Persistence across
 process restarts is a non-goal: the pager serves the live run, and mentra's
 transcript persistence already captures what the model actually saw.
+
+The persisted first page and trailer can therefore survive resume while their
+in-memory target does not. Calling the reader from that stale trailer returns
+`no retained result`; persistence of the trailer is not persistence of the
+full retained text.
 
 **As built — what this saves.** An earlier draft claimed the map is "strictly
 less memory than today's behaviour". It is not: the full text lives in the
@@ -164,11 +170,9 @@ round — not process memory.
 ## Where it hooks in
 
 - `tool/orchestrator.rs` executes calls and emits
-  `AgentEvent::ToolExecutionFinished { result }` (multiple sites; all emit
-  the full block today — unchanged). The paging transform applies to the
-  `ContentBlock::ToolResult` *after* event emission, before the block joins
-  the round's committed tool-result message consumed by the runner
-  (`agent/runner.rs`, `summarize_tool_results`).
+  `AgentEvent::ToolExecutionFinished { result }` with the post-limiter result.
+  Post-execution hooks run after that event; paging then applies to the reviewed
+  `ContentBlock::ToolResult` before it joins the round's committed message.
 - `agent/config.rs` gains `ToolResultPagingConfig` beside
   `CompactionConfig`.
 - The `read_tool_result` registration follows the existing built-in tool
@@ -189,6 +193,13 @@ results, which no longer need to be reasoned about as exceptions.
   suffix whole and marker-elides eligible older pages. The finite count is not
   an overall request-size bound: short old pages, markers, and non-tool history
   still accumulate.
+- **Projected byte budget**: `projected_tool_result_budget` is an exclusive
+  alternative to the finite recent-count policy. It counts each canonical
+  page/window and trailer—including later `read_tool_result` results—as ordinary
+  text and may preserve some of that text in a head/tail preview. It does not
+  parse or regenerate the trailer,
+  retain another payload, register `read_tool_result`, or promise that live
+  paging state still exists. Budgeting without paging adds no retrieval path.
 - **Parallel tool calls**: pages are per-`tool_use_id`; six parallel
   oversized results each arrive as their own page 1. Worst-case insertion
   per round becomes `parallel_calls × page_bytes` instead of unbounded.
@@ -203,15 +214,16 @@ results, which no longer need to be reasoned about as exceptions.
   the threshold is a guardrail, not an optimizer.
 - No summarization. A page is verbatim source text; deciding what matters
   is the model's job, and summaries would poison citation line numbers.
-- No cross-agent or cross-run reads.
-- No change to any event, hook, or session-mapping payload.
+- No cross-agent or post-resume reads; later runs on the same live agent can
+  still use retained entries.
+- Paging itself adds no projection event, hook, or session-mapping payload.
 
 ## Testing
 
 1. Sub-threshold result → transcript byte-identical, `read_tool_result`
    not registered when paging is `None`.
 2. Oversized result → transcript holds page 1 + trailer; the
-   `ToolExecutionFinished` event carries the full result.
+   `ToolExecutionFinished` event carries the pre-paging, post-limiter result.
 3. `read_tool_result` windows: correct absolute line ranges, final window
    marked as end, `start_line` past EOF → empty window with end marker.
 4. Unknown `tool_use_id` → tool error, run continues.

@@ -31,7 +31,7 @@ impl ToolDefinition for ReadToolResultTool {
             .description(
                 "Read the next window of a tool result that was too large to deliver whole. \
                  Pass the tool_use_id and start_line printed in that result's paging trailer. \
-                 Line numbers are absolute over the full result, so they mean the same thing \
+                 Line numbers are absolute over the retained result, so they mean the same thing \
                  in every window. This reads retained output only — it never re-runs the tool \
                  that produced it.",
             )
@@ -86,7 +86,7 @@ impl ToolExecutor for ReadToolResultTool {
         let Some(full) = ctx.paged_tool_result(&request.tool_use_id) else {
             return Err(format!(
                 "no retained result for tool_use_id \"{}\". Only results large enough to be \
-                 paged are retained, and only for this agent's current run — use the \
+                 paged are retained, and only for this same live agent instance — use the \
                  tool_use_id printed in a paging trailer.",
                 request.tool_use_id
             ));

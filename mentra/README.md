@@ -753,7 +753,7 @@ Agents automatically recall from long-term memory by default. When you use `Runt
 
 ## Context Compaction
 
-Mentra has two separate aggregate context mechanisms:
+Mentra separates canonical summary compaction from two request-only projection policies:
 
 - **Summary compaction** is enabled by default. When estimated request context
   crosses its threshold, Mentra writes the full transcript to the default
@@ -769,28 +769,55 @@ Mentra has two separate aggregate context mechanisms:
   is unchanged by this projection. Each changed projection emits
   `AgentEvent::RequestToolResultsElided`; a `Session` maps the same facts to
   `SessionEvent::RequestToolResultsElided`.
+- **Request-only tool-result budgeting** is also disabled by default. Setting
+  `projected_tool_result_budget` selects it instead of the legacy recent-count
+  policy. `max_bytes` is a hard aggregate cap over final provider-neutral tool
+  result body bytes—not roles, call ids, JSON/wire framing, tool definitions, or
+  other request content. A floor keeps short originals or descriptive markers
+  where possible, then degrades lower-priority results to ellipsis or empty text
+  when even those markers exceed the strict cap. Whole recent bodies, bounded
+  UTF-8 head/tail previews, and whole historical bodies then receive budget in
+  that order. Recent priority is not an exemption from the cap, and structured
+  JSON is never sliced.
 
 A finite recent count is a lossy heuristic, not a byte or token limit: recent
 results remain unbounded, short old results survive, and markers accumulate.
-Use it only when old results are disposable. Use tool-result paging when a large
-result must stay retrievable while the model sees bounded windows. Paging is
-text-only and runs after the output limiter; to use its default 64 KiB threshold,
-raise the limiter above its default 50 KiB cap.
+Use it only when old results are disposable. Tool-result paging can provide
+sequential window access within the same live agent when its reader is offered;
+it is text-only, and one line longer than a page is deliberately hard-cut. It
+runs after the output limiter, so to use its default 64 KiB threshold, raise the
+limiter above its default 50 KiB cap.
+
+Budget mode adds no recovery channel. It operates on whatever canonical result
+the limiter, post-execution hook, and optional pager placed in history. An
+existing paging trailer may survive as ordinary tail text, but paging state is
+live-agent-only and is not restored after resume. Auto-compaction measures the
+same budget-shaped main-request projection that is ultimately sent, so enabling
+the budget can delay or avoid summary compaction.
 
 You can tune or disable this per-agent with `CompactionConfig`:
 
 ```rust
-use mentra::agent::{AgentConfig, CompactionConfig};
+use mentra::agent::{AgentConfig, CompactionConfig, ProjectedToolResultBudget};
 
 let config = AgentConfig {
     compaction: CompactionConfig {
         auto_compact_threshold_tokens: Some(75_000),
         auto_compact_threshold_percent: Some(80),
+        projected_tool_result_budget: Some(ProjectedToolResultBudget {
+            max_bytes: 128 * 1024,
+            prioritize_recent_results: 4,
+            max_preview_bytes: 8 * 1024,
+        }),
         ..Default::default()
     },
     ..Default::default()
 };
 ```
+
+`ProjectedToolResultBudget` intentionally has no default: all lossy limits must
+be explicit. Its persisted field requires Mentra 0.22 or later; older binaries
+ignore it and therefore cannot enforce the cap.
 
 ## Data And Persistence Defaults
 

@@ -2,25 +2,48 @@
 
 ## Unreleased
 
-### Finite tool-result elision is visible to hosts
+### Projected tool results can be observed and hard-bounded
 
 - A finite `CompactionConfig::keep_recent_tool_results` still replaces eligible
   old request-projection payloads with `[Previous: used <tool>]`, without
-  changing the canonical transcript. Each changed logical request now emits
-  `AgentEvent::RequestToolResultsElided`, carrying the configured threshold and
-  ordered call metadata without copying result bodies into the event stream.
-  Transport retries reuse the projection and do not duplicate the event.
+  changing the canonical transcript. The new optional
+  `projected_tool_result_budget` is an exclusive alternative: a hard aggregate
+  cap over final provider-neutral `ToolResult` body bytes under every message
+  role in a main-model request projection. Its floor walks newest to oldest,
+  keeping a short original or descriptive marker where possible and degrading
+  to ellipsis or empty text when the strict cap cannot fit one. It then
+  prioritizes whole recent bodies, bounded UTF-8 text previews, and whole
+  historical bodies; structured JSON is whole or a complete text omission,
+  never a fragment. Auto-compaction measures this same projection. Both policies
+  remain disabled by default.
+- Each changed logical request emits `AgentEvent::RequestToolResultsElided` with
+  the active policy, exact canonical/projected aggregate bytes, and ordered
+  per-call content kind, action, and byte counts. It never copies result bodies
+  into the event stream. Transport retries reuse the projection and do not
+  duplicate the event.
 - The same facts reach session-based hosts through the distinct
   `SessionEvent::RequestToolResultsElided`. This is intentionally not a
   `ContextCompacted` event: those events continue to mean that a summary
   replaced canonical transcript items.
 - The marker policy and oldest-first selection remain unchanged for explicit
   finite values, including values restored from persisted agent configuration.
-  Head/tail truncation remains the output limiter's job; retrievable sequential
-  text windows remain the paging layer's job.
-- Adding variants to the exhaustive `AgentEvent` and `SessionEvent` enums is a
-  source-breaking API change. Since 0.21.0 is already published, this must ship
-  in 0.22.0; Basis must add its corresponding event mapping when it upgrades.
+  Canonical-ingestion head/tail truncation remains the output limiter's job;
+  budget mode can make a separate request-only head/tail preview. Retrievable
+  sequential text windows remain the separately configured, live-agent-only
+  paging layer's job. Budget mode creates no reader or retrieval promise.
+- Adding the public config field and variants to the exhaustive `AgentEvent` and
+  `SessionEvent` enums is a source-breaking API change. Since 0.21.0 is already
+  published, this must ship in 0.22.0; Basis must add its corresponding event
+  mapping when it upgrades. Pre-0.22 persisted agents load with the budget off,
+  but an older binary ignores a configured budget and immediately loses the
+  cap; saving that record can then remove the unknown field from persisted JSON.
+  Budgeted persisted agents therefore require Mentra 0.22 or later.
+
+### Documentation warnings are CI-clean
+
+- Public rustdoc no longer links to private subagent-template helpers, and the
+  SQLite store links to the public `RuntimeStore` path. This fixes the
+  warnings-denied documentation job without suppressing its diagnostics.
 
 ## 0.21.0
 

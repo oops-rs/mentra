@@ -45,10 +45,11 @@ provider-neutral message content after canonical history has been built.
    request that actually replaces at least one payload emits
    `AgentEvent::RequestToolResultsElided`. The event is mapped to the distinct
    `SessionEvent::RequestToolResultsElided` so session-based hosts such as Basis
-   can forward it through their event sinks. The payload includes the agent,
-   configured suffix threshold, and ordered call id, optional tool name, error
-   status, and pre-elision canonical-payload byte length for every changed
-   result. It never copies the content into the event stream.
+   can forward it through their event sinks. Before the 0.22 release, ADR-0006
+   generalizes the payload to identify the active policy, exact aggregate
+   canonical/projected bytes, and ordered call id, optional tool name, error
+   status, content kind, action, and byte counts for every changed result. It
+   never copies the content into the event stream.
 
 4. **Define the event per logical request projection.** Auto-compaction may
    build the same projection for estimation, but that estimate emits nothing.
@@ -57,9 +58,10 @@ provider-neutral message content after canonical history has been built.
    event.
 
 5. **Do not make observation an override.** `AgentEvent` delivery is
-   best-effort and cannot veto or rewrite the current request. A retention pin
-   or host-selected budget would require a separate synchronous policy seam
-   with an explicit rule for protected content that exceeds the budget.
+   best-effort and cannot veto or rewrite the current request. ADR-0006 adds a
+   static host-selected budget to configuration; a per-result retention pin or
+   runtime callback would still require a separate synchronous policy seam with
+   an explicit rule for protected content that exceeds the budget.
 
 6. **Treat the event variants as a 0.22.0 API change.** Mentra 0.21.0 is already
    published, and both public event enums intentionally make exhaustive
@@ -68,7 +70,7 @@ provider-neutral message content after canonical history has been built.
 
 ## Consequences
 
-- A raw agent subscriber can log exactly which calls lost their bodies in each
+- A raw agent subscriber can log exactly which calls were reduced in each
   projected request. A session subscriber receives the same facts in the
   session event vocabulary.
 - `ContextCompacted`, `CompactionStarted`, and `CompactionCompleted` retain

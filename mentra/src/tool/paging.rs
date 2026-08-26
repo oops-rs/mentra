@@ -7,7 +7,7 @@
 //! The full text is retained separately (see [`PagedToolResults`]) so nothing
 //! is lost — paging never discards, it defers.
 //!
-//! Line numbers in every trailer are **absolute over the full result**, so a
+//! Line numbers in every trailer are **absolute over the retained result**, so a
 //! line the model quotes from window three means the same line it would have
 //! meant in an unpaged result.
 
@@ -31,7 +31,7 @@ pub(crate) struct ToolResultPager {
     page_bytes: usize,
 }
 
-/// One window of a full result, before the trailer is appended.
+/// One window of a retained result, before the trailer is appended.
 struct Window<'a> {
     text: &'a str,
     /// 1-based absolute line this window starts at; equals `last_line + 1`
@@ -166,12 +166,14 @@ impl ToolResultPager {
     }
 }
 
-/// Full texts of this agent's paged tool results, keyed by `tool_use_id`.
+/// Post-limiter texts of this live agent's paged tool results, keyed by
+/// `tool_use_id`.
 ///
 /// Entries are immutable once recorded and are only ever read back whole;
 /// the map lives for the life of the agent and is dropped with it. Nothing
-/// here is persisted: the pager serves the live run, and the transcript
-/// already records what the model actually saw.
+/// here is persisted: the pager serves later turns on the same live agent, and
+/// the transcript records only what the model actually saw. After resume, a
+/// persisted trailer has no retained target behind it.
 #[derive(Clone, Default)]
 pub(crate) struct PagedToolResults {
     entries: Arc<Mutex<HashMap<String, Arc<str>>>>,

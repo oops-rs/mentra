@@ -107,8 +107,10 @@ pub struct CompactionConfig {
     ///
     /// When set, this policy is used exclusively and
     /// `keep_recent_tool_results` is not consulted. `None` preserves the exact
-    /// legacy recent-count behavior. Budgeting adds no retrieval mechanism;
-    /// tool-result paging remains an independent, live-agent-only feature.
+    /// legacy recent-count behavior. Auto-compaction measures this same
+    /// budget-shaped main-request projection. Budgeting adds no retrieval
+    /// mechanism; tool-result paging remains an independent, live-agent-only
+    /// feature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projected_tool_result_budget: Option<ProjectedToolResultBudget>,
     /// The token count above which a run compacts, when the model's context
