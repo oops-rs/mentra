@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.23.0 / mentra-provider 0.7.0
+## 0.23.1 / mentra-provider 0.7.0
+
+### Runtime teardown releases background observer state
+
+- Agent background observers retain the runtime store directly instead of a
+  clone of their owning background-task manager. Dropping a spawned agent and
+  runtime now releases the manager, store, executor, hooks, and observer state
+  rather than keeping them alive through a strong-reference cycle.
+- A drop regression covers the ownership graph, while the existing background
+  and teammate-wakeup suites preserve notification behavior.
+- The `v0.23.0` tag was not published to crates.io after release preflight found
+  this lifecycle defect; the corrected runtime package starts at 0.23.1.
 
 ### Sessions expose complete lossless agent observation
 
@@ -28,7 +39,7 @@
 
 ### Release scope
 
-- Publish `mentra-provider` 0.7.0 first, then `mentra` 0.23.0 against it. Both
+- Publish `mentra-provider` 0.7.0 first, then `mentra` 0.23.1 against it. Both
   changes are additive public APIs; the minor versions state their new
   pre-1.0 compatibility boundaries.
 
