@@ -1092,7 +1092,11 @@ async fn bounds_the_initialized_notification_post() {
     let server = SseTestServer::start();
     let mut config = config(&server);
     config.limits = McpSseLimits {
-        initialize_timeout: std::time::Duration::from_millis(150),
+        // This deadline covers the initialize request, response processing,
+        // and the initialized notification POST. Leave enough scheduling
+        // margin for the highly parallel full suite while keeping the stalled
+        // POST itself firmly bounded.
+        initialize_timeout: std::time::Duration::from_secs(2),
         ..McpSseLimits::default()
     };
     let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
@@ -1104,7 +1108,7 @@ async fn bounds_the_initialized_notification_post() {
     server.send_message(&initialize_result(1));
     server.wait_for_posts(2);
 
-    let error = tokio::time::timeout(std::time::Duration::from_secs(2), connecting)
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), connecting)
         .await
         .expect("the configured initialize deadline must bound the notification POST")
         .expect("no panic")

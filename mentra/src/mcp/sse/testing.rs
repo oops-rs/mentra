@@ -180,7 +180,7 @@ impl SseTestServer {
             assert!(
                 !timeout.timed_out(),
                 "expected {count} POSTs, saw {}",
-                *lock.lock().expect("lock the post counter")
+                *seen
             );
         }
     }
@@ -197,7 +197,7 @@ impl SseTestServer {
             assert!(
                 !timeout.timed_out(),
                 "expected {count} POST response heads, saw {}",
-                *lock.lock().expect("lock the POST response-head counter")
+                *seen
             );
         }
     }
