@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.23.2
+
+### Agent event taps are ordered and quiescent
+
+- Concurrent agent-event emitters now share one serialized tap-and-broadcast
+  dispatch order. Tap callbacks cannot overlap or observe a different order
+  from the bounded broadcast channel.
+- Dropping `AgentEventTapGuard` waits for an invocation already in flight before
+  returning, then prevents every future invocation.
+- Callbacks remain synchronous and inline. They must not re-enter an
+  event-emitting operation on the same session or drop an event-tap guard from
+  inside a callback.
+- Focused concurrency regressions cover non-overlap, shared tap/broadcast order,
+  and quiescent guard removal.
+
 ## 0.23.1 / mentra-provider 0.7.0
 
 ### Runtime teardown releases background observer state
