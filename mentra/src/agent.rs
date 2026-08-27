@@ -129,11 +129,16 @@ struct AgentEventTapRegistry {
 
 /// Keeps one agent's synchronous event tap registered.
 ///
-/// Dropping it stops observation, so it must outlive the run being observed —
-/// binding it to `_` unregisters the tap immediately.
-#[must_use = "dropping the guard unregisters the agent event tap immediately"]
+/// Dropping it stops future observation and waits for any callback already in
+/// flight, so it must outlive the run being observed — binding it to `_` drops
+/// the guard before observation can continue.
+///
+/// Because drop waits, do not drop a guard while holding a lock or other
+/// resource that an in-flight callback needs.
+#[must_use = "dropping the guard unregisters the tap and may wait for an in-flight callback"]
 pub struct AgentEventTapGuard {
     registry: Arc<Mutex<AgentEventTapRegistry>>,
+    dispatch: Arc<Mutex<()>>,
     id: u64,
 }
 
@@ -141,6 +146,10 @@ pub struct AgentEventTapGuard {
 pub(crate) struct AgentEventBus {
     tx: broadcast::Sender<AgentEvent>,
     taps: Arc<Mutex<AgentEventTapRegistry>>,
+    /// Serializes tap callbacks and the matching broadcast send into one
+    /// occurrence order. Guard drop takes the same gate before unregistering,
+    /// making its return a quiescence boundary for already-started callbacks.
+    dispatch: Arc<Mutex<()>>,
 }
 
 impl AgentEventBus {
@@ -149,10 +158,15 @@ impl AgentEventBus {
         Self {
             tx,
             taps: Arc::new(Mutex::new(AgentEventTapRegistry::default())),
+            dispatch: Arc::new(Mutex::new(())),
         }
     }
 
     pub(crate) fn send(&self, event: AgentEvent) {
+        let _dispatch = self
+            .dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let taps = {
             let registry = self.taps.lock().expect("agent event tap registry poisoned");
             registry
@@ -181,6 +195,7 @@ impl AgentEventBus {
         registry.taps.push((id, Arc::new(tap)));
         AgentEventTapGuard {
             registry: Arc::clone(&self.taps),
+            dispatch: Arc::clone(&self.dispatch),
             id,
         }
     }
@@ -188,11 +203,27 @@ impl AgentEventBus {
 
 impl Drop for AgentEventTapGuard {
     fn drop(&mut self) {
-        let mut registry = self
-            .registry
-            .lock()
-            .expect("agent event tap registry poisoned");
-        registry.taps.retain(|(tap_id, _)| *tap_id != self.id);
+        let removed = {
+            let _dispatch = self
+                .dispatch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut registry = self
+                .registry
+                .lock()
+                .expect("agent event tap registry poisoned");
+            registry
+                .taps
+                .iter()
+                .position(|(tap_id, _)| *tap_id == self.id)
+                .map(|index| registry.taps.remove(index).1)
+        };
+
+        // A callback owns arbitrary user captures. Destroy them only after the
+        // dispatch and registry locks are released: a capture may contain a
+        // second guard for this same bus, and its destructor must be able to
+        // acquire both locks without recursing into them.
+        drop(removed);
     }
 }
 

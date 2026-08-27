@@ -1,4 +1,5 @@
 mod budgets;
+mod event_tap;
 mod pending;
 mod round_strategy;
 mod runtime;

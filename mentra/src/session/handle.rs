@@ -370,11 +370,14 @@ impl Session {
     /// The callback executes inline on the operation emitting the event. It
     /// must return promptly and must not block or panic: blocking stalls that
     /// operation, and a panic propagates through it because taps are not an
-    /// unwind boundary.
+    /// unwind boundary. It must not re-enter an event-emitting operation on
+    /// this session or drop an event-tap guard from inside a callback.
     ///
     /// Keep the returned [`AgentEventTapGuard`] alive for as long as observation
-    /// is required. Dropping it unregisters the callback; registration does not
-    /// replay events that happened earlier.
+    /// is required. Dropping it unregisters the callback and waits for any
+    /// invocation already in flight; registration does not replay events that
+    /// happened earlier. Do not drop it while holding a lock or other resource
+    /// that an in-flight callback needs.
     pub fn register_agent_event_tap(
         &self,
         tap: impl Fn(&AgentEvent) + Send + Sync + 'static,
