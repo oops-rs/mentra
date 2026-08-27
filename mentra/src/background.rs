@@ -205,13 +205,6 @@ impl BackgroundTaskManager {
             .unwrap_or_default()
     }
 
-    pub(crate) fn has_pending_notifications(&self, agent_id: &str) -> bool {
-        self.inner
-            .store
-            .has_pending_background_notifications(agent_id)
-            .unwrap_or(false)
-    }
-
     pub(crate) fn has_deliverable_notifications(&self, agent_id: &str) -> bool {
         self.inner
             .store

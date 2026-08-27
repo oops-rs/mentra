@@ -54,7 +54,7 @@ impl TeamObserverSink for AgentTeamObserver {
 }
 
 struct AgentBackgroundObserver {
-    background_tasks: crate::background::BackgroundTaskManager,
+    store: Arc<dyn crate::runtime::RuntimeStore>,
     team: crate::team::TeamManager,
     agent_id: String,
     team_dir: PathBuf,
@@ -67,14 +67,14 @@ struct AgentBackgroundObserver {
 
 impl AgentBackgroundObserver {
     fn new(
-        background_tasks: crate::background::BackgroundTaskManager,
+        store: Arc<dyn crate::runtime::RuntimeStore>,
         team: crate::team::TeamManager,
         agent_id: String,
         config: &AgentExecutionConfig,
         observer: &AgentObserver,
     ) -> Self {
         Self {
-            background_tasks,
+            store,
             team,
             agent_id,
             team_dir: config.team_dir.clone(),
@@ -96,8 +96,9 @@ impl BackgroundObserverSink for AgentBackgroundObserver {
         self.snapshot_tx.send_replace(next_snapshot);
         if self.is_teammate
             && self
-                .background_tasks
-                .has_pending_notifications(&self.agent_id)
+                .store
+                .has_pending_background_notifications(&self.agent_id)
+                .unwrap_or(false)
         {
             let _ = self
                 .team
@@ -131,7 +132,7 @@ impl RuntimeHandle {
             .register_agent(BackgroundRegistration {
                 agent_id: agent_id.to_string(),
                 observer: Arc::new(AgentBackgroundObserver::new(
-                    self.collaboration.background_tasks.clone(),
+                    self.persistence.store.clone(),
                     self.collaboration.team.clone(),
                     agent_id.to_string(),
                     &config,
@@ -181,5 +182,56 @@ impl RuntimeHandle {
             .get(agent_id)
             .cloned()
             .ok_or_else(|| format!("Unknown agent '{agent_id}'"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct StubProvider;
+
+    #[async_trait]
+    impl crate::provider::Provider for StubProvider {
+        fn descriptor(&self) -> crate::provider::ProviderDescriptor {
+            crate::provider::ProviderDescriptor::new(crate::BuiltinProvider::OpenAI)
+        }
+
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<crate::ModelInfo>, crate::provider::ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn stream(
+            &self,
+            _request: crate::provider::Request<'_>,
+        ) -> Result<crate::provider::ProviderEventStream, crate::provider::ProviderError> {
+            unreachable!("no turn is run in this test")
+        }
+    }
+
+    #[test]
+    fn dropping_spawned_agent_and_runtime_releases_background_store() {
+        let store: Arc<dyn crate::runtime::RuntimeStore> =
+            Arc::new(crate::runtime::VolatileRuntimeStore::new());
+        let weak_store = Arc::downgrade(&store);
+        let model = crate::ModelInfo::new("model", crate::BuiltinProvider::OpenAI);
+        let runtime = crate::Runtime::empty_builder()
+            .with_shared_store(Arc::clone(&store))
+            .with_provider_instance(StubProvider)
+            .build()
+            .expect("build runtime");
+        drop(store);
+
+        let agent = runtime.spawn("agent", model).expect("spawn agent");
+        drop(agent);
+        drop(runtime);
+
+        assert!(
+            weak_store.upgrade().is_none(),
+            "agent registration must not keep its background manager and store alive"
+        );
     }
 }
