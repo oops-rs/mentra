@@ -2,11 +2,14 @@
 
 ## 0.23.3
 
-### MCP SSE fixture synchronization is deterministic
+### Release fixtures are deterministic across platforms
 
 - The local SSE fixture now records a POST before notifying tests that the
   request was captured, so concurrent-call assertions cannot observe the
   counter ahead of the request log under load.
+- The background-completion ordering fixture now uses distinct whole-second
+  delays on Windows, matching the resolution of its `ping`-based test command
+  instead of collapsing both tasks onto the same delay.
 - The `v0.23.2` tag was not published to crates.io after its exact-tag
   no-default-features CI exposed this fixture race.
 
