@@ -13,6 +13,7 @@ use std::{
 use async_trait::async_trait;
 use mentra::{
     Agent, BuiltinProvider, ContentBlock, FileToolProfile, ModelInfo, ModelSelector, Runtime,
+    agent::{AgentEvent, AgentEventTapGuard},
     error::RuntimeError,
     provider::{
         Provider, ProviderDescriptor, ProviderError, ProviderEventStream, ProviderId, Request,
@@ -293,6 +294,54 @@ async fn send_returns_final_message_after_tool_execution() {
     assert_eq!(message.role, Role::Assistant);
     assert_eq!(message.text(), "done");
     assert_eq!(harness.recorded_requests().await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_session_exposes_the_lossless_agent_event_tap_to_embedders() {
+    let harness = Harness::new(vec![
+        Turn::ToolCalls(vec![ScriptedToolCall::new("echo_tool", json!({}))]),
+        Turn::Text("done".to_string()),
+    ]);
+    harness.runtime.register_tool(EchoTool);
+    let mut session = harness
+        .runtime
+        .create_session("observed-session", harness.model.clone())
+        .expect("create observed session");
+    let observed = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+    let observed_for_tap = Arc::clone(&observed);
+
+    // Spelling the guard type here proves both sides of the embedding API are
+    // nameable from a downstream crate rather than only from mentra itself.
+    let tap: AgentEventTapGuard = session.register_agent_event_tap(move |event| {
+        observed_for_tap
+            .lock()
+            .expect("agent event observation log poisoned")
+            .push(event.clone());
+    });
+
+    let message = session
+        .append_turn(vec![ContentBlock::text("run the tool")])
+        .await
+        .expect("observed session completes");
+    assert_eq!(message.text(), "done");
+
+    let events = observed
+        .lock()
+        .expect("agent event observation log poisoned");
+    assert!(matches!(events.first(), Some(AgentEvent::RunStarted)));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionFinished {
+            result: ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error: false,
+            },
+        } if tool_use_id == "tool-1" && content.to_display_string() == "echoed"
+    )));
+    assert!(matches!(events.last(), Some(AgentEvent::RunFinished)));
+    drop(events);
+    drop(tap);
 }
 
 #[tokio::test]

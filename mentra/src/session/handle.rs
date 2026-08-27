@@ -358,6 +358,30 @@ impl Session {
         self.event_tx.subscribe()
     }
 
+    /// Registers a lossless in-process observer for this session's agent events.
+    ///
+    /// The callback runs synchronously for every [`AgentEvent`] in occurrence
+    /// order, before the event is offered to the agent's bounded broadcast
+    /// channel. It therefore does not lag or drop events when a broadcast
+    /// receiver falls behind, and it sees complete provider-neutral tool call
+    /// and result payloads that the UI-oriented [`SessionEvent`] stream may
+    /// summarize.
+    ///
+    /// The callback executes inline on the operation emitting the event. It
+    /// must return promptly and must not block or panic: blocking stalls that
+    /// operation, and a panic propagates through it because taps are not an
+    /// unwind boundary.
+    ///
+    /// Keep the returned [`AgentEventTapGuard`] alive for as long as observation
+    /// is required. Dropping it unregisters the callback; registration does not
+    /// replay events that happened earlier.
+    pub fn register_agent_event_tap(
+        &self,
+        tap: impl Fn(&AgentEvent) + Send + Sync + 'static,
+    ) -> AgentEventTapGuard {
+        self.agent.register_event_tap(tap)
+    }
+
     pub fn permission_handle(&self) -> SessionPermissionHandle {
         self.permission_handle.clone()
     }
