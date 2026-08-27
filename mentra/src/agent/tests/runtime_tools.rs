@@ -2088,8 +2088,15 @@ async fn set_reasoning_updates_the_configured_reasoning_for_future_turns() {
 
 #[tokio::test]
 async fn completed_background_results_are_batched_in_completion_order() {
-    let first_command = background_success_command("first", 20);
-    let second_command = background_success_command("second", 50);
+    // The Windows fixture implements delays with `ping`, whose resolution is
+    // one second. Keep the fast millisecond separation on Unix, but cross a
+    // full tick on Windows so the test actually establishes an order there.
+    #[cfg(unix)]
+    let (first_delay_ms, second_delay_ms) = (20, 50);
+    #[cfg(windows)]
+    let (first_delay_ms, second_delay_ms) = (0, 1_000);
+    let first_command = background_success_command("first", first_delay_ms);
+    let second_command = background_success_command("second", second_delay_ms);
     let first_input = command_input_json(&first_command);
     let second_input = command_input_json(&second_command);
     let model = model_info("model", BuiltinProvider::Anthropic);
