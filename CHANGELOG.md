@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.23.0 / mentra-provider 0.7.0
+
+### Sessions expose complete lossless agent observation
+
+- `Session::register_agent_event_tap` installs a synchronous in-process tap
+  over the complete ordered `AgentEvent` stream. Unlike the bounded broadcast
+  channel, it cannot lag or drop events while the callback returns normally.
+- The tap observes complete tool inputs/results, usage, retry, cancellation,
+  and terminal facts. A completed parallel sibling result is delivered before
+  a later cancellation even when post-execution hooks never run.
+- Registration returns an `AgentEventTapGuard`; dropping the guard removes the
+  callback. The existing session event/broadcast and serialized wire surfaces
+  are unchanged.
+
+### Responses providers can mint isolated session scopes
+
+- `ResponsesProvider::fresh_session_scope` retains the provider definition,
+  credential source, HTTP client/connection pool, endpoint capability cache,
+  and configured transport posture while allocating new response-chain,
+  turn-affinity, WebSocket, and in-flight session state.
+- Ordinary `Clone` deliberately keeps its existing shared-session semantics.
+  The fresh-scope API is the explicit lifecycle seam for a host that consumes
+  old run state and rebuilds a reusable entry.
+- Focused HTTP and WebSocket probes cover A/B response-chain isolation, late
+  old-scope completion, connection reuse, and prewarm confinement.
+
+### Release scope
+
+- Publish `mentra-provider` 0.7.0 first, then `mentra` 0.23.0 against it. Both
+  changes are additive public APIs; the minor versions state their new
+  pre-1.0 compatibility boundaries.
+
 ## 0.22.0
 
 ### Projected tool results can be observed and hard-bounded
