@@ -261,17 +261,18 @@ fn serve_connection(
 ) {
     while let Some(request) = read_request(&mut stream) {
         let is_stream_request = request.method == "GET";
+        shared
+            .requests
+            .lock()
+            .expect("lock the request log")
+            .push(request);
+
         if !is_stream_request {
             let (lock, condvar) = &shared.posts_seen;
             let mut seen = lock.lock().expect("lock the post counter");
             *seen += 1;
             condvar.notify_all();
         }
-        shared
-            .requests
-            .lock()
-            .expect("lock the request log")
-            .push(request);
 
         if is_stream_request {
             serve_stream(&mut stream, &shared, &commands, &opening);
