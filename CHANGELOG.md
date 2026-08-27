@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.23.3
+
+### MCP SSE fixture synchronization is deterministic
+
+- The local SSE fixture now records a POST before notifying tests that the
+  request was captured, so concurrent-call assertions cannot observe the
+  counter ahead of the request log under load.
+- The `v0.23.2` tag was not published to crates.io after its exact-tag
+  no-default-features CI exposed this fixture race.
+
 ## 0.23.2
 
 ### Agent event taps are ordered and quiescent
