@@ -125,6 +125,24 @@ where
         self
     }
 
+    /// Returns the same configured provider with an independent session scope.
+    ///
+    /// The provider definition, credential source, HTTP client and its connection pool, and
+    /// endpoint capability knowledge are retained. Response chaining, turn affinity, WebSocket
+    /// connections, and in-flight session state start empty. Clone this returned value when a
+    /// runtime and its prewarm handle must share the newly allocated scope; ordinary [`Clone`]
+    /// continues to share the current scope.
+    pub fn fresh_session_scope(&self) -> Self {
+        Self {
+            definition: self.definition.clone(),
+            credential_source: Arc::clone(&self.credential_source),
+            client: self.client.clone(),
+            session_state: Arc::new(ResponsesSessionState::default()),
+            endpoint_capabilities: Arc::clone(&self.endpoint_capabilities),
+            hybrid_http_previous_response_id: self.hybrid_http_previous_response_id,
+        }
+    }
+
     pub fn session(&self) -> ResponsesSession<C> {
         ResponsesSession::new(
             self.definition.clone(),
@@ -357,5 +375,51 @@ mod tests {
 
         assert!(original.hybrid_http_previous_response_id);
         assert!(!disabled.hybrid_http_previous_response_id);
+    }
+
+    #[test]
+    fn clone_keeps_the_existing_shared_session_scope() {
+        let provider = openai("test-key");
+        let clone = provider.clone();
+
+        assert!(Arc::ptr_eq(&provider.session_state, &clone.session_state));
+        assert!(Arc::ptr_eq(
+            &provider.endpoint_capabilities,
+            &clone.endpoint_capabilities
+        ));
+        assert!(Arc::ptr_eq(
+            &provider.credential_source,
+            &clone.credential_source
+        ));
+    }
+
+    #[test]
+    fn fresh_scope_preserves_provider_configuration_and_splits_only_session_state() {
+        let mut definition = openai_definition();
+        definition.descriptor.id = ProviderId::new("custom-responses");
+        definition.base_url = Some("https://example.test/custom/".to_string());
+        definition
+            .headers
+            .get_or_insert_default()
+            .insert("x-provider-config".to_string(), "preserved".to_string());
+        let provider = ResponsesProvider::with_shared_credential_source(
+            definition.clone(),
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .without_hybrid_http_previous_response_id();
+
+        let fresh = provider.fresh_session_scope();
+
+        assert_eq!(fresh.definition, definition);
+        assert!(Arc::ptr_eq(
+            &provider.credential_source,
+            &fresh.credential_source
+        ));
+        assert!(!Arc::ptr_eq(&provider.session_state, &fresh.session_state));
+        assert!(Arc::ptr_eq(
+            &provider.endpoint_capabilities,
+            &fresh.endpoint_capabilities
+        ));
+        assert!(!fresh.hybrid_http_previous_response_id);
     }
 }
