@@ -41,6 +41,7 @@ pub struct MockToolCall {
     id: Option<String>,
     name: String,
     input: Value,
+    terminal_output: bool,
 }
 
 impl MockToolCall {
@@ -49,6 +50,20 @@ impl MockToolCall {
             id: None,
             name: name.into(),
             input,
+            terminal_output: false,
+        }
+    }
+
+    /// Call the generated terminal output tool reserved by the run.
+    ///
+    /// Its provider-visible name is intentionally generated per reservation,
+    /// so a scripted test names the role rather than guessing that name.
+    pub fn terminal_output(input: Value) -> Self {
+        Self {
+            id: None,
+            name: String::new(),
+            input,
+            terminal_output: true,
         }
     }
 
@@ -316,6 +331,11 @@ impl Provider for ScriptedProvider {
     }
 
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let terminal_output_tool = request
+            .tools
+            .iter()
+            .find(|tool| tool.name.starts_with("mentra_terminal_"))
+            .map(|tool| tool.name.clone());
         self.requests
             .lock()
             .expect("mock request log poisoned")
@@ -351,7 +371,13 @@ impl Provider for ScriptedProvider {
                         .enumerate()
                         .map(|(index, call)| ContentBlock::ToolUse {
                             id: call.id.unwrap_or_else(|| format!("tool-{}", index + 1)),
-                            name: call.name,
+                            name: if call.terminal_output {
+                                terminal_output_tool
+                                    .clone()
+                                    .expect("mock terminal output requires a reserved output tool")
+                            } else {
+                                call.name
+                            },
                             input: call.input,
                         })
                         .collect(),
@@ -514,6 +540,40 @@ mod tests {
 
         assert_eq!(message.text(), "done");
         assert_eq!(mock.recorded_requests().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mock_runtime_resolves_a_reserved_terminal_output_name() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Verdict {
+            verdict: String,
+        }
+
+        let mock = MockRuntime::builder()
+            .tool_calls([MockToolCall::terminal_output(json!({ "verdict": "ship" }))])
+            .build()
+            .unwrap();
+        let mut agent = spawn_agent(&mock).await;
+        let output = agent
+            .run_to_reserved_output::<Verdict, _>(
+                vec![ContentBlock::text("decide")],
+                crate::runtime::RunOptions::default(),
+                crate::TerminalOutputSpec::new(
+                    "verdict",
+                    "submit the verdict",
+                    json!({
+                        "type": "object",
+                        "properties": { "verdict": { "type": "string" } },
+                        "required": ["verdict"]
+                    }),
+                )
+                .reserve(),
+                |value| crate::TerminalOutputDecision::Accept(value.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.value.verdict, "ship");
     }
 
     #[tokio::test]
