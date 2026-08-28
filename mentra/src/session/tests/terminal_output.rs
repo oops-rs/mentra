@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 use crate::{
     BuiltinProvider, ContentBlock, ModelInfo, Provider, ProviderDescriptor, ProviderError,
-    ProviderEventStream, Request, Role, Runtime, TerminalOutputSpec, ToolChoice,
+    ProviderEventStream, Request, Role, Runtime, TerminalOutputDecision, TerminalOutputSpec,
+    ToolChoice,
     provider::Response,
     provider_event_stream_from_response,
     runtime::RunOptions,
@@ -154,6 +155,40 @@ fn report_spec() -> TerminalOutputSpec {
 
 fn drain(rx: &mut crate::session::SessionEventReceiver) -> Vec<SessionEvent> {
     std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+#[tokio::test]
+async fn a_session_reserved_output_rejects_then_returns_the_accepted_value() {
+    let provider = ForcedToolProvider::answering(json!({ "answer": 1, "evidence": [] }));
+    let calls = Arc::clone(&provider.calls);
+    let (_runtime, mut session) = session_for(provider);
+    let decisions = Arc::new(AtomicUsize::new(0));
+    let decisions_for_validator = Arc::clone(&decisions);
+
+    let output = session
+        .append_turn_to_reserved_output::<Report, _>(
+            vec![
+                ContentBlock::text("produce the report"),
+                ContentBlock::text("preserve multipart ordering"),
+            ],
+            RunOptions::default(),
+            report_spec().reserve(),
+            move |_| {
+                if decisions_for_validator.fetch_add(1, Ordering::SeqCst) == 0 {
+                    TerminalOutputDecision::Reject("the first report is provisional".to_string())
+                } else {
+                    TerminalOutputDecision::Accept(json!({ "answer": 2, "evidence": ["accepted"] }))
+                }
+            },
+        )
+        .await
+        .expect("the corrected report succeeds");
+
+    assert_eq!(output.value.answer, 2);
+    assert_eq!(output.value.evidence, vec!["accepted"]);
+    assert_eq!(decisions.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(session.metadata().turn_count, 1);
 }
 
 fn position(

@@ -8,7 +8,7 @@ use crate::{
     AgentTranscript, ContentBlock, Message, Role,
     agent::{
         Agent, AgentEvent, AgentEventTapGuard, DisposableSubagentTemplate, FinalOutput,
-        TerminalOutputSpec,
+        TerminalOutputDecision, TerminalOutputReservation, TerminalOutputSpec,
     },
     error::RuntimeError,
     runtime::{PermissionRuleStore, RunOptions, is_transient_runtime_error},
@@ -467,6 +467,29 @@ impl Session {
 
         let turn = self.begin_turn();
         let result = self.agent.run_to_output::<T>(content, options, spec).await;
+        self.finish_turn(turn, result)
+    }
+
+    /// Submits a multipart turn whose reserved output is validated before the
+    /// generated tool may terminate it.
+    pub async fn append_turn_to_reserved_output<T, V>(
+        &mut self,
+        content: Vec<ContentBlock>,
+        options: RunOptions,
+        reservation: TerminalOutputReservation,
+        validator: V,
+    ) -> Result<FinalOutput<T>, RuntimeError>
+    where
+        T: DeserializeOwned,
+        V: Fn(&serde_json::Value) -> TerminalOutputDecision + Send + Sync + 'static,
+    {
+        self.emit(user_message_event(&content));
+
+        let turn = self.begin_turn();
+        let result = self
+            .agent
+            .run_to_reserved_output::<T, V>(content, options, reservation, validator)
+            .await;
         self.finish_turn(turn, result)
     }
 

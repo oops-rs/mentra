@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentConfig, BuiltinProvider, ContentBlock, ModelInfo, Provider, ProviderDescriptor,
-    ProviderError, ProviderEventStream, Request, Role, Runtime, TerminalOutputSpec, TokenUsage,
+    ProviderError, ProviderEventStream, Request, Role, Runtime, TerminalOutputDecision,
+    TerminalOutputSpec, TokenUsage,
     error::RuntimeError,
     provider::{Response, ToolChoice},
     provider_event_stream_from_response,
@@ -196,6 +197,74 @@ fn review_spec() -> TerminalOutputSpec {
 
 fn hold() -> Value {
     json!({ "verdict": "hold" })
+}
+
+#[tokio::test]
+async fn a_reserved_output_rejects_then_accepts_a_transformed_value() {
+    let provider = ScriptedModel::new(vec![
+        Round::new(vec![Say::Answer {
+            id: "draft-1",
+            input: json!({ "verdict": "draft" }),
+        }]),
+        Round::new(vec![Say::Answer {
+            id: "answer-1",
+            input: hold(),
+        }]),
+    ]);
+    let handle = provider.clone();
+    let model = provider.model.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("reviewer", model).expect("spawn agent");
+    let reservation = review_spec().reserve();
+    let terminal_name = reservation.tool_name().to_string();
+    let attempts = Arc::new(Mutex::new(0usize));
+    let attempts_for_validator = Arc::clone(&attempts);
+
+    let output = agent
+        .run_to_reserved_output::<Review, _>(
+            vec![ContentBlock::text("submit a validated review")],
+            RunOptions::default(),
+            reservation,
+            move |candidate| {
+                let mut attempts = attempts_for_validator
+                    .lock()
+                    .expect("attempt counter poisoned");
+                *attempts += 1;
+                assert_eq!(
+                    candidate["verdict"],
+                    if *attempts == 1 { "draft" } else { "hold" }
+                );
+                if *attempts == 1 {
+                    TerminalOutputDecision::Reject("draft verdict is not final".to_string())
+                } else {
+                    TerminalOutputDecision::Accept(json!({ "verdict": "ship" }))
+                }
+            },
+        )
+        .await
+        .expect("the corrected output is accepted");
+
+    assert_eq!(
+        output.value.verdict, "ship",
+        "the accepted value is validator-owned"
+    );
+    assert_eq!(*attempts.lock().expect("attempt counter poisoned"), 2);
+    let offers = handle.offers();
+    assert_eq!(offers.len(), 2, "a rejection stays inside the same run");
+    assert!(
+        offers
+            .iter()
+            .all(|offer| offer.tools.contains(&terminal_name)),
+        "the reservation exposes the exact generated tool used by every round"
+    );
+    assert!(agent.history().iter().any(|message| {
+        last_results(message).iter().any(|(id, text, is_error)| {
+            id == "draft-1" && *is_error && text.contains("draft verdict is not final")
+        })
+    }));
 }
 
 /// An agent that forces one ordinary tool of its own, so a test can tell a

@@ -63,7 +63,9 @@ use runner::TurnRunner;
 pub use steering::{QueueMode, SteeringHandle};
 pub use subagent::DisposableSubagentTemplate;
 use terminal_output::TerminalToolGate;
-pub use terminal_output::{FinalOutput, TerminalOutputSpec};
+pub use terminal_output::{
+    FinalOutput, TerminalOutputDecision, TerminalOutputReservation, TerminalOutputSpec,
+};
 pub use wait::{AgentWaitFuture, AgentWaitHandle};
 
 static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
