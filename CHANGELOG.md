@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.23.4
+
+### Hosts can validate reserved terminal output in-run
+
+- `TerminalOutputSpec::reserve` exposes the exact generated scoped tool name
+  before execution without registering it early.
+- `Agent::run_to_reserved_output` and the matching session method accept or
+  reject candidate JSON before termination. A rejection is an ordinary tool
+  error, so the same bounded run can correct it without a second runtime path.
+- An accepted value may be normalized by the host and is correlated by its
+  exact tool-call id. Existing typed-output methods and naming remain
+  unchanged.
+
 ## 0.23.3
 
 ### Release fixtures are deterministic across platforms
