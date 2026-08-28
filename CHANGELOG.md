@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.5
+
+### Scripted runtimes can target reserved output
+
+- `MockToolCall::terminal_output` resolves the generated scoped terminal tool
+  from the provider request, so host tests exercise reserved output without a
+  copied provider/runtime fixture or a guessed generated name.
+
 ## 0.23.4
 
 ### Hosts can validate reserved terminal output in-run
