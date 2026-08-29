@@ -11,8 +11,10 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::ChildStdin;
 use tokio::sync::{Mutex, oneshot};
+
+use crate::process::{BoundedChild, BoundedCommand, baseline_environment};
 
 use super::protocol::*;
 
@@ -33,6 +35,15 @@ const MAX_TOOL_PAGES: usize = 1_000;
 /// The page cap bounds the round trips; nothing bounded the list they
 /// accumulate into. Well past what any real server exposes.
 const MAX_TOOLS: usize = 4_096;
+
+/// Maximum bytes accepted for one newline-delimited JSON-RPC frame from a
+/// stdio server. The reader enforces this before parsing, so malformed or
+/// hostile output cannot make one allocation grow without bound.
+const MAX_SERVER_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Stderr is diagnostic output rather than protocol data; drain it forever but
+/// retain only a bounded head/tail for the lifetime of the client.
+const MAX_SERVER_STDERR_BYTES: usize = 2 * 1024;
 
 /// Errors from the MCP stdio client.
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +87,7 @@ type PendingMap = HashMap<u64, oneshot::Sender<Result<JsonValue, McpClientError>
 /// A running MCP stdio client connected to one server process.
 pub struct McpStdioClient {
     stdin: Mutex<ChildStdin>,
-    _child: Mutex<Child>,
+    child: Arc<Mutex<BoundedChild>>,
     next_id: AtomicU64,
     pending: Arc<Mutex<PendingMap>>,
     server_info: Option<McpServerInfo>,
@@ -86,38 +97,67 @@ pub struct McpStdioClient {
 
 impl McpStdioClient {
     /// Spawn the MCP server process and perform the `initialize` handshake.
+    ///
+    /// The process starts with an empty environment, then receives the
+    /// cross-platform runnable baseline and the variables in `config.env`.
+    /// On Unix the baseline is `PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`,
+    /// and `LC_ALL`; on Windows it is `PATH`, `PATHEXT`, `SystemRoot`,
+    /// `COMSPEC`, `TEMP`, and `TMP`. A `.mcp.json` author must name every
+    /// other variable explicitly. The server runs in its own host process
+    /// session/tree and is terminated as a unit when this client is dropped or
+    /// shut down; this is process hygiene, not a sandbox or confinement
+    /// boundary.
     pub async fn connect(config: &McpServerConfig) -> Result<Self, McpClientError> {
-        let mut cmd = Command::new(&config.command);
-        cmd.args(&config.args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-
-        for (key, value) in &config.env {
-            cmd.env(key, value);
-        }
+        let overrides: Vec<_> = config
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let baseline = baseline_environment()
+            .into_iter()
+            .filter(|(key, _)| !config.env.contains_key(&key.to_string_lossy().into_owned()));
+        let command = BoundedCommand::new(
+            &config.command,
+            Duration::from_secs(0),
+            MAX_SERVER_MESSAGE_BYTES,
+        )
+        .args(&config.args)
+        .envs(baseline)
+        .envs(overrides)
+        .max_stderr_bytes(MAX_SERVER_STDERR_BYTES);
         if let Some(cwd) = &config.cwd {
-            cmd.current_dir(cwd);
+            let command = command.current_dir(cwd);
+            return Self::connect_with_command(command, config).await;
         }
 
-        let mut child = cmd.spawn()?;
+        Self::connect_with_command(command, config).await
+    }
 
-        let stdin = child.stdin.take().ok_or(McpClientError::NoStdin)?;
-        let stdout = child.stdout.take().ok_or(McpClientError::NoStdout)?;
+    async fn connect_with_command(
+        command: BoundedCommand,
+        config: &McpServerConfig,
+    ) -> Result<Self, McpClientError> {
+        let mut child = command.spawn_piped()?;
+
+        let stdin = child.take_stdin().ok_or(McpClientError::NoStdin)?;
+        let stdout = child.take_stdout().ok_or(McpClientError::NoStdout)?;
+        let child = Arc::new(Mutex::new(child));
 
         let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
 
         // Spawn the reader task that routes responses to pending callers.
         let pending_clone = pending.clone();
+        let child_weak = Arc::downgrade(&child);
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
             loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
+                let line = match read_bounded_line(&mut reader, MAX_SERVER_MESSAGE_BYTES).await {
+                    Ok(Some(line)) => line,
+                    Ok(None) | Err(_) => break,
+                };
+                let Ok(line) = String::from_utf8(line) else {
+                    break;
+                };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -145,6 +185,16 @@ impl McpStdioClient {
                     }
                 }
             }
+
+            // EOF, an I/O error, an oversized frame, or invalid UTF-8 makes
+            // this protocol stream unusable. A strong child owner remains in
+            // the client, while this task holds only a Weak reference so it
+            // cannot keep the process alive after the client is dropped.
+            if let Some(child) = child_weak.upgrade() {
+                let mut child = child.lock().await;
+                drop(child.terminate().await);
+            }
+
             // When the reader exits, signal all pending callers.
             let mut pending = pending_clone.lock().await;
             for (_, tx) in pending.drain() {
@@ -154,7 +204,7 @@ impl McpStdioClient {
 
         let mut client = Self {
             stdin: Mutex::new(stdin),
-            _child: Mutex::new(child),
+            child,
             next_id: AtomicU64::new(1),
             pending,
             server_info: None,
@@ -360,16 +410,59 @@ impl McpStdioClient {
         self.pending.lock().await.len()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn drains_stderr(&self) -> bool {
+        self.child.lock().await.drains_stderr()
+    }
+
     /// Shut down the MCP server process gracefully.
     pub async fn shutdown(&self) {
         // Best-effort: drop stdin to signal the child.
         let mut stdin = self.stdin.lock().await;
         drop(stdin.shutdown().await);
+        drop(stdin);
+
+        // Closing stdin lets a cooperative server finish; terminating the
+        // supervised child also handles a server (or descendant) that ignores
+        // EOF. The process wrapper kills the whole session/tree.
+        let mut child = self.child.lock().await;
+        drop(child.terminate().await);
     }
 }
 
-impl Drop for McpStdioClient {
-    fn drop(&mut self) {
-        // The child process will be killed when the Child handle is dropped.
+/// Reads one newline-delimited frame while retaining at most `limit` bytes.
+/// The caller can then drop the client and kill its process tree instead of
+/// attempting to recover a protocol stream whose framing is no longer
+/// trustworthy.
+async fn read_bounded_line<R>(reader: &mut R, limit: usize) -> std::io::Result<Option<Vec<u8>>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut line = Vec::with_capacity(limit.min(8192));
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(line))
+            };
+        }
+
+        let (take, has_newline) = match chunk.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (index + 1, true),
+            None => (chunk.len(), false),
+        };
+        if line.len().saturating_add(take) > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "MCP stdio frame exceeded its byte limit",
+            ));
+        }
+        line.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if has_newline {
+            return Ok(Some(line));
+        }
     }
 }

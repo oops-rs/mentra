@@ -1,6 +1,6 @@
 use std::{
     ffi::{OsStr, OsString},
-    io,
+    fmt, io,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -11,7 +11,7 @@ use std::process::Command as StdCommand;
 
 use tokio::{
     io::AsyncWriteExt,
-    process::{Child, Command},
+    process::{Child, ChildStdin, ChildStdout, Command},
     task::JoinHandle,
     time::Instant,
 };
@@ -84,7 +84,7 @@ impl Completion {
     }
 }
 
-/// Runs another program under the confinement mentra applies to its own
+/// Runs another program under the process discipline mentra applies to its own
 /// commands.
 ///
 /// The guarantees a caller gets, all of them enforced by
@@ -94,7 +94,7 @@ impl Completion {
 ///   cleared before the pairs given to [`env`](Self::env) / [`envs`](Self::envs)
 ///   are set, so nothing this process happens to be holding — a token, a proxy
 ///   setting, a `PATH` — reaches the program unless the caller listed it.
-/// - **The process tree is confined and killed as a unit.** On unix the child
+/// - **The process tree is grouped and killed as a unit.** On unix the child
 ///   is put in its own session with `setsid`, and the deadline kills the whole
 ///   group; a program that backgrounds work cannot leave it running. On Windows
 ///   the tree is killed with `taskkill /T /F`.
@@ -102,7 +102,7 @@ impl Completion {
 ///   inherits the pipes cannot hold a caller past the deadline: output still
 ///   arriving then is a [`Completion::TimedOut`], not a wait.
 /// - **Output is capped while it is read.** Neither stream can cost more than
-///   `max_output_bytes_per_stream`, however much the program prints, and both
+///   the configured stdout/stderr cap, however much the program prints, and both
 ///   are still drained so the program is never blocked on a full pipe.
 /// - **A dropped run kills the child.** The command is spawned with
 ///   `kill_on_drop`, so a cancelled future does not leak a process.
@@ -139,7 +139,130 @@ pub struct BoundedCommand {
     env: Vec<(OsString, OsString)>,
     stdin: Option<Vec<u8>>,
     timeout: Duration,
-    max_output_bytes_per_stream: usize,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+}
+
+/// The small environment baseline used by interactive host-owned processes.
+///
+/// `BoundedCommand` itself always starts from an empty environment and callers
+/// choose which names to add. MCP stdio uses this shared baseline so its bare
+/// command lookup and ordinary language runtimes keep working without
+/// receiving ambient credentials or shell state.
+#[cfg(not(windows))]
+const BASELINE_ENVIRONMENT: &[&str] = &["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"];
+
+#[cfg(windows)]
+const BASELINE_ENVIRONMENT: &[&str] = &["PATH", "PATHEXT", "SystemRoot", "COMSPEC", "TEMP", "TMP"];
+
+pub(crate) fn baseline_environment() -> Vec<(OsString, OsString)> {
+    BASELINE_ENVIRONMENT
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
+        .collect()
+}
+
+/// A child started with the process discipline, kept alive for a bidirectional
+/// protocol such as MCP rather than consumed by [`BoundedCommand::run`].
+pub(crate) struct BoundedChild {
+    child: Child,
+    group: Option<u32>,
+    stderr_task: Option<JoinHandle<io::Result<CapturedStream>>>,
+    armed: bool,
+}
+
+impl BoundedChild {
+    pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    /// Terminates the process group and waits briefly for the direct child.
+    pub(crate) async fn terminate(&mut self) -> io::Result<()> {
+        if self.armed {
+            kill_tree_and_reap(&mut self.child, self.group).await?;
+            self.armed = false;
+        }
+        self.abort_stderr_reader();
+        Ok(())
+    }
+
+    fn abort_stderr_reader(&mut self) {
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+        }
+    }
+
+    /// Whether the stderr reader is still installed for this child.
+    ///
+    /// Only exposed to crate tests: the observable contract is that a server
+    /// cannot block on a full stderr pipe, not the task representation.
+    #[cfg(test)]
+    pub(crate) fn drains_stderr(&self) -> bool {
+        self.stderr_task.is_some()
+    }
+}
+
+impl Drop for BoundedChild {
+    fn drop(&mut self) {
+        if self.armed {
+            // Drop cannot await, but the group signal is synchronous. The
+            // Child's `kill_on_drop` flag covers the direct process as well;
+            // this extra group signal is what prevents descendants surviving a
+            // disconnected protocol client.
+            let _ = kill_entire_process_tree(&mut self.child, self.group);
+            self.armed = false;
+        }
+        self.abort_stderr_reader();
+    }
+}
+
+impl fmt::Debug for BoundedCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let env_names = self
+            .env
+            .iter()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        f.debug_struct("BoundedCommand")
+            .field("program", &self.program)
+            .field("arg_count", &self.args.len())
+            .field("current_dir", &self.current_dir)
+            .field("env_names", &env_names)
+            .field("stdin_bytes", &self.stdin.as_ref().map(Vec::len))
+            .field("timeout", &self.timeout)
+            .field("stdout_max_bytes", &self.max_stdout_bytes)
+            .field("stderr_max_bytes", &self.max_stderr_bytes)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod api_tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_values_and_payload_but_identifies_the_command() {
+        let command = BoundedCommand::new("/bin/echo", Duration::from_secs(3), 128)
+            .arg("--api-token")
+            .arg("argv-secret")
+            .env("API_TOKEN", "environment-secret")
+            .stdin("stdin-secret")
+            .max_stdout_bytes(256)
+            .max_stderr_bytes(64);
+
+        let rendered = format!("{command:?}");
+        assert!(rendered.contains("/bin/echo"), "{rendered}");
+        assert!(rendered.contains("API_TOKEN"), "{rendered}");
+        assert!(rendered.contains("stdout_max_bytes: 256"), "{rendered}");
+        assert!(rendered.contains("stderr_max_bytes: 64"), "{rendered}");
+        assert!(!rendered.contains("environment-secret"), "{rendered}");
+        assert!(!rendered.contains("argv-secret"), "{rendered}");
+        assert!(!rendered.contains("stdin-secret"), "{rendered}");
+    }
 }
 
 impl BoundedCommand {
@@ -159,7 +282,8 @@ impl BoundedCommand {
             env: Vec::new(),
             stdin: None,
             timeout,
-            max_output_bytes_per_stream,
+            max_stdout_bytes: max_output_bytes_per_stream,
+            max_stderr_bytes: max_output_bytes_per_stream,
         }
     }
 
@@ -244,6 +368,43 @@ impl BoundedCommand {
         self
     }
 
+    /// Sets the maximum bytes retained from stdout.
+    ///
+    /// The constructor's `max_output_bytes_per_stream` remains the initial cap
+    /// for both streams; use this additive builder when stdout needs its own
+    /// budget.
+    pub fn max_stdout_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_stdout_bytes = max_bytes;
+        self
+    }
+
+    /// Sets the maximum bytes retained from stderr.
+    ///
+    /// The constructor's `max_output_bytes_per_stream` remains the initial cap
+    /// for both streams; use this additive builder when stderr needs its own
+    /// budget.
+    pub fn max_stderr_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_stderr_bytes = max_bytes;
+        self
+    }
+
+    /// Starts an interactive process with piped stdin/stdout and a bounded
+    /// stderr drain. This is crate-internal because the public primitive's
+    /// contract is the one-shot [`run`](Self::run) operation; protocol clients
+    /// own their request deadlines separately.
+    pub(crate) fn spawn_piped(&self) -> io::Result<BoundedChild> {
+        let mut child = self.spawn_with_stdio(Stdio::piped(), Stdio::piped(), Stdio::piped())?;
+        let group = child.id();
+        let stderr = child.stderr.take().ok_or_else(|| missing_pipe("stderr"))?;
+        let stderr_task = tokio::spawn(read_capped(stderr, self.max_stderr_bytes));
+        Ok(BoundedChild {
+            child,
+            group,
+            stderr_task: Some(stderr_task),
+            armed: true,
+        })
+    }
+
     /// Spawns the program and waits for it, inside the budget.
     ///
     /// `Err` means the program could not be started or supervised at all. A
@@ -276,10 +437,11 @@ impl BoundedCommand {
         };
         let stdout = child.stdout.take().ok_or_else(|| missing_pipe("stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| missing_pipe("stderr"))?;
-        let cap = self.max_output_bytes_per_stream;
+        let stdout_cap = self.max_stdout_bytes;
+        let stderr_cap = self.max_stderr_bytes;
         let mut streams = Drain {
-            stdout: DrainingStream::new(tokio::spawn(read_capped(stdout, cap))),
-            stderr: DrainingStream::new(tokio::spawn(read_capped(stderr, cap))),
+            stdout: DrainingStream::new(tokio::spawn(read_capped(stdout, stdout_cap))),
+            stderr: DrainingStream::new(tokio::spawn(read_capped(stderr, stderr_cap))),
         };
 
         let waited = tokio::time::timeout_at(deadline, child.wait()).await;
@@ -331,19 +493,29 @@ impl BoundedCommand {
         })
     }
 
-    /// Starts the child with every confinement this type promises applied.
+    /// Starts the child with every process and environment rule this type
+    /// promises applied.
     fn spawn(&self) -> io::Result<Child> {
+        self.spawn_with_stdio(
+            if self.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            },
+            Stdio::piped(),
+            Stdio::piped(),
+        )
+    }
+
+    fn spawn_with_stdio(&self, stdin: Stdio, stdout: Stdio, stderr: Stdio) -> io::Result<Child> {
         let mut process = Command::new(resolve_program(&self.program, self.current_dir.as_deref()));
         process
             .args(&self.args)
             .env_clear()
             .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .stdin(match self.stdin {
-                Some(_) => Stdio::piped(),
-                None => Stdio::null(),
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdin(stdin)
+            .stdout(stdout)
+            .stderr(stderr)
             .kill_on_drop(true);
         if let Some(dir) = &self.current_dir {
             process.current_dir(dir);
@@ -688,6 +860,23 @@ mod tests {
             assert!(text.starts_with("FIRST\n"), "{text}");
             assert!(text.ends_with("LAST\n"), "{text}");
             assert!(text.contains("bytes elided"), "{text}");
+        }
+
+        #[tokio::test]
+        async fn stdout_and_stderr_caps_can_be_configured_independently() {
+            let completion =
+                BoundedCommand::shell("printf 1234567890; printf abcdefghij >&2", seconds(5), 4)
+                    .envs(minimal_shell_env())
+                    .max_stdout_bytes(9)
+                    .max_stderr_bytes(3)
+                    .run()
+                    .await
+                    .expect("the program is supervised");
+
+            assert!(completion.stdout().truncated(), "{completion:?}");
+            assert!(completion.stderr().truncated(), "{completion:?}");
+            assert!(completion.stdout().len() <= 9, "{completion:?}");
+            assert!(completion.stderr().len() <= 3, "{completion:?}");
         }
 
         #[tokio::test]

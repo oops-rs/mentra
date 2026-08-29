@@ -1,5 +1,5 @@
-//! Running another program on a budget, confined the way mentra confines its
-//! own commands.
+//! Running another program with the environment, process-tree, time, and
+//! output discipline mentra applies to its own commands.
 //!
 //! A host embedding mentra runs programs of its own — a workspace hook, a
 //! formatter, a declared tool that speaks JSON over stdin. Before this module
@@ -17,5 +17,6 @@
 mod bounded;
 mod capture;
 
+pub(crate) use bounded::{BoundedChild, baseline_environment};
 pub use bounded::{BoundedCommand, Completion};
 pub use capture::CapturedStream;
