@@ -8,6 +8,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::process::Stdio;
+
 use super::{McpClientError, McpStdioClient};
 use crate::mcp::protocol::McpServerConfig;
 
@@ -40,7 +43,7 @@ fn scripted_server(python: &str, source: &str) -> McpServerConfig {
 fn handshake_server(extra: &str) -> String {
     format!(
         r#"
-import sys, json
+import os, sys, json
 
 def send(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
@@ -65,11 +68,247 @@ read()
 # tools/list
 request = read()
 send({{"jsonrpc": "2.0", "id": request["id"], "result": {{"tools": [
-    {{"name": "echo", "inputSchema": {{"type": "object"}}}}]}}}})
+    {{"name": "echo", "description": json.dumps(dict(os.environ)),
+      "inputSchema": {{"type": "object"}}}}]}}}})
 
 {extra}
 "#
     )
+}
+
+fn server_environment(client: &McpStdioClient) -> HashMap<String, String> {
+    let description = client.tools()[0]
+        .description
+        .as_deref()
+        .expect("the scripted server reports its environment");
+    serde_json::from_str(description).expect("the environment is valid JSON")
+}
+
+/// Runs this one test in a child test process whose environment contains a
+/// name no normal test or MCP config uses. Mutating the current process's
+/// environment is unsafe once the test runner has threads; a child process is
+/// the deterministic way to prove inheritance without a process-global race.
+fn rerun_with_host_only_variable(test_name: &str) -> Option<std::process::ExitStatus> {
+    const MARKER: &str = "MENTRA_MCP_ENV_TEST_CHILD";
+    const HOST_ONLY: &str = "MENTRA_MCP_HOST_ONLY";
+
+    if std::env::var_os(MARKER).is_some() {
+        return None;
+    }
+
+    Some(
+        std::process::Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+            .env(MARKER, "1")
+            .env(HOST_ONLY, "ambient-secret")
+            .status()
+            .expect("rerun the test with a host-only variable"),
+    )
+}
+
+#[tokio::test]
+async fn stdio_server_receives_only_the_baseline_and_explicit_environment() {
+    const TEST_NAME: &str =
+        "mcp::client::tests::stdio_server_receives_only_the_baseline_and_explicit_environment";
+    const HOST_ONLY: &str = "MENTRA_MCP_HOST_ONLY";
+
+    if let Some(status) = rerun_with_host_only_variable(TEST_NAME) {
+        assert!(
+            status.success(),
+            "the isolated test process failed: {status}"
+        );
+        return;
+    }
+
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python interpreter available");
+        return;
+    };
+
+    assert_eq!(
+        std::env::var(HOST_ONLY).as_deref(),
+        Ok("ambient-secret"),
+        "the host-only variable must exist in the client process"
+    );
+
+    let source = handshake_server("read()");
+    let config = scripted_server(python, &source);
+    let client = McpStdioClient::connect(&config)
+        .await
+        .expect("the handshake should succeed with the baseline PATH");
+    let environment = server_environment(&client);
+
+    assert!(
+        environment.contains_key("PATH"),
+        "the baseline must keep a bare interpreter command runnable: {environment:?}"
+    );
+    assert!(
+        !environment.contains_key(HOST_ONLY),
+        "an ambient host variable reached the server: {environment:?}"
+    );
+    drop(client);
+
+    let mut explicit = scripted_server(python, &source);
+    explicit
+        .env
+        .insert(HOST_ONLY.to_string(), "declared-value".to_string());
+    let client = McpStdioClient::connect(&explicit)
+        .await
+        .expect("an explicitly configured variable should be accepted");
+    assert_eq!(
+        server_environment(&client)
+            .get(HOST_ONLY)
+            .map(String::as_str),
+        Some("declared-value")
+    );
+}
+
+#[tokio::test]
+async fn dropping_a_stdio_client_kills_its_descendants() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python interpreter available");
+        return;
+    };
+
+    let source = r#"
+import json, subprocess, sys, time
+
+descendant = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL)
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
+
+request = read()
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "protocolVersion": "2024-11-05", "capabilities": {},
+    "serverInfo": {"name": "descendant", "version": "1"}}})
+read()
+request = read()
+send({"jsonrpc": "2.0", "id": request["id"], "result": {"tools": [{
+    "name": "pid", "description": str(descendant.pid),
+    "inputSchema": {"type": "object"}}]}})
+read()
+"#;
+
+    let config = scripted_server(python, source);
+    let client = McpStdioClient::connect(&config)
+        .await
+        .expect("the handshake should succeed");
+    let pid: u32 = client.tools()[0]
+        .description
+        .as_deref()
+        .expect("the server reports its descendant")
+        .parse()
+        .expect("the descendant pid is numeric");
+
+    drop(client);
+
+    let dead = wait_until_process_is_dead(pid).await;
+    if !dead {
+        // Keep the RED run from leaving the fixture behind on old production.
+        kill_process(pid);
+    }
+    assert!(dead, "MCP server descendant {pid} survived client drop");
+}
+
+#[cfg(unix)]
+async fn wait_until_process_is_dead(pid: u32) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if unsafe { libc::kill(pid as i32, 0) } == -1 {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(windows)]
+async fn wait_until_process_is_dead(pid: u32) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let running = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()));
+        if !running {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+fn kill_process(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_process(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[tokio::test]
+async fn an_oversized_stdio_response_is_rejected() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python interpreter available");
+        return;
+    };
+
+    let source = r#"
+import json, sys
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
+
+request = read()
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "protocolVersion": "2024-11-05", "capabilities": {},
+    "serverInfo": {"name": "oversized", "version": "1"},
+    "padding": "x" * (8 * 1024 * 1024)}})
+read()
+request = read()
+send({"jsonrpc": "2.0", "id": request["id"], "result": {"tools": []}})
+read()
+"#;
+
+    let config = scripted_server(python, source);
+    let error = match McpStdioClient::connect(&config).await {
+        Ok(_) => panic!("one stdio response must have a finite memory bound"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, McpClientError::ProcessExited), "{error:?}");
 }
 
 #[tokio::test]

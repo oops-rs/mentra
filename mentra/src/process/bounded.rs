@@ -142,6 +142,31 @@ pub struct BoundedCommand {
     max_output_bytes_per_stream: usize,
 }
 
+#[cfg(test)]
+mod api_tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_values_and_payload_but_identifies_the_command() {
+        let command = BoundedCommand::new("/bin/echo", Duration::from_secs(3), 128)
+            .arg("--api-token")
+            .arg("argv-secret")
+            .env("API_TOKEN", "environment-secret")
+            .stdin("stdin-secret")
+            .max_stdout_bytes(256)
+            .max_stderr_bytes(64);
+
+        let rendered = format!("{command:?}");
+        assert!(rendered.contains("/bin/echo"), "{rendered}");
+        assert!(rendered.contains("API_TOKEN"), "{rendered}");
+        assert!(rendered.contains("stdout_max_bytes: 256"), "{rendered}");
+        assert!(rendered.contains("stderr_max_bytes: 64"), "{rendered}");
+        assert!(!rendered.contains("environment-secret"), "{rendered}");
+        assert!(!rendered.contains("argv-secret"), "{rendered}");
+        assert!(!rendered.contains("stdin-secret"), "{rendered}");
+    }
+}
+
 impl BoundedCommand {
     /// Runs `program` directly, with no shell between the caller and it.
     ///
@@ -241,6 +266,18 @@ impl BoundedCommand {
     /// program printed and how it exited are the answer.
     pub fn stdin(mut self, payload: impl Into<Vec<u8>>) -> Self {
         self.stdin = Some(payload.into());
+        self
+    }
+
+    /// Sets the maximum bytes retained from stdout.
+    pub fn max_stdout_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_stdout_bytes = max_bytes;
+        self
+    }
+
+    /// Sets the maximum bytes retained from stderr.
+    pub fn max_stderr_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_stderr_bytes = max_bytes;
         self
     }
 
@@ -688,6 +725,23 @@ mod tests {
             assert!(text.starts_with("FIRST\n"), "{text}");
             assert!(text.ends_with("LAST\n"), "{text}");
             assert!(text.contains("bytes elided"), "{text}");
+        }
+
+        #[tokio::test]
+        async fn stdout_and_stderr_caps_can_be_configured_independently() {
+            let completion =
+                BoundedCommand::shell("printf 1234567890; printf abcdefghij >&2", seconds(5), 4)
+                    .envs(minimal_shell_env())
+                    .max_stdout_bytes(9)
+                    .max_stderr_bytes(3)
+                    .run()
+                    .await
+                    .expect("the program is supervised");
+
+            assert!(completion.stdout().truncated(), "{completion:?}");
+            assert!(completion.stderr().truncated(), "{completion:?}");
+            assert!(completion.stdout().len() <= 9, "{completion:?}");
+            assert!(completion.stderr().len() <= 3, "{completion:?}");
         }
 
         #[tokio::test]
