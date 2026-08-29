@@ -121,23 +121,17 @@ impl RuntimeHandle {
             .is_none_or(|owner| owner == agent_id)
     }
 
-    /// Adds a skill root, keeping any name already registered.
+    /// Commits already-loaded skill roots and enables the `load_skill` tool.
     ///
-    /// Additive rather than replacing: registering a second root used to
-    /// discard the first silently, which made "project skills layered over
-    /// personal ones" impossible to express.
-    pub fn register_skill_loader(&self, loader: SkillLoader) {
-        let mut slot = self
-            .tooling
-            .skill_loader
-            .write()
-            .expect("skill loader poisoned");
-        match slot.as_mut() {
-            Some(existing) => existing.merge_weaker(loader),
-            None => *slot = Some(loader),
+    /// The roots arrive loaded so that this step cannot fail: a caller that
+    /// hit a bad root never gets here, which is what makes a registration call
+    /// all-or-nothing. An empty batch is a no-op, tool included.
+    pub fn register_skill_roots(&self, roots: Vec<SkillRoot>) {
+        if roots.is_empty() {
+            return;
         }
-        drop(slot);
 
+        self.skill_registry_mut().insert(roots);
         self.tooling
             .tool_registry
             .write()
@@ -145,15 +139,40 @@ impl RuntimeHandle {
             .register_skill_tool();
     }
 
+    /// Drops every root named by `paths`, reporting whether any was there.
+    ///
+    /// Removing the last root also withdraws the `load_skill` tool: a tool
+    /// that can only answer "Skill loader is not available" is worth tokens to
+    /// nobody. It comes back with the next registration.
+    pub fn unregister_skill_roots<I, P>(&self, paths: I) -> bool
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut registry = self.skill_registry_mut();
+        // Deliberately not `Iterator::any`, which stops at the first match:
+        // every path named here must be dropped, not just the first one that
+        // happens to be registered.
+        let mut removed = false;
+        for path in paths {
+            removed |= registry.remove(path);
+        }
+        let empty = registry.is_empty();
+        drop(registry);
+
+        if removed && empty {
+            self.tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned")
+                .unregister_skill_tool();
+        }
+        removed
+    }
+
     /// Every loaded skill, name-ordered, without bodies.
     pub fn skills(&self) -> Vec<crate::runtime::SkillInfo> {
-        self.tooling
-            .skill_loader
-            .read()
-            .expect("skill loader poisoned")
-            .as_ref()
-            .map(SkillLoader::infos)
-            .unwrap_or_default()
+        self.skill_registry().infos()
     }
 
     pub fn tools(&self) -> Arc<[crate::tool::ProviderToolSpec]> {
@@ -173,40 +192,28 @@ impl RuntimeHandle {
     }
 
     pub fn skill_descriptions(&self) -> Option<String> {
-        self.tooling
-            .skill_loader
-            .read()
-            .expect("skill loader poisoned")
-            .as_ref()
-            .map(SkillLoader::get_descriptions)
-            .filter(|descriptions| !descriptions.is_empty())
+        let descriptions = self.skill_registry().get_descriptions();
+        Some(descriptions).filter(|descriptions| !descriptions.is_empty())
     }
 
     pub fn load_skill(&self, name: &str) -> Result<String, String> {
-        let skills = self
-            .tooling
-            .skill_loader
-            .read()
-            .expect("skill loader poisoned");
-        let Some(loader) = skills.as_ref() else {
-            return Err("Skill loader is not available".to_string());
-        };
-
-        loader.get_content(name)
+        self.skill_registry().get_content(name)
     }
 
     /// Returns a skill's body whether or not the model may invoke it.
     pub fn skill_body(&self, name: &str) -> Result<String, String> {
-        let skills = self
-            .tooling
-            .skill_loader
-            .read()
-            .expect("skill loader poisoned");
-        let Some(loader) = skills.as_ref() else {
-            return Err("Skill loader is not available".to_string());
-        };
+        self.skill_registry().get_body(name)
+    }
 
-        loader.get_body(name)
+    fn skill_registry(&self) -> RwLockReadGuard<'_, SkillRegistry> {
+        self.tooling.skills.read().expect("skill registry poisoned")
+    }
+
+    fn skill_registry_mut(&self) -> RwLockWriteGuard<'_, SkillRegistry> {
+        self.tooling
+            .skills
+            .write()
+            .expect("skill registry poisoned")
     }
 
     pub fn get_tool(&self, name: &str) -> Option<Arc<dyn ExecutableTool>> {

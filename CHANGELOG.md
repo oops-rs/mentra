@@ -19,6 +19,45 @@
 - Source-breaking for hosts matching exhaustively on `McpClientError`,
   `McpSseError`, or `McpStreamableHttpError`: each gained one variant.
 
+||||||| ef035ca
+
+### Hosts can take a skills root back
+
+- `Runtime::unregister_skills_dir` and `Runtime::unregister_skills_dirs` drop
+  every skill registered from a root, reporting whether one was there. A host
+  that multiplexes repositories over a single runtime — an editor server, a
+  daemon — can now clean up when a workspace closes, instead of carrying its
+  skills for the life of the process.
+- A dropped skill is unreachable, not merely unlisted: `load_skill` refuses it
+  and it leaves the model-facing skill list. Dropping the last root also
+  withdraws the `load_skill` tool, which the next registration restores.
+- Roots are kept separate rather than merged into one map, so shadowing is no
+  longer destructive: unregistering the root that won a name reveals the skill
+  it had outranked instead of deleting the name.
+- A root is matched by canonical path, so a path spelled differently than at
+  registration still names it, and a root whose directory has since been
+  deleted is still matched by the exact path that registered it. Registering a
+  root already registered reloads it in place, keeping its precedence.
+- `SkillInfo::root` reports the registered root a skill was loaded from,
+  exactly as it was passed in — the attribution a host needs to say which
+  workspace a skill came from, and the path it hands back to unregister.
+- **Source-breaking:** `SkillInfo` gained that field and is now
+  `#[non_exhaustive]`. Code that destructures it exhaustively needs `..`; it is
+  a descriptor the runtime hands out, not one a host builds.
+
+### Registering skills directories is all-or-nothing
+
+- **Behaviour-changing:** `Runtime::register_skills_dirs` loads and validates
+  every root before committing any. A call that fails leaves the runtime
+  exactly as it was, where it previously kept the roots ahead of the failing
+  one. A host that abandons its workspace on error no longer leaves residue on
+  a shared runtime, and fixing the bad root and calling again is a clean retry.
+- The name-collision rule across roots is unchanged and now documented on the
+  registration methods and covered by tests: roots layer in registration
+  order, earliest first, so a workspace skill shadows a personal one of the
+  same name. Within a single root a repeated name is still
+  `SkillLoadError::DuplicateSkillName`.
+
 ## 0.23.5
 
 ### Scripted runtimes can target reserved output

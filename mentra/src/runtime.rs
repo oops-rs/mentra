@@ -213,36 +213,86 @@ impl Runtime {
     /// Registers a skills directory and enables the builtin `load_skill` tool.
     ///
     /// Additive: calling this again adds a second root rather than replacing
-    /// the first, and a name already registered wins. Register the most
-    /// specific root first.
+    /// the first. Register the most specific root first — a name two roots
+    /// both define resolves to the one registered earlier, and the shadowed
+    /// skill is outranked rather than discarded, so
+    /// [`unregister_skills_dir`](Self::unregister_skills_dir) on the winner
+    /// brings it back.
+    ///
+    /// A root already registered is *reloaded in place*, keeping the
+    /// precedence it had: one entry per directory, so one unregister always
+    /// suffices to drop it.
+    ///
+    /// Nothing is registered when the root fails to load.
     pub fn register_skills_dir(&self, path: impl AsRef<Path>) -> Result<(), SkillLoadError> {
         self.handle
-            .register_skill_loader(skill::SkillLoader::from_dir(path)?);
+            .register_skill_roots(vec![skill::SkillRoot::load(path)?]);
         Ok(())
     }
 
     /// Registers several skills directories at once, strongest first.
     ///
     /// Equivalent to calling [`register_skills_dir`](Self::register_skills_dir)
-    /// for each in order: a skill defined in an earlier root shadows the same
-    /// name in a later one, so a project root can override a personal one.
-    /// Within a single root a repeated name is still an error.
+    /// for each in order, with one difference that matters to a host: the call
+    /// is atomic. Every root is loaded and validated before any is committed,
+    /// so an `Err` leaves the runtime exactly as it was and names the root
+    /// that failed. Fixing that root and calling again is a clean retry rather
+    /// than a second, overlapping registration.
     ///
-    /// Registration stops at the first unreadable root, leaving the roots
-    /// before it registered.
+    /// Within a single root a repeated name is still
+    /// [`SkillLoadError::DuplicateSkillName`]: across roots it is layering,
+    /// inside one root it is a mistake.
     pub fn register_skills_dirs<I, P>(&self, paths: I) -> Result<(), SkillLoadError>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        for path in paths {
-            self.register_skills_dir(path)?;
-        }
+        let roots = paths
+            .into_iter()
+            .map(skill::SkillRoot::load)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.handle.register_skill_roots(roots);
         Ok(())
     }
 
-    /// Every loaded skill, name-ordered, with its description and source path
-    /// but not its body.
+    /// Drops every skill registered from `path`, reporting whether the root
+    /// was there.
+    ///
+    /// The inverse of [`register_skills_dir`](Self::register_skills_dir), for
+    /// a host that outlives the thing a root belongs to — an editor server
+    /// closing one repository while other repositories keep running on the
+    /// same runtime. A dropped skill is unreachable, not merely unlisted:
+    /// `load_skill` refuses it, and it leaves the model-facing skill list.
+    /// A name this root had shadowed resolves to the weaker root again.
+    ///
+    /// The root is matched by canonical path, so a path spelled differently
+    /// than at registration still names it; a root whose directory has since
+    /// been deleted is matched by the exact path that registered it.
+    ///
+    /// Dropping the last root also withdraws the `load_skill` tool, which the
+    /// next registration restores.
+    pub fn unregister_skills_dir(&self, path: impl AsRef<Path>) -> bool {
+        self.handle.unregister_skill_roots([path])
+    }
+
+    /// Drops several skills directories at once, reporting whether *any* of
+    /// them was registered.
+    ///
+    /// Every path that names a registered root is dropped regardless of the
+    /// others, so a host closing a workspace can pass the same list it
+    /// registered without first checking which roots still exist.
+    pub fn unregister_skills_dirs<I, P>(&self, paths: I) -> bool
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        self.handle.unregister_skill_roots(paths)
+    }
+
+    /// Every loaded skill, name-ordered, with its description, source path and
+    /// registered root but not its body.
+    ///
+    /// Shadowed skills are left out: this is what a name resolves to today.
     pub fn skills(&self) -> Vec<SkillInfo> {
         self.handle.skills()
     }

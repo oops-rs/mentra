@@ -171,6 +171,15 @@ impl ToolRegistry {
         self.register_tool(LoadSkillTool);
     }
 
+    /// Withdraws the `load_skill` tool, reporting whether it was registered.
+    ///
+    /// The inverse of [`register_skill_tool`](Self::register_skill_tool), for
+    /// a runtime whose last skills root was unregistered.
+    pub(crate) fn unregister_skill_tool(&mut self) -> bool {
+        let name = LoadSkillTool.descriptor().provider.name;
+        self.unregister_tool(&name)
+    }
+
     pub(crate) fn register_builtin_tools(&mut self, file_tools: FileToolProfile) {
         self.register_tool(ShellTool);
         self.register_tool(BackgroundRunTool);

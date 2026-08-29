@@ -1,3 +1,5 @@
+mod registry;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -7,6 +9,14 @@ use std::{
 use serde::Deserialize;
 use thiserror::Error;
 
+pub(crate) use registry::{SkillRegistry, SkillRoot};
+
+/// Every skill found under one root, keyed by name.
+///
+/// A loader is the parse result for a single directory and nothing more. Which
+/// root a skill came from, and which root wins a name two roots both define,
+/// is [`SkillRegistry`]'s to answer — keeping the two apart is what makes a
+/// root removable.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SkillLoader {
     skills: BTreeMap<String, SkillEntry>,
@@ -27,7 +37,12 @@ struct SkillEntry {
 /// asserting the expected skills loaded. The body stays behind `load_skill`,
 /// which is what keeps skills cheap in context: descriptions are always
 /// present, bodies arrive only when asked for.
+///
+/// Fields are added here as the runtime learns to say more about a skill, so
+/// this is `#[non_exhaustive]`: match it with `..` and read it rather than
+/// building one.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
@@ -42,6 +57,13 @@ pub struct SkillInfo {
     /// The `SKILL.md` this came from. With several roots registered, this is
     /// how a host tells which one won.
     pub path: PathBuf,
+    /// The registered skills root this skill was loaded from, exactly as it
+    /// was passed to `register_skills_dir`.
+    ///
+    /// A host that registers one root per workspace uses this to attribute a
+    /// skill back to its workspace, and to hand the same path to
+    /// `unregister_skills_dir` when that workspace closes.
+    pub root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -130,80 +152,14 @@ impl SkillLoader {
         Ok(Self { skills })
     }
 
-    /// Folds in skills from a lower-precedence root.
-    ///
-    /// A name already defined here wins, so roots registered earlier shadow
-    /// later ones — the same rule `PATH` uses, and the one that lets a project
-    /// override a personal skill by name. Within a single root a repeated name
-    /// is still [`SkillLoadError::DuplicateSkillName`], because there it is a
-    /// mistake rather than an intent.
-    pub(crate) fn merge_weaker(&mut self, weaker: SkillLoader) {
-        for (name, entry) in weaker.skills {
-            self.skills.entry(name).or_insert(entry);
-        }
+    /// The entry a name resolves to within this one root.
+    fn entry(&self, name: &str) -> Option<&SkillEntry> {
+        self.skills.get(name)
     }
 
-    /// Every loaded skill, name-ordered, without bodies.
-    pub(crate) fn infos(&self) -> Vec<SkillInfo> {
-        self.skills
-            .iter()
-            .map(|(name, entry)| SkillInfo {
-                name: name.clone(),
-                description: entry.description.clone(),
-                model_invocable: entry.model_invocable,
-                path: entry.path.clone(),
-            })
-            .collect()
-    }
-
-    /// The skill list shown to the model.
-    ///
-    /// Skills whose frontmatter disabled model invocation are left out: naming
-    /// one here and refusing it in `load_skill` would be an invitation
-    /// followed by a refusal.
-    pub(crate) fn get_descriptions(&self) -> String {
-        let invocable = self
-            .skills
-            .iter()
-            .filter(|(_, skill)| skill.model_invocable)
-            .collect::<Vec<_>>();
-        if invocable.is_empty() {
-            return String::new();
-        }
-
-        let mut lines = vec!["Skills available:".to_string()];
-        for (name, skill) in invocable {
-            lines.push(format!("  - {name}: {}", skill.description));
-        }
-        lines.push(
-            "Use the load_skill tool only when one of these skills is relevant to the task."
-                .to_string(),
-        );
-        lines.join("\n")
-    }
-
-    /// Returns a skill's body regardless of whether the model may invoke it.
-    ///
-    /// The host-side counterpart to [`get_content`](Self::get_content): a
-    /// skill marked `disable-model-invocation` is refused there and returned
-    /// here, which is the whole point of the flag. Without this, that skill was
-    /// visible in a listing and reachable by nobody at all.
-    pub(crate) fn get_body(&self, name: &str) -> Result<String, String> {
-        let Some(skill) = self.skills.get(name) else {
-            return Err(format!("Unknown skill '{name}'"));
-        };
-        Ok(render_skill(name, &skill.body))
-    }
-
-    pub(crate) fn get_content(&self, name: &str) -> Result<String, String> {
-        let Some(skill) = self.skills.get(name) else {
-            return Err(format!("Unknown skill '{name}'"));
-        };
-        if !skill.model_invocable {
-            return Err(format!("Skill '{name}' cannot be invoked by the model"));
-        }
-
-        Ok(render_skill(name, &skill.body))
+    /// Every entry this root defines, name-ordered.
+    fn entries(&self) -> impl Iterator<Item = (&String, &SkillEntry)> {
+        self.skills.iter()
     }
 }
 
@@ -284,7 +240,7 @@ fn parse_skill_file(path: &Path, raw: &str) -> Result<(SkillFrontmatter, String)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -297,9 +253,7 @@ mod tests {
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
     #[test]
-    fn a_skill_that_disables_model_invocation_is_neither_listed_nor_loadable() {
-        // Listing it and then refusing it would be an invitation followed by a
-        // refusal, so it is left out of the model's list entirely.
+    fn frontmatter_decides_whether_the_model_may_reach_a_skill() {
         let root = temp_skills_dir("disabled");
         write_skill(
             &root,
@@ -314,30 +268,14 @@ mod tests {
 
         let loader = SkillLoader::from_dir(&root).expect("load skills");
 
-        let descriptions = loader.get_descriptions();
-        assert!(descriptions.contains("git: Git helpers"), "{descriptions}");
-        assert!(!descriptions.contains("release"), "{descriptions}");
-
-        let refused = loader
-            .get_content("release")
-            .expect_err("the model may not load it");
-        assert!(
-            refused.contains("cannot be invoked by the model"),
-            "{refused}"
-        );
-        assert!(loader.get_content("git").is_ok());
-
-        // A host still sees it, which is what makes it invocable by a person.
-        let infos = loader.infos();
-        let release = infos
-            .iter()
-            .find(|info| info.name == "release")
-            .expect("still loaded");
-        assert!(!release.model_invocable);
+        assert!(!loader.entry("release").expect("loaded").model_invocable);
+        assert!(loader.entry("git").expect("loaded").model_invocable);
     }
 
     #[test]
-    fn every_skill_disabled_leaves_no_list_at_all() {
+    fn the_underscore_spelling_of_the_flag_is_accepted_too() {
+        // A skill author should not have to know which spelling this parser
+        // preferred.
         let root = temp_skills_dir("all-disabled");
         write_skill(
             &root,
@@ -347,11 +285,7 @@ mod tests {
 
         let loader = SkillLoader::from_dir(&root).expect("load skills");
 
-        assert_eq!(
-            loader.get_descriptions(),
-            "",
-            "an empty list must not become a header with nothing under it"
-        );
+        assert!(!loader.entry("release").expect("loaded").model_invocable);
     }
 
     #[test]
@@ -365,14 +299,10 @@ mod tests {
 
         let loader = SkillLoader::from_dir(&root).expect("load skills");
 
-        assert_eq!(
-            loader.get_descriptions(),
-            "Skills available:\n  - git: Git helpers\nUse the load_skill tool only when one of these skills is relevant to the task."
-        );
-        assert_eq!(
-            loader.get_content("git").expect("git skill"),
-            "<skill name=\"git\">\nStep 1\nStep 2\n</skill>"
-        );
+        let entry = loader.entry("git").expect("git skill");
+        assert_eq!(entry.description, "Git helpers");
+        assert_eq!(entry.body, "Step 1\nStep 2\n");
+        assert_eq!(entry.path, root.join("git").join("SKILL.md"));
     }
 
     #[test]
@@ -386,12 +316,11 @@ mod tests {
 
         let loader = SkillLoader::from_dir(&root).expect("load skills");
 
-        assert!(loader.get_descriptions().contains("  - pdf: Process PDFs"));
-        assert!(loader.get_content("pdf").is_ok());
+        assert!(loader.entry("pdf").is_some());
     }
 
     #[test]
-    fn renders_descriptions_in_sorted_order() {
+    fn entries_are_name_ordered_regardless_of_directory_names() {
         let root = temp_skills_dir("sorted");
         write_skill(
             &root,
@@ -406,10 +335,8 @@ mod tests {
 
         let loader = SkillLoader::from_dir(&root).expect("load skills");
 
-        assert_eq!(
-            loader.get_descriptions(),
-            "Skills available:\n  - alpha: First\n  - zebra: Last\nUse the load_skill tool only when one of these skills is relevant to the task."
-        );
+        let names: Vec<&str> = loader.entries().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zebra"]);
     }
 
     #[test]
@@ -437,75 +364,7 @@ mod tests {
         assert!(error.to_string().contains("invalid skill frontmatter"));
     }
 
-    #[test]
-    fn a_weaker_root_only_fills_in_names_the_stronger_one_lacks() {
-        let strong = temp_skills_dir("merge-strong");
-        write_skill(&strong, "review", "---\nname: review\n---\nProject rules\n");
-        let weak = temp_skills_dir("merge-weak");
-        write_skill(&weak, "review", "---\nname: review\n---\nPersonal rules\n");
-        write_skill(&weak, "deploy", "---\nname: deploy\n---\nPersonal deploy\n");
-
-        let mut loader = SkillLoader::from_dir(&strong).expect("strong root loads");
-        loader.merge_weaker(SkillLoader::from_dir(&weak).expect("weak root loads"));
-
-        assert!(
-            loader
-                .get_content("review")
-                .expect("review present")
-                .contains("Project rules"),
-            "the stronger root must win a name collision"
-        );
-        assert!(
-            loader.get_content("deploy").is_ok(),
-            "a name only the weaker root defines must still load"
-        );
-    }
-
-    #[test]
-    fn merging_reports_which_file_each_skill_came_from() {
-        let strong = temp_skills_dir("merge-infos-strong");
-        write_skill(
-            &strong,
-            "review",
-            "---\nname: review\ndescription: D1\n---\nA\n",
-        );
-        let weak = temp_skills_dir("merge-infos-weak");
-        write_skill(
-            &weak,
-            "deploy",
-            "---\nname: deploy\ndescription: D2\n---\nB\n",
-        );
-
-        let mut loader = SkillLoader::from_dir(&strong).expect("loads");
-        loader.merge_weaker(SkillLoader::from_dir(&weak).expect("loads"));
-        let infos = loader.infos();
-
-        assert_eq!(infos.len(), 2);
-        // Name-ordered, so `deploy` precedes `review`.
-        assert_eq!(infos[0].name, "deploy");
-        assert_eq!(infos[0].description, "D2");
-        assert!(infos[0].path.starts_with(&weak));
-        assert_eq!(infos[1].name, "review");
-        assert_eq!(infos[1].description, "D1");
-        assert!(infos[1].path.starts_with(&strong));
-    }
-
-    #[test]
-    fn infos_omit_bodies() {
-        let root = temp_skills_dir("infos-no-body");
-        write_skill(
-            &root,
-            "one",
-            "---\nname: one\ndescription: short\n---\nSECRET BODY\n",
-        );
-
-        let infos = SkillLoader::from_dir(&root).expect("loads").infos();
-
-        let rendered = format!("{infos:?}");
-        assert!(!rendered.contains("SECRET BODY"));
-    }
-
-    fn temp_skills_dir(label: &str) -> PathBuf {
+    pub(crate) fn temp_skills_dir(label: &str) -> PathBuf {
         let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -517,7 +376,7 @@ mod tests {
         path
     }
 
-    fn write_skill(root: &Path, name: &str, content: &str) {
+    pub(crate) fn write_skill(root: &Path, name: &str, content: &str) {
         let skill_dir = root.join(name);
         fs::create_dir_all(&skill_dir).expect("create skill dir");
         fs::write(skill_dir.join("SKILL.md"), content).expect("write skill");

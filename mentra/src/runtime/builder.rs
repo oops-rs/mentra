@@ -12,7 +12,7 @@ use crate::{
 };
 use mentra_provider::BuiltinProvider;
 
-use super::skill::SkillLoader;
+use super::skill::SkillRoot;
 use super::{McpServerSummary, Runtime};
 
 /// An MCP server to connect to during build, and how to reach it.
@@ -217,9 +217,13 @@ impl RuntimeBuilder {
     }
 
     /// Registers a skills directory and enables the builtin `load_skill` tool.
+    ///
+    /// Roots layer in registration order, strongest first, under the same
+    /// rules as [`Runtime::register_skills_dir`](crate::Runtime::register_skills_dir).
+    /// Nothing is registered if the root fails to load.
     pub fn with_skills_dir(self, path: impl AsRef<Path>) -> Result<Self, SkillLoadError> {
         self.handle
-            .register_skill_loader(SkillLoader::from_dir(path)?);
+            .register_skill_roots(vec![SkillRoot::load(path)?]);
         Ok(self)
     }
 
