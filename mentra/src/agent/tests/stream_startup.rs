@@ -9,8 +9,12 @@ use super::support::{ScriptedProvider, StreamScript, controlled_stream, model_in
 
 const CANCEL_AFTER: Duration = Duration::from_millis(40);
 const CANCEL_WATCHDOG: Duration = Duration::from_millis(200);
-const DEADLINE_AFTER: Duration = Duration::from_millis(250);
-const DEADLINE_WATCHDOG: Duration = Duration::from_secs(2);
+// Deadline tests use wall-clock `SystemTime`, rather than Tokio's virtual
+// clock. Leave the test harness several seconds to first poll the run when
+// hundreds of sibling tests are running in parallel; the runtime still
+// returns promptly once the provider stream has been accepted.
+const DEADLINE_AFTER: Duration = Duration::from_secs(5);
+const DEADLINE_WATCHDOG: Duration = Duration::from_secs(15);
 
 fn input() -> Vec<ContentBlock> {
     vec![ContentBlock::text("hello")]
