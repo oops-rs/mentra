@@ -94,6 +94,34 @@
   the old behavior). A `CompactionEngine` implementation compiles unchanged but
   is expected to honor `request.bounds` — see the trait docs.
 
+### Hosts can run their own programs under the runtime's confinement
+
+- `mentra::process::BoundedCommand` runs a program — an argv vector, or a shell
+  string through `BoundedCommand::shell` — with the discipline the shell
+  executor applies: the child's environment cleared to exactly the pairs the
+  caller passed, its own session on unix so the deadline kills the whole process
+  group (`taskkill /T /F` on Windows), `kill_on_drop`, and each stream capped
+  while it is read, keeping head and tail with an elision marker between them.
+  Both bounds are constructor arguments, so an unbounded run cannot be spelled.
+- An optional stdin payload is written from its own task, so a program that
+  answers without ever reading cannot deadlock a caller whose payload outgrew
+  the pipe buffer. One budget covers spawning, running, and reading: a
+  descendant that inherited the pipes and holds them open past the deadline is a
+  timed-out completion with the tree killed, not a wait.
+- `Completion` is `Exited { code, stdout, stderr }` or `TimedOut { stdout,
+  stderr }`. Both carry what the program printed as a `CapturedStream`, which
+  reports the kept bytes and whether there had been more. A relative program
+  path with a directory part is resolved against the working directory, so
+  `./hooks/guard.sh` means the same thing wherever the host process was started.
+- `LocalRuntimeExecutor` is now a thin user of that primitive: the spawn, the
+  process-group kill, and the capped read exist once in the crate rather than
+  twice. Nothing existing is source-breaking.
+- One behaviour change for hosts running the shell tool: a command whose
+  descendant inherits stdout and holds it open past the deadline is now reported
+  as timed out, and that descendant is killed, where it used to fail after a
+  fixed two-second drain and leave the descendant running. Backgrounding with
+  output redirected — the usual idiom — holds no pipe and is unaffected.
+
 ## 0.23.5
 
 ### Scripted runtimes can target reserved output
