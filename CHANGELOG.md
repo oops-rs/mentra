@@ -119,7 +119,7 @@
   the old behavior). A `CompactionEngine` implementation compiles unchanged but
   is expected to honor `request.bounds` — see the trait docs.
 
-### Hosts can run their own programs under the runtime's confinement
+### Hosts can run their own programs under the runtime's process discipline
 
 - `mentra::process::BoundedCommand` runs a program — an argv vector, or a shell
   string through `BoundedCommand::shell` — with the discipline the shell
