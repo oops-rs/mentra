@@ -17,6 +17,8 @@ pub mod compaction;
 pub mod mcp;
 /// Working-memory journal and long-term memory services.
 pub mod memory;
+/// Bounded, confined execution of other programs.
+pub mod process;
 /// Provider integrations and transport-neutral request/response types.
 pub mod provider;
 /// Runtime orchestration, persistence, policies, and agent APIs.
