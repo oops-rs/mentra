@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Stdio MCP servers use the bounded process discipline
+
+- **Behaviour change:** `McpStdioClient::connect` now clears the server's
+  ambient environment, restores only the documented runnable baseline, then
+  layers `McpServerConfig::env` over it. On Unix that baseline is `PATH`,
+  `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, and `LC_ALL`; on Windows it is
+  `PATH`, `PATHEXT`, `SystemRoot`, `COMSPEC`, `TEMP`, and `TMP`. A `.mcp.json`
+  author must explicitly name every variable outside that baseline, including
+  provider credentials and proxy settings.
+- The stdio process is grouped and killed with its descendants on disconnect
+  or drop. Protocol frames and retained stderr have finite byte bounds, and
+  stderr is continuously drained so a full diagnostic pipe cannot stall the
+  server. This is host-owned process and environment hygiene, not a sandbox or
+  confinement boundary; the server still runs with the host account's
+  filesystem and network authority. Streamable HTTP and legacy SSE are
+  unchanged.
+- `BoundedCommand::max_stdout_bytes` and `max_stderr_bytes` add independent
+  stream budgets. The existing constructors retain their signature and still
+  initialize both streams from their single cap, so this is additive rather
+  than source-breaking. `BoundedCommand` now implements `Debug`, showing the
+  program, environment names, payload/argument sizes, timeout, and caps without
+  rendering arguments, environment values, or stdin bytes.
+
 ## 0.24.0
 
 ### MCP server names that would collide are rejected at connect time
