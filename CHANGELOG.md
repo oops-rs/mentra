@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Pre-execution hooks run before authorization, on both lanes
+
+- A scheduled tool call now meets its gates in one fixed order on the serial
+  and the parallel lane alike: pre-execution hooks, then the tool's
+  `input_schema` check, then the `ToolAuthorizer`. Previously the authorizer
+  ran first and a `HookDecision::Modify` executed its rewritten input with no
+  further check, so the input a permission rule was remembered against could
+  differ from the input the tool ran with.
+- **Behaviour change for hosts.** The `ToolAuthorizer` is asked about the
+  input the tool will execute with, after any hook rewrite; a rule keyed on
+  `structured_input` therefore matches the post-rewrite call, and a rule
+  written against the pre-rewrite input no longer answers it. A pre-execution
+  hook now runs for every registered call, including one the authorizer would
+  have refused, so a hook with side effects must not assume the call it sees
+  was approved — use `HookDecision::Deny` for calls it will not stand behind.
+  A host that relied on authorize-then-rewrite (a hook that expected only
+  approved calls, or a rule store keyed on the model's original input) must
+  move that assumption into the hook or re-key its rules on the input the
+  authorizer now sees.
+- A `HookDecision::Modify` whose replacement does not fit the tool's schema is
+  refused as the hook's failure — `Blocked by pre-execution hook: ...` with a
+  `ToolExecutionBlocked` event — without entering the tool or consulting the
+  authorizer. The model's own schema errors are still answered to the model.
+- A `HookDecision::Deny` short-circuits before the authorizer is consulted.
+- The order is stated as a contract on `PreExecutionHook`, `HookDecision::Modify`
+  and `ToolAuthorizer`, and both lanes share the admission code so they cannot
+  drift.
+
 ## 0.23.5
 
 ### Scripted runtimes can target reserved output

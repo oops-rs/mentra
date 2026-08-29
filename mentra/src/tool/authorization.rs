@@ -145,6 +145,20 @@ pub struct ToolAuthorizationRequest {
     pub preview: ToolAuthorizationPreview,
 }
 
+/// Consulted after the pre-execution hooks and the schema check, and able to
+/// stop a call — but not to rewrite it.
+///
+/// The request's [`structured_input`](ToolAuthorizationPreview::structured_input)
+/// is the input the tool will execute with: every
+/// [`PreExecutionHook`](crate::runtime::control::PreExecutionHook) has already
+/// run, any [`HookDecision::Modify`](crate::runtime::control::HookDecision::Modify)
+/// has been applied and validated against the tool's `input_schema`, and
+/// nothing rewrites the call between this answer and execution. A host that
+/// remembers a decision as a rule keyed on that input can therefore replay it
+/// against future calls and know the rule describes what ran.
+///
+/// The authorizer is not consulted for a call a hook denied, nor for one whose
+/// input — the model's or a hook's — does not fit the schema.
 #[async_trait]
 pub trait ToolAuthorizer: Send + Sync {
     async fn authorize(
