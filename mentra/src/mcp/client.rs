@@ -87,7 +87,7 @@ type PendingMap = HashMap<u64, oneshot::Sender<Result<JsonValue, McpClientError>
 /// A running MCP stdio client connected to one server process.
 pub struct McpStdioClient {
     stdin: Mutex<ChildStdin>,
-    _child: Mutex<BoundedChild>,
+    child: Arc<Mutex<BoundedChild>>,
     next_id: AtomicU64,
     pending: Arc<Mutex<PendingMap>>,
     server_info: Option<McpServerInfo>,
@@ -141,11 +141,13 @@ impl McpStdioClient {
 
         let stdin = child.take_stdin().ok_or(McpClientError::NoStdin)?;
         let stdout = child.take_stdout().ok_or(McpClientError::NoStdout)?;
+        let child = Arc::new(Mutex::new(child));
 
         let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
 
         // Spawn the reader task that routes responses to pending callers.
         let pending_clone = pending.clone();
+        let child_weak = Arc::downgrade(&child);
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -183,6 +185,16 @@ impl McpStdioClient {
                     }
                 }
             }
+
+            // EOF, an I/O error, an oversized frame, or invalid UTF-8 makes
+            // this protocol stream unusable. A strong child owner remains in
+            // the client, while this task holds only a Weak reference so it
+            // cannot keep the process alive after the client is dropped.
+            if let Some(child) = child_weak.upgrade() {
+                let mut child = child.lock().await;
+                drop(child.terminate().await);
+            }
+
             // When the reader exits, signal all pending callers.
             let mut pending = pending_clone.lock().await;
             for (_, tx) in pending.drain() {
@@ -192,7 +204,7 @@ impl McpStdioClient {
 
         let mut client = Self {
             stdin: Mutex::new(stdin),
-            _child: Mutex::new(child),
+            child,
             next_id: AtomicU64::new(1),
             pending,
             server_info: None,
@@ -400,7 +412,7 @@ impl McpStdioClient {
 
     #[cfg(test)]
     pub(crate) async fn drains_stderr(&self) -> bool {
-        self._child.lock().await.drains_stderr()
+        self.child.lock().await.drains_stderr()
     }
 
     /// Shut down the MCP server process gracefully.
@@ -413,7 +425,7 @@ impl McpStdioClient {
         // Closing stdin lets a cooperative server finish; terminating the
         // supervised child also handles a server (or descendant) that ignores
         // EOF. The process wrapper kills the whole session/tree.
-        let mut child = self._child.lock().await;
+        let mut child = self.child.lock().await;
         drop(child.terminate().await);
     }
 }
