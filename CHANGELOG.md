@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Model stream startup honors run bounds
+
+- `Agent::run` now observes its cancellation token and deadline while opening
+  a provider stream and while waiting for the first model event. A provider
+  that accepts a request but stalls in either phase now ends the run with the
+  existing `RuntimeError::Cancelled` or `RuntimeError::DeadlineExceeded`
+  instead of leaving the host waiting indefinitely.
+- A transient-provider retry backoff observes the same hard bounds, while
+  streaming after the first event and its per-event `check_limits` behavior
+  remain unchanged.
+- The runtime abandons its own wait when a bound wins; whether a provider
+  transport aborts its underlying request remains provider-specific. No public
+  signatures or error variants changed.
+
 ## 0.24.0
 
 ### MCP server names that would collide are rejected at connect time
