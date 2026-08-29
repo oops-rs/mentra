@@ -312,6 +312,36 @@ read()
 }
 
 #[tokio::test]
+async fn stdio_server_stderr_is_drained_continuously() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python interpreter available");
+        return;
+    };
+
+    let source = handshake_server(
+        r#"
+sys.stderr.write("x" * (1024 * 1024))
+sys.stderr.flush()
+request = read()
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "content": [{"type": "text", "text": "after stderr"}], "isError": False}})
+read()
+"#,
+    );
+    let config = scripted_server(python, &source);
+    let client = McpStdioClient::connect(&config)
+        .await
+        .expect("the handshake should succeed");
+
+    assert!(client.drains_stderr().await);
+    let result = tokio::time::timeout(Duration::from_secs(5), client.call_tool("echo", None))
+        .await
+        .expect("a full stderr pipe must not block the server")
+        .expect("the tool response should arrive");
+    assert_eq!(result.content[0].text.as_deref(), Some("after stderr"));
+}
+
+#[tokio::test]
 async fn completes_the_handshake_and_discovers_tools() {
     let Some(python) = python() else {
         eprintln!("skipping: no Python interpreter available");
