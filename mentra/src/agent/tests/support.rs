@@ -32,6 +32,9 @@ use crate::{
 pub(super) enum StreamScript {
     Buffered(Vec<Result<ProviderEvent, ProviderError>>),
     Receiver(ProviderEventStream),
+    /// The `stream` call itself never returns, as when a provider stalls while
+    /// opening the HTTP response.
+    Pending,
     /// The `stream` call itself fails, as it does for a real provider whose
     /// HTTP request is refused before any SSE begins.
     Failure(ProviderError),
@@ -106,6 +109,7 @@ impl Provider for ScriptedProvider {
                 Ok(rx)
             }
             Some(StreamScript::Receiver(receiver)) => Ok(receiver),
+            Some(StreamScript::Pending) => std::future::pending().await,
             Some(StreamScript::Failure(error)) => Err(error),
             None => panic!("no scripted stream available"),
         }

@@ -403,6 +403,7 @@ impl<'a> TurnRunner<'a> {
             provider_request_options,
         };
         let mut attempt = 0usize;
+        let bounds = CompactionBounds::from_run_options(&self.options);
         let stream = loop {
             self.options.check_limits()?;
             attempt += 1;
@@ -420,7 +421,7 @@ impl<'a> TurnRunner<'a> {
                 self.agent
                     .emit_event(AgentEvent::RequestToolResultsElided { details });
             }
-            match provider.stream(request.clone()).await {
+            match bounds.guard(provider.stream(request.clone())).await? {
                 Ok(stream) => {
                     self.agent
                         .runtime
@@ -466,7 +467,7 @@ impl<'a> TurnRunner<'a> {
                         max_attempts: self.options.retry_budget as u32,
                         next_delay_ms: delay.as_millis() as u64,
                     });
-                    tokio::time::sleep(delay).await;
+                    bounds.sleep(delay).await?;
                     continue;
                 }
                 Err(error) => {
@@ -530,7 +531,29 @@ impl<'a> TurnRunner<'a> {
             .update_pending_turn(Self::pending_state(&pending))?;
         self.agent.sync_memory_snapshot();
 
-        while let Some(event) = stream.recv().await {
+        let mut first_event = true;
+        loop {
+            let event = if first_event {
+                first_event = false;
+                match compaction_bounds.guard(stream.recv()).await {
+                    Ok(event) => event,
+                    Err(error) => {
+                        self.emit_model_response_finished(
+                            attempt,
+                            false,
+                            Some(error.to_string()),
+                            None,
+                            None,
+                        )?;
+                        return Err(error);
+                    }
+                }
+            } else {
+                stream.recv().await
+            };
+            let Some(event) = event else {
+                break;
+            };
             if let Err(error) = self.options.check_limits() {
                 self.emit_model_response_finished(
                     attempt,
