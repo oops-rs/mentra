@@ -150,6 +150,9 @@ pub enum McpSseError {
 
     #[error("the MCP SSE client is shut down")]
     Shutdown,
+
+    #[error(transparent)]
+    InvalidServerName(#[from] crate::mcp::bridge::McpServerNameError),
 }
 
 /// The outcome of a JSON-RPC request, kept in the pending map.

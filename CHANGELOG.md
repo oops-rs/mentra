@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### MCP server names that would collide are rejected at connect time
+
+- `McpManager::connect`, `connect_sse`, and `connect_streamable_http` now
+  validate the server name before opening any connection. A name that is
+  empty, contains `__`, or ends with `_` is rejected with a new
+  `McpServerNameError`, surfaced through each transport's existing error
+  type (`McpClientError::InvalidServerName`,
+  `McpSseError::InvalidServerName`, `McpStreamableHttpError::InvalidServerName`).
+- Those three shapes previously let `mcp_tool_name`/`parse_mcp_tool_name`
+  encode two distinct `(server, tool)` pairs to the same `mcp__{server}__{tool}`
+  string — a server named `evil__foo` or `evil_` could have its tools
+  misattributed to a different server. `mcp_tool_name` and
+  `parse_mcp_tool_name` now document this grammar; tool names are unaffected
+  and may still contain `__` or start with `_`.
+- Source-breaking for hosts matching exhaustively on `McpClientError`,
+  `McpSseError`, or `McpStreamableHttpError`: each gained one variant.
+
 ## 0.23.5
 
 ### Scripted runtimes can target reserved output

@@ -66,6 +66,9 @@ pub enum McpClientError {
 
     #[error("MCP client is already shut down")]
     Shutdown,
+
+    #[error(transparent)]
+    InvalidServerName(#[from] super::bridge::McpServerNameError),
 }
 
 type PendingMap = HashMap<u64, oneshot::Sender<Result<JsonValue, McpClientError>>>;

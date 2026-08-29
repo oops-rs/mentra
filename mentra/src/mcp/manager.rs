@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::bridge::{McpBridgedTool, McpToolClient, mcp_tool_name};
+use super::bridge::{McpBridgedTool, McpToolClient, mcp_tool_name, validate_mcp_server_name};
 use super::client::{McpClientError, McpStdioClient};
 use super::protocol::{McpServerConfig, McpToolDefinition};
 use super::sse::client::{McpSseClient, McpSseError};
@@ -127,10 +127,17 @@ impl McpManager {
 
     /// Connect to an MCP server over stdio and discover its tools.
     /// Returns the bridged tools ready for registration.
+    ///
+    /// Rejects `config.name` before connecting if
+    /// [`validate_mcp_server_name`] would reject it, so a name shaped to
+    /// collide with another server's tools under [`mcp_tool_name`] never
+    /// reaches a live connection.
     pub async fn connect(
         &mut self,
         config: &McpServerConfig,
     ) -> Result<Vec<McpBridgedTool>, McpClientError> {
+        validate_mcp_server_name(&config.name)?;
+
         // Disconnect existing connection if any.
         self.disconnect(&config.name).await;
 
@@ -148,11 +155,14 @@ impl McpManager {
     /// its tools.
     ///
     /// Returns the bridged tools ready for registration, exactly as
-    /// [`connect`](Self::connect) does for stdio.
+    /// [`connect`](Self::connect) does for stdio, including the server-name
+    /// validation.
     pub async fn connect_sse(
         &mut self,
         config: &McpSseServerConfig,
     ) -> Result<Vec<McpBridgedTool>, McpSseError> {
+        validate_mcp_server_name(&config.name)?;
+
         self.disconnect(&config.name).await;
 
         let client = McpSseClient::connect(config).await.inspect_err(|error| {
@@ -171,11 +181,14 @@ impl McpManager {
     /// This is the transport current MCP servers ship; a server that answers
     /// `404` on a legacy `/sse` path needs this rather than
     /// [`connect_sse`](Self::connect_sse). Returns the bridged tools ready for
-    /// registration, exactly as [`connect`](Self::connect) does for stdio.
+    /// registration, exactly as [`connect`](Self::connect) does for stdio,
+    /// including the server-name validation.
     pub async fn connect_streamable_http(
         &mut self,
         config: &McpStreamableHttpServerConfig,
     ) -> Result<Vec<McpBridgedTool>, McpStreamableHttpError> {
+        validate_mcp_server_name(&config.name)?;
+
         self.disconnect(&config.name).await;
 
         let client = McpStreamableHttpClient::connect(config)

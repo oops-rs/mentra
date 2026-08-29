@@ -206,6 +206,9 @@ pub enum McpStreamableHttpError {
          the call may have executed and must not be retried automatically"
     )]
     RequestIndeterminate { method: String },
+
+    #[error(transparent)]
+    InvalidServerName(#[from] crate::mcp::bridge::McpServerNameError),
 }
 
 /// The session state the transport itself owns.
