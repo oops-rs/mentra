@@ -42,8 +42,14 @@ pub(super) async fn execute_mut(
                 input,
             };
             let child_options = ctx.child_run_options();
+            // The model asked for this compaction inside a turn, so it runs
+            // under the turn's bounds like every other step of it.
+            let compaction_bounds =
+                crate::compaction::CompactionBounds::from_run_options(&ctx.run_options);
             let block = match tool {
-                RuntimeIntrinsicTool::Compact => execute_compact(ctx.agent, call).await,
+                RuntimeIntrinsicTool::Compact => {
+                    execute_compact(ctx.agent, call, &compaction_bounds).await
+                }
                 RuntimeIntrinsicTool::Idle => execute_idle(ctx.agent, call),
                 RuntimeIntrinsicTool::MemorySearch => unreachable!("handled above"),
                 RuntimeIntrinsicTool::MemoryPin => execute_memory_pin(ctx, call),
@@ -200,11 +206,16 @@ async fn execute_memory_search(ctx: ParallelToolContext, input: serde_json::Valu
     }
 }
 
-async fn execute_compact(agent: &mut Agent, call: ToolCall) -> ContentBlock {
+async fn execute_compact(
+    agent: &mut Agent,
+    call: ToolCall,
+    bounds: &crate::compaction::CompactionBounds,
+) -> ContentBlock {
     match agent
         .compact_history(
             agent.history().len().saturating_sub(1),
             CompactionTrigger::Manual,
+            bounds,
         )
         .await
     {

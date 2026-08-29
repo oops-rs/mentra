@@ -3,6 +3,7 @@ use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 use crate::{
     ContentBlock, Message, Role,
     background::BackgroundNotification,
+    compaction::CompactionBounds,
     error::RuntimeError,
     memory::journal::PendingTurnState,
     memory::{MemorySearchMode, MemorySearchRequest, build_search_query, recalled_memory_message},
@@ -496,7 +497,13 @@ impl<'a> TurnRunner<'a> {
         self.agent.inject_background_notifications()?;
         self.agent.set_status(AgentStatus::AwaitingModel);
         self.agent.refresh_tasks_from_disk()?;
-        self.agent.auto_compact_if_needed().await?;
+        // The compaction about to happen is part of this turn, so it runs
+        // under this turn's bounds: a cancel mid-summarization ends the run
+        // instead of waiting for the summarizer.
+        let compaction_bounds = CompactionBounds::from_run_options(&self.options);
+        self.agent
+            .auto_compact_if_needed(&compaction_bounds)
+            .await?;
         let (mut stream, attempt) = match self.open_model_stream().await {
             Ok(opened) => opened,
             // The estimate said the request fit and the provider says it did
@@ -508,7 +515,9 @@ impl<'a> TurnRunner<'a> {
             Err(RuntimeError::FailedToStreamResponse(error))
                 if error.is_context_length_exceeded() =>
             {
-                self.agent.compact_after_context_overflow().await?;
+                self.agent
+                    .compact_after_context_overflow(&compaction_bounds)
+                    .await?;
                 self.open_model_stream().await?
             }
             Err(error) => return Err(error),

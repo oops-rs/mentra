@@ -241,11 +241,16 @@ impl ToolContext<'_> {
         self.agent.request_idle();
     }
 
+    /// Compacts the running agent's transcript, under the bounds of the run
+    /// this tool is a step of: cancelling the run abandons the summarization
+    /// rather than waiting it out.
     pub async fn compact_history(&mut self) -> Result<Option<CompactionDetails>, RuntimeError> {
+        let bounds = crate::compaction::CompactionBounds::from_run_options(&self.run_options);
         self.agent
             .compact_history(
                 self.agent.history().len().saturating_sub(1),
                 CompactionTrigger::Manual,
+                &bounds,
             )
             .await
     }

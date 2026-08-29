@@ -20,6 +20,25 @@
   resolution.
 - Adding a field to `CompactionConfig` is source-breaking only for a struct
   literal that names every field; the `..Default::default()` form is unchanged.
+- A compaction now carries the run's bounds. `CompactionRequest::bounds`
+  (`CompactionBounds`) holds the run's cancellation token and deadline; an
+  auto-compaction, a context-overflow recovery, and the `compact` intrinsic all
+  inherit them from the turn they happen in. A cancelled or expired compaction
+  abandons the provider call instead of waiting for an answer, reports
+  `RuntimeError::Cancelled` / `DeadlineExceeded`, and leaves the transcript
+  exactly as it was.
+- The auto-compaction retry loop checks the bounds between attempts and no
+  longer sleeps out its 500 ms retry delay in a cancelled run. **Behavior
+  change:** its degrade-gracefully branch no longer swallows a cancellation —
+  the run now ends cancelled where it previously carried on with
+  micro-compaction only. A summarizer outage still degrades exactly as before.
+- `Session::compact_with_bounds` is `Session::compact` with bounds the caller
+  can trip; `compact` is unchanged and unbounded. `ToolContext::compact_history`
+  now runs under its own run's bounds, with no signature change.
+- **Source-breaking:** `CompactionRequest` gained a field, so a struct literal
+  naming every field needs `bounds` (`CompactionBounds::default()` reproduces
+  the old behavior). A `CompactionEngine` implementation compiles unchanged but
+  is expected to honor `request.bounds` — see the trait docs.
 
 ## 0.23.5
 
