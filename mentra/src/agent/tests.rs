@@ -1,5 +1,6 @@
 mod budgets;
 mod event_tap;
+mod hook_authorization_order;
 mod pending;
 mod round_strategy;
 mod runtime;

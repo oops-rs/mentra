@@ -319,6 +319,14 @@ pub enum HookDecision {
     /// The replacement is re-checked by every remaining hook, so a later hook
     /// still sees — and can still refuse — what an earlier one produced. A hook
     /// cannot use `Modify` to smuggle a call past a hook that runs after it.
+    ///
+    /// Nor past anything that runs after the hook chain. The replacement is
+    /// validated against the tool's `input_schema` and is what the
+    /// [`ToolAuthorizer`](crate::tool::ToolAuthorizer) is asked about, so a
+    /// remembered permission rule is written against — and matched against —
+    /// the input that actually runs. A replacement that does not fit the
+    /// schema is refused as the hook's failure, with the tool never entered
+    /// and no one asked for permission.
     Modify {
         /// The tool's new input, as JSON.
         input_json: String,
@@ -337,6 +345,28 @@ pub enum HookDecision {
 ///
 /// The same shape as [`ToolAuthorizer`](crate::tool::ToolAuthorizer), which
 /// sits at the adjacent seam doing the same kind of work.
+///
+/// # Order of the seams
+///
+/// A scheduled call meets its gates in this order, on both the serial and the
+/// parallel execution lane:
+///
+/// 1. every pre-execution hook, in registration order;
+/// 2. the tool's `input_schema` check, against whatever the hooks left;
+/// 3. the [`ToolAuthorizer`](crate::tool::ToolAuthorizer).
+///
+/// Hooks run first so that the authorizer — and any permission rule a host
+/// remembers from its answer — judges the call that will actually run. A hook
+/// that narrows an over-broad command makes the narrowed command the thing a
+/// person approves, which is the point of narrowing it. Two consequences a
+/// host can rely on:
+///
+/// - A [`HookDecision::Deny`] short-circuits before the authorizer is
+///   consulted; the call is answered as blocked by the hook and nobody is
+///   asked.
+/// - A hook runs for every registered call, including one the authorizer would
+///   have refused. A hook with side effects sees calls it did not before, and
+///   must not assume the call it inspects has been approved.
 #[async_trait]
 pub trait PreExecutionHook: Send + Sync {
     async fn pre_tool_execution(
