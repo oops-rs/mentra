@@ -320,6 +320,82 @@ read()
 }
 
 #[tokio::test]
+async fn a_malformed_stdio_frame_terminates_server_descendants() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python interpreter available");
+        return;
+    };
+
+    let source = r#"
+import json, subprocess, sys, time
+
+descendant = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL)
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+def read():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
+
+request = read()
+send({"jsonrpc": "2.0", "id": request["id"], "result": {
+    "protocolVersion": "2024-11-05", "capabilities": {},
+    "serverInfo": {"name": "malformed", "version": "1"}}})
+read()
+request = read()
+send({"jsonrpc": "2.0", "id": request["id"], "result": {"tools": [{
+    "name": "malformed", "description": str(descendant.pid),
+    "inputSchema": {"type": "object"}}]}})
+
+# Answer the first tool call with a frame that is not UTF-8, then remain alive.
+read()
+sys.stdout.buffer.write(b"\xff\n")
+sys.stdout.buffer.flush()
+time.sleep(60)
+"#;
+
+    let config = scripted_server(python, source);
+    let client = McpStdioClient::connect(&config)
+        .await
+        .expect("the handshake should succeed");
+    let pid: u32 = client.tools()[0]
+        .description
+        .as_deref()
+        .expect("the server reports its descendant")
+        .parse()
+        .expect("the descendant pid is numeric");
+
+    let error = tokio::time::timeout(Duration::from_secs(5), client.call_tool("malformed", None))
+        .await
+        .expect("the malformed frame should end the pending call")
+        .expect_err("a malformed frame is not a tool response");
+    assert!(matches!(error, McpClientError::ProcessExited), "{error:?}");
+
+    let dead = wait_until_process_is_dead(pid).await;
+    if !dead {
+        // Keep the RED run from leaving the fixture behind. The retained
+        // client drops during panic unwinding and kills the direct server.
+        kill_process(pid);
+    }
+    assert!(
+        dead,
+        "MCP server descendant {pid} survived the malformed frame"
+    );
+
+    // Deliberately keep `client` alive through the assertion above: the reader
+    // task, not an explicit shutdown or client drop, must terminate the tree.
+    drop(client);
+}
+
+#[tokio::test]
 async fn stdio_server_stderr_is_drained_continuously() {
     let Some(python) = python() else {
         eprintln!("skipping: no Python interpreter available");
