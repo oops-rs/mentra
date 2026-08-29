@@ -55,6 +55,27 @@ struct ToolCallSchedule {
     batches: Vec<ToolCallBatch>,
 }
 
+/// What the pre-execution hooks left of a call.
+enum HookOutcome {
+    /// Run it; `modified` records whether a hook rewrote the input, because a
+    /// shape error in a rewritten input is the hook's to answer for.
+    Proceed { modified: bool },
+    /// Do not run it, and tell the model why.
+    Refused(String),
+}
+
+/// Whether a scheduled call made it through hooks, schema check, and
+/// authorization.
+///
+/// Both payloads are boxed: each is hundreds of bytes and they differ enough
+/// that an unboxed enum pays the larger one's size on every admission.
+enum Admission {
+    /// Execute with this context.
+    Run(Box<ParallelToolContext>),
+    /// Already answered; nothing runs.
+    Refused(Box<CompletedToolExecution>),
+}
+
 struct CompletedToolExecution {
     result: ContentBlock,
     task_succeeded: bool,
@@ -454,19 +475,17 @@ impl ToolRuntime {
 
     /// Runs the pre-execution hooks and applies whatever they decided.
     ///
-    /// `Ok(None)` means proceed — possibly with `call.input` rewritten by a
-    /// hook. `Ok(Some(reason))` means the call must not run and `reason` is
-    /// what the model should be told.
+    /// `Ok(HookOutcome::Proceed { .. })` means proceed — with `call.input`
+    /// rewritten by a hook when `modified` is set. `Ok(HookOutcome::Refused)`
+    /// means the call must not run and the reason is what the model should be
+    /// told.
     ///
     /// Shared by the serial and parallel paths so the two cannot disagree
     /// about what a hook's answer means.
-    async fn apply_pre_hooks(
-        &mut self,
-        call: &mut ToolCall,
-    ) -> Result<Option<String>, RuntimeError> {
+    async fn apply_pre_hooks(&mut self, call: &mut ToolCall) -> Result<HookOutcome, RuntimeError> {
         match self.run_pre_hooks(call).await? {
-            HookDecision::Allow => Ok(None),
-            HookDecision::Deny(reason) => Ok(Some(reason)),
+            HookDecision::Allow => Ok(HookOutcome::Proceed { modified: false }),
+            HookDecision::Deny(reason) => Ok(HookOutcome::Refused(reason)),
             HookDecision::Modify { input_json, .. } => {
                 // A hook that rewrites the input but hands back something that
                 // is not JSON has failed at its own job. Refusing is the safe
@@ -475,14 +494,130 @@ impl ToolRuntime {
                 match serde_json::from_str(&input_json) {
                     Ok(input) => {
                         call.input = input;
-                        Ok(None)
+                        Ok(HookOutcome::Proceed { modified: true })
                     }
-                    Err(error) => Ok(Some(format!(
+                    Err(error) => Ok(HookOutcome::Refused(format!(
                         "pre-execution hook returned invalid JSON for '{}': {error}",
                         call.name
                     ))),
                 }
             }
+        }
+    }
+
+    /// Everything that stands between a scheduled call and its execution, in
+    /// the one order both lanes share: pre-execution hooks, then the schema
+    /// check, then the [`ToolAuthorizer`](crate::tool::ToolAuthorizer).
+    ///
+    /// Hooks run first so that the input the authorizer is asked about is the
+    /// input the tool will run with. A remembered permission rule is matched
+    /// against the serialized input, and a rule that matched a call the hook
+    /// then rewrote would describe an execution that never happened. The
+    /// schema check sits between them because a hook can rewrite into the
+    /// wrong shape as easily as a model can produce it, and a call that does
+    /// not fit its own schema should be corrected, not put to a person.
+    ///
+    /// Returning `Err` means a hook or the authorizer itself failed; each lane
+    /// decides what a failure costs (the parallel lane aborts the batch, the
+    /// serial lane answers the one call), which is why this does not.
+    async fn admit_call(
+        &mut self,
+        agent: &mut Agent,
+        options: &RunOptions,
+        call: &mut ToolCall,
+        tool: &Arc<dyn ExecutableTool>,
+        descriptor: &RuntimeToolDescriptor,
+    ) -> Result<Admission, RuntimeError> {
+        let modified = match self.apply_pre_hooks(call).await? {
+            HookOutcome::Proceed { modified } => modified,
+            HookOutcome::Refused(reason) => {
+                return Ok(Admission::Refused(Box::new(
+                    self.hook_blocked_execution(agent, call, descriptor, &reason),
+                )));
+            }
+        };
+
+        if let Some(error) = self.schema_violation(call, descriptor) {
+            // The model is told what to fix when the shape is its own. When a
+            // hook produced the shape, blaming the model would send it
+            // correcting an input it never wrote; the host component is the
+            // one that failed, and the record says so.
+            return Ok(Admission::Refused(Box::new(if modified {
+                let reason = format!(
+                    "pre-execution hook rewrote '{}' into input that does not fit its schema: \
+                     {error}",
+                    call.name
+                );
+                self.hook_blocked_execution(agent, call, descriptor, &reason)
+            } else {
+                self.schema_violation_execution(agent, call, error)
+            })));
+        }
+
+        let ctx = self.parallel_tool_context(agent, options, call);
+        if let Some(result) = self.authorize_tool_call(call, tool, &ctx).await? {
+            let execution = self.completed_execution(
+                agent,
+                call,
+                descriptor,
+                result,
+                RoundEffect::default(),
+                None,
+            );
+            return Ok(Admission::Refused(Box::new(execution)));
+        }
+
+        Ok(Admission::Run(Box::new(ctx)))
+    }
+
+    fn hook_blocked_execution(
+        &self,
+        agent: &Agent,
+        call: &ToolCall,
+        descriptor: &RuntimeToolDescriptor,
+        reason: &str,
+    ) -> CompletedToolExecution {
+        self.emit_tool_execution_blocked(call, reason);
+        let result = ContentBlock::ToolResult {
+            tool_use_id: call.id.clone(),
+            content: format!("Blocked by pre-execution hook: {reason}").into(),
+            is_error: true,
+        };
+        self.completed_execution(
+            agent,
+            call,
+            descriptor,
+            result,
+            RoundEffect::default(),
+            None,
+        )
+    }
+
+    /// The answer to a call whose shape the model itself got wrong: an error
+    /// result naming the field, and nothing else — a call that never ran has
+    /// no runtime-level finish to report.
+    fn schema_violation_execution(
+        &self,
+        agent: &Agent,
+        call: &ToolCall,
+        error: String,
+    ) -> CompletedToolExecution {
+        let result = ContentBlock::ToolResult {
+            tool_use_id: call.id.clone(),
+            content: format!("Invalid input for '{}': {error}", call.name).into(),
+            is_error: true,
+        };
+        agent.emit_event(AgentEvent::ToolExecutionFinished {
+            result: result.clone(),
+        });
+        CompletedToolExecution {
+            result,
+            task_succeeded: false,
+            should_end_turn: false,
+            terminated: false,
+            tool_name: call.name.clone(),
+            input_json: serde_json::to_string(&call.input).unwrap_or_default(),
+            details: None,
         }
     }
 
@@ -497,20 +632,20 @@ impl ToolRuntime {
             });
     }
 
-    /// Checks a call against the schema its tool published, returning the
-    /// result to hand back when it does not fit.
+    /// Checks a call against the schema its tool published, returning what
+    /// is wrong when it does not fit.
     ///
     /// A tool advertises an `input_schema` to the model and nothing compared a
     /// call against it, so a missing required field or a string where a number
     /// belonged reached the tool's own code — where it became a confusing
     /// deserialization error, or worse, was read loosely and did the wrong
-    /// thing quietly. Answering here gives the model the one thing it can act
-    /// on: which field, and what was expected.
-    fn schema_violation_result(
+    /// thing quietly. Answering here gives whoever produced the input the one
+    /// thing they can act on: which field, and what was expected.
+    fn schema_violation(
         &self,
         call: &ToolCall,
         descriptor: &RuntimeToolDescriptor,
-    ) -> Option<ContentBlock> {
+    ) -> Option<String> {
         // A terminal tool's result *is* the turn's value, and it validates that
         // value itself with a message about the requested type. Rejecting the
         // call here instead would replace a turn that fails cleanly with one
@@ -520,16 +655,9 @@ impl ToolRuntime {
             return None;
         }
 
-        let error = crate::tool::schema::validate_tool_input(
-            &descriptor.provider.input_schema,
-            &call.input,
-        )
-        .err()?;
-        Some(ContentBlock::ToolResult {
-            tool_use_id: call.id.clone(),
-            content: format!("Invalid input for '{}': {error}", call.name).into(),
-            is_error: true,
-        })
+        crate::tool::schema::validate_tool_input(&descriptor.provider.input_schema, &call.input)
+            .err()
+            .map(|error| error.to_string())
     }
 
     fn unavailable_tool_result(&self, call: ToolCall) -> ContentBlock {
@@ -839,58 +967,16 @@ impl ToolRuntime {
                 continue;
             };
 
-            if let Some(result) = self.schema_violation_result(&call, &descriptor) {
-                agent.emit_event(AgentEvent::ToolExecutionFinished {
-                    result: result.clone(),
-                });
-                results[index] = Some(CompletedToolExecution {
-                    result,
-                    task_succeeded: false,
-                    should_end_turn: false,
-                    terminated: false,
-                    tool_name: call.name.clone(),
-                    input_json: serde_json::to_string(&call.input).unwrap_or_default(),
-                    details: None,
-                });
-                continue;
-            }
-
-            let ctx = self.parallel_tool_context(agent, options, &call);
-            if let Some(result) = self.authorize_tool_call(&call, &tool, &ctx).await? {
-                let execution = self.completed_execution(
-                    agent,
-                    &call,
-                    &descriptor,
-                    result,
-                    RoundEffect::default(),
-                    None,
-                );
-                results[index] = Some(execution);
-                continue;
-            }
-
-            // Pre-execution hook check
-            match self.apply_pre_hooks(&mut call).await? {
-                None => {}
-                Some(reason) => {
-                    self.emit_tool_execution_blocked(&call, &reason);
-                    let result = ContentBlock::ToolResult {
-                        tool_use_id: call.id.clone(),
-                        content: format!("Blocked by pre-execution hook: {reason}").into(),
-                        is_error: true,
-                    };
-                    let execution = self.completed_execution(
-                        agent,
-                        &call,
-                        &descriptor,
-                        result,
-                        RoundEffect::default(),
-                        None,
-                    );
-                    results[index] = Some(execution);
+            let ctx = match self
+                .admit_call(agent, options, &mut call, &tool, &descriptor)
+                .await?
+            {
+                Admission::Run(ctx) => *ctx,
+                Admission::Refused(execution) => {
+                    results[index] = Some(*execution);
                     continue;
                 }
-            }
+            };
 
             if let Err(error) = self.emit_tool_runtime_started(&call) {
                 let result = self.blocked_tool_result(&call, error);
@@ -1001,39 +1087,12 @@ impl ToolRuntime {
             };
         };
 
-        // Before authorization: a call that does not fit its own schema should
-        // be corrected, not put to a person for permission.
-        if let Some(result) = self.schema_violation_result(&call, &descriptor) {
-            agent.emit_event(AgentEvent::ToolExecutionFinished {
-                result: result.clone(),
-            });
-            return CompletedToolExecution {
-                result,
-                task_succeeded: false,
-                should_end_turn: false,
-                terminated: false,
-                tool_name: call.name.clone(),
-                input_json: serde_json::to_string(&call.input).unwrap_or_default(),
-                details: None,
-            };
-        }
-
-        let authorization_ctx = self.parallel_tool_context(agent, options, &call);
-        match self
-            .authorize_tool_call(&call, &tool, &authorization_ctx)
+        let authorization_ctx = match self
+            .admit_call(agent, options, &mut call, &tool, &descriptor)
             .await
         {
-            Ok(Some(result)) => {
-                return self.completed_execution(
-                    agent,
-                    &call,
-                    &descriptor,
-                    result,
-                    RoundEffect::default(),
-                    None,
-                );
-            }
-            Ok(None) => {}
+            Ok(Admission::Run(ctx)) => *ctx,
+            Ok(Admission::Refused(execution)) => return *execution,
             Err(error) => {
                 let result = self.blocked_tool_result(&call, error);
                 return self.completed_execution(
@@ -1045,39 +1104,7 @@ impl ToolRuntime {
                     None,
                 );
             }
-        }
-
-        // Pre-execution hook check
-        match self.apply_pre_hooks(&mut call).await {
-            Ok(None) => {}
-            Ok(Some(reason)) => {
-                self.emit_tool_execution_blocked(&call, &reason);
-                let result = ContentBlock::ToolResult {
-                    tool_use_id: call.id.clone(),
-                    content: format!("Blocked by pre-execution hook: {reason}").into(),
-                    is_error: true,
-                };
-                return self.completed_execution(
-                    agent,
-                    &call,
-                    &descriptor,
-                    result,
-                    RoundEffect::default(),
-                    None,
-                );
-            }
-            Err(error) => {
-                let result = self.blocked_tool_result(&call, error);
-                return self.completed_execution(
-                    agent,
-                    &call,
-                    &descriptor,
-                    result,
-                    RoundEffect::default(),
-                    None,
-                );
-            }
-        }
+        };
 
         if let Err(error) = self.emit_tool_runtime_started(&call) {
             let result = self.blocked_tool_result(&call, error);
