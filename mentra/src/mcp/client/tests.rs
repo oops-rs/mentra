@@ -84,6 +84,12 @@ fn server_environment(client: &McpStdioClient) -> HashMap<String, String> {
     serde_json::from_str(description).expect("the environment is valid JSON")
 }
 
+fn environment_names(environment: &HashMap<String, String>) -> Vec<&str> {
+    let mut names = environment.keys().map(String::as_str).collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
 /// Runs this one test in a child test process whose environment contains a
 /// name no normal test or MCP config uses. Mutating the current process's
 /// environment is unsafe once the test runner has threads; a child process is
@@ -140,11 +146,13 @@ async fn stdio_server_receives_only_the_baseline_and_explicit_environment() {
 
     assert!(
         environment.contains_key("PATH"),
-        "the baseline must keep a bare interpreter command runnable: {environment:?}"
+        "the baseline must keep a bare interpreter command runnable; names: {:?}",
+        environment_names(&environment)
     );
     assert!(
         !environment.contains_key(HOST_ONLY),
-        "an ambient host variable reached the server: {environment:?}"
+        "an ambient host variable reached the server; names: {:?}",
+        environment_names(&environment)
     );
     drop(client);
 
