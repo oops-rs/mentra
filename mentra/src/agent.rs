@@ -44,7 +44,7 @@ use crate::{
 pub(crate) use team::parse_task_input;
 
 pub use config::{
-    AgentConfig, CompactionConfig, ContextCompactionConfig, MemoryConfig,
+    AgentConfig, AutoCompactTrigger, CompactionConfig, ContextCompactionConfig, MemoryConfig,
     ProjectedToolResultBudget, TaskConfig, TeamAutonomyConfig, TeamConfig, ToolProfile,
     ToolResultPagingConfig, WorkspaceConfig,
 };

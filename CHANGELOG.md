@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Compaction takes an explicit trigger and the run's bounds
+
+- `CompactionConfig::auto_compact_trigger` (`AutoCompactTrigger`) separates the
+  off switch from the fallback token count. `WindowShareOnly` compacts at
+  `auto_compact_threshold_percent` of a *known* context window and never
+  auto-compacts when the window is unknown — the policy that previously had no
+  spelling, because clearing `auto_compact_threshold_tokens` to opt out of an
+  absolute number turned the feature off instead. `Off` states the off switch on
+  its own, keeping both numbers.
+- The field defaults to `Thresholds`, which resolves the two numbers exactly as
+  0.23.5 did, `None` tokens included. A `CompactionConfig` serialized before this
+  field existed deserializes to it, so stored agent config keeps its effective
+  behavior at every window size.
+- `CompactionConfig::auto_compact_enabled` reports whether auto-compaction can
+  fire at all, so a host observes the off state without reimplementing threshold
+  resolution.
+- Adding a field to `CompactionConfig` is source-breaking only for a struct
+  literal that names every field; the `..Default::default()` form is unchanged.
+
 ## 0.23.5
 
 ### Scripted runtimes can target reserved output

@@ -80,6 +80,53 @@ pub struct ProjectedToolResultBudget {
     pub max_preview_bytes: usize,
 }
 
+/// Which signal decides that a run auto-compacts, and — separately from any
+/// number — whether it auto-compacts at all.
+///
+/// Before this existed, [`CompactionConfig::auto_compact_threshold_tokens`]
+/// carried two meanings at once: the fallback used when the model's context
+/// window is unknown, *and* the master off switch. That left one policy
+/// unspellable — "compact at a share of the window, and do nothing when the
+/// window is unknown" — because clearing the absolute number to opt out of it
+/// turned the whole feature off. A host that wanted window-relative behavior
+/// had to invent an absolute token count it did not believe in, and that
+/// invented number went live in exactly the case where a wrong guess does
+/// damage: [`ModelInfo::context_window`](crate::ModelInfo::context_window) is
+/// `None` by default, so an unlisted model gets the guess.
+///
+/// Each variant names one policy, and every reachable state is nameable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoCompactTrigger {
+    /// Resolve the threshold from the two numbers, exactly as mentra did
+    /// before this enum existed: the window share when the window and the
+    /// percentage are both known, otherwise
+    /// [`auto_compact_threshold_tokens`](CompactionConfig::auto_compact_threshold_tokens)
+    /// — and off entirely when that is `None`.
+    ///
+    /// The default, so a config stored before this field existed keeps
+    /// resolving to the same threshold at every window size.
+    #[default]
+    Thresholds,
+    /// Never auto-compact, whatever the two numbers say.
+    ///
+    /// The off switch stated on its own, so turning auto-compaction off does
+    /// not mean discarding the thresholds a host would want back when it turns
+    /// the feature on again.
+    Off,
+    /// Compact at
+    /// [`auto_compact_threshold_percent`](CompactionConfig::auto_compact_threshold_percent)
+    /// of a *known* context window, and do not auto-compact at all when the
+    /// window is unknown.
+    ///
+    /// [`auto_compact_threshold_tokens`](CompactionConfig::auto_compact_threshold_tokens)
+    /// is not consulted, so it may keep whatever value it holds. With no
+    /// percentage set there is nothing to take a share of and this is off —
+    /// deliberately, rather than falling back onto the absolute number this
+    /// variant exists to opt out of.
+    WindowShareOnly,
+}
+
 /// Controls request-only tool-result projection and canonical summary compaction.
 ///
 /// These mechanisms are separate. Request-only elision changes a cloned main
@@ -113,10 +160,20 @@ pub struct CompactionConfig {
     /// feature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projected_tool_result_budget: Option<ProjectedToolResultBudget>,
+    /// Which signal decides that a run auto-compacts. See
+    /// [`AutoCompactTrigger`]; the default reproduces the pre-0.24 resolution
+    /// of the two numbers below exactly, including `None` tokens meaning off.
+    #[serde(default)]
+    pub auto_compact_trigger: AutoCompactTrigger,
     /// The token count above which a run compacts, when the model's context
     /// window is unknown.
     ///
-    /// `None` disables auto-compaction outright, whatever the window is.
+    /// Under the default [`AutoCompactTrigger::Thresholds`], `None` here
+    /// disables auto-compaction outright, whatever the window is — this field
+    /// is both the fallback and the off switch, which is why
+    /// [`AutoCompactTrigger`] exists. Under
+    /// [`AutoCompactTrigger::WindowShareOnly`] this field is not consulted at
+    /// all, and under [`AutoCompactTrigger::Off`] neither is anything else.
     pub auto_compact_threshold_tokens: Option<usize>,
     /// The percentage of the model's context window to compact at, when the
     /// window *is* known.
@@ -128,7 +185,9 @@ pub struct CompactionConfig {
     /// [`ModelInfo::context_window`](crate::ModelInfo::context_window) is
     /// known, this percentage of it wins; otherwise
     /// `auto_compact_threshold_tokens` does. `None` here always uses the
-    /// absolute number. Values above 100 are treated as 100.
+    /// absolute number — or, under
+    /// [`AutoCompactTrigger::WindowShareOnly`], means off. Values above 100
+    /// are treated as 100.
     #[serde(default = "default_auto_compact_threshold_percent")]
     pub auto_compact_threshold_percent: Option<u8>,
     pub transcript_dir: PathBuf,
@@ -146,6 +205,7 @@ impl Default for CompactionConfig {
         Self {
             keep_recent_tool_results: usize::MAX,
             projected_tool_result_budget: None,
+            auto_compact_trigger: AutoCompactTrigger::default(),
             auto_compact_threshold_tokens: Some(50_000),
             auto_compact_threshold_percent: default_auto_compact_threshold_percent(),
             transcript_dir: default_transcript_dir(),
@@ -168,19 +228,62 @@ fn default_auto_compact_threshold_percent() -> Option<u8> {
 
 impl CompactionConfig {
     /// Resolves the token count at which a run compacts, for a model whose
-    /// context window is `context_window`.
+    /// context window is `context_window`. `None` means this run does not
+    /// auto-compact.
     ///
-    /// `None` means auto-compaction is off.
+    /// Every outcome, by [`auto_compact_trigger`](Self::auto_compact_trigger):
+    ///
+    /// - [`Off`](AutoCompactTrigger::Off) — `None`, always.
+    /// - [`WindowShareOnly`](AutoCompactTrigger::WindowShareOnly) — the
+    ///   percentage of a known `context_window`; `None` when the window or the
+    ///   percentage is unknown. The absolute number is never consulted.
+    /// - [`Thresholds`](AutoCompactTrigger::Thresholds) — `None` when
+    ///   [`auto_compact_threshold_tokens`](Self::auto_compact_threshold_tokens)
+    ///   is `None`; otherwise the percentage of a known `context_window` when
+    ///   both are set, and that absolute number in every remaining case.
+    ///
+    /// A percentage above 100 is treated as 100, so the threshold can never
+    /// exceed the window it is a share of.
     pub fn auto_compact_threshold(&self, context_window: Option<usize>) -> Option<usize> {
-        let fallback = self.auto_compact_threshold_tokens?;
+        match self.auto_compact_trigger {
+            AutoCompactTrigger::Off => None,
+            AutoCompactTrigger::WindowShareOnly => Some(window_share(
+                context_window?,
+                self.auto_compact_threshold_percent?,
+            )),
+            AutoCompactTrigger::Thresholds => {
+                let fallback = self.auto_compact_threshold_tokens?;
 
-        match (context_window, self.auto_compact_threshold_percent) {
-            (Some(window), Some(percent)) => {
-                Some(window.saturating_mul(percent.min(100) as usize) / 100)
+                match (context_window, self.auto_compact_threshold_percent) {
+                    (Some(window), Some(percent)) => Some(window_share(window, percent)),
+                    _ => Some(fallback),
+                }
             }
-            _ => Some(fallback),
         }
     }
+
+    /// Whether auto-compaction can fire at all, for *some* context window.
+    ///
+    /// The off state is otherwise only observable by resolving the threshold
+    /// against a window and finding `None`, which a host cannot do
+    /// window-independently without reimplementing
+    /// [`auto_compact_threshold`](Self::auto_compact_threshold). `true` does
+    /// not promise this run compacts: under
+    /// [`AutoCompactTrigger::WindowShareOnly`] a model with no declared
+    /// context window still never reaches a threshold.
+    pub fn auto_compact_enabled(&self) -> bool {
+        match self.auto_compact_trigger {
+            AutoCompactTrigger::Off => false,
+            AutoCompactTrigger::WindowShareOnly => self.auto_compact_threshold_percent.is_some(),
+            AutoCompactTrigger::Thresholds => self.auto_compact_threshold_tokens.is_some(),
+        }
+    }
+}
+
+/// `percent` of `window`, saturating, with `percent` clamped to 100 so a
+/// threshold can never land past the window it bounds.
+fn window_share(window: usize, percent: u8) -> usize {
+    window.saturating_mul(percent.min(100) as usize) / 100
 }
 
 pub type ContextCompactionConfig = CompactionConfig;
@@ -447,16 +550,131 @@ mod tests {
     }
 
     #[test]
-    fn clearing_the_token_threshold_disables_compaction_at_any_window() {
-        // `None` has always meant off, and a known window must not switch it
-        // back on.
+    fn under_the_threshold_trigger_a_missing_token_count_is_still_off() {
+        // The default trigger is the pre-0.24 resolution, where the absolute
+        // number doubles as the off switch. A stored config that used it that
+        // way keeps meaning off, and a known window must not switch it back on.
         let compaction = CompactionConfig {
             auto_compact_threshold_tokens: None,
             ..Default::default()
         };
 
+        assert_eq!(
+            compaction.auto_compact_trigger,
+            AutoCompactTrigger::Thresholds
+        );
         assert_eq!(compaction.auto_compact_threshold(Some(200_000)), None);
         assert_eq!(compaction.auto_compact_threshold(None), None);
+        assert!(!compaction.auto_compact_enabled());
+    }
+
+    #[test]
+    fn the_window_share_trigger_compacts_on_the_window_and_never_on_a_constant() {
+        // The state basis could not spell: compact at 75% of a window that is
+        // known, and do nothing at all when it is not — without inventing an
+        // absolute token count that goes live exactly when the guess is worst.
+        let compaction = CompactionConfig {
+            auto_compact_trigger: AutoCompactTrigger::WindowShareOnly,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            compaction.auto_compact_threshold(Some(200_000)),
+            Some(150_000)
+        );
+        assert_eq!(compaction.auto_compact_threshold(None), None);
+        assert!(compaction.auto_compact_enabled());
+    }
+
+    #[test]
+    fn the_window_share_trigger_ignores_the_absolute_number_entirely() {
+        let compaction = CompactionConfig {
+            auto_compact_trigger: AutoCompactTrigger::WindowShareOnly,
+            auto_compact_threshold_tokens: Some(9),
+            ..Default::default()
+        };
+
+        assert_eq!(compaction.auto_compact_threshold(None), None);
+        assert_eq!(
+            compaction.auto_compact_threshold(Some(64_000)),
+            Some(48_000)
+        );
+    }
+
+    #[test]
+    fn the_window_share_trigger_without_a_percentage_never_compacts() {
+        // Nothing left to take a share of: the honest answer is off, not a
+        // silent fall back onto the absolute number the host opted out of.
+        let compaction = CompactionConfig {
+            auto_compact_trigger: AutoCompactTrigger::WindowShareOnly,
+            auto_compact_threshold_percent: None,
+            ..Default::default()
+        };
+
+        assert_eq!(compaction.auto_compact_threshold(Some(200_000)), None);
+        assert_eq!(compaction.auto_compact_threshold(None), None);
+        assert!(!compaction.auto_compact_enabled());
+    }
+
+    #[test]
+    fn the_explicit_off_switch_survives_both_threshold_numbers() {
+        let compaction = CompactionConfig {
+            auto_compact_trigger: AutoCompactTrigger::Off,
+            auto_compact_threshold_tokens: Some(1),
+            auto_compact_threshold_percent: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(compaction.auto_compact_threshold(Some(200_000)), None);
+        assert_eq!(compaction.auto_compact_threshold(None), None);
+        assert!(!compaction.auto_compact_enabled());
+    }
+
+    #[test]
+    fn a_stored_config_without_the_trigger_field_keeps_the_pre_0_24_resolution() {
+        for tokens in [Some(50_000), None] {
+            for percent in [Some(75u8), None] {
+                let expected = CompactionConfig {
+                    auto_compact_threshold_tokens: tokens,
+                    auto_compact_threshold_percent: percent,
+                    ..Default::default()
+                };
+                let mut stored = serde_json::to_value(&expected).unwrap();
+                stored
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("auto_compact_trigger");
+
+                let loaded: CompactionConfig = serde_json::from_value(stored).unwrap();
+
+                assert_eq!(loaded.auto_compact_trigger, AutoCompactTrigger::Thresholds);
+                for window in [Some(200_000), Some(64_000), None] {
+                    assert_eq!(
+                        loaded.auto_compact_threshold(window),
+                        expected.auto_compact_threshold(window),
+                        "tokens={tokens:?} percent={percent:?} window={window:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_trigger_round_trips_through_serde() {
+        for trigger in [
+            AutoCompactTrigger::Thresholds,
+            AutoCompactTrigger::Off,
+            AutoCompactTrigger::WindowShareOnly,
+        ] {
+            let config = CompactionConfig {
+                auto_compact_trigger: trigger,
+                ..Default::default()
+            };
+            let round_tripped: CompactionConfig =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+
+            assert_eq!(round_tripped.auto_compact_trigger, trigger);
+        }
     }
 
     #[test]
