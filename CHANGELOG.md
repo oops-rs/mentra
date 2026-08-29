@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.24.0
 
 ### MCP server names that would collide are rejected at connect time
 
