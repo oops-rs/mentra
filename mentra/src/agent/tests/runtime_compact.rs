@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::PathBuf,
+    sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -16,6 +17,7 @@ use crate::{
         ToolResultContentKind, ToolResultElisionAction,
     },
     compaction::{CompactionExecutionMode, CompactionMode},
+    error::RuntimeError,
     provider::{CompactionInputItem, CompactionResponse, ProviderCapabilities, Request},
     runtime::{ProviderRetry, RunOptions, Runtime},
     tool::{
@@ -1542,5 +1544,276 @@ async fn a_second_overflow_after_compacting_is_not_retried_again() {
         provider_handle.recorded_requests().await.len(),
         2,
         "one compaction, one retry, and then it stops"
+    );
+}
+
+/// Answers the first request normally and then never answers another, so a
+/// test can reach a real compaction — which needs a completed exchange to
+/// summarize — and then hold its provider call open.
+struct AnswersOnceThenBlocksProvider {
+    model: crate::ModelInfo,
+    requests: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl crate::provider::Provider for AnswersOnceThenBlocksProvider {
+    fn descriptor(&self) -> crate::provider::ProviderDescriptor {
+        crate::provider::ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<crate::ModelInfo>, ProviderError> {
+        Ok(vec![self.model.clone()])
+    }
+
+    async fn stream(
+        &self,
+        _request: Request<'_>,
+    ) -> Result<crate::provider::ProviderEventStream, ProviderError> {
+        if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(crate::provider::provider_event_stream_from_response(
+                crate::provider::Response {
+                    id: "first".to_string(),
+                    model: self.model.id.clone(),
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::text("first response")],
+                    stop_reason: None,
+                    usage: None,
+                },
+            ));
+        }
+        std::future::pending().await
+    }
+}
+
+/// Answers the first request normally; every request after it fails retryably
+/// and trips `cancellation` on the way out — the shape of a run cancelled
+/// between two compaction attempts.
+struct AnswersOnceThenCancelsProvider {
+    model: crate::ModelInfo,
+    requests: Arc<AtomicU64>,
+    cancellation: crate::runtime::CancellationToken,
+}
+
+#[async_trait]
+impl crate::provider::Provider for AnswersOnceThenCancelsProvider {
+    fn descriptor(&self) -> crate::provider::ProviderDescriptor {
+        crate::provider::ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<crate::ModelInfo>, ProviderError> {
+        Ok(vec![self.model.clone()])
+    }
+
+    async fn stream(
+        &self,
+        _request: Request<'_>,
+    ) -> Result<crate::provider::ProviderEventStream, ProviderError> {
+        if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(crate::provider::provider_event_stream_from_response(
+                crate::provider::Response {
+                    id: "first".to_string(),
+                    model: self.model.id.clone(),
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::text("first response")],
+                    stop_reason: None,
+                    usage: None,
+                },
+            ));
+        }
+        self.cancellation.cancel();
+        Err(ProviderError::Retryable {
+            message: "summarizer is briefly unavailable".to_string(),
+            delay: None,
+        })
+    }
+}
+
+/// Spawns an agent that auto-compacts before every model request.
+fn compacting_agent<P: crate::provider::Provider + 'static>(
+    provider: P,
+    model: crate::ModelInfo,
+    label: &str,
+) -> crate::Agent {
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: Some(1),
+                    transcript_dir: temp_dir(label),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent")
+}
+
+// Virtual time, for the reason given on the retry-delay test below: the
+// summarizer here never answers, so what is measured is how long the run waits
+// before giving up on it.
+#[tokio::test(start_paused = true)]
+async fn cancelling_a_run_stops_a_compaction_already_in_flight() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let requests = Arc::new(AtomicU64::new(0));
+    let mut agent = compacting_agent(
+        AnswersOnceThenBlocksProvider {
+            model: model.clone(),
+            requests: Arc::clone(&requests),
+        },
+        model,
+        "cancel-in-flight-compaction",
+    );
+
+    // One completed exchange, so the next turn has something older than its
+    // protected tail to summarize.
+    agent
+        .send(vec![ContentBlock::text("first turn")])
+        .await
+        .expect("first turn");
+
+    let cancellation = crate::runtime::CancellationToken::default();
+    let canceller = tokio::spawn({
+        let cancellation = cancellation.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancellation.cancel();
+        }
+    });
+
+    let started = tokio::time::Instant::now();
+    let result = agent
+        .run(
+            vec![ContentBlock::text("second turn")],
+            RunOptions {
+                cancellation: Some(cancellation),
+                ..Default::default()
+            },
+        )
+        .await;
+    canceller.await.expect("canceller task");
+
+    assert!(
+        matches!(result, Err(RuntimeError::Cancelled)),
+        "a cancel during compaction must end the run as cancelled, not wait for \
+         the summarizer; got {result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "the run must not sit on a provider call that never answers; waited {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "the first turn, then the abandoned compaction; the second turn never \
+         reached the model"
+    );
+}
+
+#[tokio::test]
+async fn a_deadline_reached_during_compaction_ends_the_run() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let requests = Arc::new(AtomicU64::new(0));
+    let mut agent = compacting_agent(
+        AnswersOnceThenBlocksProvider {
+            model: model.clone(),
+            requests: Arc::clone(&requests),
+        },
+        model,
+        "deadline-during-compaction",
+    );
+
+    agent
+        .send(vec![ContentBlock::text("first turn")])
+        .await
+        .expect("first turn");
+
+    // Real time, deliberately: the deadline is a `SystemTime`, which
+    // `start_paused` does not virtualize. The margin is generous on purpose —
+    // the deadline has to outlast this run's setup (checkpoint and journal
+    // writes) so that the round-boundary check passes and the compaction is
+    // actually reached, which is the thing under test. The run does not wait
+    // it out: the summarizer never answers, so the deadline is what ends it.
+    let result = agent
+        .run(
+            vec![ContentBlock::text("second turn")],
+            RunOptions {
+                deadline: Some(SystemTime::now() + Duration::from_secs(2)),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(RuntimeError::DeadlineExceeded)),
+        "got {result:?}"
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "the first turn, then the compaction the deadline cut short"
+    );
+}
+
+// Virtual time: the claim is precisely "the 500 ms retry delay is not
+// waited out", and under `start_paused` the clock advances only for sleeps the
+// code actually asks for — so the elapsed value below is the delay itself, not
+// the test machine's load.
+#[tokio::test(start_paused = true)]
+async fn a_cancellation_between_compaction_attempts_ends_the_run_instead_of_degrading() {
+    // The auto-compaction retry loop deliberately swallows a failure and
+    // carries on with micro-compaction only. A cancellation is not a failure
+    // to degrade past: swallowing it would let the turn proceed after the
+    // caller asked for it to stop.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let requests = Arc::new(AtomicU64::new(0));
+    let cancellation = crate::runtime::CancellationToken::default();
+    let mut agent = compacting_agent(
+        AnswersOnceThenCancelsProvider {
+            model: model.clone(),
+            requests: Arc::clone(&requests),
+            cancellation: cancellation.clone(),
+        },
+        model,
+        "cancel-between-attempts",
+    );
+
+    agent
+        .send(vec![ContentBlock::text("first turn")])
+        .await
+        .expect("first turn");
+
+    let started = tokio::time::Instant::now();
+    let result = agent
+        .run(
+            vec![ContentBlock::text("second turn")],
+            RunOptions {
+                cancellation: Some(cancellation),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(RuntimeError::Cancelled)),
+        "got {result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "the loop must notice the cancellation instead of sleeping out its \
+         500 ms retry delay; waited {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "the first turn, then one failed compaction attempt: a cancelled run \
+         does not spend the remaining two"
     );
 }

@@ -409,6 +409,7 @@ async fn compact_preserves_salvaged_details_and_lets_discarded_details_go_with_t
         mode: CompactionMode::LocalOnly,
         max_persisted_transcripts: None,
         instructions: None,
+        bounds: CompactionBounds::default(),
     };
 
     let outcome = StandardCompactionEngine
@@ -520,6 +521,7 @@ fn request_for(items: Vec<TranscriptItem>, label: &str, model: &ModelInfo) -> Co
         mode: CompactionMode::LocalOnly,
         max_persisted_transcripts: None,
         instructions: None,
+        bounds: CompactionBounds::default(),
     }
 }
 
@@ -677,4 +679,134 @@ fn carried_files_reads_the_newest_summary_only() {
     // sufficient — and reading every summary would resurrect files an
     // earlier round deliberately carried forward or dropped.
     assert_eq!(carried_files(&items), vec!["fresh.rs".to_string()]);
+}
+
+/// A provider whose summarization request is accepted and then never
+/// answered, so a test can observe what a compaction does while a provider
+/// call is genuinely in flight rather than simulating one.
+struct BlockingProvider {
+    model: ModelInfo,
+    requests: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl Provider for BlockingProvider {
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(vec![self.model.clone()])
+    }
+
+    async fn stream(&self, _request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+fn compactable_items() -> Vec<TranscriptItem> {
+    vec![
+        user_turn_item("please do the thing"),
+        TranscriptItem::assistant_turn(Message::assistant(ContentBlock::text("ack"))),
+        tool_exchange_item("some tool output"),
+        user_turn_item("carry on"),
+    ]
+}
+
+// Virtual time: the provider never answers, so what is being measured is how
+// long the compaction waits before giving up on it. Under `start_paused` the
+// clock advances only when the runtime is idle, so the elapsed value is the
+// bound checker's own sleeps rather than the test machine's load.
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_compaction_gives_up_without_waiting_for_the_provider() {
+    let model = ModelInfo::new("test-model", "test-provider");
+    let requests = Arc::new(AtomicU64::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(BlockingProvider {
+        model: model.clone(),
+        requests: Arc::clone(&requests),
+    });
+    let cancellation = crate::runtime::CancellationToken::default();
+
+    let mut request = request_for(compactable_items(), "bounds-cancelled", &model);
+    request.bounds = CompactionBounds {
+        cancellation: Some(cancellation.clone()),
+        deadline: None,
+    };
+
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancellation.cancel();
+    });
+
+    let started = tokio::time::Instant::now();
+    let result = StandardCompactionEngine.compact(provider, request).await;
+    canceller.await.expect("canceller task");
+
+    assert!(
+        matches!(result, Err(RuntimeError::Cancelled)),
+        "a cancelled compaction reports cancellation, not a compaction failure; got {result:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(150),
+        "the compaction must abandon the in-flight call within a poll interval \
+         of the cancel, not wait for an answer that never comes"
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "the provider was reached and then abandoned mid-call"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_deadline_stops_a_compaction_before_it_reaches_the_provider() {
+    let model = ModelInfo::new("test-model", "test-provider");
+    let requests = Arc::new(AtomicU64::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(BlockingProvider {
+        model: model.clone(),
+        requests: Arc::clone(&requests),
+    });
+
+    let mut request = request_for(compactable_items(), "bounds-deadline", &model);
+    let transcript_dir = request.transcript_dir.clone();
+    request.bounds = CompactionBounds {
+        cancellation: None,
+        deadline: Some(SystemTime::now() - std::time::Duration::from_secs(1)),
+    };
+
+    let result = StandardCompactionEngine.compact(provider, request).await;
+
+    assert!(
+        matches!(result, Err(RuntimeError::DeadlineExceeded)),
+        "got {result:?}"
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "a compaction past its deadline must not spend a provider request"
+    );
+    assert!(
+        !transcript_dir.exists(),
+        "nor write a pre-compaction snapshot for work it will not do"
+    );
+}
+
+#[tokio::test]
+async fn unbounded_compaction_is_unchanged() {
+    // The bounds are additive: the default is no bound, and a request that
+    // carries none behaves exactly as it did before they existed.
+    let model = ModelInfo::new("test-model", "test-provider");
+    let request = request_for(compactable_items(), "bounds-absent", &model);
+
+    assert!(request.bounds.cancellation.is_none());
+    assert!(request.bounds.deadline.is_none());
+
+    let outcome = StandardCompactionEngine
+        .compact(fixed_provider(&model), request)
+        .await
+        .expect("an unbounded compaction should not error")
+        .expect("an outcome");
+
+    assert!(outcome.replaced_items > 0);
 }

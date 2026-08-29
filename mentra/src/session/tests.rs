@@ -370,6 +370,7 @@ fn all_session_event_variants_serialize_with_type_tag() {
 use crate::runtime::{AgentStore, SqliteRuntimeStore};
 use crate::{
     ContentBlock,
+    compaction::CompactionBounds,
     runtime::{CancellationToken, RunOptions},
     test::MockRuntime,
 };
@@ -3335,4 +3336,99 @@ async fn a_prompted_call_reports_the_lane_it_will_actually_run_in() {
         .expect("the turn task should finish")
         .expect("the turn should succeed");
     assert_eq!(message.text(), "done");
+}
+
+#[tokio::test]
+async fn a_manual_compaction_past_its_deadline_leaves_the_transcript_untouched() {
+    // `Session::compact` is the person's door to compaction, and the person
+    // is exactly who wants to take it back. A bounded compaction that gives
+    // up must leave the session it was compacting exactly as it found it.
+    let transcript_dir = unique_test_base_dir("compact-bounds-deadline");
+    let agent_config = AgentConfig {
+        compaction: crate::agent::CompactionConfig {
+            auto_compact_threshold_tokens: None,
+            transcript_dir,
+            ..Default::default()
+        },
+        ..AgentConfig::default()
+    };
+    let mock = MockRuntime::builder()
+        .text("first response")
+        .text("a summary that must never be requested")
+        .build()
+        .unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session_with_config("compact-bounds", mock.model(), agent_config)
+        .unwrap();
+
+    session
+        .append_turn(vec![ContentBlock::text("first turn")])
+        .await
+        .unwrap();
+    let history_before = session.history().to_vec();
+
+    let result = session
+        .compact_with_bounds(
+            None,
+            CompactionBounds {
+                cancellation: None,
+                deadline: Some(std::time::SystemTime::now() - std::time::Duration::from_secs(1)),
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(crate::error::RuntimeError::DeadlineExceeded)),
+        "a compaction past its deadline reports the bound that stopped it; got {result:?}"
+    );
+    assert_eq!(
+        session.history(),
+        history_before.as_slice(),
+        "an abandoned compaction must not touch the transcript"
+    );
+}
+
+#[tokio::test]
+async fn a_manual_compaction_without_bounds_still_compacts() {
+    // `compact_with_bounds` is additive: `compact` is it with no bounds, and
+    // an unbounded manual compaction behaves as it always has.
+    let transcript_dir = unique_test_base_dir("compact-bounds-absent");
+    let agent_config = AgentConfig {
+        compaction: crate::agent::CompactionConfig {
+            auto_compact_threshold_tokens: None,
+            transcript_dir,
+            ..Default::default()
+        },
+        ..AgentConfig::default()
+    };
+    let mock = MockRuntime::builder()
+        .text("first response")
+        .text("second response")
+        .text("compaction summary")
+        .build()
+        .unwrap();
+    let mut session = mock
+        .runtime()
+        .create_session_with_config("compact-unbounded", mock.model(), agent_config)
+        .unwrap();
+
+    session
+        .append_turn(vec![ContentBlock::text("first turn")])
+        .await
+        .unwrap();
+    session
+        .append_turn(vec![ContentBlock::text("second turn")])
+        .await
+        .unwrap();
+
+    let details = session
+        .compact_with_bounds(None, CompactionBounds::default())
+        .await
+        .expect("an unbounded manual compaction should not error");
+
+    assert!(
+        details.is_some(),
+        "there was older history to summarize, so a compaction happened"
+    );
 }

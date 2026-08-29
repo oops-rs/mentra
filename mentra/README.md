@@ -819,6 +819,18 @@ let config = AgentConfig {
 be explicit. Its persisted field requires Mentra 0.22 or later; older binaries
 ignore it and therefore cannot enforce the cap.
 
+`auto_compact_trigger` decides which of those two numbers is consulted, and
+whether auto-compaction runs at all. The default, `AutoCompactTrigger::Thresholds`,
+resolves them exactly as earlier versions did — the window share when the window
+is known, the absolute number otherwise, and off when the absolute number is
+`None`. `AutoCompactTrigger::WindowShareOnly` compacts strictly at
+`auto_compact_threshold_percent` of a *known* context window and never
+auto-compacts when the window is unknown, so a host with window-relative policy
+does not have to invent an absolute count that goes live for exactly the models
+whose window it does not know. `AutoCompactTrigger::Off` turns auto-compaction
+off without discarding either number, and `CompactionConfig::auto_compact_enabled`
+reports that state without resolving a threshold.
+
 ## Data And Persistence Defaults
 
 For non-test builds, Mentra keeps all default persisted state under a workspace-scoped app-data directory:

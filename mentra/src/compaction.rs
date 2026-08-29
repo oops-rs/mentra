@@ -1,6 +1,10 @@
 #[cfg(test)]
 mod tests;
 
+mod bounds;
+
+pub use bounds::CompactionBounds;
+
 use std::{
     borrow::Cow,
     collections::HashSet,
@@ -176,6 +180,13 @@ pub struct CompactionRequest {
     /// replacing them, so a caller cannot accidentally drop the continuity
     /// requirements by asking for one extra thing.
     pub instructions: Option<String>,
+    /// The bounds of the run this compaction belongs to.
+    ///
+    /// See [`CompactionBounds`]: a compaction inside a turn inherits the
+    /// turn's cancellation token and deadline, and every
+    /// [`CompactionEngine`] is expected to honor them. Defaults to no bounds,
+    /// which is what a compaction outside a run gets.
+    pub bounds: CompactionBounds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -251,6 +262,18 @@ pub struct CompactionOutcome {
 /// only from the pre-compaction snapshot at [`CompactionOutcome::transcript_path`].
 #[async_trait]
 pub trait CompactionEngine: Send + Sync {
+    /// Compacts `request.transcript`, or returns `Ok(None)` when there is
+    /// nothing older than the continuation tail to summarize.
+    ///
+    /// **Honor [`request.bounds`](CompactionRequest::bounds).** They are the
+    /// run's cancellation token and deadline, and an engine is the only thing
+    /// that can act on them once a provider call is in flight. Call
+    /// [`CompactionBounds::check`] before starting work and wrap the provider
+    /// call in [`CompactionBounds::guard`]; report
+    /// [`RuntimeError::Cancelled`] / [`RuntimeError::DeadlineExceeded`]
+    /// rather than an engine-specific error, and leave the transcript
+    /// untouched when you do. An engine that ignores them leaves its host
+    /// unable to cancel a compaction at all.
     async fn compact(
         &self,
         provider: Arc<dyn Provider>,
@@ -300,6 +323,11 @@ impl CompactionEngine for StandardCompactionEngine {
         if compacted_prefix.is_empty() {
             return Ok(None);
         }
+
+        // Before the snapshot, not just before the provider call: a run
+        // already past its bounds should leave no artifact of work it will
+        // not do.
+        request.bounds.check()?;
 
         let transcript_path =
             persist_transcript(request.transcript.items(), &request.transcript_dir).await?;
@@ -425,6 +453,7 @@ pub(crate) fn compaction_request_from_agent(
     transcript: AgentTranscript,
     config: &crate::agent::CompactionConfig,
     provider_request_options: ProviderRequestOptions,
+    bounds: CompactionBounds,
 ) -> CompactionRequest {
     CompactionRequest {
         model: model.to_string(),
@@ -438,6 +467,7 @@ pub(crate) fn compaction_request_from_agent(
         mode: config.mode,
         max_persisted_transcripts: config.max_persisted_transcripts,
         instructions: None,
+        bounds,
     }
 }
 
@@ -489,8 +519,12 @@ File paths, command outputs, and error messages should be quoted verbatim.";
     }
     prompt.push_str("\nTranscript JSON:\n");
     prompt.push_str(transcript);
-    let response = provider
-        .send(Request {
+    // Guarded rather than plainly awaited: this is the one long await in a
+    // compaction, and until it was bounded a cancelled run kept going until
+    // the summarizer answered.
+    let response = request
+        .bounds
+        .guard(provider.send(Request {
             model: Cow::Borrowed(request.model.as_str()),
             system: Some(Cow::Borrowed(system)),
             messages: Cow::Owned(vec![Message::user(ContentBlock::text(prompt))]),
@@ -500,8 +534,8 @@ File paths, command outputs, and error messages should be quoted verbatim.";
             max_output_tokens: Some(request.summary_max_output_tokens),
             metadata: Cow::Owned(Default::default()),
             provider_request_options: request.provider_request_options.clone(),
-        })
-        .await
+        }))
+        .await?
         .map_err(RuntimeError::FailedToCompactHistory)?;
     let text = response
         .content
@@ -547,8 +581,9 @@ async fn compact_remotely(
         .iter()
         .map(project_compaction_item)
         .collect::<Vec<_>>();
-    let response = provider
-        .compact(ProviderCompactionRequest {
+    let response = request
+        .bounds
+        .guard(provider.compact(ProviderCompactionRequest {
             model: Cow::Borrowed(request.model.as_str()),
             instructions: match request.instructions.as_deref() {
                 Some(extra) => Cow::Owned(format!(
@@ -559,8 +594,8 @@ async fn compact_remotely(
             input: Cow::Owned(input),
             metadata: Cow::Owned(Default::default()),
             provider_request_options: request.provider_request_options.clone(),
-        })
-        .await
+        }))
+        .await?
         .map_err(RuntimeError::FailedToCompactHistory)?;
     Ok(parse_remote_summary(response))
 }

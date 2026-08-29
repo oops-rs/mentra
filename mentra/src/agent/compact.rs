@@ -2,7 +2,7 @@ use crate::memory::journal::CompactionOutcome;
 use crate::{
     ContentBlock, Message,
     agent::AgentEvent,
-    compaction::compaction_request_from_agent,
+    compaction::{CompactionBounds, compaction_request_from_agent},
     error::{ErrorCategory, RuntimeError},
     memory::{
         ProjectedToolResultHistory, estimated_request_tokens, project_tool_result_history,
@@ -28,7 +28,17 @@ impl Agent {
         estimated_request_tokens(messages, self.effective_system_prompt().as_deref())
     }
 
-    pub(crate) async fn auto_compact_if_needed(&mut self) -> Result<(), RuntimeError> {
+    /// Compacts before the next model request when the projected history has
+    /// outgrown the configured threshold.
+    ///
+    /// `bounds` are the run's — see [`CompactionBounds`]. They are checked
+    /// between retry attempts as well as inside the provider call, so a
+    /// cancelled run gives up here instead of sitting out a retry delay it
+    /// will only wake from to fail.
+    pub(crate) async fn auto_compact_if_needed(
+        &mut self,
+        bounds: &CompactionBounds,
+    ) -> Result<(), RuntimeError> {
         let Some(threshold) = self
             .config
             .compaction
@@ -46,10 +56,17 @@ impl Agent {
 
         for attempt in 1..=AUTO_COMPACT_MAX_ATTEMPTS {
             match self
-                .compact_history(preserve_from, CompactionTrigger::Auto)
+                .compact_history(preserve_from, CompactionTrigger::Auto, bounds)
                 .await
             {
                 Ok(_) => return Ok(()),
+                // Ahead of every other arm: a run bound is not a compaction
+                // failure to degrade past. Swallowing it the way the arm
+                // below swallows a summarizer outage would let the turn
+                // proceed after the caller asked for it to stop, and the
+                // cancel would surface — if at all — as a silently ignored
+                // request.
+                Err(err) if is_run_bound(&err) => return Err(err),
                 Err(err)
                     if err.category() == ErrorCategory::Retryable
                         && attempt < AUTO_COMPACT_MAX_ATTEMPTS =>
@@ -61,10 +78,11 @@ impl Agent {
                         max_attempts: AUTO_COMPACT_MAX_ATTEMPTS,
                         next_delay_ms: AUTO_COMPACT_RETRY_DELAY_MS,
                     });
-                    tokio::time::sleep(tokio::time::Duration::from_millis(
-                        AUTO_COMPACT_RETRY_DELAY_MS,
-                    ))
-                    .await;
+                    bounds
+                        .sleep(tokio::time::Duration::from_millis(
+                            AUTO_COMPACT_RETRY_DELAY_MS,
+                        ))
+                        .await?;
                 }
                 Err(_) => {
                     // Non-retryable error or all attempts exhausted: degrade gracefully.
@@ -83,9 +101,12 @@ impl Agent {
     /// consults no threshold: the threshold is an estimate of what will fit and
     /// the provider has just said, authoritatively, that it did not. There is
     /// nothing left to predict.
-    pub(crate) async fn compact_after_context_overflow(&mut self) -> Result<(), RuntimeError> {
+    pub(crate) async fn compact_after_context_overflow(
+        &mut self,
+        bounds: &CompactionBounds,
+    ) -> Result<(), RuntimeError> {
         let preserve_from = required_tail_start_for_continuation(self.history());
-        self.compact_history(preserve_from, CompactionTrigger::Auto)
+        self.compact_history(preserve_from, CompactionTrigger::Auto, bounds)
             .await?;
         Ok(())
     }
@@ -94,8 +115,9 @@ impl Agent {
         &mut self,
         preserve_from: usize,
         trigger: CompactionTrigger,
+        bounds: &CompactionBounds,
     ) -> Result<Option<CompactionDetails>, RuntimeError> {
-        self.compact_history_with_instructions(preserve_from, trigger, None)
+        self.compact_history_with_instructions(preserve_from, trigger, None, bounds)
             .await
     }
 
@@ -106,11 +128,16 @@ impl Agent {
     /// rather than replacing them: a caller asking for one extra thing should
     /// not thereby lose the file paths and command outcomes every summary
     /// needs.
+    /// `bounds` travel with the request into the engine, and nothing before
+    /// them mutates the transcript: a compaction that gives up on a bound
+    /// returns the error before `try_apply_compaction` is reached, so the
+    /// transcript is exactly as it was.
     pub(crate) async fn compact_history_with_instructions(
         &mut self,
         preserve_from: usize,
         trigger: CompactionTrigger,
         instructions: Option<&str>,
+        bounds: &CompactionBounds,
     ) -> Result<Option<CompactionDetails>, RuntimeError> {
         if self.history().is_empty() {
             return Ok(None);
@@ -143,6 +170,7 @@ impl Agent {
                     self.transcript().clone(),
                     &self.config.compaction,
                     provider_request_options,
+                    bounds.clone(),
                 );
                 request.instructions = instructions.map(str::to_string);
                 request
@@ -254,4 +282,16 @@ impl Agent {
             }),
         );
     }
+}
+
+/// Whether this error is a run bound reporting itself rather than a
+/// compaction failing.
+///
+/// The two are handled oppositely: a failure degrades into "carry on with
+/// micro-compaction", a bound must end the run.
+fn is_run_bound(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Cancelled | RuntimeError::DeadlineExceeded
+    )
 }

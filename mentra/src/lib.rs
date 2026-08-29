@@ -53,7 +53,9 @@ pub use agent::{
     TerminalOutputReservation, TerminalOutputSpec, ToolResultPagingConfig,
 };
 pub use background::{BackgroundNotification, BackgroundTaskStatus, BackgroundTaskSummary};
-pub use compaction::{CompactionEngine, CompactionMode, StandardCompactionEngine};
+pub use compaction::{
+    CompactionBounds, CompactionEngine, CompactionMode, StandardCompactionEngine,
+};
 pub use mcp::{
     McpClientError, McpManager, McpServerConfig, McpServerStatus, McpServerSummary, McpSseClient,
     McpSseConfigError, McpSseError, McpSseLimits, McpSseServerConfig, McpStreamableHttpClient,

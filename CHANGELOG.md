@@ -19,8 +19,6 @@
 - Source-breaking for hosts matching exhaustively on `McpClientError`,
   `McpSseError`, or `McpStreamableHttpError`: each gained one variant.
 
-||||||| ef035ca
-
 ### Hosts can take a skills root back
 
 - `Runtime::unregister_skills_dir` and `Runtime::unregister_skills_dirs` drop
@@ -57,6 +55,44 @@
   order, earliest first, so a workspace skill shadows a personal one of the
   same name. Within a single root a repeated name is still
   `SkillLoadError::DuplicateSkillName`.
+
+### Compaction takes an explicit trigger and the run's bounds
+
+- `CompactionConfig::auto_compact_trigger` (`AutoCompactTrigger`) separates the
+  off switch from the fallback token count. `WindowShareOnly` compacts at
+  `auto_compact_threshold_percent` of a *known* context window and never
+  auto-compacts when the window is unknown — the policy that previously had no
+  spelling, because clearing `auto_compact_threshold_tokens` to opt out of an
+  absolute number turned the feature off instead. `Off` states the off switch on
+  its own, keeping both numbers.
+- The field defaults to `Thresholds`, which resolves the two numbers exactly as
+  0.23.5 did, `None` tokens included. A `CompactionConfig` serialized before this
+  field existed deserializes to it, so stored agent config keeps its effective
+  behavior at every window size.
+- `CompactionConfig::auto_compact_enabled` reports whether auto-compaction can
+  fire at all, so a host observes the off state without reimplementing threshold
+  resolution.
+- Adding a field to `CompactionConfig` is source-breaking only for a struct
+  literal that names every field; the `..Default::default()` form is unchanged.
+- A compaction now carries the run's bounds. `CompactionRequest::bounds`
+  (`CompactionBounds`) holds the run's cancellation token and deadline; an
+  auto-compaction, a context-overflow recovery, and the `compact` intrinsic all
+  inherit them from the turn they happen in. A cancelled or expired compaction
+  abandons the provider call instead of waiting for an answer, reports
+  `RuntimeError::Cancelled` / `DeadlineExceeded`, and leaves the transcript
+  exactly as it was.
+- The auto-compaction retry loop checks the bounds between attempts and no
+  longer sleeps out its 500 ms retry delay in a cancelled run. **Behavior
+  change:** its degrade-gracefully branch no longer swallows a cancellation —
+  the run now ends cancelled where it previously carried on with
+  micro-compaction only. A summarizer outage still degrades exactly as before.
+- `Session::compact_with_bounds` is `Session::compact` with bounds the caller
+  can trip; `compact` is unchanged and unbounded. `ToolContext::compact_history`
+  now runs under its own run's bounds, with no signature change.
+- **Source-breaking:** `CompactionRequest` gained a field, so a struct literal
+  naming every field needs `bounds` (`CompactionBounds::default()` reproduces
+  the old behavior). A `CompactionEngine` implementation compiles unchanged but
+  is expected to honor `request.bounds` — see the trait docs.
 
 ## 0.23.5
 

@@ -315,9 +315,33 @@ impl Session {
     /// them.
     ///
     /// Returns `None` when there was nothing to compact.
+    ///
+    /// Unbounded: a compaction started here runs to completion. Use
+    /// [`compact_with_bounds`](Self::compact_with_bounds) to be able to take
+    /// it back.
     pub async fn compact(
         &mut self,
         instructions: Option<&str>,
+    ) -> Result<Option<crate::agent::CompactionDetails>, RuntimeError> {
+        self.compact_with_bounds(instructions, crate::compaction::CompactionBounds::default())
+            .await
+    }
+
+    /// Compacts this session's transcript now, under bounds the caller can
+    /// trip.
+    ///
+    /// [`compact`](Self::compact) with a way to stop: a summarization is a
+    /// full provider round trip over a long transcript, and a host driving one
+    /// from a UI needs the same cancel it has over a turn. Reaching a bound
+    /// fails with [`RuntimeError::Cancelled`] or
+    /// [`RuntimeError::DeadlineExceeded`] and leaves the transcript exactly as
+    /// it was — an abandoned compaction changes nothing.
+    ///
+    /// `instructions` behave as they do for [`compact`](Self::compact).
+    pub async fn compact_with_bounds(
+        &mut self,
+        instructions: Option<&str>,
+        bounds: crate::compaction::CompactionBounds,
     ) -> Result<Option<crate::agent::CompactionDetails>, RuntimeError> {
         // The last turn stays whole, as it does for the intrinsic: compacting
         // the exchange a caller just had is the one thing they did not ask for.
@@ -335,6 +359,7 @@ impl Session {
                 preserve_from,
                 crate::agent::CompactionTrigger::Manual,
                 instructions,
+                &bounds,
             )
             .await;
         drop(event_tap);
