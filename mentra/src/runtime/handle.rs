@@ -7,7 +7,7 @@ use std::{
     any::{Any, TypeId},
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::Duration,
 };
 
@@ -36,7 +36,7 @@ use crate::{
     tool::{ExecutableTool, ToolAuthorizer, ToolRegistry},
 };
 
-use super::skill::SkillLoader;
+use super::skill::{SkillRegistry, SkillRoot};
 
 #[derive(Clone)]
 pub struct RuntimeHandle {
@@ -80,7 +80,7 @@ pub(crate) struct CollaborationServices {
 pub(crate) struct ToolingServices {
     pub(crate) tool_registry: Arc<RwLock<ToolRegistry>>,
     pub(crate) scoped_tools: Arc<RwLock<HashMap<String, String>>>,
-    pub(crate) skill_loader: Arc<RwLock<Option<SkillLoader>>>,
+    pub(crate) skills: Arc<RwLock<SkillRegistry>>,
     pub(crate) app_contexts: Arc<RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>>,
 }
 

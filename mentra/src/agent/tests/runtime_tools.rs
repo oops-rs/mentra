@@ -2768,6 +2768,94 @@ async fn registered_skills_are_exposed_and_load_skill_returns_wrapped_content() 
 }
 
 #[tokio::test]
+async fn load_skill_cannot_reach_a_skill_whose_root_was_unregistered() {
+    // The model-facing half of unregistration: dropping a root must remove the
+    // skill from the prompt *and* from `load_skill`, or a model that remembers
+    // the name from an earlier turn keeps loading a workspace it has left.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "tool-gone", "load_skill", r#"{"name":"gone"}"#),
+            tool_use_stream(&model.id, "tool-kept", "load_skill", r#"{"name":"kept"}"#),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let provider_handle = provider.clone();
+
+    let dropped = temp_skills_dir("unregistered-dropped");
+    write_skill(
+        &dropped,
+        "gone",
+        "---\nname: gone\ndescription: Leaves with its root\n---\nGone body.\n",
+    );
+    let kept = temp_skills_dir("unregistered-kept");
+    write_skill(
+        &kept,
+        "kept",
+        "---\nname: kept\ndescription: Stays registered\n---\nKept body.\n",
+    );
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    runtime
+        .register_skills_dirs([dropped.as_path(), kept.as_path()])
+        .expect("register skills");
+    assert!(runtime.unregister_skills_dir(&dropped));
+
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                system: Some("Base system prompt".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    agent
+        .send(vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        agent.history()[2],
+        Message::user(ContentBlock::ToolResult {
+            tool_use_id: "tool-gone".to_string(),
+            content: "Unknown skill 'gone'".into(),
+            is_error: true,
+        }),
+        "the dropped root's skill is refused, not served from a stale map"
+    );
+
+    assert_eq!(
+        agent.history()[4],
+        Message::user(ContentBlock::ToolResult {
+            tool_use_id: "tool-kept".to_string(),
+            content: "<skill name=\"kept\">\nKept body.\n</skill>".into(),
+            is_error: false,
+        }),
+        "the surviving root is untouched"
+    );
+
+    let requests = provider_handle.recorded_requests().await;
+    assert!(tool_names(&requests[0]).contains("load_skill"));
+    assert_eq!(
+        requests[0].system.as_deref(),
+        Some(
+            "Base system prompt\n\nSkills available:\n  - kept: Stays registered\nUse the load_skill tool only when one of these skills is relevant to the task."
+        ),
+        "the dropped skill is not offered to the model either"
+    );
+}
+
+#[tokio::test]
 async fn task_subagent_keeps_load_skill_while_hiding_task() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
