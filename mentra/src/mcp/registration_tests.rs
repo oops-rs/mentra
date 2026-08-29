@@ -570,3 +570,92 @@ impl crate::tool::ToolExecutor for EchoTool {
         Ok(self.output.clone())
     }
 }
+
+mod server_name_validation {
+    use crate::mcp::{
+        McpClientError, McpManager, McpServerConfig, McpServerNameError, McpSseError,
+        McpSseServerConfig, McpStreamableHttpError, McpStreamableHttpServerConfig,
+    };
+
+    /// Every rejected shape, paired with the [`McpServerNameError`] variant
+    /// it must produce.
+    fn rejected_names() -> Vec<(&'static str, McpServerNameError)> {
+        vec![
+            ("", McpServerNameError::Empty),
+            (
+                "evil__foo",
+                McpServerNameError::ContainsDoubleUnderscore("evil__foo".to_string()),
+            ),
+            (
+                "evil_",
+                McpServerNameError::EndsWithUnderscore("evil_".to_string()),
+            ),
+        ]
+    }
+
+    /// `connect` rejects every ambiguous server-name shape before touching a
+    /// live process, so a bad config never spawns anything.
+    #[tokio::test]
+    async fn connect_rejects_every_ambiguous_server_name() {
+        for (name, expected) in rejected_names() {
+            let config = McpServerConfig {
+                name: name.to_string(),
+                command: "does-not-matter".to_string(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            };
+            let mut manager = McpManager::new();
+            let error = manager
+                .connect(&config)
+                .await
+                .expect_err("ambiguous server name must be rejected");
+            match error {
+                McpClientError::InvalidServerName(got) => {
+                    assert_eq!(got, expected, "name {name:?}")
+                }
+                other => panic!("name {name:?}: expected InvalidServerName, got {other}"),
+            }
+            assert_eq!(manager.connected_count(), 0);
+        }
+    }
+
+    /// `connect_sse` rejects the same shapes before opening any connection.
+    #[tokio::test]
+    async fn connect_sse_rejects_every_ambiguous_server_name() {
+        for (name, expected) in rejected_names() {
+            let config = McpSseServerConfig::new(name, "http://127.0.0.1:1/sse");
+            let mut manager = McpManager::new();
+            let error = manager
+                .connect_sse(&config)
+                .await
+                .expect_err("ambiguous server name must be rejected");
+            match error {
+                McpSseError::InvalidServerName(got) => assert_eq!(got, expected, "name {name:?}"),
+                other => panic!("name {name:?}: expected InvalidServerName, got {other}"),
+            }
+            assert_eq!(manager.connected_count(), 0);
+        }
+    }
+
+    /// `connect_streamable_http` rejects the same shapes before opening any
+    /// connection.
+    #[tokio::test]
+    async fn connect_streamable_http_rejects_every_ambiguous_server_name() {
+        for (name, expected) in rejected_names() {
+            let config = McpStreamableHttpServerConfig::new(name, "http://127.0.0.1:1/mcp");
+            let mut manager = McpManager::new();
+            let error = manager
+                .connect_streamable_http(&config)
+                .await
+                .expect_err("ambiguous server name must be rejected");
+            match error {
+                McpStreamableHttpError::InvalidServerName(got) => {
+                    assert_eq!(got, expected, "name {name:?}")
+                }
+                other => panic!("name {name:?}: expected InvalidServerName, got {other}"),
+            }
+            assert_eq!(manager.connected_count(), 0);
+        }
+    }
+}

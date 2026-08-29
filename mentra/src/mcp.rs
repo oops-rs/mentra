@@ -56,7 +56,10 @@ pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
 
-pub use bridge::{McpBridgedTool, mcp_tool_name, parse_mcp_tool_name};
+pub use bridge::{
+    McpBridgedTool, McpServerNameError, mcp_tool_name, parse_mcp_tool_name,
+    validate_mcp_server_name,
+};
 pub use client::{McpClientError, McpStdioClient};
 pub use manager::{McpManager, McpServerStatus, McpServerSummary};
 pub use protocol::{McpServerConfig, McpToolDefinition};
