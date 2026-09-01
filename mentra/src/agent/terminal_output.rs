@@ -197,7 +197,7 @@ impl Agent {
             validator: None,
             accepted_call_id: None,
         };
-        self.runtime.register_scoped_tool(&self.id, terminal_tool);
+        let registration = self.runtime.register_scoped_tool(&self.id, terminal_tool);
         *self
             .terminal_tool_gate
             .lock()
@@ -208,7 +208,7 @@ impl Agent {
         let _guard = TerminalToolGuard {
             runtime: self.runtime.clone(),
             agent_id: self.id.clone(),
-            tool_name: tool_name.clone(),
+            registration,
             gate: Arc::clone(&self.terminal_tool_gate),
         };
 
@@ -267,7 +267,7 @@ impl Agent {
             validator: Some(Arc::new(validator)),
             accepted_call_id: Some(Arc::clone(&accepted_call_id)),
         };
-        self.runtime.register_scoped_tool(&self.id, terminal_tool);
+        let registration = self.runtime.register_scoped_tool(&self.id, terminal_tool);
         *self
             .terminal_tool_gate
             .lock()
@@ -278,7 +278,7 @@ impl Agent {
         let _guard = TerminalToolGuard {
             runtime: self.runtime.clone(),
             agent_id: self.id.clone(),
-            tool_name: tool_name.clone(),
+            registration,
             gate: Arc::clone(&self.terminal_tool_gate),
         };
 
@@ -424,22 +424,23 @@ impl ToolExecutor for TerminalOutputTool {
 struct TerminalToolGuard {
     runtime: RuntimeHandle,
     agent_id: String,
-    tool_name: String,
+    registration: crate::tool::ToolRegistration,
     gate: Arc<Mutex<Option<TerminalToolGate>>>,
 }
 
 impl Drop for TerminalToolGuard {
     fn drop(&mut self) {
+        let tool_name = self.registration.name();
         let mut gate = self.gate.lock().expect("terminal tool gate poisoned");
         if gate
             .as_ref()
-            .is_some_and(|open| open.tool_name == self.tool_name)
+            .is_some_and(|open| open.tool_name == tool_name)
         {
             *gate = None;
         }
         drop(gate);
         self.runtime
-            .unregister_scoped_tool(&self.agent_id, &self.tool_name);
+            .unregister_scoped_tool(&self.agent_id, &self.registration);
     }
 }
 

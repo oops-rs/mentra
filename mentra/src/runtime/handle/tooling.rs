@@ -75,41 +75,59 @@ impl RuntimeHandle {
             .unregister(name)
     }
 
-    pub(crate) fn register_scoped_tool<T>(&self, agent_id: &str, tool: T)
+    pub(crate) fn register_scoped_tool<T>(
+        &self,
+        agent_id: &str,
+        tool: T,
+    ) -> crate::tool::ToolRegistration
     where
         T: ExecutableTool + 'static,
     {
-        let name = tool.descriptor().provider.name;
+        let mut registry = self
+            .tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned");
+        let registration = registry.register_tool_tracked(tool);
+        let name = registration.descriptor().provider.name.clone();
         self.tooling
             .scoped_tools
             .write()
             .expect("scoped tool registry poisoned")
-            .insert(name, agent_id.to_string());
-        self.register_tool(tool);
+            .insert(
+                name,
+                ScopedToolOwner {
+                    agent_id: agent_id.to_string(),
+                    generation: registration.generation(),
+                },
+            );
+        registration
     }
 
-    pub(crate) fn unregister_scoped_tool(&self, agent_id: &str, name: &str) {
-        let owner_matches = self
+    pub(crate) fn unregister_scoped_tool(
+        &self,
+        agent_id: &str,
+        registration: &crate::tool::ToolRegistration,
+    ) {
+        let mut registry = self
+            .tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned");
+        let mut scoped_tools = self
             .tooling
             .scoped_tools
-            .read()
-            .expect("scoped tool registry poisoned")
-            .get(name)
-            .is_some_and(|owner| owner == agent_id);
+            .write()
+            .expect("scoped tool registry poisoned");
+        let owner_matches = scoped_tools.get(registration.name()).is_some_and(|owner| {
+            owner.agent_id == agent_id && owner.generation == registration.generation()
+        });
         if !owner_matches {
             return;
         }
 
-        self.tooling
-            .tool_registry
-            .write()
-            .expect("tool registry poisoned")
-            .unregister_tool(name);
-        self.tooling
-            .scoped_tools
-            .write()
-            .expect("scoped tool registry poisoned")
-            .remove(name);
+        registry.unregister_registration(registration);
+        scoped_tools.remove(registration.name());
     }
 
     pub(crate) fn tool_is_visible_to_agent(&self, name: &str, agent_id: &str) -> bool {
@@ -118,7 +136,7 @@ impl RuntimeHandle {
             .read()
             .expect("scoped tool registry poisoned")
             .get(name)
-            .is_none_or(|owner| owner == agent_id)
+            .is_none_or(|owner| owner.agent_id == agent_id)
     }
 
     /// Commits already-loaded skill roots and enables the `load_skill` tool.
@@ -230,5 +248,18 @@ impl RuntimeHandle {
             .read()
             .expect("tool registry poisoned")
             .get_tool_descriptor(name)
+    }
+
+    pub(crate) fn resolve_tool(
+        &self,
+        name: &str,
+    ) -> Option<(Arc<dyn ExecutableTool>, crate::tool::RuntimeToolDescriptor)> {
+        let resolved = self
+            .tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned")
+            .resolve_tool(name)?;
+        Some((resolved.handler, resolved.descriptor))
     }
 }

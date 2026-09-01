@@ -15,7 +15,13 @@ mod runtime;
 pub(crate) mod schema;
 mod truncation;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
+};
 
 pub use authorization::{
     ToolAuthorizationDecision, ToolAuthorizationOutcome, ToolAuthorizationPreview,
@@ -38,6 +44,8 @@ use builtin::{BackgroundRunTool, CheckBackgroundTool, LoadSkillTool, ShellTool};
 use coding::{EditTool, GlobTool, GrepTool, ListTool, ReadTool, WriteTool};
 use files::FilesTool;
 
+static NEXT_TOOL_REGISTRATION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 /// Selects which builtin file-tool surface a runtime exposes.
 ///
 /// [`None`](Self::None) leaves every builtin file tool unregistered while
@@ -58,8 +66,42 @@ pub enum FileToolProfile {
 
 #[derive(Clone)]
 struct RegisteredTool {
+    generation: ToolRegistrationGeneration,
     descriptor: RuntimeToolDescriptor,
     handler: Arc<dyn ExecutableTool>,
+}
+
+struct PreparedTool {
+    descriptor: RuntimeToolDescriptor,
+    handler: Arc<dyn ExecutableTool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ToolRegistrationGeneration(u64);
+
+#[derive(Clone)]
+pub(crate) struct ToolRegistration {
+    generation: ToolRegistrationGeneration,
+    descriptor: RuntimeToolDescriptor,
+}
+
+impl ToolRegistration {
+    pub(crate) fn generation(&self) -> ToolRegistrationGeneration {
+        self.generation
+    }
+
+    pub(crate) fn descriptor(&self) -> &RuntimeToolDescriptor {
+        &self.descriptor
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.descriptor.provider.name
+    }
+}
+
+pub(crate) struct ResolvedTool {
+    pub(crate) descriptor: RuntimeToolDescriptor,
+    pub(crate) handler: Arc<dyn ExecutableTool>,
 }
 
 /// A tool could not be registered because its name was already taken.
@@ -88,16 +130,7 @@ impl ToolRegistry {
     where
         T: ExecutableTool + 'static,
     {
-        let handler: Arc<dyn ExecutableTool> = Arc::new(tool);
-        let descriptor = handler.descriptor();
-        self.tools.insert(
-            descriptor.provider.name.clone(),
-            RegisteredTool {
-                descriptor,
-                handler,
-            },
-        );
-        self.refresh_provider_specs();
+        self.register_tool_tracked(tool);
     }
 
     /// Registers a tool unless its name is already taken.
@@ -110,22 +143,31 @@ impl ToolRegistry {
     where
         T: ExecutableTool + 'static,
     {
-        let handler: Arc<dyn ExecutableTool> = Arc::new(tool);
-        let descriptor = handler.descriptor();
-        let name = descriptor.provider.name.clone();
+        self.try_register_tool_tracked(tool).map(drop)
+    }
+
+    pub(crate) fn register_tool_tracked<T>(&mut self, tool: T) -> ToolRegistration
+    where
+        T: ExecutableTool + 'static,
+    {
+        let prepared = Self::prepare_tool(tool);
+        self.insert_prepared(prepared)
+    }
+
+    pub(crate) fn try_register_tool_tracked<T>(
+        &mut self,
+        tool: T,
+    ) -> Result<ToolRegistration, ToolNameCollision>
+    where
+        T: ExecutableTool + 'static,
+    {
+        let prepared = Self::prepare_tool(tool);
+        let name = prepared.descriptor.provider.name.clone();
         if self.tools.contains_key(&name) {
             return Err(ToolNameCollision { name });
         }
 
-        self.tools.insert(
-            name,
-            RegisteredTool {
-                descriptor,
-                handler,
-            },
-        );
-        self.refresh_provider_specs();
-        Ok(())
+        Ok(self.insert_prepared(prepared))
     }
 
     /// Removes a tool by name, reporting whether one was there.
@@ -152,6 +194,25 @@ impl ToolRegistry {
         self.tools.get(name).map(|tool| tool.descriptor.clone())
     }
 
+    pub(crate) fn resolve_tool(&self, name: &str) -> Option<ResolvedTool> {
+        self.tools.get(name).map(|tool| ResolvedTool {
+            descriptor: tool.descriptor.clone(),
+            handler: Arc::clone(&tool.handler),
+        })
+    }
+
+    pub(crate) fn unregister_registration(&mut self, registration: &ToolRegistration) -> bool {
+        let matches_generation = self
+            .tools
+            .get(registration.name())
+            .is_some_and(|tool| tool.generation == registration.generation());
+        if !matches_generation {
+            return false;
+        }
+
+        self.unregister_tool(registration.name())
+    }
+
     pub(crate) fn unregister_tool(&mut self, name: &str) -> bool {
         let removed = self.tools.remove(name).is_some();
         if removed {
@@ -168,6 +229,47 @@ impl ToolRegistry {
             .collect::<Vec<_>>()
             .into();
     }
+
+    fn prepare_tool<T>(tool: T) -> PreparedTool
+    where
+        T: ExecutableTool + 'static,
+    {
+        let handler: Arc<dyn ExecutableTool> = Arc::new(tool);
+        let descriptor = handler.descriptor();
+        PreparedTool {
+            descriptor,
+            handler,
+        }
+    }
+
+    fn insert_prepared(&mut self, prepared: PreparedTool) -> ToolRegistration {
+        let generation = next_tool_registration_generation();
+        let registration = ToolRegistration {
+            generation,
+            descriptor: prepared.descriptor.clone(),
+        };
+        self.tools.insert(
+            registration.name().to_string(),
+            RegisteredTool {
+                generation,
+                descriptor: prepared.descriptor,
+                handler: prepared.handler,
+            },
+        );
+        self.refresh_provider_specs();
+        registration
+    }
+}
+
+fn next_tool_registration_generation() -> ToolRegistrationGeneration {
+    let generation = NEXT_TOOL_REGISTRATION_GENERATION
+        .fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            |current| current.checked_add(1),
+        )
+        .expect("tool registration generation exhausted");
+    ToolRegistrationGeneration(generation)
 }
 
 impl ToolRegistry {
@@ -220,11 +322,38 @@ impl ToolRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, collections::BTreeMap};
+    use std::{
+        borrow::Cow,
+        collections::BTreeMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use serde_json::json;
 
     use super::*;
+
+    struct CountingDescriptorTool {
+        calls: Arc<AtomicUsize>,
+        label: &'static str,
+        execution_category: ToolExecutionCategory,
+    }
+
+    impl ToolDefinition for CountingDescriptorTool {
+        fn descriptor(&self) -> ToolSpec {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            ToolSpec::builder("counting_tool")
+                .description(format!("{} descriptor call {call}", self.label))
+                .execution_category(self.execution_category)
+                .build()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for CountingDescriptorTool {
+        fn execution_category(&self, _input: &serde_json::Value) -> ToolExecutionCategory {
+            self.execution_category
+        }
+    }
 
     #[test]
     fn builtin_shell_and_files_tools_serialize_as_non_strict_responses_functions() {
@@ -303,5 +432,58 @@ mod tests {
                 "builtin provider spec missing: {name}"
             );
         }
+    }
+
+    #[test]
+    fn registration_evaluates_one_descriptor_and_resolves_its_matching_handler_snapshot() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::default();
+        let registration = registry
+            .try_register_tool_tracked(CountingDescriptorTool {
+                calls: Arc::clone(&calls),
+                label: "first",
+                execution_category: ToolExecutionCategory::ReadOnlyParallel,
+            })
+            .expect("unused name registers");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let resolved = registry
+            .resolve_tool(registration.name())
+            .expect("registered tool resolves");
+        assert_eq!(&resolved.descriptor, registration.descriptor());
+        assert_eq!(
+            resolved.handler.execution_category(&json!({})),
+            registration.descriptor().execution_category
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "resolution must use the descriptor captured during insertion"
+        );
+    }
+
+    #[test]
+    fn stale_registration_cannot_remove_a_newer_same_name_generation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::default();
+        let first = registry.register_tool_tracked(CountingDescriptorTool {
+            calls: Arc::clone(&calls),
+            label: "first",
+            execution_category: ToolExecutionCategory::ReadOnlyParallel,
+        });
+        let second = registry.register_tool_tracked(CountingDescriptorTool {
+            calls: Arc::clone(&calls),
+            label: "second",
+            execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
+        });
+
+        assert!(second.generation() > first.generation());
+        assert!(!registry.unregister_registration(&first));
+        let resolved = registry
+            .resolve_tool(second.name())
+            .expect("newer registration remains");
+        assert_eq!(&resolved.descriptor, second.descriptor());
+        assert!(registry.unregister_registration(&second));
+        assert!(registry.resolve_tool(second.name()).is_none());
     }
 }

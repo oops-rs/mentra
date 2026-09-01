@@ -807,9 +807,7 @@ impl ToolRuntime {
         &self,
         name: &str,
     ) -> Option<(Arc<dyn ExecutableTool>, RuntimeToolDescriptor)> {
-        let tool = self.runtime.get_tool(name)?;
-        let descriptor = self.runtime.get_tool_descriptor(name)?;
-        Some((tool, descriptor))
+        self.runtime.resolve_tool(name)
     }
 
     async fn authorize_tool_call(
