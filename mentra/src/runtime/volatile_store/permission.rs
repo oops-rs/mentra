@@ -1,8 +1,9 @@
 use crate::{
-    runtime::{PermissionRuleStore, RuntimeError},
-    session::{PermissionRuleScope, permission::RememberedRule},
+    runtime::{PermissionRuleContext, PermissionRuleStore, RuntimeError},
+    session::{PermissionRuleAddress, PermissionRuleScope, permission::RememberedRule},
 };
 
+use super::super::store::canonicalize_permission_rules;
 use super::VolatileRuntimeStore;
 
 struct StoredRule {
@@ -18,26 +19,130 @@ pub(super) struct PermissionState {
     rules: Vec<StoredRule>,
 }
 
+fn context(session_id: &str, project_id: Option<&str>) -> PermissionRuleContext {
+    PermissionRuleContext {
+        session_id: session_id.to_owned(),
+        project_id: project_id.map(str::to_owned),
+    }
+}
+
+fn in_namespace(
+    stored: &StoredRule,
+    context: &PermissionRuleContext,
+    scope: PermissionRuleScope,
+) -> bool {
+    if stored.rule.scope != scope {
+        return false;
+    }
+    match scope {
+        PermissionRuleScope::Session => stored.session_id == context.session_id,
+        PermissionRuleScope::Project => {
+            context.project_id.is_some()
+                && stored.project_id.as_deref() == context.project_id.as_deref()
+        }
+        PermissionRuleScope::Global => true,
+    }
+}
+
+fn at_address(
+    stored: &StoredRule,
+    context: &PermissionRuleContext,
+    address: &PermissionRuleAddress,
+) -> bool {
+    in_namespace(stored, context, address.scope) && stored.rule.key == address.key
+}
+
+fn stored_rule(context: &PermissionRuleContext, rule: &RememberedRule) -> StoredRule {
+    StoredRule {
+        session_id: context.session_id.clone(),
+        project_id: match rule.scope {
+            PermissionRuleScope::Project => context.project_id.clone(),
+            PermissionRuleScope::Session | PermissionRuleScope::Global => None,
+        },
+        rule: rule.clone(),
+    }
+}
+
+fn upsert(rules: &mut Vec<StoredRule>, context: &PermissionRuleContext, rule: &RememberedRule) {
+    let address = PermissionRuleAddress::from(rule);
+    rules.retain(|stored| !at_address(stored, context, &address));
+    rules.push(stored_rule(context, rule));
+}
+
 impl PermissionRuleStore for VolatileRuntimeStore {
+    fn upsert_rule(
+        &self,
+        context: &PermissionRuleContext,
+        rule: &RememberedRule,
+    ) -> Result<(), RuntimeError> {
+        context.validate_scope(rule.scope)?;
+        let mut state = self.lock();
+        upsert(&mut state.permissions.rules, context, rule);
+        Ok(())
+    }
+
+    fn load_applicable_rules(
+        &self,
+        context: &PermissionRuleContext,
+    ) -> Result<Vec<RememberedRule>, RuntimeError> {
+        let state = self.lock();
+        Ok(canonicalize_permission_rules(
+            state
+                .permissions
+                .rules
+                .iter()
+                .filter(|stored| in_namespace(stored, context, stored.rule.scope))
+                .map(|stored| stored.rule.clone()),
+        ))
+    }
+
+    fn revoke_rule(
+        &self,
+        context: &PermissionRuleContext,
+        address: &PermissionRuleAddress,
+    ) -> Result<bool, RuntimeError> {
+        context.validate_scope(address.scope)?;
+        let mut state = self.lock();
+        let before = state.permissions.rules.len();
+        state
+            .permissions
+            .rules
+            .retain(|stored| !at_address(stored, context, address));
+        Ok(before != state.permissions.rules.len())
+    }
+
+    fn clear_scope(
+        &self,
+        context: &PermissionRuleContext,
+        scope: PermissionRuleScope,
+    ) -> Result<usize, RuntimeError> {
+        context.validate_scope(scope)?;
+        let mut state = self.lock();
+        let before = state.permissions.rules.len();
+        state
+            .permissions
+            .rules
+            .retain(|stored| !in_namespace(stored, context, scope));
+        Ok(before - state.permissions.rules.len())
+    }
+
     fn save_rules(
         &self,
         session_id: &str,
         project_id: Option<&str>,
         rules: &[RememberedRule],
     ) -> Result<(), RuntimeError> {
-        let mut state = self.lock();
-        // Only session-scoped rules for this session are replaced; project-
-        // and global-scoped rules are managed separately and untouched here,
-        // matching the default store.
-        state.permissions.rules.retain(|stored| {
-            !(stored.session_id == session_id && stored.rule.scope == PermissionRuleScope::Session)
-        });
+        let context = context(session_id, project_id);
         for rule in rules {
-            state.permissions.rules.push(StoredRule {
-                session_id: session_id.to_string(),
-                project_id: project_id.map(str::to_string),
-                rule: rule.clone(),
-            });
+            context.validate_scope(rule.scope)?;
+        }
+        let mut state = self.lock();
+        state
+            .permissions
+            .rules
+            .retain(|stored| !in_namespace(stored, &context, PermissionRuleScope::Session));
+        for rule in rules {
+            upsert(&mut state.permissions.rules, &context, rule);
         }
         Ok(())
     }
@@ -47,20 +152,7 @@ impl PermissionRuleStore for VolatileRuntimeStore {
         session_id: &str,
         project_id: Option<&str>,
     ) -> Result<Vec<RememberedRule>, RuntimeError> {
-        let state = self.lock();
-        Ok(state
-            .permissions
-            .rules
-            .iter()
-            .filter(|stored| match stored.rule.scope {
-                PermissionRuleScope::Session => stored.session_id == session_id,
-                PermissionRuleScope::Project => {
-                    project_id.is_some() && stored.project_id.as_deref() == project_id
-                }
-                PermissionRuleScope::Global => true,
-            })
-            .map(|stored| stored.rule.clone())
-            .collect())
+        self.load_applicable_rules(&context(session_id, project_id))
     }
 
     fn clear_rules(&self, session_id: &str) -> Result<(), RuntimeError> {
@@ -75,14 +167,14 @@ impl PermissionRuleStore for VolatileRuntimeStore {
 #[cfg(test)]
 mod tests {
     use crate::{
-        runtime::PermissionRuleStore,
+        runtime::{PermissionRuleContext, PermissionRuleStore},
         session::{
-            PermissionRuleScope,
+            PermissionRuleAddress, PermissionRuleScope,
             permission::{RememberedRule, RuleKey},
         },
     };
 
-    use super::super::VolatileRuntimeStore;
+    use super::{super::VolatileRuntimeStore, StoredRule};
 
     fn rule(tool_name: &str, allow: bool, scope: PermissionRuleScope) -> RememberedRule {
         RememberedRule {
@@ -184,6 +276,80 @@ mod tests {
             loaded[0].reason.as_deref(),
             Some("this run does not allow writes"),
             "the volatile store answers a remembered refusal the same as the persistent one"
+        );
+    }
+
+    #[test]
+    fn point_operations_follow_the_shared_permission_store_contract() {
+        let store = VolatileRuntimeStore::new();
+        crate::runtime::store::permission_contract::assert_permission_rule_store_contract(&store);
+    }
+
+    #[test]
+    fn legacy_duplicates_load_fail_safe_and_exact_mutations_remove_every_row() {
+        let store = VolatileRuntimeStore::new();
+        let context = PermissionRuleContext {
+            session_id: "current".to_owned(),
+            project_id: None,
+        };
+        let duplicate = |session_id: &str, allow: bool, reason: Option<&str>| StoredRule {
+            session_id: session_id.to_owned(),
+            project_id: None,
+            rule: RememberedRule {
+                key: RuleKey {
+                    tool_name: "shell".to_owned(),
+                    pattern: None,
+                },
+                allow,
+                scope: PermissionRuleScope::Global,
+                reason: reason.map(str::to_owned),
+            },
+        };
+        {
+            let mut state = store.lock();
+            state.permissions.rules.extend([
+                duplicate("legacy-allow", true, Some("allowed")),
+                duplicate("legacy-reasonless", false, None),
+                duplicate("legacy-zeta", false, Some("zeta")),
+                duplicate("legacy-alpha", false, Some("alpha")),
+            ]);
+        }
+
+        let loaded = store
+            .load_applicable_rules(&context)
+            .expect("load legacy duplicates");
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].allow);
+        assert_eq!(loaded[0].reason.as_deref(), Some("alpha"));
+
+        let address = PermissionRuleAddress {
+            scope: PermissionRuleScope::Global,
+            key: loaded[0].key.clone(),
+        };
+        assert!(
+            store
+                .revoke_rule(&context, &address)
+                .expect("revoke duplicate address")
+        );
+        assert!(
+            store
+                .load_applicable_rules(&context)
+                .expect("load after revoke")
+                .is_empty()
+        );
+
+        {
+            let mut state = store.lock();
+            state.permissions.rules.extend([
+                duplicate("legacy-1", false, Some("one")),
+                duplicate("legacy-2", false, Some("two")),
+            ]);
+        }
+        assert_eq!(
+            store
+                .clear_scope(&context, PermissionRuleScope::Global)
+                .expect("clear duplicate namespace"),
+            2
         );
     }
 }

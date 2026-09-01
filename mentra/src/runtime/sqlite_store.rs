@@ -15,16 +15,16 @@ use crate::{
     memory::{MemoryCursor, MemoryRecord, MemorySearchRequest, MemoryStore},
     provider::ProviderId,
     runtime::TaskItem,
-    session::PermissionRuleScope,
     session::permission::{RememberedRule, RuleKey},
+    session::{PermissionRuleAddress, PermissionRuleScope},
     team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary, TeamStore},
 };
 
 use super::error::RuntimeError;
 use super::store::{
-    AgentStore, AuditStore, LeaseStore, LoadedAgentState, PermissionRuleStore,
-    PersistedAgentRecord, RunStore, TaskStateSnapshot, TaskStore, default_store_dir, next_id,
-    now_secs,
+    AgentStore, AuditStore, LeaseStore, LoadedAgentState, PermissionRuleContext,
+    PermissionRuleStore, PersistedAgentRecord, RunStore, TaskStateSnapshot, TaskStore,
+    canonicalize_permission_rules, default_store_dir, next_id, now_secs,
 };
 
 const DELIVERY_PENDING: i64 = 0;
@@ -1096,90 +1096,134 @@ impl LeaseStore for SqliteRuntimeStore {
     }
 }
 
+fn permission_context(session_id: &str, project_id: Option<&str>) -> PermissionRuleContext {
+    PermissionRuleContext {
+        session_id: session_id.to_owned(),
+        project_id: project_id.map(str::to_owned),
+    }
+}
+
+fn delete_permission_address(
+    conn: &Connection,
+    context: &PermissionRuleContext,
+    address: &PermissionRuleAddress,
+) -> Result<usize, RuntimeError> {
+    let scope = to_json(&address.scope)?;
+    let removed = match address.scope {
+        PermissionRuleScope::Session => conn.execute(
+            "DELETE FROM permission_rules WHERE scope = ?1 AND session_id = ?2 AND tool_name = ?3 AND pattern IS ?4",
+            params![scope, context.session_id, address.key.tool_name, address.key.pattern],
+        ),
+        PermissionRuleScope::Project => conn.execute(
+            "DELETE FROM permission_rules WHERE scope = ?1 AND project_id = ?2 AND tool_name = ?3 AND pattern IS ?4",
+            params![scope, context.project_id, address.key.tool_name, address.key.pattern],
+        ),
+        PermissionRuleScope::Global => conn.execute(
+            "DELETE FROM permission_rules WHERE scope = ?1 AND tool_name = ?2 AND pattern IS ?3",
+            params![scope, address.key.tool_name, address.key.pattern],
+        ),
+    }
+    .map_err(sqlite_error)?;
+    Ok(removed)
+}
+
+fn clear_permission_namespace(
+    conn: &Connection,
+    context: &PermissionRuleContext,
+    scope: PermissionRuleScope,
+) -> Result<usize, RuntimeError> {
+    let scope_json = to_json(&scope)?;
+    let removed = match scope {
+        PermissionRuleScope::Session => conn.execute(
+            "DELETE FROM permission_rules WHERE scope = ?1 AND session_id = ?2",
+            params![scope_json, context.session_id],
+        ),
+        PermissionRuleScope::Project => conn.execute(
+            "DELETE FROM permission_rules WHERE scope = ?1 AND project_id = ?2",
+            params![scope_json, context.project_id],
+        ),
+        PermissionRuleScope::Global => conn.execute(
+            "DELETE FROM permission_rules WHERE scope = ?1",
+            params![scope_json],
+        ),
+    }
+    .map_err(sqlite_error)?;
+    Ok(removed)
+}
+
+fn insert_permission_rule(
+    conn: &Connection,
+    context: &PermissionRuleContext,
+    rule: &RememberedRule,
+) -> Result<(), RuntimeError> {
+    let scope = to_json(&rule.scope)?;
+    let project_id = match rule.scope {
+        PermissionRuleScope::Project => context.project_id.as_deref(),
+        PermissionRuleScope::Session | PermissionRuleScope::Global => None,
+    };
+    conn.execute(
+        r#"
+        INSERT INTO permission_rules (session_id, project_id, tool_name, pattern, allow, scope, reason)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+        params![
+            context.session_id,
+            project_id,
+            rule.key.tool_name,
+            rule.key.pattern,
+            rule.allow as i32,
+            scope,
+            rule.reason,
+        ],
+    )
+    .map_err(sqlite_error)?;
+    Ok(())
+}
+
 impl PermissionRuleStore for SqliteRuntimeStore {
-    fn save_rules(
+    fn upsert_rule(
         &self,
-        session_id: &str,
-        project_id: Option<&str>,
-        rules: &[RememberedRule],
+        context: &PermissionRuleContext,
+        rule: &RememberedRule,
     ) -> Result<(), RuntimeError> {
+        context.validate_scope(rule.scope)?;
         let mut conn = self.open()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
-
-        // Only delete session-scoped rules for this session; project and global
-        // rules are managed separately and must not be removed here.
-        let session_scope = to_json(&PermissionRuleScope::Session)?;
-        tx.execute(
-            "DELETE FROM permission_rules WHERE session_id = ?1 AND scope = ?2",
-            params![session_id, session_scope],
-        )
-        .map_err(sqlite_error)?;
-
-        for rule in rules {
-            let scope_str = to_json(&rule.scope)?;
-            tx.execute(
-                r#"
-                INSERT INTO permission_rules (session_id, project_id, tool_name, pattern, allow, scope, reason)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                "#,
-                params![
-                    session_id,
-                    project_id,
-                    rule.key.tool_name,
-                    rule.key.pattern,
-                    rule.allow as i32,
-                    scope_str,
-                    rule.reason,
-                ],
-            )
-            .map_err(sqlite_error)?;
-        }
-
-        tx.commit().map_err(sqlite_error)?;
-        Ok(())
+        delete_permission_address(&tx, context, &PermissionRuleAddress::from(rule))?;
+        insert_permission_rule(&tx, context, rule)?;
+        tx.commit().map_err(sqlite_error)
     }
 
-    fn load_rules(
+    fn load_applicable_rules(
         &self,
-        session_id: &str,
-        project_id: Option<&str>,
+        context: &PermissionRuleContext,
     ) -> Result<Vec<RememberedRule>, RuntimeError> {
         let conn = self.open()?;
-
         let session_scope = to_json(&PermissionRuleScope::Session)?;
         let project_scope = to_json(&PermissionRuleScope::Project)?;
         let global_scope = to_json(&PermissionRuleScope::Global)?;
-
-        // UNION of session-scoped, project-scoped (if project_id provided),
-        // and global-scoped rules.
         let sql = r#"
             SELECT tool_name, pattern, allow, scope, reason
             FROM permission_rules
             WHERE session_id = ?1 AND scope = ?2
-            UNION
+            UNION ALL
             SELECT tool_name, pattern, allow, scope, reason
             FROM permission_rules
-            WHERE project_id IS NOT NULL AND project_id = ?3 AND scope = ?4
-            UNION
+            WHERE ?3 IS NOT NULL AND project_id = ?3 AND scope = ?4
+            UNION ALL
             SELECT tool_name, pattern, allow, scope, reason
             FROM permission_rules
             WHERE scope = ?5
         "#;
-
         let mut stmt = conn.prepare(sql).map_err(sqlite_error)?;
-
-        // When project_id is None we pass an empty string; the IS NOT NULL guard
-        // in the project clause prevents accidental matches.
-        let project_id_param = project_id.unwrap_or("");
-
         let rows = stmt
             .query_map(
                 params![
-                    session_id,
+                    context.session_id,
                     session_scope,
-                    project_id_param,
+                    context.project_id.as_deref(),
                     project_scope,
                     global_scope,
                 ],
@@ -1194,19 +1238,78 @@ impl PermissionRuleStore for SqliteRuntimeStore {
                 },
             )
             .map_err(sqlite_error)?;
-
         let mut rules = Vec::new();
         for row in rows {
-            let (tool_name, pattern, allow, scope_str, reason) = row.map_err(sqlite_error)?;
-            let scope: PermissionRuleScope = from_json(&scope_str)?;
+            let (tool_name, pattern, allow, scope, reason) = row.map_err(sqlite_error)?;
             rules.push(RememberedRule {
                 key: RuleKey { tool_name, pattern },
                 allow: allow != 0,
-                scope,
+                scope: from_json(&scope)?,
                 reason,
             });
         }
-        Ok(rules)
+        Ok(canonicalize_permission_rules(rules))
+    }
+
+    fn revoke_rule(
+        &self,
+        context: &PermissionRuleContext,
+        address: &PermissionRuleAddress,
+    ) -> Result<bool, RuntimeError> {
+        context.validate_scope(address.scope)?;
+        let mut conn = self.open()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        let removed = delete_permission_address(&tx, context, address)?;
+        tx.commit().map_err(sqlite_error)?;
+        Ok(removed != 0)
+    }
+
+    fn clear_scope(
+        &self,
+        context: &PermissionRuleContext,
+        scope: PermissionRuleScope,
+    ) -> Result<usize, RuntimeError> {
+        context.validate_scope(scope)?;
+        let mut conn = self.open()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        let removed = clear_permission_namespace(&tx, context, scope)?;
+        tx.commit().map_err(sqlite_error)?;
+        Ok(removed)
+    }
+
+    fn save_rules(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+        rules: &[RememberedRule],
+    ) -> Result<(), RuntimeError> {
+        let context = permission_context(session_id, project_id);
+        for rule in rules {
+            context.validate_scope(rule.scope)?;
+        }
+        let mut conn = self.open()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        clear_permission_namespace(&tx, &context, PermissionRuleScope::Session)?;
+        for rule in rules {
+            delete_permission_address(&tx, &context, &PermissionRuleAddress::from(rule))?;
+            insert_permission_rule(&tx, &context, rule)?;
+        }
+        tx.commit().map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    fn load_rules(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<Vec<RememberedRule>, RuntimeError> {
+        self.load_applicable_rules(&permission_context(session_id, project_id))
     }
 
     fn clear_rules(&self, session_id: &str) -> Result<(), RuntimeError> {
@@ -1855,6 +1958,130 @@ mod tests {
         assert!(!read_rule.allow);
         assert_eq!(read_rule.scope, PermissionRuleScope::Project);
         assert_eq!(read_rule.key.pattern, Some("/tmp/*".to_string()));
+    }
+
+    #[test]
+    fn permission_point_operations_follow_the_shared_store_contract() {
+        let store = permission_store();
+        crate::runtime::store::permission_contract::assert_permission_rule_store_contract(&store);
+    }
+
+    #[test]
+    fn permission_point_operations_survive_sqlite_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "mentra-store-perm-point-reopen-{}.sqlite",
+            now_nanos()
+        ));
+        let context = PermissionRuleContext {
+            session_id: "session-1".to_owned(),
+            project_id: Some("project-1".to_owned()),
+        };
+        {
+            let store = SqliteRuntimeStore::new(&path);
+            for scope in [
+                PermissionRuleScope::Global,
+                PermissionRuleScope::Project,
+                PermissionRuleScope::Session,
+            ] {
+                store
+                    .upsert_rule(
+                        &context,
+                        &RememberedRule {
+                            key: RuleKey {
+                                tool_name: "shell".to_owned(),
+                                pattern: None,
+                            },
+                            allow: scope != PermissionRuleScope::Project,
+                            scope,
+                            reason: None,
+                        },
+                    )
+                    .expect("upsert point rule");
+            }
+        }
+
+        let reopened = SqliteRuntimeStore::new(&path);
+        let loaded = reopened
+            .load_applicable_rules(&context)
+            .expect("load point rules after reopen");
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(
+            loaded.iter().map(|rule| rule.scope).collect::<Vec<_>>(),
+            vec![
+                PermissionRuleScope::Session,
+                PermissionRuleScope::Project,
+                PermissionRuleScope::Global,
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlite_legacy_duplicates_load_fail_safe_and_exact_mutations_remove_all_rows() {
+        let store = permission_store();
+        let scope = to_json(&PermissionRuleScope::Global).expect("serialize scope");
+        {
+            let conn = store.open().expect("open store");
+            for (session_id, allow, reason) in [
+                ("legacy-allow", true, Some("allowed")),
+                ("legacy-reasonless", false, None),
+                ("legacy-zeta", false, Some("zeta")),
+                ("legacy-alpha", false, Some("alpha")),
+            ] {
+                conn.execute(
+                    "INSERT INTO permission_rules (session_id, project_id, tool_name, pattern, allow, scope, reason) VALUES (?1, NULL, 'shell', NULL, ?2, ?3, ?4)",
+                    params![session_id, allow as i32, scope, reason],
+                )
+                .expect("insert legacy duplicate");
+            }
+        }
+        let context = PermissionRuleContext {
+            session_id: "current".to_owned(),
+            project_id: None,
+        };
+
+        let loaded = store
+            .load_applicable_rules(&context)
+            .expect("load legacy duplicates");
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].allow);
+        assert_eq!(loaded[0].reason.as_deref(), Some("alpha"));
+
+        let address = PermissionRuleAddress {
+            scope: PermissionRuleScope::Global,
+            key: loaded[0].key.clone(),
+        };
+        assert!(
+            store
+                .revoke_rule(&context, &address)
+                .expect("revoke legacy duplicates")
+        );
+        let remaining: i64 = store
+            .open()
+            .expect("open after revoke")
+            .query_row(
+                "SELECT COUNT(*) FROM permission_rules WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .expect("count rows after revoke");
+        assert_eq!(remaining, 0);
+
+        {
+            let conn = store.open().expect("reopen for clear fixture");
+            for session_id in ["legacy-one", "legacy-two"] {
+                conn.execute(
+                    "INSERT INTO permission_rules (session_id, project_id, tool_name, pattern, allow, scope, reason) VALUES (?1, NULL, 'shell', NULL, 0, ?2, 'denied')",
+                    params![session_id, scope],
+                )
+                .expect("insert clear duplicate");
+            }
+        }
+        assert_eq!(
+            store
+                .clear_scope(&context, PermissionRuleScope::Global)
+                .expect("clear duplicate namespace"),
+            2
+        );
     }
 
     #[test]

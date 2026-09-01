@@ -7,11 +7,12 @@ use crate::{
     memory::journal::{AgentMemoryState, RunMemoryState},
     provider::ProviderId,
     runtime::{
-        AgentStore, LeaseStore, PermissionRuleStore, RunStore, RuntimeError, TaskStore,
+        AgentStore, LeaseStore, PermissionRuleContext, PermissionRuleStore, RunStore, RuntimeError,
+        TaskStore,
         store::{PersistedAgentRecord, now_nanos},
     },
     session::{
-        PermissionRuleScope,
+        PermissionRuleAddress, PermissionRuleScope,
         permission::{RememberedRule, RuleKey},
     },
     transcript::{AgentTranscript, TranscriptItem},
@@ -600,6 +601,127 @@ fn permission_rules_round_trip_across_scopes_and_reopen() {
             .load_rules("session-1", Some("proj-x"))
             .expect("load after clear")
             .is_empty()
+    );
+}
+
+#[test]
+fn permission_point_operations_follow_the_shared_store_contract() {
+    let store = FileRuntimeStore::new(temp_root("rules-point-contract"));
+    crate::runtime::store::permission_contract::assert_permission_rule_store_contract(&store);
+}
+
+#[test]
+fn permission_point_operations_survive_file_store_reopen() {
+    let root = temp_root("rules-point-reopen");
+    let context = PermissionRuleContext {
+        session_id: "session-1".to_owned(),
+        project_id: Some("project-1".to_owned()),
+    };
+    {
+        let store = FileRuntimeStore::new(&root);
+        for scope in [
+            PermissionRuleScope::Global,
+            PermissionRuleScope::Project,
+            PermissionRuleScope::Session,
+        ] {
+            store
+                .upsert_rule(
+                    &context,
+                    &rule("shell", scope != PermissionRuleScope::Project, scope),
+                )
+                .expect("upsert point rule");
+        }
+    }
+
+    let reopened = FileRuntimeStore::new(&root);
+    let loaded = reopened
+        .load_applicable_rules(&context)
+        .expect("load point rules after reopen");
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(
+        loaded.iter().map(|rule| rule.scope).collect::<Vec<_>>(),
+        vec![
+            PermissionRuleScope::Session,
+            PermissionRuleScope::Project,
+            PermissionRuleScope::Global,
+        ]
+    );
+}
+
+#[test]
+fn file_store_legacy_duplicates_load_fail_safe_and_revoke_all_rows() {
+    let root = temp_root("rules-legacy-duplicates");
+    std::fs::create_dir_all(&root).expect("create store root");
+    let store = FileRuntimeStore::new(&root);
+    let row = |session_id: &str, allow: bool, reason: Option<&str>| {
+        serde_json::json!({
+            "session_id": session_id,
+            "rule": {
+                "key": { "tool_name": "shell", "pattern": null },
+                "allow": allow,
+                "scope": "global",
+                "reason": reason,
+            }
+        })
+    };
+    std::fs::write(
+        store.rules_path(),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": super::SCHEMA_VERSION,
+            "rules": [
+                row("legacy-allow", true, Some("allowed")),
+                row("legacy-reasonless", false, None),
+                row("legacy-zeta", false, Some("zeta")),
+                row("legacy-alpha", false, Some("alpha")),
+            ]
+        }))
+        .expect("serialize legacy rules"),
+    )
+    .expect("write legacy rules");
+    let context = PermissionRuleContext {
+        session_id: "current".to_owned(),
+        project_id: None,
+    };
+
+    let loaded = store
+        .load_applicable_rules(&context)
+        .expect("load legacy duplicates");
+    assert_eq!(loaded.len(), 1);
+    assert!(!loaded[0].allow);
+    assert_eq!(loaded[0].reason.as_deref(), Some("alpha"));
+
+    let address = PermissionRuleAddress {
+        scope: PermissionRuleScope::Global,
+        key: loaded[0].key.clone(),
+    };
+    assert!(
+        store
+            .revoke_rule(&context, &address)
+            .expect("revoke legacy duplicates")
+    );
+    let on_disk: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(store.rules_path()).expect("read rules after revoke"),
+    )
+    .expect("parse rules after revoke");
+    assert!(on_disk["rules"].as_array().expect("rules array").is_empty());
+
+    std::fs::write(
+        store.rules_path(),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": super::SCHEMA_VERSION,
+            "rules": [
+                row("legacy-one", false, Some("one")),
+                row("legacy-two", false, Some("two")),
+            ]
+        }))
+        .expect("serialize clear fixture"),
+    )
+    .expect("write clear fixture");
+    assert_eq!(
+        store
+            .clear_scope(&context, PermissionRuleScope::Global)
+            .expect("clear duplicate namespace"),
+        2
     );
 }
 

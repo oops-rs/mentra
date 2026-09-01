@@ -67,9 +67,9 @@ pub use mcp::{
 #[cfg(feature = "store-sqlite")]
 pub use runtime::HybridRuntimeStore;
 pub use runtime::{
-    AgentStore, AuditStore, FileRuntimeStore, LeaseStore, NewTask, PermissionRuleStore, RunStore,
-    Runtime, RuntimeBuilder, RuntimePolicy, ShellValidationMode, SkillInfo, SkillLoadError,
-    TaskBoard, TaskBoardError, TaskPatch, TaskStore, skill_root_key,
+    AgentStore, AuditStore, FileRuntimeStore, LeaseStore, NewTask, PermissionRuleContext,
+    PermissionRuleStore, RunStore, Runtime, RuntimeBuilder, RuntimePolicy, ShellValidationMode,
+    SkillInfo, SkillLoadError, TaskBoard, TaskBoardError, TaskPatch, TaskStore, skill_root_key,
 };
 pub use session::{
     PermissionDecision, PermissionRequest, PermissionRuleAddress, RememberedRule, RuleKey,

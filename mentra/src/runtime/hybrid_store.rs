@@ -9,10 +9,11 @@ use crate::{
         MemoryCursor, MemoryRecord, MemorySearchRequest, MemoryStore, SqliteHybridMemoryStore,
     },
     runtime::{
-        AgentStore, AuditStore, LeaseStore, LoadedAgentState, PermissionRuleStore,
-        PersistedAgentRecord, RunStore, SqliteRuntimeStore, TaskStateSnapshot, TaskStore,
+        AgentStore, AuditStore, LeaseStore, LoadedAgentState, PermissionRuleContext,
+        PermissionRuleStore, PersistedAgentRecord, RunStore, SqliteRuntimeStore, TaskStateSnapshot,
+        TaskStore,
     },
-    session::permission::RememberedRule,
+    session::{PermissionRuleAddress, PermissionRuleScope, permission::RememberedRule},
     team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary, TeamStore},
 };
 
@@ -347,6 +348,37 @@ impl LeaseStore for HybridRuntimeStore {
 }
 
 impl PermissionRuleStore for HybridRuntimeStore {
+    fn upsert_rule(
+        &self,
+        context: &PermissionRuleContext,
+        rule: &RememberedRule,
+    ) -> Result<(), RuntimeError> {
+        self.inner.upsert_rule(context, rule)
+    }
+
+    fn load_applicable_rules(
+        &self,
+        context: &PermissionRuleContext,
+    ) -> Result<Vec<RememberedRule>, RuntimeError> {
+        self.inner.load_applicable_rules(context)
+    }
+
+    fn revoke_rule(
+        &self,
+        context: &PermissionRuleContext,
+        address: &PermissionRuleAddress,
+    ) -> Result<bool, RuntimeError> {
+        self.inner.revoke_rule(context, address)
+    }
+
+    fn clear_scope(
+        &self,
+        context: &PermissionRuleContext,
+        scope: PermissionRuleScope,
+    ) -> Result<usize, RuntimeError> {
+        self.inner.clear_scope(context, scope)
+    }
+
     fn save_rules(
         &self,
         session_id: &str,
@@ -385,6 +417,19 @@ mod tests {
         agent::{AgentConfig, AgentStatus},
         runtime::AgentStore,
     };
+
+    #[test]
+    fn permission_point_operations_forward_the_shared_store_contract() {
+        let base = std::env::temp_dir().join(format!(
+            "mentra-hybrid-permission-{}.sqlite",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let store = HybridRuntimeStore::new(base);
+        crate::runtime::store::permission_contract::assert_permission_rule_store_contract(&store);
+    }
 
     #[test]
     fn wrapper_store_delegates_non_memory_runtime_operations() {

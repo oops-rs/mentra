@@ -50,7 +50,8 @@ pub use skill::{SkillInfo, SkillLoadError, skill_root_key};
 #[cfg(feature = "store-sqlite")]
 pub use sqlite_store::SqliteRuntimeStore;
 pub use store::{
-    AgentStore, AuditStore, LeaseStore, PermissionRuleStore, RunStore, RuntimeStore, TaskStore,
+    AgentStore, AuditStore, LeaseStore, PermissionRuleContext, PermissionRuleStore, RunStore,
+    RuntimeStore, TaskStore,
 };
 pub(crate) use store::{LoadedAgentState, PersistedAgentRecord, TaskStateSnapshot};
 pub(crate) use task::TaskIntrinsicTool;

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,11 +14,14 @@ use crate::{
     memory::journal::AgentMemoryState,
     provider::ProviderId,
     runtime::TaskItem,
-    session::permission::RememberedRule,
+    session::{PermissionRuleAddress, PermissionRuleScope, RememberedRule, RuleStore},
     team::TeamStore,
 };
 
 use super::error::RuntimeError;
+
+#[cfg(test)]
+pub(crate) mod permission_contract;
 
 static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
@@ -171,18 +174,129 @@ pub trait LeaseStore: Send + Sync {
     fn release_lease(&self, key: &str, owner: &str) -> Result<(), RuntimeError>;
 }
 
+/// Stable namespace context used to address remembered permission rules.
+///
+/// `session_id` identifies one resumable permission session. `project_id`, when
+/// present, identifies the project namespace shared by several sessions. A
+/// global rule ignores both identifiers and belongs to one store-wide global
+/// namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PermissionRuleContext {
+    pub session_id: String,
+    pub project_id: Option<String>,
+}
+
+impl PermissionRuleContext {
+    pub(crate) fn validate_scope(&self, scope: PermissionRuleScope) -> Result<(), RuntimeError> {
+        if scope == PermissionRuleScope::Project && self.project_id.is_none() {
+            return Err(RuntimeError::OperationDenied(
+                "project-scoped permission rules require a project_id".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn compare_duplicate_rules(left: &RememberedRule, right: &RememberedRule) -> std::cmp::Ordering {
+    // `false < true`, so denial wins first. For equal verdicts, keep an
+    // actionable reason over no reason, then use lexical reason/key order.
+    left.allow
+        .cmp(&right.allow)
+        .then_with(|| match (&left.reason, &right.reason) {
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (left, right) => left.cmp(right),
+        })
+        .then_with(|| left.key.tool_name.cmp(&right.key.tool_name))
+        .then_with(|| left.key.pattern.cmp(&right.key.pattern))
+}
+
+/// Collapses legacy duplicate rows into one fail-safe rule per exact address.
+///
+/// Denial wins conflicting verdicts. Equal verdicts prefer a reason, then
+/// lexical reason/key order. The returned rules use [`RuleStore::rules`]'s
+/// stable session/project/global and key ordering.
+pub(crate) fn canonicalize_permission_rules(
+    rules: impl IntoIterator<Item = RememberedRule>,
+) -> Vec<RememberedRule> {
+    let mut unique: HashMap<PermissionRuleAddress, RememberedRule> = HashMap::new();
+    for rule in rules {
+        let address = PermissionRuleAddress::from(&rule);
+        match unique.entry(address) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(rule);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if compare_duplicate_rules(&rule, entry.get()).is_lt() {
+                    entry.insert(rule);
+                }
+            }
+        }
+    }
+
+    let store = RuleStore::new();
+    for rule in unique.into_values() {
+        store.add_rule(rule);
+    }
+    store.rules()
+}
+
 /// Persistence backend for remembered permission rules.
 ///
 /// Permission rules survive session restarts when backed by a persistent store.
 ///
-/// The `project_id` parameter is an opaque string supplied by the consumer and
-/// used to associate rules with a project for cross-session inheritance.
-/// Mentra does not interpret its value.
+/// Point operations are the authoritative mutation API. Implementations must
+/// resolve the rule's namespace from [`PermissionRuleContext`] and perform each
+/// upsert, revoke, or clear atomically within the backend's documented
+/// concurrency boundary. Project-scoped mutation without a `project_id` is
+/// invalid. Loading must return one deterministic, fail-safe rule per exact
+/// address.
+///
+/// The older bulk methods remain for compatibility with callers, but mutating
+/// defaults would permit partial writes after a later failure. Implementations
+/// must therefore provide their own atomic `save_rules` and `clear_rules` as
+/// well as the point contract. Only the read-only `load_rules` has a default.
 pub trait PermissionRuleStore: Send + Sync {
+    /// Atomically inserts or replaces one rule in its effective namespace.
+    fn upsert_rule(
+        &self,
+        context: &PermissionRuleContext,
+        rule: &RememberedRule,
+    ) -> Result<(), RuntimeError>;
+
+    /// Loads the unique rules applicable to `context` in stable order.
+    fn load_applicable_rules(
+        &self,
+        context: &PermissionRuleContext,
+    ) -> Result<Vec<RememberedRule>, RuntimeError>;
+
+    /// Atomically revokes one exact address from its effective namespace.
+    ///
+    /// All legacy duplicate rows at that address are removed. Returns whether
+    /// at least one row existed.
+    fn revoke_rule(
+        &self,
+        context: &PermissionRuleContext,
+        address: &PermissionRuleAddress,
+    ) -> Result<bool, RuntimeError>;
+
+    /// Atomically clears one effective scope and returns rows removed.
+    ///
+    /// The count includes legacy duplicates. Project scope requires a project
+    /// id; global scope always names the one store-wide global namespace.
+    fn clear_scope(
+        &self,
+        context: &PermissionRuleContext,
+        scope: PermissionRuleScope,
+    ) -> Result<usize, RuntimeError>;
+
     /// Persists the provided permission rules for a session, replacing any
     /// existing session-scoped rules. `project_id` is stored alongside each
     /// rule so that project-scoped rules can later be retrieved by other
     /// sessions that share the same project.
+    ///
+    /// Compatibility operation. Implementations must keep the whole mutation
+    /// atomic within their documented concurrency boundary.
     fn save_rules(
         &self,
         session_id: &str,
@@ -200,9 +314,18 @@ pub trait PermissionRuleStore: Send + Sync {
         &self,
         session_id: &str,
         project_id: Option<&str>,
-    ) -> Result<Vec<RememberedRule>, RuntimeError>;
+    ) -> Result<Vec<RememberedRule>, RuntimeError> {
+        self.load_applicable_rules(&PermissionRuleContext {
+            session_id: session_id.to_owned(),
+            project_id: project_id.map(str::to_owned),
+        })
+    }
 
-    /// Removes all persisted permission rules for a session.
+    /// Legacy creator-oriented clear operation.
+    ///
+    /// Implementations retain their released behavior of deleting rows written
+    /// by `session_id`, regardless of effective scope, and must perform it
+    /// atomically. New code should use [`Self::clear_scope`].
     fn clear_rules(&self, session_id: &str) -> Result<(), RuntimeError>;
 }
 

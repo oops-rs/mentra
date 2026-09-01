@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Permission stores mutate effective namespaces atomically
+
+- `PermissionRuleContext { session_id, project_id }` and new point operations on
+  `PermissionRuleStore` make one rule address the unit of persistence: atomic
+  upsert, applicable-rule load, exact revoke, and effective-scope clear. Session
+  rules key on the context session, project rules require and key on its project,
+  and global rules share one store-wide namespace independent of their creator.
+- Volatile stores and clones of one file store perform each mutation under one
+  shared in-process lock (the file store writes one atomic replacement); SQLite
+  uses an immediate transaction; the hybrid store forwards to that SQLite
+  contract. Independently constructed same-root file stores remain outside the
+  file backend's concurrency contract. Exact revoke and scope clear remove every
+  legacy duplicate in the selected namespace.
+- Applicable loads collapse legacy conflicts deterministically and fail-safe:
+  denial wins, a reason beats no reason, lexical reason/key order breaks the
+  remainder, and the returned rules use `RuleStore`'s stable scope/key order.
+  Legacy bulk saves now canonical-upsert broader inherited addresses rather than
+  copying them once per session.
+- **Source-breaking for custom stores:** `PermissionRuleStore` gained four
+  required point methods. The released `save_rules`, `load_rules`, and
+  `clear_rules` call surface remains available, but mutating defaults would be
+  weaker than the atomic contract, so custom backends must implement both point
+  mutation and the two legacy mutations; only `load_rules` has a default.
+  Session live wiring still uses the compatibility surface in this change;
+  switching it to point mutation remains follow-up work for
+  [#43](https://github.com/oops-rs/mentra/issues/43).
+
 ### Remembered permission rules have exact scoped addresses
 
 - `PermissionRuleAddress { scope, key }` is now the public identity of one

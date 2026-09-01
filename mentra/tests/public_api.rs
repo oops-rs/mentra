@@ -878,7 +878,17 @@ fn a_session_accepts_a_scoped_tool_authorizer_after_runtime_construction() {
 #[test]
 fn permission_rule_addresses_are_public_serializable_and_exact() {
     use mentra::session::PermissionRuleScope;
-    use mentra::{PermissionRuleAddress, RememberedRule, RuleKey, RuleStore};
+    use mentra::{
+        PermissionRuleAddress, PermissionRuleContext, PermissionRuleStore, RememberedRule, RuleKey,
+        RuleStore,
+    };
+
+    let context = PermissionRuleContext {
+        session_id: "session-1".to_owned(),
+        project_id: Some("project-1".to_owned()),
+    };
+    assert_eq!(context.session_id, "session-1");
+    assert_eq!(context.project_id.as_deref(), Some("project-1"));
 
     let address = PermissionRuleAddress {
         scope: PermissionRuleScope::Project,
@@ -926,6 +936,26 @@ fn permission_rule_addresses_are_public_serializable_and_exact() {
     store.add_rule(rule);
     assert!(store.revoke_rule(&address));
     assert!(!store.revoke_rule(&address));
+
+    let persistent = mentra::runtime::VolatileRuntimeStore::new();
+    persistent
+        .upsert_rule(
+            &context,
+            &RememberedRule {
+                key: address.key.clone(),
+                allow: false,
+                scope: address.scope,
+                reason: Some("public contract".to_owned()),
+            },
+        )
+        .expect("upsert through public store contract");
+    assert_eq!(
+        persistent
+            .load_applicable_rules(&context)
+            .expect("load through public store contract")
+            .len(),
+        1
+    );
 }
 
 /// The downstream shape this exists for, written from outside the crate: a
