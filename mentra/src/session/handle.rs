@@ -249,6 +249,19 @@ impl Session {
         &self.metadata
     }
 
+    /// Returns the current configuration of this session's underlying agent.
+    ///
+    /// For a newly resumed session, this is the configuration loaded from the
+    /// persisted agent record. Later configuration changes are reflected here,
+    /// so this is not an immutable historical snapshot.
+    ///
+    /// The configuration can contain system prompts, metadata, local paths,
+    /// and provider request headers. Callers should not log or otherwise expose
+    /// it wholesale.
+    pub fn config(&self) -> &crate::agent::AgentConfig {
+        self.agent.config()
+    }
+
     /// Updates the live session model and persists the new setting so future
     /// resumes observe the same model.
     pub fn set_model(&mut self, model: crate::ModelInfo) -> Result<(), RuntimeError> {

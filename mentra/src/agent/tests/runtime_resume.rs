@@ -281,6 +281,54 @@ async fn resume_agent_keeps_committed_transcript_when_tool_execution_was_interru
     assert_eq!(persisted_after_resume.memory.transcript.len(), 2);
 }
 
+#[test]
+fn resumed_session_exposes_the_persisted_agent_config() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let store = temp_store("session-config");
+    let config = AgentConfig {
+        system: Some("persist this exact system prompt".to_string()),
+        temperature: Some(0.25),
+        max_output_tokens: Some(1_234),
+        metadata: BTreeMap::from([("scope".to_string(), "resumed-session".to_string())]),
+        ..AgentConfig::default()
+    };
+    let serialized_config = serde_json::to_value(&config).expect("serialize original agent config");
+
+    let agent_id = {
+        let runtime = Runtime::empty_builder()
+            .with_store(store.clone())
+            .with_provider_instance(ScriptedProvider::new(
+                BuiltinProvider::Anthropic,
+                vec![model.clone()],
+                Vec::new(),
+            ))
+            .build()
+            .expect("build runtime");
+        let session = runtime
+            .create_session_with_config("configured", model.clone(), config)
+            .expect("create configured session");
+        session.agent_id().to_string()
+    };
+
+    let reboot_runtime = Runtime::empty_builder()
+        .with_store(store)
+        .with_provider_instance(ScriptedProvider::new(
+            BuiltinProvider::Anthropic,
+            vec![model],
+            Vec::new(),
+        ))
+        .build()
+        .expect("rebuild runtime");
+    let resumed = reboot_runtime
+        .resume_session(&agent_id)
+        .expect("resume configured session");
+
+    assert_eq!(
+        serde_json::to_value(resumed.config()).expect("serialize resumed agent config"),
+        serialized_config
+    );
+}
+
 #[tokio::test]
 async fn resume_all_rebuilds_agents_from_agent_memory() {
     let model = model_info("model", BuiltinProvider::Anthropic);
