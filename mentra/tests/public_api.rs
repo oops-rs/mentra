@@ -395,6 +395,25 @@ fn runtime_builder_publicly_selects_split_file_tools() {
     assert!(!names.contains("files"));
 }
 
+#[test]
+fn runtime_builder_publicly_disables_builtin_file_tools() {
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let runtime = Runtime::builder()
+        .with_file_tools(FileToolProfile::None)
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    for name in ["files", "read", "ls", "grep", "glob", "write", "edit"] {
+        assert!(
+            runtime.tool_descriptor(name).is_none(),
+            "file tool descriptor remained: {name}"
+        );
+    }
+    assert!(runtime.tool_descriptor("shell").is_some());
+}
+
 #[tokio::test]
 async fn parallel_tool_context_can_spawn_subagents_from_public_api() {
     let harness = Harness::new(vec![

@@ -66,8 +66,9 @@ impl RuntimeBuilder {
     /// Reconfigures the eagerly registered builtin file-tool surface.
     ///
     /// The default is [`FileToolProfile::Batched`], preserving the historical
-    /// `files` tool. This method also works with [`Runtime::empty_builder`] to
-    /// opt into only the selected file tools.
+    /// `files` tool. [`FileToolProfile::None`] removes every builtin file tool
+    /// without affecting non-file builtins. This method also works with
+    /// [`Runtime::empty_builder`] to opt into only the selected file tools.
     pub fn with_file_tools(self, profile: FileToolProfile) -> Self {
         self.handle.configure_file_tools(profile);
         self

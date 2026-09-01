@@ -40,12 +40,16 @@ use files::FilesTool;
 
 /// Selects which builtin file-tool surface a runtime exposes.
 ///
-/// [`Batched`](Self::Batched) preserves the historical `files` tool exactly.
+/// [`None`](Self::None) leaves every builtin file tool unregistered while
+/// preserving non-file builtins. [`Batched`](Self::Batched) preserves the
+/// historical `files` tool exactly.
+///
 /// [`Split`](Self::Split) exposes model-conventional `read`, `ls`, `grep`,
 /// `glob`, `write`, and `edit` tools. [`Both`](Self::Both) exposes both
 /// surfaces over the same workspace engine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FileToolProfile {
+    None,
     #[default]
     Batched,
     Split,
@@ -192,10 +196,17 @@ impl ToolRegistry {
             self.tools.remove(name);
         }
 
-        if matches!(profile, FileToolProfile::Batched | FileToolProfile::Both) {
+        let (register_batched, register_split) = match profile {
+            FileToolProfile::None => (false, false),
+            FileToolProfile::Batched => (true, false),
+            FileToolProfile::Split => (false, true),
+            FileToolProfile::Both => (true, true),
+        };
+
+        if register_batched {
             self.register_tool(FilesTool);
         }
-        if matches!(profile, FileToolProfile::Split | FileToolProfile::Both) {
+        if register_split {
             self.register_tool(ReadTool);
             self.register_tool(ListTool);
             self.register_tool(GrepTool);
@@ -268,6 +279,29 @@ mod tests {
         assert!(registry.get_tool("files").is_some());
         for name in ["read", "ls", "grep", "glob", "write", "edit"] {
             assert!(registry.get_tool(name).is_some(), "missing {name}");
+        }
+
+        registry.configure_file_tools(FileToolProfile::None);
+        let provider_specs = registry.tools();
+        for name in ["files", "read", "ls", "grep", "glob", "write", "edit"] {
+            assert!(
+                registry.get_tool(name).is_none(),
+                "file handler remained: {name}"
+            );
+            assert!(
+                provider_specs.iter().all(|tool| tool.name != name),
+                "file provider spec remained: {name}"
+            );
+        }
+        for name in ["shell", "background_run", "check_background"] {
+            assert!(
+                registry.get_tool(name).is_some(),
+                "builtin handler missing: {name}"
+            );
+            assert!(
+                provider_specs.iter().any(|tool| tool.name == name),
+                "builtin provider spec missing: {name}"
+            );
         }
     }
 }
