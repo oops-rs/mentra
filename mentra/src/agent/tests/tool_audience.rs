@@ -74,6 +74,30 @@ impl ToolExecutor for CountingTool {
     }
 }
 
+struct LayeredTool {
+    label: &'static str,
+}
+
+impl ToolDefinition for LayeredTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("layered_tool")
+            .description(self.label)
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for LayeredTool {
+    fn execution_category(&self, _input: &Value) -> ToolExecutionCategory {
+        ToolExecutionCategory::ReadOnlyParallel
+    }
+
+    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+        Ok(self.label.to_string())
+    }
+}
+
 struct CountingHook(Arc<AtomicUsize>);
 
 #[async_trait]
@@ -184,6 +208,144 @@ async fn two_audiences_resolve_same_name_to_different_handlers_and_keep_globals(
         assert!(names.contains(&"audience_tool".to_string()));
         assert!(names.contains(&"global_tool".to_string()));
     }
+}
+
+#[tokio::test]
+async fn roster_order_and_same_name_precedence_are_stable() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "exact-call", "layered_tool", r#"{}"#),
+            text_stream(&model.id, "exact done"),
+            tool_use_stream(&model.id, "audience-call", "layered_tool", r#"{}"#),
+            text_stream(&model.id, "audience done"),
+            tool_use_stream(&model.id, "audience-fallback-call", "layered_tool", r#"{}"#),
+            text_stream(&model.id, "audience fallback done"),
+            tool_use_stream(&model.id, "global-call", "layered_tool", r#"{}"#),
+            text_stream(&model.id, "global done"),
+        ],
+    );
+    let provider_handle = provider.clone();
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    runtime.register_tool(StaticTool::success("z_global", "z"));
+    runtime.register_tool(StaticTool::success("a_global", "a"));
+    let audience = ToolAudience::new("layered");
+    let mut exact = runtime
+        .spawn_with_config_for_audience(
+            "exact",
+            model.clone(),
+            AgentConfig::default(),
+            audience.clone(),
+        )
+        .expect("exact agent");
+    let handle = exact.runtime_handle();
+    let exact_registration = handle.register_scoped_tool(
+        exact.id(),
+        LayeredTool {
+            label: "exact/global",
+        },
+    );
+    let prepared = crate::tool::ToolRegistry::prepare_tool(LayeredTool { label: "audience" });
+    let displaced = {
+        let mut registry = handle
+            .tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned");
+        registry
+            .insert_audience_prepared(&audience, prepared)
+            .into_parts()
+            .1
+    };
+    assert!(displaced.is_empty());
+
+    let expected_roster = exact
+        .tools()
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
+    assert!(expected_roster.windows(2).all(|pair| pair[0] <= pair[1]));
+    for _ in 0..32 {
+        assert_eq!(
+            exact
+                .tools()
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>(),
+            expected_roster
+        );
+    }
+
+    let mut audience_agent = runtime
+        .spawn_with_config_for_audience(
+            "audience",
+            model.clone(),
+            AgentConfig::default(),
+            audience.clone(),
+        )
+        .expect("audience agent");
+    exact
+        .send(vec![ContentBlock::text("go")])
+        .await
+        .expect("exact run");
+    audience_agent
+        .send(vec![ContentBlock::text("go")])
+        .await
+        .expect("audience run");
+
+    handle
+        .tooling
+        .scoped_tools
+        .write()
+        .expect("scoped tools poisoned")
+        .remove("layered_tool");
+    let mut audience_fallback = runtime
+        .spawn_with_config_for_audience(
+            "audience-fallback",
+            model.clone(),
+            AgentConfig::default(),
+            audience,
+        )
+        .expect("audience fallback agent");
+    let mut global = runtime.spawn("global", model).expect("global agent");
+    audience_fallback
+        .send(vec![ContentBlock::text("go")])
+        .await
+        .expect("audience fallback run");
+    global
+        .send(vec![ContentBlock::text("go")])
+        .await
+        .expect("global run");
+
+    assert_eq!(result_for(&exact, "exact-call"), "exact/global");
+    assert_eq!(result_for(&audience_agent, "audience-call"), "audience");
+    assert_eq!(
+        result_for(&audience_fallback, "audience-fallback-call"),
+        "audience"
+    );
+    assert_eq!(result_for(&global, "global-call"), "exact/global");
+    let requests = provider_handle.recorded_requests().await;
+    for (index, expected) in [
+        (0, "exact/global"),
+        (2, "audience"),
+        (4, "audience"),
+        (6, "exact/global"),
+    ] {
+        assert_eq!(
+            requests[index]
+                .tools
+                .iter()
+                .find(|tool| tool.name == "layered_tool")
+                .and_then(|tool| tool.description.as_deref()),
+            Some(expected)
+        );
+    }
+    handle.unregister_scoped_tool(exact.id(), &exact_registration);
 }
 
 #[tokio::test]
@@ -328,6 +490,19 @@ fn resume_audience_is_explicit_ephemeral_and_never_persisted() {
         .resume_agent_for_audience(&agent_id, current.clone())
         .expect("audience resume");
     assert_eq!(resumed.tool_audience(), Some(&current));
+    drop(resumed);
+    drop(runtime);
+
+    let bulk_audience = ToolAudience::new("bulk-current");
+    let runtime = persistent_runtime(store.clone(), &model);
+    let resumed = runtime
+        .resume_for_audience("default", bulk_audience.clone())
+        .expect("bulk audience resume");
+    let resumed_agent = resumed
+        .iter()
+        .find(|agent| agent.id() == agent_id)
+        .expect("bulk resume includes original agent");
+    assert_eq!(resumed_agent.tool_audience(), Some(&bulk_audience));
     drop(resumed);
     drop(runtime);
 

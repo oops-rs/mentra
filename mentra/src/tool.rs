@@ -488,6 +488,14 @@ impl ToolRegistry {
             ));
         }
 
+        Ok(self.insert_audience_prepared(audience, prepared))
+    }
+
+    pub(crate) fn insert_audience_prepared(
+        &mut self,
+        audience: &ToolAudience,
+        prepared: PreparedTool,
+    ) -> ToolInsertion {
         let generation = next_tool_registration_generation();
         let registration = ToolRegistration {
             generation,
@@ -509,10 +517,10 @@ impl ToolRegistry {
             .into_iter()
             .collect::<Vec<_>>();
         debug_assert!(displaced_handlers.is_empty());
-        Ok(ToolInsertion {
+        ToolInsertion {
             registration,
             displaced_handlers,
-        })
+        }
     }
 
     pub(crate) fn resolve_audience_tool(

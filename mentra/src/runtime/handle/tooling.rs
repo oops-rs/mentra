@@ -218,7 +218,9 @@ impl RuntimeHandle {
                     .or_insert(registration);
             }
         }
-        selected.into_values().collect()
+        let mut registrations = selected.into_values().collect::<Vec<_>>();
+        registrations.sort_by(|left, right| left.name().cmp(right.name()));
+        registrations
     }
 
     pub(crate) fn resolve_tool_for_agent(
