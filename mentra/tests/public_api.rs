@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io::{Read, Write},
     net::TcpListener,
     sync::{
@@ -13,6 +13,7 @@ use std::{
 use async_trait::async_trait;
 use mentra::{
     Agent, BuiltinProvider, ContentBlock, FileToolProfile, ModelInfo, ModelSelector, Runtime,
+    ToolAudience,
     agent::{AgentEvent, AgentEventTapGuard},
     error::RuntimeError,
     provider::{
@@ -412,6 +413,51 @@ fn runtime_builder_publicly_disables_builtin_file_tools() {
         );
     }
     assert!(runtime.tool_descriptor("shell").is_some());
+}
+
+#[test]
+fn runtime_publicly_registers_audience_tools_with_guard_lifetimes() {
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let audience = ToolAudience::new("workspace-a");
+    assert_eq!(audience.as_ref(), "workspace-a");
+    assert_eq!(audience.to_string(), "workspace-a");
+    assert_eq!(
+        serde_json::from_str::<ToolAudience>(
+            &serde_json::to_string(&audience).expect("serialize audience")
+        )
+        .expect("deserialize audience"),
+        audience
+    );
+    assert_eq!(
+        HashSet::from([audience.clone(), ToolAudience::from("workspace-a")]).len(),
+        1
+    );
+
+    let guard = runtime
+        .try_register_tool_for_audience(audience.clone(), EchoTool)
+        .expect("register audience tool");
+    assert_eq!(guard.audience(), &audience);
+    assert_eq!(guard.descriptor(), &EchoTool.descriptor());
+    assert!(runtime.tool_descriptor("echo_tool").is_none());
+    assert!(
+        runtime
+            .try_register_tool_for_audience(audience.clone(), EchoTool)
+            .is_err()
+    );
+    let other_guard = runtime
+        .try_register_tool_for_audience(ToolAudience::from("workspace-b"), EchoTool)
+        .expect("same name in another audience");
+    assert!(guard.unregister());
+    let replacement = runtime
+        .try_register_tool_for_audience(audience, EchoTool)
+        .expect("released audience name can register again");
+    drop(replacement);
+    drop(other_guard);
 }
 
 #[tokio::test]

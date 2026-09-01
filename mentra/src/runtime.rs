@@ -171,6 +171,23 @@ impl Runtime {
         self.handle.try_register_tool(tool)
     }
 
+    /// Registers a custom tool visible only to agents in `audience`.
+    ///
+    /// Registration refuses a global tool of the same name or another tool in
+    /// the same audience, while a different audience may use the same name.
+    /// The returned guard owns the registration lifetime and exposes the exact
+    /// descriptor snapshot evaluated by this call.
+    pub fn try_register_tool_for_audience<T>(
+        &self,
+        audience: crate::tool::ToolAudience,
+        tool: T,
+    ) -> Result<crate::tool::AudienceToolRegistration, crate::tool::ToolNameCollision>
+    where
+        T: ExecutableTool + 'static,
+    {
+        self.handle.try_register_tool_for_audience(audience, tool)
+    }
+
     /// Removes a registered tool by name, reporting whether one was there.
     pub fn unregister_tool(&self, name: &str) -> bool {
         self.handle.unregister_tool_by_name(name)

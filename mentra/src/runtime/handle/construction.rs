@@ -52,30 +52,8 @@ fn background_hook_sink(
     Arc::new(RuntimeBackgroundHookSink { store, hooks })
 }
 
-fn clone_tooling_services(tooling: &ToolingServices) -> ToolingServices {
-    let (tool_registry, scoped_tools) = {
-        let tool_registry = tooling
-            .tool_registry
-            .read()
-            .expect("tool registry poisoned");
-        let scoped_tools = tooling
-            .scoped_tools
-            .read()
-            .expect("scoped tool registry poisoned");
-        (tool_registry.clone(), scoped_tools.clone())
-    };
-    ToolingServices {
-        tool_registry: Arc::new(RwLock::new(tool_registry)),
-        scoped_tools: Arc::new(RwLock::new(scoped_tools)),
-        skills: Arc::new(RwLock::new(
-            tooling
-                .skills
-                .read()
-                .expect("skill registry poisoned")
-                .clone(),
-        )),
-        app_contexts: tooling.app_contexts.clone(),
-    }
+fn share_tooling_services(tooling: &ToolingServices) -> ToolingServices {
+    tooling.clone()
 }
 
 impl RuntimeHandle {
@@ -189,7 +167,7 @@ impl RuntimeHandle {
                 team: TeamManager::new(store),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -229,7 +207,7 @@ impl RuntimeHandle {
                 team: self.collaboration.team.clone(),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -269,7 +247,7 @@ impl RuntimeHandle {
                 team: self.collaboration.team.clone(),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -306,7 +284,7 @@ impl RuntimeHandle {
                 team: self.collaboration.team.clone(),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -346,7 +324,7 @@ impl RuntimeHandle {
                 team: self.collaboration.team.clone(),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -386,7 +364,7 @@ impl RuntimeHandle {
                 team: self.collaboration.team.clone(),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -419,7 +397,7 @@ impl RuntimeHandle {
                 team: self.collaboration.team.clone(),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: runtime_identifier.into(),
@@ -459,7 +437,7 @@ impl RuntimeHandle {
                 team: self.collaboration.team.clone(),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -495,7 +473,7 @@ impl RuntimeHandle {
                 team: self.collaboration.team.clone(),
                 teammate_host: self.collaboration.teammate_host.clone(),
             },
-            tooling: clone_tooling_services(&self.tooling),
+            tooling: share_tooling_services(&self.tooling),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
             runtime_instance_id: format!("runtime-{}", std::process::id()),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
@@ -508,16 +486,10 @@ impl RuntimeHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::mpsc,
-        thread,
-        time::{Duration, Instant},
-    };
-
     use async_trait::async_trait;
 
     use super::*;
-    use crate::tool::{ToolDefinition, ToolExecutor, ToolResolution, ToolSpec};
+    use crate::tool::{ToolDefinition, ToolExecutor, ToolSpec};
 
     struct NamedTool {
         description: &'static str,
@@ -535,68 +507,31 @@ mod tests {
     impl ToolExecutor for NamedTool {}
 
     #[test]
-    fn tooling_clone_cannot_pair_a_scoped_generation_with_a_cleared_marker() {
+    fn derived_handles_share_live_tool_registration_and_removal() {
         let runtime = RuntimeHandle::new(false);
-        let scoped = runtime.register_scoped_tool(
-            "owner",
-            NamedTool {
-                description: "scoped",
-            },
-        );
-        let scoped_lock = runtime
-            .tooling
-            .scoped_tools
-            .write()
-            .expect("scoped tool registry poisoned");
-        let tooling = runtime.tooling.clone();
-        let cloner = thread::spawn(move || clone_tooling_services(&tooling));
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while runtime.tooling.tool_registry.try_write().is_ok() {
-            assert!(
-                Instant::now() < deadline,
-                "cloner never acquired registry lock"
-            );
-            thread::yield_now();
-        }
-        let writer_runtime = runtime.clone();
-        let (started, writer_started) = mpsc::channel();
-        let writer = thread::spawn(move || {
-            started.send(()).expect("announce writer");
-            writer_runtime.register_tool(NamedTool {
-                description: "global",
-            });
-        });
-        writer_started.recv().expect("writer started");
-        drop(scoped_lock);
-
-        let cloned_tooling = cloner.join().expect("tooling clone");
-        writer.join().expect("global replacement");
-        let mut cloned_runtime = runtime.clone();
-        cloned_runtime.tooling = cloned_tooling;
-
-        assert!(matches!(
-            cloned_runtime.resolve_tool_for_agent("clone_race", "other"),
-            ToolResolution::Hidden
+        let derived = runtime.with_hooks(runtime.hooks().clone());
+        assert!(Arc::ptr_eq(
+            &runtime.tooling.tool_registry,
+            &derived.tooling.tool_registry
         ));
-        let ToolResolution::Visible(owner_tool) =
-            cloned_runtime.resolve_tool_for_agent("clone_race", "owner")
-        else {
-            panic!("owner must see coherent scoped clone");
-        };
+        assert!(Arc::ptr_eq(
+            &runtime.tooling.skills,
+            &derived.tooling.skills
+        ));
+
+        runtime.register_tool(NamedTool {
+            description: "registered late",
+        });
         assert_eq!(
-            owner_tool.descriptor().provider.description.as_deref(),
-            Some("scoped")
+            derived
+                .get_tool_descriptor("clone_race")
+                .expect("derived handle sees late registration")
+                .provider
+                .description
+                .as_deref(),
+            Some("registered late")
         );
-        let ToolResolution::Visible(global_tool) =
-            runtime.resolve_tool_for_agent("clone_race", "other")
-        else {
-            panic!("source runtime must contain global replacement");
-        };
-        assert_eq!(
-            global_tool.descriptor().provider.description.as_deref(),
-            Some("global")
-        );
-        runtime.unregister_scoped_tool("owner", &scoped);
+        assert!(runtime.unregister_tool_by_name("clone_race"));
+        assert!(derived.get_tool_descriptor("clone_race").is_none());
     }
 }

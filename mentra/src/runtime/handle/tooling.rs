@@ -53,13 +53,13 @@ impl RuntimeHandle {
     {
         let prepared = ToolRegistry::prepare_tool(tool);
         let name = prepared.name().to_string();
-        let displaced_handler = {
+        let displaced_handlers = {
             let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let (_, displaced_handler) = registry.insert_prepared(prepared).into_parts();
+            let (_, displaced_handlers) = registry.insert_prepared(prepared).into_parts();
             scoped_tools.remove(&name);
-            displaced_handler
+            displaced_handlers
         };
-        drop(displaced_handler);
+        drop(displaced_handlers);
     }
 
     /// Registers a tool unless its name is already taken.
@@ -80,9 +80,43 @@ impl RuntimeHandle {
             }
         };
         match outcome {
-            Ok(displaced_handler) => {
-                debug_assert!(displaced_handler.is_none());
+            Ok(displaced_handlers) => {
+                debug_assert!(displaced_handlers.is_empty());
                 Ok(())
+            }
+            Err((collision, rejected)) => {
+                drop(rejected);
+                Err(collision)
+            }
+        }
+    }
+
+    pub fn try_register_tool_for_audience<T>(
+        &self,
+        audience: crate::tool::ToolAudience,
+        tool: T,
+    ) -> Result<crate::tool::AudienceToolRegistration, crate::tool::ToolNameCollision>
+    where
+        T: ExecutableTool + 'static,
+    {
+        let prepared = ToolRegistry::prepare_tool(tool);
+        let outcome = {
+            let mut registry = self
+                .tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned");
+            registry.try_insert_audience_prepared(&audience, prepared)
+        };
+        match outcome {
+            Ok(insertion) => {
+                let (registration, displaced_handlers) = insertion.into_parts();
+                debug_assert!(displaced_handlers.is_empty());
+                Ok(crate::tool::AudienceToolRegistration::new(
+                    Arc::downgrade(&self.tooling.tool_registry),
+                    audience,
+                    registration,
+                ))
             }
             Err((collision, rejected)) => {
                 drop(rejected);
@@ -114,9 +148,10 @@ impl RuntimeHandle {
     {
         let prepared = ToolRegistry::prepare_tool(tool);
         let name = prepared.name().to_string();
-        let (registration, displaced_handler) = {
+        let (registration, displaced_handlers) = {
             let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let (registration, displaced_handler) = registry.insert_prepared(prepared).into_parts();
+            let (registration, displaced_handlers) =
+                registry.insert_prepared(prepared).into_parts();
             scoped_tools.insert(
                 name,
                 ScopedToolOwner {
@@ -124,9 +159,9 @@ impl RuntimeHandle {
                     generation: registration.generation(),
                 },
             );
-            (registration, displaced_handler)
+            (registration, displaced_handlers)
         };
-        drop(displaced_handler);
+        drop(displaced_handlers);
         registration
     }
 
@@ -196,13 +231,13 @@ impl RuntimeHandle {
         }
 
         self.skill_registry_mut().insert(roots);
-        let displaced_handler = {
+        let displaced_handlers = {
             let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let (registration, displaced_handler) = registry.register_skill_tool().into_parts();
+            let (registration, displaced_handlers) = registry.register_skill_tool().into_parts();
             scoped_tools.remove(registration.name());
-            displaced_handler
+            displaced_handlers
         };
-        drop(displaced_handler);
+        drop(displaced_handlers);
     }
 
     /// Drops every root named by `paths`, reporting whether any was there.
@@ -343,7 +378,12 @@ impl RuntimeHandle {
 #[cfg(test)]
 mod tests {
     use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
         sync::mpsc,
+        sync::{
+            Arc as StdArc,
+            atomic::{AtomicUsize, Ordering},
+        },
         thread,
         time::{Duration, Instant},
     };
@@ -369,6 +409,22 @@ mod tests {
     #[async_trait]
     impl ToolExecutor for NamedTool {}
 
+    struct CountingDescriptorTool {
+        calls: StdArc<AtomicUsize>,
+    }
+
+    impl ToolDefinition for CountingDescriptorTool {
+        fn descriptor(&self) -> ToolSpec {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            ToolSpec::builder("counted_audience")
+                .description(format!("descriptor call {call}"))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for CountingDescriptorTool {}
+
     struct ReentrantDropTool {
         runtime: RuntimeHandle,
         name: &'static str,
@@ -390,6 +446,20 @@ mod tests {
             runtime.resolve_tool_for_agent(name, agent_id),
             crate::tool::ToolResolution::Visible(_)
         )
+    }
+
+    fn audience_description(
+        runtime: &RuntimeHandle,
+        audience: &crate::tool::ToolAudience,
+        name: &str,
+    ) -> Option<String> {
+        runtime
+            .tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned")
+            .resolve_audience_tool(audience, name)
+            .and_then(|tool| tool.descriptor().provider.description.clone())
     }
 
     impl Drop for ReentrantDropTool {
@@ -481,6 +551,167 @@ mod tests {
         runtime.unregister_scoped_tool("owner", &removed);
         assert!(is_visible(&runtime, "removed", "other"));
         assert!(runtime.get_tool_descriptor("removed").is_some());
+    }
+
+    #[test]
+    fn audience_registration_enforces_scope_collision_matrix_and_global_compatibility() {
+        let runtime = RuntimeHandle::new(false);
+        let alpha = crate::tool::ToolAudience::new("alpha");
+        let beta = crate::tool::ToolAudience::new("beta");
+        let alpha_guard = runtime
+            .try_register_tool_for_audience(
+                alpha.clone(),
+                NamedTool {
+                    name: "shared_name",
+                    description: "alpha",
+                },
+            )
+            .expect("first audience registration");
+        let collision = runtime
+            .try_register_tool_for_audience(
+                alpha.clone(),
+                NamedTool {
+                    name: "shared_name",
+                    description: "duplicate alpha",
+                },
+            )
+            .expect_err("same audience and name collide");
+        assert_eq!(collision.name, "shared_name");
+        let beta_guard = runtime
+            .try_register_tool_for_audience(
+                beta.clone(),
+                NamedTool {
+                    name: "shared_name",
+                    description: "beta",
+                },
+            )
+            .expect("different audiences may share a name");
+        assert_eq!(
+            audience_description(&runtime, &alpha, "shared_name").as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            audience_description(&runtime, &beta, "shared_name").as_deref(),
+            Some("beta")
+        );
+        assert!(runtime.get_tool_descriptor("shared_name").is_none());
+        assert!(
+            runtime
+                .tools()
+                .iter()
+                .all(|tool| tool.name != "shared_name")
+        );
+        assert!(
+            runtime
+                .try_register_tool(NamedTool {
+                    name: "shared_name",
+                    description: "safe global",
+                })
+                .is_err()
+        );
+
+        runtime.register_tool(NamedTool {
+            name: "shared_name",
+            description: "unsafe global",
+        });
+        assert_eq!(
+            runtime
+                .get_tool_descriptor("shared_name")
+                .expect("unsafe global registration")
+                .provider
+                .description
+                .as_deref(),
+            Some("unsafe global")
+        );
+        assert!(audience_description(&runtime, &alpha, "shared_name").is_none());
+        assert!(audience_description(&runtime, &beta, "shared_name").is_none());
+        assert!(
+            !alpha_guard.unregister(),
+            "global insertion staled alpha guard"
+        );
+        assert!(
+            !beta_guard.unregister(),
+            "global insertion staled beta guard"
+        );
+        assert!(runtime.unregister_tool_by_name("shared_name"));
+
+        runtime.register_tool(NamedTool {
+            name: "global_first",
+            description: "global",
+        });
+        assert!(
+            runtime
+                .try_register_tool_for_audience(
+                    alpha,
+                    NamedTool {
+                        name: "global_first",
+                        description: "audience",
+                    },
+                )
+                .is_err()
+        );
+
+        let file_audience = crate::tool::ToolAudience::new("file-profile");
+        let file_guard = runtime
+            .try_register_tool_for_audience(
+                file_audience.clone(),
+                NamedTool {
+                    name: "files",
+                    description: "audience files",
+                },
+            )
+            .expect("audience files registration");
+        runtime.configure_file_tools(crate::tool::FileToolProfile::Batched);
+        assert!(runtime.get_tool_descriptor("files").is_some());
+        assert!(audience_description(&runtime, &file_audience, "files").is_none());
+        assert!(
+            !file_guard.unregister(),
+            "builtin insertion staled audience guard"
+        );
+    }
+
+    #[test]
+    fn audience_guard_returns_single_descriptor_snapshot_and_is_aba_safe() {
+        let runtime = RuntimeHandle::new(false);
+        let audience = crate::tool::ToolAudience::new("counted");
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let old_guard = runtime
+            .try_register_tool_for_audience(
+                audience.clone(),
+                CountingDescriptorTool {
+                    calls: StdArc::clone(&calls),
+                },
+            )
+            .expect("audience registration");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            old_guard.descriptor().provider.description.as_deref(),
+            Some("descriptor call 1")
+        );
+
+        let detached_handler = runtime
+            .tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .detach_audience_registration(&audience, old_guard.registration());
+        drop(detached_handler);
+        let new_guard = runtime
+            .try_register_tool_for_audience(
+                audience.clone(),
+                NamedTool {
+                    name: "counted_audience",
+                    description: "new generation",
+                },
+            )
+            .expect("replacement generation");
+        drop(old_guard);
+        assert_eq!(
+            audience_description(&runtime, &audience, "counted_audience").as_deref(),
+            Some("new generation")
+        );
+        assert!(new_guard.unregister());
+        assert!(audience_description(&runtime, &audience, "counted_audience").is_none());
     }
 
     #[test]
@@ -591,5 +822,135 @@ mod tests {
             .expect("reentrant Drop must not deadlock on scoped registry locks");
         worker.join().expect("unregister worker");
         assert!(runtime.get_tool_descriptor("scoped_drop_probe").is_some());
+    }
+
+    #[test]
+    fn audience_guard_drops_its_handler_after_registry_unlock() {
+        let runtime = RuntimeHandle::new(false);
+        let audience = crate::tool::ToolAudience::new("drop");
+        let (dropped, observed) = mpsc::channel();
+        let guard = runtime
+            .try_register_tool_for_audience(
+                audience,
+                ReentrantDropTool {
+                    runtime: runtime.clone(),
+                    name: "reentrant_audience",
+                    probe_name: "audience_drop_probe",
+                    dropped,
+                },
+            )
+            .expect("audience registration");
+
+        let worker = thread::spawn(move || drop(guard));
+        observed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reentrant Drop must not deadlock on audience registry lock");
+        worker.join().expect("guard drop worker");
+        assert!(runtime.get_tool_descriptor("audience_drop_probe").is_some());
+    }
+
+    #[test]
+    fn audience_guard_recovers_a_poisoned_registry_without_panicking() {
+        let runtime = RuntimeHandle::new(false);
+        let audience = crate::tool::ToolAudience::new("poisoned");
+        let guard = runtime
+            .try_register_tool_for_audience(
+                audience.clone(),
+                NamedTool {
+                    name: "poisoned_tool",
+                    description: "registered",
+                },
+            )
+            .expect("audience registration");
+        let registry = Arc::clone(&runtime.tooling.tool_registry);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _lock = registry.write().expect("unpoisoned before test");
+                panic!("poison registry");
+            }))
+            .is_err()
+        );
+
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(guard))).is_ok());
+        assert!(
+            registry
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .resolve_audience_tool(&audience, "poisoned_tool")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejected_audience_handler_is_dropped_after_registry_unlock() {
+        let runtime = RuntimeHandle::new(false);
+        let audience = crate::tool::ToolAudience::new("collision-drop");
+        let _guard = runtime
+            .try_register_tool_for_audience(
+                audience.clone(),
+                NamedTool {
+                    name: "audience_collision",
+                    description: "first",
+                },
+            )
+            .expect("first registration");
+        let (dropped, observed) = mpsc::channel();
+        let worker_runtime = runtime.clone();
+        let worker = thread::spawn(move || {
+            worker_runtime
+                .try_register_tool_for_audience(
+                    audience,
+                    ReentrantDropTool {
+                        runtime: worker_runtime.clone(),
+                        name: "audience_collision",
+                        probe_name: "audience_rejection_probe",
+                        dropped,
+                    },
+                )
+                .expect_err("same audience collision");
+        });
+        observed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("rejected handler Drop must not hold registry lock");
+        worker.join().expect("collision worker");
+        assert!(
+            runtime
+                .get_tool_descriptor("audience_rejection_probe")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn global_eviction_drops_audience_handlers_after_registry_unlock() {
+        let runtime = RuntimeHandle::new(false);
+        let (dropped, observed) = mpsc::channel();
+        let guard = runtime
+            .try_register_tool_for_audience(
+                crate::tool::ToolAudience::new("evicted"),
+                ReentrantDropTool {
+                    runtime: runtime.clone(),
+                    name: "audience_evict",
+                    probe_name: "audience_eviction_probe",
+                    dropped,
+                },
+            )
+            .expect("audience registration");
+        let worker_runtime = runtime.clone();
+        let worker = thread::spawn(move || {
+            worker_runtime.register_tool(NamedTool {
+                name: "audience_evict",
+                description: "global replacement",
+            });
+        });
+        observed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("evicted audience handler Drop must not hold registry locks");
+        worker.join().expect("global replacement worker");
+        assert!(!guard.unregister());
+        assert!(
+            runtime
+                .get_tool_descriptor("audience_eviction_probe")
+                .is_some()
+        );
     }
 }

@@ -80,7 +80,7 @@ pub use team::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
     TeamProtocolRequestSummary, TeamProtocolStatus,
 };
-pub use tool::FileToolProfile;
+pub use tool::{AudienceToolRegistration, FileToolProfile, ToolAudience};
 pub use transcript::{
     AgentTranscript, BranchError, CompactionSummary, DelegationArtifact, DelegationEdge,
     DelegationKind, DelegationStatus, EntryId, TranscriptItem, TranscriptKind,

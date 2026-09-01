@@ -17,8 +17,9 @@ mod truncation;
 
 use std::{
     collections::HashMap,
+    fmt,
     sync::{
-        Arc,
+        Arc, RwLock, Weak,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
 };
@@ -63,6 +64,55 @@ pub enum FileToolProfile {
     Batched,
     Split,
     Both,
+}
+
+/// Opaque identity selecting one audience-specific tool namespace.
+///
+/// Mentra compares the value for equality only. It does not interpret it as a
+/// path, session identifier, permission scope, or credential.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct ToolAudience(String);
+
+impl ToolAudience {
+    /// Creates an audience identity from an opaque string.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Returns the opaque string value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the identity and returns its string value.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for ToolAudience {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<String> for ToolAudience {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for ToolAudience {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl fmt::Display for ToolAudience {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Clone)]
@@ -110,14 +160,96 @@ impl ToolRegistration {
     }
 }
 
+/// Keeps one audience-scoped tool registration live.
+///
+/// Dropping the guard unregisters only the exact generation created by the
+/// registration call. A later same-name registration is never removed by an
+/// older guard. The guard does not keep its runtime alive.
+#[must_use = "dropping the guard immediately unregisters the audience-scoped tool"]
+pub struct AudienceToolRegistration {
+    registry: Weak<RwLock<ToolRegistry>>,
+    audience: ToolAudience,
+    registration: ToolRegistration,
+    active: bool,
+}
+
+impl fmt::Debug for AudienceToolRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AudienceToolRegistration")
+            .field("audience", &self.audience)
+            .field("descriptor", &self.registration.descriptor)
+            .field("active", &self.active)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AudienceToolRegistration {
+    pub(crate) fn new(
+        registry: Weak<RwLock<ToolRegistry>>,
+        audience: ToolAudience,
+        registration: ToolRegistration,
+    ) -> Self {
+        Self {
+            registry,
+            audience,
+            registration,
+            active: true,
+        }
+    }
+
+    /// Returns the audience this registration belongs to.
+    pub fn audience(&self) -> &ToolAudience {
+        &self.audience
+    }
+
+    /// Returns the exact descriptor snapshot used to register the tool.
+    pub fn descriptor(&self) -> &RuntimeToolDescriptor {
+        self.registration.descriptor()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn registration(&self) -> &ToolRegistration {
+        &self.registration
+    }
+
+    /// Unregisters this exact generation now.
+    pub fn unregister(mut self) -> bool {
+        self.unregister_inner()
+    }
+
+    fn unregister_inner(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.active = false;
+        let Some(registry) = self.registry.upgrade() else {
+            return false;
+        };
+        let detached_handler = {
+            let mut registry = registry.write().unwrap_or_else(|error| error.into_inner());
+            registry.detach_audience_registration(&self.audience, &self.registration)
+        };
+        let removed = detached_handler.is_some();
+        drop(detached_handler);
+        removed
+    }
+}
+
+impl Drop for AudienceToolRegistration {
+    fn drop(&mut self) {
+        self.unregister_inner();
+    }
+}
+
 pub(crate) struct ToolInsertion {
     registration: ToolRegistration,
-    displaced_handler: Option<Arc<dyn ExecutableTool>>,
+    displaced_handlers: Vec<Arc<dyn ExecutableTool>>,
 }
 
 impl ToolInsertion {
-    pub(crate) fn into_parts(self) -> (ToolRegistration, Option<Arc<dyn ExecutableTool>>) {
-        (self.registration, self.displaced_handler)
+    pub(crate) fn into_parts(self) -> (ToolRegistration, Vec<Arc<dyn ExecutableTool>>) {
+        (self.registration, self.displaced_handlers)
     }
 }
 
@@ -150,6 +282,7 @@ pub struct ToolNameCollision {
 /// Registry of tools available to a runtime instance.
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
+    audience_tools: HashMap<ToolAudience, HashMap<String, RegisteredTool>>,
     provider_specs: Arc<[ProviderToolSpec]>,
 }
 
@@ -166,8 +299,8 @@ impl ToolRegistry {
         T: ExecutableTool + 'static,
     {
         let prepared = Self::prepare_tool(tool);
-        let (_, displaced_handler) = self.insert_prepared(prepared).into_parts();
-        drop(displaced_handler);
+        let (_, displaced_handlers) = self.insert_prepared(prepared).into_parts();
+        drop(displaced_handlers);
     }
 
     /// Registers a tool unless its name is already taken.
@@ -183,8 +316,8 @@ impl ToolRegistry {
         let prepared = Self::prepare_tool(tool);
         match self.try_insert_prepared(prepared) {
             Ok(insertion) => {
-                let (_, displaced_handler) = insertion.into_parts();
-                debug_assert!(displaced_handler.is_none());
+                let (_, displaced_handlers) = insertion.into_parts();
+                debug_assert!(displaced_handlers.is_empty());
                 Ok(())
             }
             Err((collision, rejected)) => {
@@ -289,7 +422,7 @@ impl ToolRegistry {
             generation,
             descriptor: prepared.descriptor.clone(),
         };
-        let displaced_handler = self
+        let mut displaced_handlers = self
             .tools
             .insert(
                 registration.name().to_string(),
@@ -299,11 +432,19 @@ impl ToolRegistry {
                     handler: prepared.handler,
                 },
             )
-            .map(|tool| tool.handler);
+            .map(|tool| tool.handler)
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.audience_tools.retain(|_, tools| {
+            if let Some(tool) = tools.remove(registration.name()) {
+                displaced_handlers.push(tool.handler);
+            }
+            !tools.is_empty()
+        });
         self.refresh_provider_specs();
         ToolInsertion {
             registration,
-            displaced_handler,
+            displaced_handlers,
         }
     }
 
@@ -311,7 +452,12 @@ impl ToolRegistry {
         &mut self,
         prepared: PreparedTool,
     ) -> Result<ToolInsertion, (ToolNameCollision, Box<PreparedTool>)> {
-        if self.tools.contains_key(prepared.name()) {
+        if self.tools.contains_key(prepared.name())
+            || self
+                .audience_tools
+                .values()
+                .any(|tools| tools.contains_key(prepared.name()))
+        {
             return Err((
                 ToolNameCollision {
                     name: prepared.name().to_string(),
@@ -321,6 +467,89 @@ impl ToolRegistry {
         }
 
         Ok(self.insert_prepared(prepared))
+    }
+
+    pub(crate) fn try_insert_audience_prepared(
+        &mut self,
+        audience: &ToolAudience,
+        prepared: PreparedTool,
+    ) -> Result<ToolInsertion, (ToolNameCollision, Box<PreparedTool>)> {
+        let collides = self.tools.contains_key(prepared.name())
+            || self
+                .audience_tools
+                .get(audience)
+                .is_some_and(|tools| tools.contains_key(prepared.name()));
+        if collides {
+            return Err((
+                ToolNameCollision {
+                    name: prepared.name().to_string(),
+                },
+                Box::new(prepared),
+            ));
+        }
+
+        let generation = next_tool_registration_generation();
+        let registration = ToolRegistration {
+            generation,
+            descriptor: prepared.descriptor.clone(),
+        };
+        let displaced_handlers = self
+            .audience_tools
+            .entry(audience.clone())
+            .or_default()
+            .insert(
+                registration.name().to_string(),
+                RegisteredTool {
+                    generation,
+                    descriptor: prepared.descriptor,
+                    handler: prepared.handler,
+                },
+            )
+            .map(|tool| tool.handler)
+            .into_iter()
+            .collect::<Vec<_>>();
+        debug_assert!(displaced_handlers.is_empty());
+        Ok(ToolInsertion {
+            registration,
+            displaced_handlers,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolve_audience_tool(
+        &self,
+        audience: &ToolAudience,
+        name: &str,
+    ) -> Option<ResolvedTool> {
+        self.audience_tools
+            .get(audience)?
+            .get(name)
+            .map(|tool| ResolvedTool {
+                registration: ToolRegistration {
+                    generation: tool.generation,
+                    descriptor: tool.descriptor.clone(),
+                },
+                handler: Arc::clone(&tool.handler),
+            })
+    }
+
+    pub(crate) fn detach_audience_registration(
+        &mut self,
+        audience: &ToolAudience,
+        registration: &ToolRegistration,
+    ) -> Option<Arc<dyn ExecutableTool>> {
+        let tools = self.audience_tools.get_mut(audience)?;
+        let matches_generation = tools
+            .get(registration.name())
+            .is_some_and(|tool| tool.generation == registration.generation());
+        if !matches_generation {
+            return None;
+        }
+        let removed = tools.remove(registration.name())?;
+        if tools.is_empty() {
+            self.audience_tools.remove(audience);
+        }
+        Some(removed.handler)
     }
 }
 
@@ -375,18 +604,27 @@ impl ToolRegistry {
         };
 
         if register_batched {
-            self.register_tool(FilesTool);
+            self.insert_prepared_collect(Self::prepare_tool(FilesTool), &mut detached_handlers);
         }
         if register_split {
-            self.register_tool(ReadTool);
-            self.register_tool(ListTool);
-            self.register_tool(GrepTool);
-            self.register_tool(GlobTool);
-            self.register_tool(WriteTool);
-            self.register_tool(EditTool);
+            self.insert_prepared_collect(Self::prepare_tool(ReadTool), &mut detached_handlers);
+            self.insert_prepared_collect(Self::prepare_tool(ListTool), &mut detached_handlers);
+            self.insert_prepared_collect(Self::prepare_tool(GrepTool), &mut detached_handlers);
+            self.insert_prepared_collect(Self::prepare_tool(GlobTool), &mut detached_handlers);
+            self.insert_prepared_collect(Self::prepare_tool(WriteTool), &mut detached_handlers);
+            self.insert_prepared_collect(Self::prepare_tool(EditTool), &mut detached_handlers);
         }
         self.refresh_provider_specs();
         detached_handlers
+    }
+
+    fn insert_prepared_collect(
+        &mut self,
+        prepared: PreparedTool,
+        detached_handlers: &mut Vec<Arc<dyn ExecutableTool>>,
+    ) {
+        let (_, mut displaced) = self.insert_prepared(prepared).into_parts();
+        detached_handlers.append(&mut displaced);
     }
 }
 
@@ -520,8 +758,8 @@ mod tests {
                     drop(rejected);
                     panic!("unused name collided: {collision}")
                 });
-        let (registration, displaced_handler) = insertion.into_parts();
-        assert!(displaced_handler.is_none());
+        let (registration, displaced_handlers) = insertion.into_parts();
+        assert!(displaced_handlers.is_empty());
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let resolved = registry
@@ -543,22 +781,22 @@ mod tests {
     fn stale_registration_cannot_remove_a_newer_same_name_generation() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ToolRegistry::default();
-        let (first, displaced_handler) = registry
+        let (first, displaced_handlers) = registry
             .insert_prepared(ToolRegistry::prepare_tool(CountingDescriptorTool {
                 calls: Arc::clone(&calls),
                 label: "first",
                 execution_category: ToolExecutionCategory::ReadOnlyParallel,
             }))
             .into_parts();
-        assert!(displaced_handler.is_none());
-        let (second, displaced_handler) = registry
+        assert!(displaced_handlers.is_empty());
+        let (second, displaced_handlers) = registry
             .insert_prepared(ToolRegistry::prepare_tool(CountingDescriptorTool {
                 calls: Arc::clone(&calls),
                 label: "second",
                 execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
             }))
             .into_parts();
-        drop(displaced_handler);
+        drop(displaced_handlers);
 
         assert!(second.generation() > first.generation());
         assert!(registry.detach_registration(&first).is_none());
