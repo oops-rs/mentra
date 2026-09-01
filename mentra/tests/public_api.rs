@@ -461,6 +461,7 @@ fn runtime_publicly_registers_audience_tools_with_guard_lifetimes() {
             model,
             SessionOptions {
                 config: Default::default(),
+                policy: None,
                 tool_audience: Some(audience.clone()),
                 project_id: None,
                 runtime_identifier: None,

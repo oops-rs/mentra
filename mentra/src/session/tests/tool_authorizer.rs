@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::{
-    AgentConfig, ContentBlock, ToolAudience,
+    AgentConfig, ContentBlock, RuntimePolicy, ToolAudience,
     error::RuntimeError,
     runtime::{SessionOptions, VolatileRuntimeStore},
     session::{Session, SessionEvent, TaskLifecycleStatus},
@@ -208,6 +208,7 @@ async fn a_session_override_isolated_from_siblings_and_the_runtime_default() {
             mock.model(),
             SessionOptions {
                 config,
+                policy: Some(RuntimePolicy::default()),
                 tool_audience: Some(audience.clone()),
                 ..SessionOptions::default()
             },

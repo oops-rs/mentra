@@ -236,6 +236,59 @@ can then explicitly enable foreground and background shell switches; Mentra
 treats that executor as a trusted enforcement boundary and does not fall back
 to the local executor.
 
+### Per-session runtime policies
+
+A shared runtime can attach a different complete policy to each live session:
+
+```rust,no_run
+use mentra::{AgentConfig, ModelInfo, Runtime, RuntimePolicy, Session};
+use mentra::runtime::{SessionOptions, SessionResumeOptions};
+
+fn create_workspace_session(
+    runtime: &Runtime,
+    model: ModelInfo,
+    workspace: &std::path::Path,
+) -> Result<Session, mentra::error::RuntimeError> {
+    runtime.create_session_with_options(
+        "workspace",
+        model,
+        SessionOptions {
+            config: AgentConfig {
+                workspace: mentra::agent::WorkspaceConfig {
+                    base_dir: workspace.to_path_buf(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            policy: Some(RuntimePolicy::workspace_bounded(workspace)),
+            ..Default::default()
+        },
+    )
+}
+
+fn resume_workspace_session(
+    runtime: &Runtime,
+    agent_id: &str,
+    workspace: &std::path::Path,
+) -> Result<Session, mentra::error::RuntimeError> {
+    runtime.resume_session_with_options(
+        agent_id,
+        SessionResumeOptions {
+            policy: Some(RuntimePolicy::workspace_bounded(workspace)),
+            ..Default::default()
+        },
+    )
+}
+```
+
+`None` inherits the runtime builder policy. `Some(policy)` is the authoritative
+complete replacement for that live session; Mentra does not merge it with the
+runtime policy. The attachment is not serialized into `AgentConfig`, so pass
+the current policy again when resuming. Disposable subagents and teammates
+inherit it from their live parent. This scoping does not turn `RuntimePolicy`
+into an OS sandbox: builtin checks remain best-effort, and an allowed shell
+command retains the authority of the configured executor.
+
 ## Tool Authorization
 
 Mentra can run a caller-provided authorization pass before any tool executes. This is the recommended integration point for LLM-based security review, human approval, or custom policy engines.

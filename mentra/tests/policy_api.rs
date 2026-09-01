@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use mentra::runtime::normalize_policy_root;
+use mentra::runtime::{RuntimePolicy, SessionOptions, SessionResumeOptions, normalize_policy_root};
 
 struct TestDirectory(PathBuf);
 
@@ -31,6 +31,24 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn session_policy_options_are_public_and_default_to_runtime_inheritance() {
+    assert!(SessionOptions::default().policy.is_none());
+    assert!(SessionResumeOptions::default().policy.is_none());
+
+    let create = SessionOptions {
+        policy: Some(RuntimePolicy::default()),
+        ..Default::default()
+    };
+    let resume = SessionResumeOptions {
+        policy: Some(RuntimePolicy::default()),
+        ..Default::default()
+    };
+
+    assert!(create.policy.is_some());
+    assert!(resume.policy.is_some());
 }
 
 #[test]

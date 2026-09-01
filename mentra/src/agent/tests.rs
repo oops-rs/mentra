@@ -7,6 +7,7 @@ mod runtime;
 mod runtime_compact;
 #[cfg(feature = "store-sqlite")]
 mod runtime_memory;
+mod runtime_policy_scope;
 mod runtime_resume;
 mod runtime_snapshot;
 mod runtime_tasks;

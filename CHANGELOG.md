@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Sessions can replace the runtime policy
+
+- `SessionOptions::policy` and `SessionResumeOptions::policy` let one shared
+  runtime give each live session a complete `RuntimePolicy` of its own
+  ([#39](https://github.com/oops-rs/mentra/issues/39)). `None` preserves the
+  runtime builder policy exactly; `Some` replaces it wholesale rather than
+  merging or intersecting the two.
+- Scoped policies govern builtin command/file authorization, environment and
+  timeout shaping, background limits, and tool-result caps. Disposable
+  subagents and teammates inherit the live parent handle's policy, while
+  sibling sessions and raw runtime agents remain unchanged.
+- Policy attachment is deliberately not persisted in `AgentConfig`. A resumed
+  session inherits its current runtime policy unless the host supplies its
+  current complete policy through `SessionResumeOptions`.
+- Runtime policies remain best-effort guards around Mentra's builtin paths, not
+  OS filesystem or network confinement. An allowed shell command still has the
+  authority of the configured executor.
+- **Source-breaking:** `SessionOptions` and `SessionResumeOptions` each gained
+  `policy`. Exhaustive struct literals must provide it;
+  `..Default::default()` keeps the prior runtime-inherited behavior.
+
 ### Hosts can register live tool namespaces for explicit audiences
 
 - `ToolAudience` and `Runtime::try_register_tool_for_audience` let a shared

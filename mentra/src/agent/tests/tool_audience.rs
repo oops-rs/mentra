@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::{
-    AgentConfig, BuiltinProvider, ContentBlock, Runtime, ToolAudience,
+    AgentConfig, BuiltinProvider, ContentBlock, Runtime, RuntimePolicy, ToolAudience,
     agent::ToolProfile,
     error::RuntimeError,
     runtime::{
@@ -407,6 +407,7 @@ async fn an_existing_session_observes_late_audience_registration_and_drop() {
             model,
             SessionOptions {
                 config: AgentConfig::default(),
+                policy: Some(RuntimePolicy::default()),
                 tool_audience: Some(audience.clone()),
                 project_id: None,
                 runtime_identifier: None,
@@ -503,6 +504,7 @@ fn resume_audience_is_explicit_ephemeral_and_never_persisted() {
             model.clone(),
             SessionOptions {
                 config: AgentConfig::default(),
+                policy: None,
                 tool_audience: Some(original_audience),
                 project_id: None,
                 runtime_identifier: None,
@@ -525,6 +527,7 @@ fn resume_audience_is_explicit_ephemeral_and_never_persisted() {
             &session_agent_id,
             SessionResumeOptions {
                 project_id: None,
+                policy: None,
                 tool_audience: Some(current.clone()),
             },
         )

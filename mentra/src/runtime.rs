@@ -117,6 +117,17 @@ pub struct PersistedAgentSummary {
 #[derive(Debug, Clone, Default)]
 pub struct SessionOptions {
     pub config: AgentConfig,
+    /// Complete runtime policy for this live session and its descendants.
+    ///
+    /// `None` inherits the policy installed on [`RuntimeBuilder`]. `Some`
+    /// replaces that policy wholesale for this session; the two policies are
+    /// not merged or intersected. The attachment is live-only and is not
+    /// persisted in [`AgentConfig`], so a resumed session must receive its
+    /// current policy again through [`SessionResumeOptions`].
+    ///
+    /// Like every [`RuntimePolicy`], this governs Mentra's builtin file and
+    /// command paths but is not an OS filesystem or network sandbox.
+    pub policy: Option<RuntimePolicy>,
     /// Ephemeral tool audience for this live session and its descendants.
     pub tool_audience: Option<crate::tool::ToolAudience>,
     /// Scopes this session's permission rules to a project.
@@ -135,6 +146,13 @@ pub struct SessionOptions {
 pub struct SessionResumeOptions {
     /// Project scope used by resumed session permission rules.
     pub project_id: Option<String>,
+    /// Complete runtime policy for this live resume and its descendants.
+    ///
+    /// `None` inherits the current runtime's policy. `Some` replaces it
+    /// wholesale for this live session; it does not merge with the runtime
+    /// policy or restore a policy from the persisted agent. See
+    /// [`SessionOptions::policy`] for the confinement boundary.
+    pub policy: Option<RuntimePolicy>,
     /// Ephemeral tool audience for this live resume and its descendants.
     pub tool_audience: Option<crate::tool::ToolAudience>,
 }
@@ -851,6 +869,7 @@ impl Runtime {
             model,
             SessionOptions {
                 config,
+                policy: None,
                 tool_audience: None,
                 project_id,
                 runtime_identifier: None,
@@ -877,6 +896,42 @@ impl Runtime {
             .with_hook(SessionHookBridge::new(event_tx.clone()))
     }
 
+    /// Derives every piece of live session scope before an agent is registered.
+    ///
+    /// The order is intentional: the session event hook is installed first,
+    /// the complete policy replacement is applied while the handle has no
+    /// agent context or leases, and the session permission authorizer remains
+    /// the outer wrapper around the runtime's authorizer. Runtime identifiers
+    /// and tool audiences then refine persistence and live tool visibility
+    /// without changing the selected policy. All derived handles share the
+    /// runtime's live tooling registry.
+    fn session_scoped_handle(
+        &self,
+        event_tx: &broadcast::Sender<SessionEvent>,
+        pending_permissions: &PendingPermissionStore,
+        rule_store: &crate::session::RuleStore,
+        policy: Option<RuntimePolicy>,
+        runtime_identifier: Option<Arc<str>>,
+        tool_audience: Option<crate::tool::ToolAudience>,
+    ) -> RuntimeHandle {
+        let handle = self.handle.with_hooks(self.session_scoped_hooks(event_tx));
+        let handle = match policy {
+            Some(policy) => handle.with_policy(policy),
+            None => handle,
+        };
+        let handle = handle.with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
+            self.handle.execution.tool_authorizer.clone(),
+            event_tx.clone(),
+            pending_permissions.clone(),
+            rule_store.clone(),
+        )));
+        let handle = match runtime_identifier {
+            Some(identifier) => handle.with_runtime_identifier(identifier),
+            None => handle,
+        };
+        handle.with_tool_audience(tool_audience)
+    }
+
     fn build_session(
         &self,
         name: String,
@@ -885,6 +940,7 @@ impl Runtime {
     ) -> Result<Session, RuntimeError> {
         let SessionOptions {
             config,
+            policy,
             tool_audience,
             project_id,
             runtime_identifier,
@@ -894,20 +950,14 @@ impl Runtime {
         let (event_tx, _) = broadcast::channel(512);
         let rule_store = crate::session::RuleStore::new();
         let pending_permissions = PendingPermissionStore::new();
-        let session_handle = self
-            .handle
-            .with_hooks(self.session_scoped_hooks(&event_tx))
-            .with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
-                self.handle.execution.tool_authorizer.clone(),
-                event_tx.clone(),
-                pending_permissions.clone(),
-                rule_store.clone(),
-            )));
-        let session_handle = match runtime_identifier {
-            Some(identifier) => session_handle.with_runtime_identifier(identifier),
-            None => session_handle,
-        }
-        .with_tool_audience(tool_audience);
+        let session_handle = self.session_scoped_handle(
+            &event_tx,
+            &pending_permissions,
+            &rule_store,
+            policy,
+            runtime_identifier,
+            tool_audience,
+        );
         let provider = self
             .provider_registry
             .read()
@@ -967,6 +1017,7 @@ impl Runtime {
             agent_id,
             SessionResumeOptions {
                 project_id,
+                policy: None,
                 tool_audience: None,
             },
         )
@@ -980,22 +1031,21 @@ impl Runtime {
     ) -> Result<Session, RuntimeError> {
         let SessionResumeOptions {
             project_id,
+            policy,
             tool_audience,
         } = options;
         let session_id = SessionId::new();
         let (event_tx, _) = broadcast::channel(512);
         let rule_store = crate::session::RuleStore::new();
         let pending_permissions = PendingPermissionStore::new();
-        let session_handle = self
-            .handle
-            .with_hooks(self.session_scoped_hooks(&event_tx))
-            .with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
-                self.handle.execution.tool_authorizer.clone(),
-                event_tx.clone(),
-                pending_permissions.clone(),
-                rule_store.clone(),
-            )))
-            .with_tool_audience(tool_audience);
+        let session_handle = self.session_scoped_handle(
+            &event_tx,
+            &pending_permissions,
+            &rule_store,
+            policy,
+            None,
+            tool_audience,
+        );
         let Some(state) = self.handle.store().load_agent(agent_id)? else {
             return Err(RuntimeError::Store(format!(
                 "No persisted agent with id '{agent_id}'"
