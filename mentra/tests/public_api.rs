@@ -845,6 +845,35 @@ fn the_retry_schedule_and_transport_are_types_downstream_code_can_name() {
     assert_eq!(child.retry_budget, options.retry_budget);
 }
 
+#[test]
+fn a_session_accepts_a_scoped_tool_authorizer_after_runtime_construction() {
+    struct Allow;
+
+    #[async_trait]
+    impl ToolAuthorizer for Allow {
+        async fn authorize(
+            &self,
+            _request: &ToolAuthorizationRequest,
+        ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+            Ok(ToolAuthorizationDecision::allow())
+        }
+    }
+
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model.clone()]);
+    let runtime = Runtime::empty_builder()
+        .with_runtime_identifier(format!("public-api-{}", now_nanos()))
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    let _session = runtime
+        .create_session("scoped-authorizer", model)
+        .expect("create session")
+        .with_tool_authorizer(Allow);
+}
+
 /// The downstream shape this exists for, written from outside the crate: a
 /// host registers an executor that serves named targets and a tool that names
 /// one. Every guard around a shell command still applies — only the executor

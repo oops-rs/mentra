@@ -713,6 +713,13 @@ impl Agent {
         self.runtime.clone()
     }
 
+    pub(crate) fn replace_tool_authorizer(
+        &mut self,
+        tool_authorizer: Arc<dyn crate::tool::ToolAuthorizer>,
+    ) {
+        self.runtime.execution.tool_authorizer = Some(tool_authorizer);
+    }
+
     /// Registers this paging agent's exact reader for its live lifetime.
     fn register_tool_result_pager(&mut self) {
         if self.config.tool_result_paging.is_some() {

@@ -242,8 +242,23 @@ Mentra can run a caller-provided authorization pass before any tool executes. Th
 
 - no authorizer installed: tools run under the remaining hard runtime constraints
 - authorizer returns `Allow`: the tool executes
-- authorizer returns `Prompt` or `Deny`: Mentra blocks execution and returns an error `tool_result`
+- authorizer returns `Deny`: Mentra blocks execution and returns an error `tool_result`
+- authorizer returns `Prompt`: a raw `Agent` run blocks, while a `Session` uses the permission flow described below
 - authorizer timeout or error: Mentra fails closed and blocks execution
+
+`RuntimeBuilder::with_tool_authorizer` is the default for agents and sessions
+created from that runtime. A host serving several conversations from one
+runtime can replace it for one live session with
+`session.with_tool_authorizer(authorizer)`. The session keeps its permission
+bridge outside that replacement: `Prompt` emits `PermissionRequested` and
+waits for `resolve_permission`, while `Allow` and `Deny` keep their ordinary
+meaning. Sibling sessions keep the runtime default, and descendants created
+from the decorated session inherit its replacement.
+
+The attachment is live execution state rather than persisted agent
+configuration. Attach the current authorizer again after `resume_session`.
+Stateful authorizers can hold a shared mode or policy and change their answer
+between calls without replacing the attachment.
 
 Every authorization request includes a `ToolAuthorizationPreview` with tool metadata plus structured input. Builtin tools provide more specific previews:
 

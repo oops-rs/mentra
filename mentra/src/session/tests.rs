@@ -6,6 +6,7 @@
 mod lossless_observer;
 mod memory_events;
 mod terminal_output;
+mod tool_authorizer;
 
 use crate::session::event::*;
 use crate::session::permission::*;
@@ -1008,7 +1009,6 @@ async fn resolve_permission_via_session_handle_while_append_turn_is_in_flight() 
 
     let model = crate::ModelInfo::new("mock-model", crate::BuiltinProvider::OpenAI);
     let runtime = crate::Runtime::builder()
-        .with_tool_authorizer(PromptingAuthorizer)
         .with_provider_instance(InFlightProvider {
             model: model.clone(),
             turn: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1020,7 +1020,8 @@ async fn resolve_permission_via_session_handle_while_append_turn_is_in_flight() 
 
     let mut session = runtime
         .create_session("permission-handle-flight", model.clone())
-        .unwrap();
+        .unwrap()
+        .with_tool_authorizer(PromptingAuthorizer);
     let permission_handle = session.permission_handle();
     let mut events = session.subscribe();
 

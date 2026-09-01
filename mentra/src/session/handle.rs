@@ -17,6 +17,7 @@ use crate::{
         mapping::{ToolNameIndex, map_agent_event},
         permission::{
             PendingPermissionStore, PermissionDecision, RememberedRule, RuleKey, RuleStore,
+            SessionToolAuthorizer,
         },
         types::{SessionId, SessionMetadata, SessionStatus},
     },
@@ -171,7 +172,6 @@ pub struct Session {
     /// Shared with the per-turn event tap so a tool call queued in one turn
     /// still resolves its name when the result arrives in another.
     tool_names: Arc<StdMutex<ToolNameIndex>>,
-    #[allow(dead_code)]
     pub(crate) pending_permissions: PendingPermissionStore,
     permission_handle: SessionPermissionHandle,
 }
@@ -265,6 +265,39 @@ impl Session {
     /// Returns this live session's ephemeral tool audience, if any.
     pub fn tool_audience(&self) -> Option<&crate::tool::ToolAudience> {
         self.agent.tool_audience()
+    }
+
+    /// Replaces the runtime's tool authorizer for this live session.
+    ///
+    /// The replacement is scoped to this session's agent and descendants
+    /// spawned after this call. Sibling sessions and agents created directly
+    /// from the runtime keep the runtime's authorizer. The session's own
+    /// permission wrapper remains outermost, so a [`crate::tool::ToolAuthorizer`]
+    /// that returns [`crate::tool::ToolAuthorizationOutcome::Prompt`] still
+    /// emits [`SessionEvent::PermissionRequested`] and waits for
+    /// [`resolve_permission`](Self::resolve_permission).
+    ///
+    /// The attachment is live-only and is not persisted with the agent. Attach
+    /// the current authorizer again after resuming a session. A stateful
+    /// authorizer may change its own policy between calls without replacing the
+    /// session attachment.
+    ///
+    /// Consume and decorate the session before its first turn or before taking
+    /// a disposable-subagent template from it. Already-spawned descendants and
+    /// previously captured templates retain the authorizer they inherited when
+    /// they were created.
+    pub fn with_tool_authorizer<A>(mut self, authorizer: A) -> Self
+    where
+        A: crate::tool::ToolAuthorizer + 'static,
+    {
+        let authorizer = SessionToolAuthorizer::new(
+            Some(Arc::new(authorizer)),
+            self.event_tx.clone(),
+            self.pending_permissions.clone(),
+            self.permission_handle.rule_store().clone(),
+        );
+        self.agent.replace_tool_authorizer(Arc::new(authorizer));
+        self
     }
 
     /// Updates the live session model and persists the new setting so future

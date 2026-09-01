@@ -26,6 +26,21 @@
   global-only behavior. `SessionResumeOptions` and the audience-specific raw
   agent creation/resume helpers are additive.
 
+### Sessions can replace the runtime tool authorizer
+
+- `Session::with_tool_authorizer` replaces the runtime default for one live
+  session without changing sibling sessions, runtime-spawned agents, policy,
+  hooks, registered agent context, leases, or tool-audience visibility
+  ([#38](https://github.com/oops-rs/mentra/issues/38)).
+- The session permission layer remains outside the replacement, so `Prompt`
+  still emits `PermissionRequested`, waits for `resolve_permission`, and uses
+  the replacement's timeout. Disposable subagents and teammates created from
+  the decorated session inherit the same authorizer.
+- Authorizer attachment is deliberately not persisted. A resumed session uses
+  its current runtime's default until the host attaches its current scoped
+  authorizer again. A stateful authorizer may change its own policy between
+  calls without rebuilding the runtime or session.
+
 ## 0.25.0
 
 ### Model stream startup honors run bounds
