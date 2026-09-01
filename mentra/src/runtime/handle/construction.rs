@@ -53,21 +53,20 @@ fn background_hook_sink(
 }
 
 fn clone_tooling_services(tooling: &ToolingServices) -> ToolingServices {
+    let (tool_registry, scoped_tools) = {
+        let tool_registry = tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned");
+        let scoped_tools = tooling
+            .scoped_tools
+            .read()
+            .expect("scoped tool registry poisoned");
+        (tool_registry.clone(), scoped_tools.clone())
+    };
     ToolingServices {
-        tool_registry: Arc::new(RwLock::new(
-            tooling
-                .tool_registry
-                .read()
-                .expect("tool registry poisoned")
-                .clone(),
-        )),
-        scoped_tools: Arc::new(RwLock::new(
-            tooling
-                .scoped_tools
-                .read()
-                .expect("scoped tool registry poisoned")
-                .clone(),
-        )),
+        tool_registry: Arc::new(RwLock::new(tool_registry)),
+        scoped_tools: Arc::new(RwLock::new(scoped_tools)),
         skills: Arc::new(RwLock::new(
             tooling
                 .skills
@@ -504,5 +503,100 @@ impl RuntimeHandle {
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
             provider_registry: self.provider_registry.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::tool::{ToolDefinition, ToolExecutor, ToolResolution, ToolSpec};
+
+    struct NamedTool {
+        description: &'static str,
+    }
+
+    impl ToolDefinition for NamedTool {
+        fn descriptor(&self) -> ToolSpec {
+            ToolSpec::builder("clone_race")
+                .description(self.description)
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for NamedTool {}
+
+    #[test]
+    fn tooling_clone_cannot_pair_a_scoped_generation_with_a_cleared_marker() {
+        let runtime = RuntimeHandle::new(false);
+        let scoped = runtime.register_scoped_tool(
+            "owner",
+            NamedTool {
+                description: "scoped",
+            },
+        );
+        let scoped_lock = runtime
+            .tooling
+            .scoped_tools
+            .write()
+            .expect("scoped tool registry poisoned");
+        let tooling = runtime.tooling.clone();
+        let cloner = thread::spawn(move || clone_tooling_services(&tooling));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.tooling.tool_registry.try_write().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "cloner never acquired registry lock"
+            );
+            thread::yield_now();
+        }
+        let writer_runtime = runtime.clone();
+        let (started, writer_started) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            started.send(()).expect("announce writer");
+            writer_runtime.register_tool(NamedTool {
+                description: "global",
+            });
+        });
+        writer_started.recv().expect("writer started");
+        drop(scoped_lock);
+
+        let cloned_tooling = cloner.join().expect("tooling clone");
+        writer.join().expect("global replacement");
+        let mut cloned_runtime = runtime.clone();
+        cloned_runtime.tooling = cloned_tooling;
+
+        assert!(matches!(
+            cloned_runtime.resolve_tool_for_agent("clone_race", "other"),
+            ToolResolution::Hidden
+        ));
+        let ToolResolution::Visible(owner_tool) =
+            cloned_runtime.resolve_tool_for_agent("clone_race", "owner")
+        else {
+            panic!("owner must see coherent scoped clone");
+        };
+        assert_eq!(
+            owner_tool.descriptor().provider.description.as_deref(),
+            Some("scoped")
+        );
+        let ToolResolution::Visible(global_tool) =
+            runtime.resolve_tool_for_agent("clone_race", "other")
+        else {
+            panic!("source runtime must contain global replacement");
+        };
+        assert_eq!(
+            global_tool.descriptor().provider.description.as_deref(),
+            Some("global")
+        );
+        runtime.unregister_scoped_tool("owner", &scoped);
     }
 }
