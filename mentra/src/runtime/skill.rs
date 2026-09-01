@@ -11,6 +11,23 @@ use thiserror::Error;
 
 pub(crate) use registry::{SkillRegistry, SkillRoot};
 
+/// Returns the identity Mentra uses to match a registered skills root.
+///
+/// An existing path is canonicalized, so different spellings and symlinks to
+/// the same directory share one identity. When the filesystem cannot resolve
+/// the path, it is returned unchanged; this preserves the registry's fallback
+/// for a root that has already been deleted.
+///
+/// A host that counts several holders of one root should capture this key
+/// while the root exists and retain it for release rather than recomputing it
+/// after deletion. The returned key can be passed to
+/// [`Runtime::unregister_skills_dir`](crate::Runtime::unregister_skills_dir).
+/// This is registry identity only, not a filesystem authorization check.
+#[must_use]
+pub fn skill_root_key(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Every skill found under one root, keyed by name.
 ///
 /// A loader is the parse result for a single directory and nothing more. Which

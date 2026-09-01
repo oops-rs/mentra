@@ -11,11 +11,10 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
-use super::{SkillEntry, SkillInfo, SkillLoadError, SkillLoader, render_skill};
+use super::{SkillEntry, SkillInfo, SkillLoadError, SkillLoader, render_skill, skill_root_key};
 
 /// Returned when nothing is registered at all, to separate "this runtime has
 /// no skills" from "that name is not one of them".
@@ -47,7 +46,7 @@ impl SkillRoot {
         let loader = SkillLoader::from_dir(path)?;
         Ok(Self {
             registered: path.to_path_buf(),
-            key: root_key(path),
+            key: skill_root_key(path),
             loader,
         })
     }
@@ -61,12 +60,6 @@ impl SkillRoot {
     fn matches(&self, path: &Path, key: &Path) -> bool {
         self.key == key || self.registered == path
     }
-}
-
-/// The canonical identity of a skills root, or the path itself when the
-/// filesystem cannot resolve one (a deleted directory, most often).
-fn root_key(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Every skill root on a runtime, strongest first.
@@ -106,7 +99,7 @@ impl SkillRegistry {
     /// shadowed resolves to the weaker root again.
     pub(crate) fn remove(&mut self, path: impl AsRef<Path>) -> bool {
         let path = path.as_ref();
-        let key = root_key(path);
+        let key = skill_root_key(path);
         let before = self.roots.len();
         self.roots.retain(|root| !root.matches(path, &key));
         self.roots.len() != before

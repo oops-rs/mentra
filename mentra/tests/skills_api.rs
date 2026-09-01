@@ -11,7 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use mentra::{BuiltinProvider, Runtime, SkillInfo, SkillLoadError};
+use mentra::{BuiltinProvider, Runtime, SkillInfo, SkillLoadError, skill_root_key};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -296,6 +296,43 @@ fn several_roots_can_be_dropped_in_one_call() {
         !runtime.unregister_skills_dirs([never.as_path()]),
         "no match at all reports false"
     );
+}
+
+#[test]
+fn root_keys_collapse_equivalent_existing_spellings() {
+    let root = temp_dir("key-equivalent");
+    let child = root.join("child");
+    fs::create_dir(&child).expect("create child");
+    let indirect = child.join("..");
+
+    assert_eq!(skill_root_key(&root), skill_root_key(&indirect));
+}
+
+#[test]
+fn an_unresolved_root_key_is_the_path_verbatim() {
+    let missing = temp_dir("key-unresolved").join("does-not-exist");
+
+    assert_eq!(skill_root_key(&missing), missing);
+}
+
+#[test]
+fn a_captured_root_key_survives_root_deletion() {
+    let root = temp_dir("key-deleted");
+    write_skill(&root, "one", "one", "one", "A");
+    let indirect = root.join("one").join("..");
+    let key = skill_root_key(&indirect);
+
+    let runtime = runtime();
+    runtime
+        .register_skills_dir(&indirect)
+        .expect("the indirect root registers");
+    assert!(has_load_skill(&runtime));
+
+    fs::remove_dir_all(&root).expect("delete root");
+
+    assert!(runtime.unregister_skills_dir(&key));
+    assert!(runtime.skills().is_empty());
+    assert!(!has_load_skill(&runtime));
 }
 
 #[test]

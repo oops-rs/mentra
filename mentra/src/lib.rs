@@ -69,7 +69,7 @@ pub use runtime::HybridRuntimeStore;
 pub use runtime::{
     AgentStore, AuditStore, FileRuntimeStore, LeaseStore, NewTask, PermissionRuleStore, RunStore,
     Runtime, RuntimeBuilder, RuntimePolicy, ShellValidationMode, SkillInfo, SkillLoadError,
-    TaskBoard, TaskBoardError, TaskPatch, TaskStore,
+    TaskBoard, TaskBoardError, TaskPatch, TaskStore, skill_root_key,
 };
 pub use session::{
     PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore, Session,
