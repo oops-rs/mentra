@@ -1,10 +1,35 @@
-use crate::{agent::AgentEvent, runtime::PersistedAgentRecord};
+use crate::{
+    agent::AgentEvent,
+    provider::TokenUsage,
+    runtime::{PersistedAgentRecord, RunOptions},
+};
 
 use super::{Agent, AgentEventTapGuard, AgentStatus};
 
 impl Agent {
     pub(crate) fn emit_event(&self, event: AgentEvent) {
         self.event_bus.send(event);
+    }
+
+    /// Reports one exact provider usage sample through the agent event contract
+    /// and, when this work belongs to a run, its shared token counter.
+    pub(crate) fn report_provider_usage(
+        &self,
+        usage: &TokenUsage,
+        run_options: Option<&RunOptions>,
+    ) {
+        self.emit_event(AgentEvent::UsageReport {
+            input_tokens: usage.input_tokens.unwrap_or(0),
+            output_tokens: usage.output_tokens.unwrap_or(0),
+            cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+            cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
+            reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
+            thoughts_tokens: usage.thoughts_tokens.unwrap_or(0),
+        });
+        if let Some(options) = run_options {
+            options
+                .record_tokens(usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0));
+        }
     }
 
     pub(crate) fn event_sender(&self) -> super::AgentEventBus {

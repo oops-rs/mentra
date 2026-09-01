@@ -8,6 +8,7 @@ use crate::{
         ProjectedToolResultHistory, estimated_request_tokens, project_tool_result_history,
         required_tail_start_for_continuation,
     },
+    runtime::RunOptions,
 };
 
 use super::{Agent, CompactionDetails, CompactionTrigger};
@@ -38,6 +39,7 @@ impl Agent {
     pub(crate) async fn auto_compact_if_needed(
         &mut self,
         bounds: &CompactionBounds,
+        run_options: Option<&RunOptions>,
     ) -> Result<(), RuntimeError> {
         let Some(threshold) = self
             .config
@@ -56,7 +58,7 @@ impl Agent {
 
         for attempt in 1..=AUTO_COMPACT_MAX_ATTEMPTS {
             match self
-                .compact_history(preserve_from, CompactionTrigger::Auto, bounds)
+                .compact_history(preserve_from, CompactionTrigger::Auto, bounds, run_options)
                 .await
             {
                 Ok(_) => return Ok(()),
@@ -104,9 +106,10 @@ impl Agent {
     pub(crate) async fn compact_after_context_overflow(
         &mut self,
         bounds: &CompactionBounds,
+        run_options: Option<&RunOptions>,
     ) -> Result<(), RuntimeError> {
         let preserve_from = required_tail_start_for_continuation(self.history());
-        self.compact_history(preserve_from, CompactionTrigger::Auto, bounds)
+        self.compact_history(preserve_from, CompactionTrigger::Auto, bounds, run_options)
             .await?;
         Ok(())
     }
@@ -116,8 +119,9 @@ impl Agent {
         preserve_from: usize,
         trigger: CompactionTrigger,
         bounds: &CompactionBounds,
+        run_options: Option<&RunOptions>,
     ) -> Result<Option<CompactionDetails>, RuntimeError> {
-        self.compact_history_with_instructions(preserve_from, trigger, None, bounds)
+        self.compact_history_with_instructions(preserve_from, trigger, None, bounds, run_options)
             .await
     }
 
@@ -138,6 +142,7 @@ impl Agent {
         trigger: CompactionTrigger,
         instructions: Option<&str>,
         bounds: &CompactionBounds,
+        run_options: Option<&RunOptions>,
     ) -> Result<Option<CompactionDetails>, RuntimeError> {
         if self.history().is_empty() {
             return Ok(None);
@@ -183,6 +188,7 @@ impl Agent {
         let replaced_items = proposal.replaced_items;
         let preserved_items = proposal.preserved_items;
         let summary = proposal.summary.clone();
+        let provider_usage = proposal.provider_usage;
         self.runtime
             .emit_hook(crate::runtime::RuntimeHookEvent::MemoryCompactionProposed {
                 agent_id: self.id().to_string(),
@@ -254,6 +260,9 @@ impl Agent {
         self.emit_event(AgentEvent::ContextCompacted {
             details: details.clone(),
         });
+        for usage in &provider_usage {
+            self.report_provider_usage(usage, run_options);
+        }
 
         Ok(Some(details))
     }

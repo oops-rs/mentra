@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::{
-    BuiltinProvider, ContentBlock, Message, Role, TranscriptKind,
+    BuiltinProvider, ContentBlock, Message, Role, SessionEvent, TokenUsage, TranscriptKind,
     agent::{
         AgentConfig, AgentEvent, CompactionConfig, CompactionTrigger, ElidedToolResult,
         ProjectedToolResultBudget, RequestToolResultElision, RequestToolResultElisionPolicy,
@@ -30,7 +30,7 @@ use crate::provider::ProviderError;
 
 use super::support::{
     PersistentStore, ScriptedProvider, SessionGenerator, StaticTool, erroring_stream, model_info,
-    text_stream, tool_use_stream,
+    text_stream, text_stream_with_usage, tool_use_stream,
 };
 
 /// A tool whose output is long enough to trigger micro-compaction's
@@ -495,12 +495,22 @@ async fn auto_compaction_preserves_details_on_tail_items() {
 #[tokio::test]
 async fn auto_compaction_persists_transcript_and_rewrites_history() {
     let model = model_info("model", BuiltinProvider::Anthropic);
+    let summary_usage = TokenUsage {
+        input_tokens: Some(40),
+        output_tokens: Some(9),
+        total_tokens: Some(49),
+        cache_read_input_tokens: Some(7),
+        cache_creation_input_tokens: Some(3),
+        reasoning_tokens: Some(2),
+        thoughts_tokens: Some(1),
+        tool_input_tokens: Some(5),
+    };
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             text_stream(&model.id, "first done"),
-            text_stream(&model.id, "summary"),
+            text_stream_with_usage(&model.id, "summary", summary_usage),
             text_stream(&model.id, "second done"),
         ],
     );
@@ -533,10 +543,15 @@ async fn auto_compaction_persists_transcript_and_rewrites_history() {
         }])
         .await
         .unwrap();
+    let run_options = RunOptions::default();
+    let observed_options = run_options.clone();
     agent
-        .send(vec![ContentBlock::Text {
-            text: "second".to_string(),
-        }])
+        .run(
+            vec![ContentBlock::Text {
+                text: "second".to_string(),
+            }],
+            run_options,
+        )
         .await
         .unwrap();
 
@@ -567,10 +582,11 @@ async fn auto_compaction_persists_transcript_and_rewrites_history() {
             .any(|message| message_text(message).contains("Progress: summary"))
     );
 
-    let compaction = collect_events(&mut events)
-        .into_iter()
+    let events = collect_events(&mut events);
+    let compaction = events
+        .iter()
         .find_map(|event| match event {
-            AgentEvent::ContextCompacted { details } => Some(details),
+            AgentEvent::ContextCompacted { details } => Some(details.clone()),
             _ => None,
         })
         .expect("expected compaction event");
@@ -581,17 +597,34 @@ async fn auto_compaction_persists_transcript_and_rewrites_history() {
     assert_eq!(compaction.preserved_delegation_results, 0);
     assert_eq!(compaction.resulting_transcript_len, 3);
     assert!(compaction.transcript_path.starts_with(&transcript_dir));
+    assert_eq!(
+        usage_report_fields(&events),
+        vec![[40, 9, 7, 3, 2, 1]],
+        "local summarizer usage reaches the ordinary UsageReport contract"
+    );
+    assert_eq!(
+        observed_options.reported_tokens(),
+        49,
+        "auto-compaction charges its run's shared input-plus-output counter"
+    );
 }
 
 #[tokio::test]
 async fn compact_tool_compacts_history_and_continues() {
     let model = model_info("model", BuiltinProvider::Anthropic);
+    let summary_usage = TokenUsage {
+        input_tokens: Some(13),
+        output_tokens: Some(4),
+        cache_read_input_tokens: Some(2),
+        reasoning_tokens: Some(1),
+        ..Default::default()
+    };
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
         vec![
             tool_use_stream(&model.id, "compact-1", "compact", "{}"),
-            text_stream(&model.id, "summary"),
+            text_stream_with_usage(&model.id, "summary", summary_usage),
             text_stream(&model.id, "after compact"),
         ],
     );
@@ -618,10 +651,15 @@ async fn compact_tool_compacts_history_and_continues() {
         .unwrap();
     let mut events = agent.subscribe_events();
 
+    let run_options = RunOptions::default();
+    let observed_options = run_options.clone();
     agent
-        .send(vec![ContentBlock::Text {
-            text: "please compact".to_string(),
-        }])
+        .run(
+            vec![ContentBlock::Text {
+                text: "please compact".to_string(),
+            }],
+            run_options,
+        )
         .await
         .unwrap();
 
@@ -648,10 +686,11 @@ async fn compact_tool_compacts_history_and_continues() {
     );
     assert!(tool_names(&requests[0]).contains("compact"));
 
-    let compaction = collect_events(&mut events)
-        .into_iter()
+    let events = collect_events(&mut events);
+    let compaction = events
+        .iter()
         .find_map(|event| match event {
-            AgentEvent::ContextCompacted { details } => Some(details),
+            AgentEvent::ContextCompacted { details } => Some(details.clone()),
             _ => None,
         })
         .expect("expected compaction event");
@@ -661,6 +700,12 @@ async fn compact_tool_compacts_history_and_continues() {
     assert_eq!(compaction.preserved_user_turns, 1);
     assert_eq!(compaction.preserved_delegation_results, 0);
     assert_eq!(compaction.resulting_transcript_len, 3);
+    assert_eq!(usage_report_fields(&events), vec![[13, 4, 2, 0, 1, 0]]);
+    assert_eq!(
+        observed_options.reported_tokens(),
+        17,
+        "the compact intrinsic charges the run that executed it"
+    );
 }
 
 #[tokio::test]
@@ -754,6 +799,16 @@ async fn auto_compaction_degrades_gracefully_on_failure() {
 #[tokio::test]
 async fn remote_compaction_succeeds_when_provider_supports_it() {
     let model = model_info("model", BuiltinProvider::Anthropic);
+    let remote_usage = TokenUsage {
+        input_tokens: Some(60),
+        output_tokens: Some(8),
+        total_tokens: Some(68),
+        cache_read_input_tokens: Some(11),
+        cache_creation_input_tokens: Some(3),
+        reasoning_tokens: Some(4),
+        thoughts_tokens: Some(2),
+        tool_input_tokens: Some(1),
+    };
     let provider = ScriptedProvider::new(
         BuiltinProvider::Anthropic,
         vec![model.clone()],
@@ -772,7 +827,7 @@ async fn remote_compaction_succeeds_when_provider_supports_it() {
             output: vec![CompactionInputItem::CompactionSummary {
                 content: "Summary of previous work".to_string(),
             }],
-            usage: None,
+            usage: Some(remote_usage),
         }))
         .await;
 
@@ -809,14 +864,16 @@ async fn remote_compaction_succeeds_when_provider_supports_it() {
         .await
         .unwrap();
 
-    let compaction = collect_events(&mut events)
-        .into_iter()
+    let events = collect_events(&mut events);
+    let compaction = events
+        .iter()
         .find_map(|event| match event {
-            AgentEvent::ContextCompacted { details } => Some(details),
+            AgentEvent::ContextCompacted { details } => Some(details.clone()),
             _ => None,
         })
         .expect("expected compaction event");
     assert_eq!(compaction.mode, CompactionExecutionMode::Remote);
+    assert_eq!(usage_report_fields(&events), vec![[60, 8, 11, 3, 4, 2]]);
 }
 
 #[tokio::test]
@@ -872,19 +929,33 @@ async fn remote_compaction_falls_back_to_local_on_unsupported() {
         .await
         .unwrap();
 
-    let compaction = collect_events(&mut events)
-        .into_iter()
+    let events = collect_events(&mut events);
+    let compaction = events
+        .iter()
         .find_map(|event| match event {
-            AgentEvent::ContextCompacted { details } => Some(details),
+            AgentEvent::ContextCompacted { details } => Some(details.clone()),
             _ => None,
         })
         .expect("expected compaction event");
     assert_eq!(compaction.mode, CompactionExecutionMode::Local);
+    assert!(
+        usage_report_fields(&events).is_empty(),
+        "providers that report no usage must not synthesize a zero report"
+    );
 }
 
 #[tokio::test]
 async fn remote_compaction_falls_back_to_local_on_empty_remote_response() {
     let model = model_info("model", BuiltinProvider::Anthropic);
+    let local_usage = TokenUsage {
+        input_tokens: Some(21),
+        output_tokens: Some(5),
+        cache_read_input_tokens: Some(2),
+        cache_creation_input_tokens: Some(1),
+        reasoning_tokens: Some(3),
+        thoughts_tokens: Some(4),
+        ..Default::default()
+    };
     // Provider advertises remote support but returns an empty response — compact_remotely
     // returns Ok(None) which triggers a local fallback.
     let provider = ScriptedProvider::new(
@@ -892,7 +963,7 @@ async fn remote_compaction_falls_back_to_local_on_empty_remote_response() {
         vec![model.clone()],
         vec![
             text_stream(&model.id, "first done"),
-            text_stream(&model.id, "summary"),
+            text_stream_with_usage(&model.id, "summary", local_usage),
             text_stream(&model.id, "second done"),
         ],
     )
@@ -904,7 +975,7 @@ async fn remote_compaction_falls_back_to_local_on_empty_remote_response() {
     provider
         .push_compact_response(Ok(CompactionResponse {
             output: vec![],
-            usage: None,
+            usage: Some(TokenUsage::default()),
         }))
         .await;
 
@@ -941,14 +1012,129 @@ async fn remote_compaction_falls_back_to_local_on_empty_remote_response() {
         .await
         .unwrap();
 
-    let compaction = collect_events(&mut events)
-        .into_iter()
+    let events = collect_events(&mut events);
+    let compaction = events
+        .iter()
         .find_map(|event| match event {
-            AgentEvent::ContextCompacted { details } => Some(details),
+            AgentEvent::ContextCompacted { details } => Some(details.clone()),
             _ => None,
         })
         .expect("expected compaction event");
     assert_eq!(compaction.mode, CompactionExecutionMode::Local);
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ContextCompacted { .. } => Some("context"),
+                AgentEvent::UsageReport { .. } => Some("usage"),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["context", "usage", "usage"],
+        "the applied compaction is announced before its usage samples"
+    );
+    assert_eq!(
+        usage_report_fields(&events),
+        vec![[0, 0, 0, 0, 0, 0], [21, 5, 2, 1, 3, 4]],
+        "reported-empty remote usage precedes local fallback usage"
+    );
+}
+
+#[tokio::test]
+async fn manual_session_compaction_maps_completion_before_usage() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            text_stream(&model.id, "first done"),
+            text_stream(&model.id, "second done"),
+            text_stream_with_usage(
+                &model.id,
+                "summary",
+                TokenUsage {
+                    input_tokens: Some(31),
+                    output_tokens: Some(7),
+                    cache_read_input_tokens: Some(5),
+                    cache_creation_input_tokens: Some(2),
+                    reasoning_tokens: Some(3),
+                    thoughts_tokens: Some(1),
+                    ..Default::default()
+                },
+            ),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut session = runtime
+        .create_session_with_config(
+            "manual-usage",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: None,
+                    transcript_dir: temp_dir("manual-session-usage"),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("create session");
+
+    session
+        .append_turn(vec![ContentBlock::text("first")])
+        .await
+        .expect("first turn");
+    session
+        .append_turn(vec![ContentBlock::text("second")])
+        .await
+        .expect("second turn");
+    let mut events = session.subscribe();
+
+    session
+        .compact(None)
+        .await
+        .expect("manual compaction")
+        .expect("compaction details");
+
+    let relevant = collect_session_events(&mut events)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SessionEvent::CompactionStarted { .. }
+                    | SessionEvent::CompactionCompleted { .. }
+                    | SessionEvent::UsageReport { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        relevant.first(),
+        Some(SessionEvent::CompactionStarted { .. })
+    ));
+    assert!(matches!(
+        relevant.get(1),
+        Some(SessionEvent::CompactionCompleted { .. })
+    ));
+    assert!(matches!(
+        relevant.get(2),
+        Some(SessionEvent::UsageReport {
+            input_tokens: 31,
+            output_tokens: 7,
+            cache_read_tokens: 5,
+            cache_creation_tokens: 2,
+            reasoning_tokens: 3,
+            thoughts_tokens: 1,
+            ..
+        })
+    ));
+    assert_eq!(
+        relevant.len(),
+        3,
+        "Basis receives the existing compaction pair followed by ordinary usage"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +1454,40 @@ fn message_text(message: &Message) -> &str {
 }
 
 fn collect_events(receiver: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+fn usage_report_fields(events: &[AgentEvent]) -> Vec<[u64; 6]> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::UsageReport {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                reasoning_tokens,
+                thoughts_tokens,
+            } => Some([
+                *input_tokens,
+                *output_tokens,
+                *cache_read_tokens,
+                *cache_creation_tokens,
+                *reasoning_tokens,
+                *thoughts_tokens,
+            ]),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_session_events(
+    receiver: &mut tokio::sync::broadcast::Receiver<SessionEvent>,
+) -> Vec<SessionEvent> {
     let mut events = Vec::new();
     while let Ok(event) = receiver.try_recv() {
         events.push(event);

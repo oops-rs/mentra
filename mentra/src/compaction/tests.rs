@@ -9,7 +9,8 @@ use super::*;
 use crate::{
     ContentBlock, DelegationArtifact, DelegationKind, DelegationStatus, Message, ModelInfo, Role,
     provider::{
-        ProviderDescriptor, ProviderEventStream, Response, provider_event_stream_from_response,
+        CompactionResponse, ProviderCapabilities, ProviderDescriptor, ProviderEventStream,
+        Response, TokenUsage, provider_event_stream_from_response,
     },
 };
 
@@ -314,12 +315,21 @@ async fn persist_transcript_snapshot_carries_every_items_details_bit_for_bit() {
 /// `agent::tests` and unreachable from this module.
 struct FixedSummaryProvider {
     model: ModelInfo,
+    local_usage: Option<TokenUsage>,
+    remote_response: Option<CompactionResponse>,
 }
 
 #[async_trait]
 impl Provider for FixedSummaryProvider {
     fn descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            supports_history_compaction: self.remote_response.is_some(),
+            ..Default::default()
+        }
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -333,8 +343,17 @@ impl Provider for FixedSummaryProvider {
             role: Role::Assistant,
             content: vec![ContentBlock::text("test summary")],
             stop_reason: None,
-            usage: None,
+            usage: self.local_usage.clone(),
         }))
+    }
+
+    async fn compact(
+        &self,
+        _request: crate::provider::CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.remote_response
+            .clone()
+            .ok_or_else(|| ProviderError::UnsupportedCapability("history_compaction".to_string()))
     }
 }
 
@@ -343,6 +362,8 @@ async fn compact_preserves_salvaged_details_and_lets_discarded_details_go_with_t
     let model = ModelInfo::new("test-model", "test-provider");
     let provider: Arc<dyn Provider> = Arc::new(FixedSummaryProvider {
         model: model.clone(),
+        local_usage: None,
+        remote_response: None,
     });
 
     // Compacted-away prefix: one user turn and one delegation result
@@ -528,7 +549,75 @@ fn request_for(items: Vec<TranscriptItem>, label: &str, model: &ModelInfo) -> Co
 fn fixed_provider(model: &ModelInfo) -> Arc<dyn Provider> {
     Arc::new(FixedSummaryProvider {
         model: model.clone(),
+        local_usage: None,
+        remote_response: None,
     })
+}
+
+#[tokio::test]
+async fn local_compaction_retains_every_reported_usage_field() {
+    let model = ModelInfo::new("test-model", "test-provider");
+    let expected = TokenUsage {
+        input_tokens: Some(101),
+        output_tokens: Some(23),
+        total_tokens: Some(124),
+        cache_read_input_tokens: Some(17),
+        cache_creation_input_tokens: Some(5),
+        reasoning_tokens: Some(11),
+        thoughts_tokens: Some(7),
+        tool_input_tokens: Some(3),
+    };
+    let provider: Arc<dyn Provider> = Arc::new(FixedSummaryProvider {
+        model: model.clone(),
+        local_usage: Some(expected.clone()),
+        remote_response: None,
+    });
+
+    let outcome = StandardCompactionEngine
+        .compact(
+            provider,
+            request_for(compactable_items(), "local-provider-usage", &model),
+        )
+        .await
+        .expect("local compaction")
+        .expect("compaction outcome");
+
+    assert_eq!(outcome.provider_usage, vec![expected]);
+}
+
+#[tokio::test]
+async fn remote_compaction_retains_every_reported_usage_field() {
+    let model = ModelInfo::new("test-model", "test-provider");
+    let expected = TokenUsage {
+        input_tokens: Some(211),
+        output_tokens: Some(34),
+        total_tokens: Some(245),
+        cache_read_input_tokens: Some(19),
+        cache_creation_input_tokens: Some(6),
+        reasoning_tokens: Some(13),
+        thoughts_tokens: Some(8),
+        tool_input_tokens: Some(4),
+    };
+    let provider: Arc<dyn Provider> = Arc::new(FixedSummaryProvider {
+        model: model.clone(),
+        local_usage: None,
+        remote_response: Some(CompactionResponse {
+            output: vec![CompactionInputItem::CompactionSummary {
+                content: "remote summary".to_string(),
+            }],
+            usage: Some(expected.clone()),
+        }),
+    });
+    let mut request = request_for(compactable_items(), "remote-provider-usage", &model);
+    request.mode = CompactionMode::RemoteOnly;
+
+    let outcome = StandardCompactionEngine
+        .compact(provider, request)
+        .await
+        .expect("remote compaction")
+        .expect("compaction outcome");
+
+    assert_eq!(outcome.provider_usage, vec![expected]);
 }
 
 #[tokio::test]
@@ -809,4 +898,8 @@ async fn unbounded_compaction_is_unchanged() {
         .expect("an outcome");
 
     assert!(outcome.replaced_items > 0);
+    assert!(
+        outcome.provider_usage.is_empty(),
+        "a provider that reports no usage must not synthesize a sample"
+    );
 }

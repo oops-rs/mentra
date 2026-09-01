@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Compaction reports exact provider usage
+
+- `CompactionResponse::usage` retains the provider's optional token-usage
+  sample instead of dropping it while extracting summary text. The standard
+  compaction engine carries every reported sample into
+  `CompactionOutcome::provider_usage` in provider-call order; a
+  `PreferRemote` pass that receives no remote summary and succeeds through its
+  local fallback therefore carries both samples ([#44](https://github.com/oops-rs/mentra/issues/44)).
+- After a compaction is successfully applied, Mentra emits its existing
+  `ContextCompacted` event first and then one ordinary `UsageReport` per
+  provider sample. In-run auto-compaction, context-overflow recovery, the
+  `compact` intrinsic, and `ToolContext::compact_history` add input plus output
+  tokens to that run's shared counter at the same point. Standalone
+  `Session::compact` still has no run counter, but forwards the same usage
+  event after `CompactionCompleted`, so hosts can account it without estimates
+  or a compaction-specific event shape.
+- A provider that reports no usage emits nothing. A reported
+  `TokenUsage::default()` is still a real all-zero report and is never confused
+  with absence. Failed, cancelled, unapplied, or empty compactions do not emit
+  or charge successful-pass usage.
+- **Source-breaking:** `CompactionResponse` gained optional `usage`, and
+  `CompactionOutcome` gained `provider_usage`. Exhaustive struct literals must
+  initialize those fields; `None` and an empty vector reproduce the previous
+  behavior.
+
 ### Runtimes can register and remove live execution hooks
 
 - `Runtime::register_pre_hook` and `register_post_hook` add runtime-global

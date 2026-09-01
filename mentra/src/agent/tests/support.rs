@@ -21,7 +21,7 @@ use crate::{
     provider::{
         CompactionRequest, CompactionResponse, ContentBlockDelta, ContentBlockStart, ModelInfo,
         Provider, ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEvent,
-        ProviderEventStream, ProviderId, Request,
+        ProviderEventStream, ProviderId, Request, TokenUsage,
     },
     tool::{
         ParallelToolContext, ToolContext, ToolDefinition, ToolExecutionCategory, ToolExecutor,
@@ -423,6 +423,31 @@ pub(super) fn text_stream(model: &str, text: &str) -> StreamScript {
             delta: ContentBlockDelta::Text(text.to_string()),
         },
         ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::MessageStopped,
+    ])
+}
+
+/// Creates a buffered text response carrying one exact usage sample.
+pub(super) fn text_stream_with_usage(model: &str, text: &str, usage: TokenUsage) -> StreamScript {
+    ok_stream(vec![
+        ProviderEvent::MessageStarted {
+            id: format!("msg-{text}"),
+            model: model.to_string(),
+            role: Role::Assistant,
+        },
+        ProviderEvent::ContentBlockStarted {
+            index: 0,
+            kind: ContentBlockStart::Text,
+        },
+        ProviderEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentBlockDelta::Text(text.to_string()),
+        },
+        ProviderEvent::ContentBlockStopped { index: 0 },
+        ProviderEvent::MessageDelta {
+            stop_reason: None,
+            usage: Some(usage),
+        },
         ProviderEvent::MessageStopped,
     ])
 }

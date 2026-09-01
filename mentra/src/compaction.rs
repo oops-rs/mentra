@@ -23,7 +23,7 @@ use crate::{
     provider::{
         CompactionInputItem, CompactionRequest as ProviderCompactionRequest,
         CompactionResponse as ProviderCompactionResponse, Provider, ProviderError,
-        ProviderRequestOptions, Request,
+        ProviderRequestOptions, Request, TokenUsage,
     },
     transcript::{AgentTranscript, CompactionSummary, TranscriptItem, TranscriptKind},
 };
@@ -228,6 +228,14 @@ pub struct CompactionOutcome {
     pub transcript_path: PathBuf,
     pub transcript: AgentTranscript,
     pub summary: CompactionSummary,
+    /// Exact usage samples reported by provider requests that produced this
+    /// successful compaction, in call order.
+    ///
+    /// Usually one sample. A `PreferRemote` compaction whose remote response
+    /// contains no summary can fall back to a local summarization, producing
+    /// two. Providers that report no usage contribute nothing; a reported
+    /// `TokenUsage::default()` remains a real sample and is not filtered out.
+    pub provider_usage: Vec<TokenUsage>,
     /// Count of original items in the summarized prefix
     /// (`required_tail_start_for_continuation`'s `preserve_from` split).
     /// This counts every item in that prefix, **including** ones also
@@ -290,6 +298,24 @@ pub trait CompactionEngine: Send + Sync {
 #[derive(Debug, Default)]
 pub struct StandardCompactionEngine;
 
+/// One provider pass before its output and exact optional usage are separated.
+struct CompactionPass<T> {
+    output: T,
+    usage: Option<TokenUsage>,
+}
+
+impl<T> CompactionPass<T> {
+    /// Moves a reported sample into `provider_usage` without interpreting it.
+    ///
+    /// In particular, `Some(TokenUsage::default())` is not absence.
+    fn into_output(self, provider_usage: &mut Vec<TokenUsage>) -> T {
+        if let Some(usage) = self.usage {
+            provider_usage.push(usage);
+        }
+        self.output
+    }
+}
+
 #[async_trait]
 impl CompactionEngine for StandardCompactionEngine {
     async fn compact(
@@ -335,29 +361,42 @@ impl CompactionEngine for StandardCompactionEngine {
             let _ = cleanup_old_transcripts(&request.transcript_dir, max).await;
         }
         let supports_remote = provider.capabilities().supports_history_compaction;
+        let mut provider_usage = Vec::new();
         let (mode, mut summary) = match request.mode {
-            CompactionMode::LocalOnly => (
-                CompactionExecutionMode::Local,
-                summarize_locally(provider, &request, compacted_prefix).await?,
-            ),
+            CompactionMode::LocalOnly => {
+                let summary = summarize_locally(provider, &request, compacted_prefix)
+                    .await?
+                    .into_output(&mut provider_usage);
+                (CompactionExecutionMode::Local, summary)
+            }
             CompactionMode::PreferRemote => {
                 if supports_remote {
                     match compact_remotely(provider.clone(), &request, compacted_prefix).await {
-                        Ok(Some(summary)) => (CompactionExecutionMode::Remote, summary),
-                        Ok(None)
-                        | Err(RuntimeError::FailedToCompactHistory(
+                        Ok(remote) => match remote.into_output(&mut provider_usage) {
+                            Some(summary) => (CompactionExecutionMode::Remote, summary),
+                            None => {
+                                let summary =
+                                    summarize_locally(provider, &request, compacted_prefix)
+                                        .await?
+                                        .into_output(&mut provider_usage);
+                                (CompactionExecutionMode::Local, summary)
+                            }
+                        },
+                        Err(RuntimeError::FailedToCompactHistory(
                             ProviderError::UnsupportedCapability(_),
-                        )) => (
-                            CompactionExecutionMode::Local,
-                            summarize_locally(provider, &request, compacted_prefix).await?,
-                        ),
+                        )) => {
+                            let summary = summarize_locally(provider, &request, compacted_prefix)
+                                .await?
+                                .into_output(&mut provider_usage);
+                            (CompactionExecutionMode::Local, summary)
+                        }
                         Err(error) => return Err(error),
                     }
                 } else {
-                    (
-                        CompactionExecutionMode::Local,
-                        summarize_locally(provider, &request, compacted_prefix).await?,
-                    )
+                    let summary = summarize_locally(provider, &request, compacted_prefix)
+                        .await?
+                        .into_output(&mut provider_usage);
+                    (CompactionExecutionMode::Local, summary)
                 }
             }
             CompactionMode::RemoteOnly => {
@@ -366,18 +405,15 @@ impl CompactionEngine for StandardCompactionEngine {
                         ProviderError::UnsupportedCapability("history_compaction".to_string()),
                     ));
                 }
-                (
-                    CompactionExecutionMode::Remote,
-                    compact_remotely(provider, &request, compacted_prefix)
-                        .await?
-                        .ok_or_else(|| {
-                            RuntimeError::FailedToCompactHistory(
-                                ProviderError::UnsupportedCapability(
-                                    "history_compaction".to_string(),
-                                ),
-                            )
-                        })?,
-                )
+                let summary = compact_remotely(provider, &request, compacted_prefix)
+                    .await?
+                    .into_output(&mut provider_usage)
+                    .ok_or_else(|| {
+                        RuntimeError::FailedToCompactHistory(ProviderError::UnsupportedCapability(
+                            "history_compaction".to_string(),
+                        ))
+                    })?;
+                (CompactionExecutionMode::Remote, summary)
             }
         };
 
@@ -439,6 +475,7 @@ impl CompactionEngine for StandardCompactionEngine {
             transcript_path,
             transcript: AgentTranscript::new(replacement),
             summary,
+            provider_usage,
             replaced_items: compacted_prefix.len(),
             preserved_items: request.transcript.len().saturating_sub(tail_start),
             preserved_user_turns: preserved_user_turns.len(),
@@ -478,7 +515,7 @@ async fn summarize_locally(
     provider: Arc<dyn Provider>,
     request: &CompactionRequest,
     items: &[TranscriptItem],
-) -> Result<CompactionSummary, RuntimeError> {
+) -> Result<CompactionPass<CompactionSummary>, RuntimeError> {
     let summary_items = items_without_thinking(items);
     let serialized =
         serde_json::to_string(&summary_items).map_err(RuntimeError::FailedToSerializeTranscript)?;
@@ -537,6 +574,7 @@ File paths, command outputs, and error messages should be quoted verbatim.";
         }))
         .await?
         .map_err(RuntimeError::FailedToCompactHistory)?;
+    let usage = response.usage;
     let text = response
         .content
         .into_iter()
@@ -548,13 +586,13 @@ File paths, command outputs, and error messages should be quoted verbatim.";
         .join("\n")
         .trim()
         .to_string();
-    if text.is_empty() {
-        return Ok(CompactionSummary::default());
-    }
+    let output = if text.is_empty() {
+        CompactionSummary::default()
+    } else {
+        serde_json::from_str(&text).unwrap_or_else(|_| CompactionSummary::from_fallback_text(text))
+    };
 
-    serde_json::from_str(&text)
-        .unwrap_or_else(|_| CompactionSummary::from_fallback_text(text))
-        .pipe(Ok)
+    Ok(CompactionPass { output, usage })
 }
 
 fn items_without_thinking(items: &[TranscriptItem]) -> Vec<TranscriptItem> {
@@ -576,7 +614,7 @@ async fn compact_remotely(
     provider: Arc<dyn Provider>,
     request: &CompactionRequest,
     items: &[TranscriptItem],
-) -> Result<Option<CompactionSummary>, RuntimeError> {
+) -> Result<CompactionPass<Option<CompactionSummary>>, RuntimeError> {
     let input = items
         .iter()
         .map(project_compaction_item)
@@ -597,20 +635,20 @@ async fn compact_remotely(
         }))
         .await?
         .map_err(RuntimeError::FailedToCompactHistory)?;
-    Ok(parse_remote_summary(response))
+    let ProviderCompactionResponse { output, usage } = response;
+    Ok(CompactionPass {
+        output: parse_remote_summary(output),
+        usage,
+    })
 }
 
-fn parse_remote_summary(response: ProviderCompactionResponse) -> Option<CompactionSummary> {
-    response
-        .output
-        .into_iter()
-        .rev()
-        .find_map(|item| match item {
-            CompactionInputItem::CompactionSummary { content } => serde_json::from_str(&content)
-                .ok()
-                .or_else(|| Some(CompactionSummary::from_fallback_text(content))),
-            _ => None,
-        })
+fn parse_remote_summary(output: Vec<CompactionInputItem>) -> Option<CompactionSummary> {
+    output.into_iter().rev().find_map(|item| match item {
+        CompactionInputItem::CompactionSummary { content } => serde_json::from_str(&content)
+            .ok()
+            .or_else(|| Some(CompactionSummary::from_fallback_text(content))),
+        _ => None,
+    })
 }
 
 fn project_compaction_item(item: &TranscriptItem) -> CompactionInputItem {
@@ -821,11 +859,3 @@ fn truncate_to_char_boundary(input: &str, max_chars: usize) -> &str {
     }
     &input[..end]
 }
-
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-
-impl<T> Pipe for T {}

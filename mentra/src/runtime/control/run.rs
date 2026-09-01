@@ -232,20 +232,21 @@ pub struct RunOptions {
     /// from [`model_budget`](field@Self::model_budget) (which caps the number of
     /// provider *requests*, not tokens).
     ///
-    /// Token usage is only known once a round's response has streamed in full
-    /// (the same point where `TurnRunner` emits
-    /// `AgentEvent::UsageReport`), so this can never be a hard ceiling: a single
-    /// round is always allowed to finish even if it pushes cumulative usage from
-    /// under the bound to well past it. Once a round has completed, the bound is
-    /// checked at the same round-boundary point where [`stop`](Self::stop) is
+    /// Usage is known only after a provider response completes: after an
+    /// ordinary round has streamed in full, or after an in-run compaction has
+    /// been successfully applied. This can therefore never be a hard ceiling.
+    /// A round — including the compaction it may perform before its main model
+    /// request — is allowed to finish even if those reports push cumulative
+    /// usage from under the bound to well past it. Once the round completes, the
+    /// bound is checked at the same boundary where [`stop`](Self::stop) is
     /// checked: if cumulative reported `input_tokens + output_tokens` (summed
-    /// across every round this run, and any [`child`](Self::child) run sharing
-    /// this handle, has completed) has reached or exceeded the bound, the run
-    /// ends **gracefully** there, exactly as `stop` does — the committed
-    /// transcript is kept, not rolled back. Cache-read and cache-creation tokens
-    /// are not counted. `None` (the default) never stops the run. This is never
-    /// an expense bound: mentra has no injected price source and makes no
-    /// monetary claim.
+    /// across every response in this run and any [`child`](Self::child) sharing
+    /// this handle) has reached or exceeded the bound, the run ends
+    /// **gracefully** there, exactly as `stop` does — the committed transcript is
+    /// kept, not rolled back. Cache-read and cache-creation tokens are not
+    /// counted. `None` (the default) never stops the run. This is never an
+    /// expense bound: mentra has no injected price source and makes no monetary
+    /// claim.
     pub token_budget: Option<u64>,
     /// Shared cumulative `input_tokens + output_tokens` counter backing
     /// [`token_budget`](Self::token_budget) and read back through

@@ -120,18 +120,8 @@ impl<'a> TurnRunner<'a> {
                 usage.clone(),
             )?;
 
-            // Emit token usage report if available.
-            if let Some(ref u) = usage {
-                self.agent.emit_event(AgentEvent::UsageReport {
-                    input_tokens: u.input_tokens.unwrap_or(0),
-                    output_tokens: u.output_tokens.unwrap_or(0),
-                    cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0),
-                    cache_creation_tokens: u.cache_creation_input_tokens.unwrap_or(0),
-                    reasoning_tokens: u.reasoning_tokens.unwrap_or(0),
-                    thoughts_tokens: u.thoughts_tokens.unwrap_or(0),
-                });
-                self.options
-                    .record_tokens(u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0));
+            if let Some(ref usage) = usage {
+                self.agent.report_provider_usage(usage, Some(&self.options));
             }
 
             if !invalid_tool_uses.is_empty() {
@@ -503,7 +493,7 @@ impl<'a> TurnRunner<'a> {
         // instead of waiting for the summarizer.
         let compaction_bounds = CompactionBounds::from_run_options(&self.options);
         self.agent
-            .auto_compact_if_needed(&compaction_bounds)
+            .auto_compact_if_needed(&compaction_bounds, Some(&self.options))
             .await?;
         let (mut stream, attempt) = match self.open_model_stream().await {
             Ok(opened) => opened,
@@ -517,7 +507,7 @@ impl<'a> TurnRunner<'a> {
                 if error.is_context_length_exceeded() =>
             {
                 self.agent
-                    .compact_after_context_overflow(&compaction_bounds)
+                    .compact_after_context_overflow(&compaction_bounds, Some(&self.options))
                     .await?;
                 self.open_model_stream().await?
             }

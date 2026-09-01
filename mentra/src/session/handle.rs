@@ -432,6 +432,7 @@ impl Session {
                 crate::agent::CompactionTrigger::Manual,
                 instructions,
                 &bounds,
+                None,
             )
             .await;
         drop(event_tap);

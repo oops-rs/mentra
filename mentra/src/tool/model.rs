@@ -251,6 +251,7 @@ impl ToolContext<'_> {
                 self.agent.history().len().saturating_sub(1),
                 CompactionTrigger::Manual,
                 &bounds,
+                Some(&self.run_options),
             )
             .await
     }
