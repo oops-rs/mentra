@@ -875,6 +875,59 @@ fn a_session_accepts_a_scoped_tool_authorizer_after_runtime_construction() {
         .with_tool_authorizer(Allow);
 }
 
+#[test]
+fn permission_rule_addresses_are_public_serializable_and_exact() {
+    use mentra::session::PermissionRuleScope;
+    use mentra::{PermissionRuleAddress, RememberedRule, RuleKey, RuleStore};
+
+    let address = PermissionRuleAddress {
+        scope: PermissionRuleScope::Project,
+        key: RuleKey {
+            tool_name: "shell".to_owned(),
+            pattern: Some("*cargo test*".to_owned()),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&address).expect("serialize address"),
+        json!({
+            "scope": "project",
+            "key": {
+                "tool_name": "shell",
+                "pattern": "*cargo test*",
+            }
+        })
+    );
+    let decoded: PermissionRuleAddress =
+        serde_json::from_value(serde_json::to_value(&address).expect("serialize address"))
+            .expect("deserialize address");
+    assert_eq!(decoded, address);
+    let addresses = HashSet::from([address.clone()]);
+    assert!(addresses.contains(&decoded));
+
+    let store = RuleStore::new();
+    let rule = RememberedRule {
+        key: address.key.clone(),
+        allow: true,
+        scope: address.scope,
+        reason: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&rule).expect("serialize remembered rule"),
+        json!({
+            "key": {
+                "tool_name": "shell",
+                "pattern": "*cargo test*",
+            },
+            "allow": true,
+            "scope": "project",
+        }),
+        "the existing RememberedRule wire shape stays unchanged"
+    );
+    store.add_rule(rule);
+    assert!(store.revoke_rule(&address));
+    assert!(!store.revoke_rule(&address));
+}
+
 /// The downstream shape this exists for, written from outside the crate: a
 /// host registers an executor that serves named targets and a tool that names
 /// one. Every guard around a shell command still applies — only the executor

@@ -72,9 +72,9 @@ pub use runtime::{
     TaskBoard, TaskBoardError, TaskPatch, TaskStore, skill_root_key,
 };
 pub use session::{
-    PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore, Session,
-    SessionEvent, SessionEventReceiver, SessionId, SessionMetadata, SessionPermissionHandle,
-    SessionStatus, SubagentHandle,
+    PermissionDecision, PermissionRequest, PermissionRuleAddress, RememberedRule, RuleKey,
+    RuleStore, Session, SessionEvent, SessionEventReceiver, SessionId, SessionMetadata,
+    SessionPermissionHandle, SessionStatus, SubagentHandle,
 };
 pub use team::{
     TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Remembered permission rules have exact scoped addresses
+
+- `PermissionRuleAddress { scope, key }` is now the public identity of one
+  in-memory remembered rule. The same tool and pattern can coexist at session,
+  project, and global scope instead of whichever rule was inserted last
+  silently replacing the others.
+- `RuleStore` lookup is deterministic: session precedes project and global;
+  within one scope a matching pattern precedes the bare fallback; overlapping
+  patterns prefer denial and then stable `RuleKey` order. `rules()` returns the
+  same stable scope/key ordering.
+- `RuleStore::revoke_rule` removes one exact address idempotently, and
+  `clear_scope` now reports how many entries it removed. These operations remain
+  in-memory in this change; persistent-store revocation is separate follow-up
+  work for [#43](https://github.com/oops-rs/mentra/issues/43).
+
 ### The current authorizer is authoritative over remembered answers
 
 - A session now asks its current `ToolAuthorizer` before consulting remembered

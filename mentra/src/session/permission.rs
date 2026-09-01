@@ -1,5 +1,6 @@
 mod pattern;
 
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -134,6 +135,18 @@ pub struct RuleKey {
     pub pattern: Option<String>,
 }
 
+/// Exact in-memory identity of one remembered permission rule.
+///
+/// Scope is part of the address rather than metadata on the stored value, so
+/// the same tool and pattern can carry independent session, project, and global
+/// answers. Construct this from a listed [`RememberedRule`] with
+/// `PermissionRuleAddress::from(&rule)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PermissionRuleAddress {
+    pub scope: PermissionRuleScope,
+    pub key: RuleKey,
+}
+
 /// A stored permission rule that was previously decided by the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RememberedRule {
@@ -142,10 +155,10 @@ pub struct RememberedRule {
     pub scope: PermissionRuleScope,
     /// Why the remembered refusal refused, in the words the model will read.
     ///
-    /// A remembered rule answers every later call itself, without ever
-    /// reaching the approver again, so a rule that keeps the verdict and drops
-    /// the reason lets the host explain itself exactly once: every repeat after
-    /// that reads only that something was blocked. Written from
+    /// A remembered rule answers a later `Prompt` without reaching the session
+    /// approver again, so a rule that keeps the verdict and drops the reason
+    /// lets the host explain itself exactly once: every repeat after that reads
+    /// only that something was blocked. Written from
     /// [`PermissionDecision::reason`] when the remembered decision is a
     /// refusal, and left unset for an allow, which explains itself by
     /// happening. A refusal that kept no reason still reads "blocked by
@@ -157,10 +170,70 @@ pub struct RememberedRule {
     pub reason: Option<String>,
 }
 
+impl From<&RememberedRule> for PermissionRuleAddress {
+    fn from(rule: &RememberedRule) -> Self {
+        Self {
+            scope: rule.scope,
+            key: rule.key.clone(),
+        }
+    }
+}
+
+const SCOPE_PRECEDENCE: [PermissionRuleScope; 3] = [
+    PermissionRuleScope::Session,
+    PermissionRuleScope::Project,
+    PermissionRuleScope::Global,
+];
+
+fn scope_rank(scope: PermissionRuleScope) -> u8 {
+    match scope {
+        PermissionRuleScope::Session => 0,
+        PermissionRuleScope::Project => 1,
+        PermissionRuleScope::Global => 2,
+    }
+}
+
+fn compare_rule_keys(left: &RuleKey, right: &RuleKey) -> CmpOrdering {
+    left.tool_name
+        .cmp(&right.tool_name)
+        .then_with(|| left.pattern.cmp(&right.pattern))
+}
+
+fn compare_rules_for_listing(left: &RememberedRule, right: &RememberedRule) -> CmpOrdering {
+    scope_rank(left.scope)
+        .cmp(&scope_rank(right.scope))
+        .then_with(|| left.key.tool_name.cmp(&right.key.tool_name))
+        .then_with(|| match (&left.key.pattern, &right.key.pattern) {
+            // Patterned rules are considered before the bare fallback within
+            // one scope and tool, matching lookup semantics.
+            (Some(_), None) => CmpOrdering::Less,
+            (None, Some(_)) => CmpOrdering::Greater,
+            (left, right) => left.cmp(right),
+        })
+}
+
+fn compare_pattern_candidates(
+    left: (&PermissionRuleAddress, &RememberedRule),
+    right: (&PermissionRuleAddress, &RememberedRule),
+) -> CmpOrdering {
+    // `false < true`, so a denial wins an overlapping-pattern tie. Exact
+    // addresses are unique; stable RuleKey order breaks every remaining tie
+    // without depending on HashMap iteration order.
+    left.1
+        .allow
+        .cmp(&right.1.allow)
+        .then_with(|| compare_rule_keys(&left.0.key, &right.0.key))
+}
+
 /// Thread-safe in-memory store for remembered permission rules.
+///
+/// Rules are addressed by [`PermissionRuleAddress`]. Lookup considers scopes
+/// in session, project, then global order. Within one scope a matching pattern
+/// precedes the bare rule; overlapping patterns prefer a denial and then stable
+/// [`RuleKey`] order.
 #[derive(Debug, Clone)]
 pub struct RuleStore {
-    inner: Arc<Mutex<HashMap<RuleKey, RememberedRule>>>,
+    inner: Arc<Mutex<HashMap<PermissionRuleAddress, RememberedRule>>>,
 }
 
 impl Default for RuleStore {
@@ -177,18 +250,20 @@ impl RuleStore {
         }
     }
 
-    /// Adds or overwrites a remembered rule.
+    /// Adds or overwrites the rule at its exact scope and key.
     pub fn add_rule(&self, rule: RememberedRule) {
         let mut rules = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        rules.insert(rule.key.clone(), rule);
+        rules.insert(PermissionRuleAddress::from(&rule), rule);
     }
 
     /// Checks whether a tool is allowed by a remembered rule.
     ///
-    /// Pattern rules are matched against `input_json` with the wildcard syntax
-    /// documented on [`RuleKey::pattern`] and take precedence over bare
-    /// (no-pattern) rules. Returns `Some(true)` if allowed, `Some(false)` if
-    /// denied, or `None` if no matching rule exists.
+    /// Scopes are considered in session, project, then global order. Within one
+    /// scope, pattern rules are matched against `input_json` with the wildcard
+    /// syntax documented on [`RuleKey::pattern`] and take precedence over the
+    /// bare (no-pattern) rule. Overlapping patterns prefer denial, then stable
+    /// key order. Returns `Some(true)` if allowed, `Some(false)` if denied, or
+    /// `None` if no matching rule exists.
     /// Use [`RuleStore::matching_rule`] when the rule's own reason matters.
     pub fn check(&self, tool_name: &str, input_json: Option<&str>) -> Option<bool> {
         self.matching_rule(tool_name, input_json)
@@ -197,11 +272,9 @@ impl RuleStore {
 
     /// The remembered rule that answers a call, if one does.
     ///
-    /// Matches exactly as [`RuleStore::check`] does — pattern rules against
-    /// `input_json` by wildcard, taking precedence over bare (no-pattern)
-    /// rules —
-    /// and hands back the whole rule, so a refusal can restate the reason it
-    /// was remembered with rather than only its verdict.
+    /// Matches exactly as [`RuleStore::check`] does and hands back the whole
+    /// rule, so a refusal can restate the reason it was remembered with rather
+    /// than only its verdict.
     pub fn matching_rule(
         &self,
         tool_name: &str,
@@ -209,40 +282,57 @@ impl RuleStore {
     ) -> Option<RememberedRule> {
         let rules = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
-        let mut pattern_match: Option<&RememberedRule> = None;
-        let mut bare_match: Option<&RememberedRule> = None;
-
-        for rule in rules.values() {
-            if rule.key.tool_name != tool_name {
-                continue;
+        for scope in SCOPE_PRECEDENCE {
+            if let Some((_, rule)) = rules
+                .iter()
+                .filter(|(address, _)| {
+                    address.scope == scope
+                        && address.key.tool_name == tool_name
+                        && address.key.pattern.as_deref().is_some_and(|rule_pattern| {
+                            input_json.is_some_and(|json| pattern::matches(rule_pattern, json))
+                        })
+                })
+                .min_by(|left, right| compare_pattern_candidates(*left, *right))
+            {
+                return Some(rule.clone());
             }
-            match &rule.key.pattern {
-                Some(rule_pattern) => {
-                    if let Some(json) = input_json
-                        && pattern::matches(rule_pattern, json)
-                    {
-                        pattern_match = Some(rule);
-                    }
-                }
-                None => {
-                    bare_match = Some(rule);
-                }
+
+            if let Some((_, rule)) = rules.iter().find(|(address, _)| {
+                address.scope == scope
+                    && address.key.tool_name == tool_name
+                    && address.key.pattern.is_none()
+            }) {
+                return Some(rule.clone());
             }
         }
 
-        pattern_match.or(bare_match).cloned()
+        None
     }
 
-    /// Returns all remembered rules as a vector.
+    /// Returns all remembered rules in deterministic lookup-oriented order.
+    ///
+    /// Session rules precede project and global rules. Within one scope, tools
+    /// and patterns use stable lexical ordering, with patterned rules before a
+    /// tool's bare fallback.
     pub fn rules(&self) -> Vec<RememberedRule> {
         let rules = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        rules.values().cloned().collect()
+        let mut listed: Vec<_> = rules.values().cloned().collect();
+        listed.sort_by(compare_rules_for_listing);
+        listed
     }
 
-    /// Removes all rules that match the given scope.
-    pub fn clear_scope(&self, scope: PermissionRuleScope) {
+    /// Revokes the rule at `address`, returning whether one existed.
+    pub fn revoke_rule(&self, address: &PermissionRuleAddress) -> bool {
         let mut rules = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        rules.retain(|_, rule| rule.scope != scope);
+        rules.remove(address).is_some()
+    }
+
+    /// Removes every rule at `scope`, returning how many were removed.
+    pub fn clear_scope(&self, scope: PermissionRuleScope) -> usize {
+        let mut rules = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let before = rules.len();
+        rules.retain(|address, _| address.scope != scope);
+        before - rules.len()
     }
 }
 
@@ -703,13 +793,23 @@ mod tests {
 
     /// A bare `shell` rule for the session, remembered with `reason` or without.
     fn shell_rule(allow: bool, reason: Option<&str>) -> RememberedRule {
+        rule_at(PermissionRuleScope::Session, "shell", None, allow, reason)
+    }
+
+    fn rule_at(
+        scope: PermissionRuleScope,
+        tool_name: &str,
+        pattern: Option<&str>,
+        allow: bool,
+        reason: Option<&str>,
+    ) -> RememberedRule {
         RememberedRule {
             key: RuleKey {
-                tool_name: "shell".to_owned(),
-                pattern: None,
+                tool_name: tool_name.to_owned(),
+                pattern: pattern.map(str::to_owned),
             },
             allow,
-            scope: PermissionRuleScope::Session,
+            scope,
             reason: reason.map(str::to_owned),
         }
     }
@@ -1119,5 +1219,232 @@ mod tests {
         });
         // Non-matching input yields None (no bare fallback).
         assert_eq!(store.check("shell", Some(r#"{"command":"ls"}"#)), None);
+    }
+
+    #[test]
+    fn the_same_key_coexists_at_every_scope_and_the_narrowest_scope_wins() {
+        let store = RuleStore::new();
+        store.add_rule(rule_at(
+            PermissionRuleScope::Global,
+            "shell",
+            None,
+            false,
+            Some("global"),
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Project,
+            "shell",
+            None,
+            false,
+            Some("project"),
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Session,
+            "shell",
+            None,
+            true,
+            Some("session"),
+        ));
+
+        assert_eq!(store.rules().len(), 3);
+        let matched = store
+            .matching_rule("shell", None)
+            .expect("one scoped rule should match");
+        assert_eq!(matched.scope, PermissionRuleScope::Session);
+        assert_eq!(matched.reason.as_deref(), Some("session"));
+    }
+
+    #[test]
+    fn scope_precedence_is_applied_before_pattern_precedence() {
+        let store = RuleStore::new();
+        store.add_rule(rule_at(
+            PermissionRuleScope::Global,
+            "shell",
+            Some("*cargo test*"),
+            false,
+            Some("global pattern"),
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Session,
+            "shell",
+            None,
+            true,
+            Some("session bare"),
+        ));
+
+        let matched = store
+            .matching_rule("shell", Some(r#"{"command":"cargo test"}"#))
+            .expect("one scoped rule should match");
+        assert_eq!(matched.scope, PermissionRuleScope::Session);
+        assert_eq!(matched.reason.as_deref(), Some("session bare"));
+    }
+
+    #[test]
+    fn overlapping_patterns_prefer_denial_then_stable_key_order() {
+        fn populated(
+            patterns: impl IntoIterator<Item = (&'static str, bool, &'static str)>,
+        ) -> RuleStore {
+            let store = RuleStore::new();
+            for (pattern, allow, reason) in patterns {
+                store.add_rule(rule_at(
+                    PermissionRuleScope::Project,
+                    "shell",
+                    Some(pattern),
+                    allow,
+                    Some(reason),
+                ));
+            }
+            store
+        }
+
+        let rules = [
+            ("*test*", false, "deny test"),
+            ("*cargo*", false, "deny cargo"),
+            ("*cargo test*", true, "allow exact phrase"),
+        ];
+        let forward = populated(rules);
+        let reverse = populated(rules.into_iter().rev());
+
+        for store in [forward, reverse] {
+            let matched = store
+                .matching_rule("shell", Some(r#"{"command":"cargo test"}"#))
+                .expect("one pattern should win");
+            assert!(!matched.allow, "a denial wins an overlapping tie");
+            assert_eq!(
+                matched.key.pattern.as_deref(),
+                Some("*cargo*"),
+                "equally denying matches use stable RuleKey order"
+            );
+            assert_eq!(matched.reason.as_deref(), Some("deny cargo"));
+        }
+    }
+
+    #[test]
+    fn exact_revoke_is_idempotent_and_leaves_other_addresses() {
+        let store = RuleStore::new();
+        for scope in [
+            PermissionRuleScope::Global,
+            PermissionRuleScope::Project,
+            PermissionRuleScope::Session,
+        ] {
+            store.add_rule(rule_at(scope, "shell", None, true, None));
+        }
+        store.add_rule(rule_at(
+            PermissionRuleScope::Session,
+            "files",
+            None,
+            false,
+            None,
+        ));
+        let project_shell = PermissionRuleAddress {
+            scope: PermissionRuleScope::Project,
+            key: RuleKey {
+                tool_name: "shell".to_owned(),
+                pattern: None,
+            },
+        };
+
+        assert!(store.revoke_rule(&project_shell));
+        assert!(!store.revoke_rule(&project_shell));
+        let rules = store.rules();
+        assert_eq!(rules.len(), 3);
+        assert!(rules.iter().any(|rule| {
+            rule.scope == PermissionRuleScope::Global && rule.key.tool_name == "shell"
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.scope == PermissionRuleScope::Session && rule.key.tool_name == "shell"
+        }));
+        assert!(rules.iter().any(|rule| rule.key.tool_name == "files"));
+    }
+
+    #[test]
+    fn clear_scope_returns_the_number_removed() {
+        let store = RuleStore::new();
+        store.add_rule(rule_at(
+            PermissionRuleScope::Session,
+            "shell",
+            None,
+            true,
+            None,
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Session,
+            "files",
+            None,
+            false,
+            None,
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Project,
+            "shell",
+            None,
+            false,
+            None,
+        ));
+
+        assert_eq!(store.clear_scope(PermissionRuleScope::Session), 2);
+        assert_eq!(store.clear_scope(PermissionRuleScope::Session), 0);
+        assert_eq!(store.rules().len(), 1);
+        assert_eq!(store.rules()[0].scope, PermissionRuleScope::Project);
+    }
+
+    #[test]
+    fn rules_are_listed_in_semantic_then_stable_key_order() {
+        let store = RuleStore::new();
+        store.add_rule(rule_at(
+            PermissionRuleScope::Global,
+            "shell",
+            None,
+            true,
+            None,
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Session,
+            "shell",
+            None,
+            true,
+            None,
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Session,
+            "files",
+            Some("*read*"),
+            true,
+            None,
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Session,
+            "files",
+            None,
+            false,
+            None,
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Project,
+            "shell",
+            None,
+            false,
+            None,
+        ));
+
+        let listed: Vec<_> = store
+            .rules()
+            .into_iter()
+            .map(|rule| (rule.scope, rule.key.tool_name, rule.key.pattern))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (
+                    PermissionRuleScope::Session,
+                    "files".to_owned(),
+                    Some("*read*".to_owned()),
+                ),
+                (PermissionRuleScope::Session, "files".to_owned(), None,),
+                (PermissionRuleScope::Session, "shell".to_owned(), None),
+                (PermissionRuleScope::Project, "shell".to_owned(), None),
+                (PermissionRuleScope::Global, "shell".to_owned(), None),
+            ]
+        );
     }
 }

@@ -12,5 +12,8 @@ pub use event::{
     TaskLifecycleStatus, ToolMutability,
 };
 pub use handle::{Session, SessionEventReceiver, SessionPermissionHandle, SubagentHandle};
-pub use permission::{PermissionDecision, PermissionRequest, RememberedRule, RuleKey, RuleStore};
+pub use permission::{
+    PermissionDecision, PermissionRequest, PermissionRuleAddress, RememberedRule, RuleKey,
+    RuleStore,
+};
 pub use types::{SessionId, SessionMetadata, SessionStatus};
