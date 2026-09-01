@@ -102,6 +102,22 @@ pub trait Provider: Send + Sync {
         ProviderCapabilities::default()
     }
 
+    /// Returns the same configured provider with an independent session scope.
+    ///
+    /// Scope creation is synchronous and local: it must not connect to the
+    /// provider or perform other network I/O. Ordinary clones of the returned
+    /// value share that one scope; calling this method again creates an
+    /// independent one with the same descriptor identity.
+    ///
+    /// Custom providers remain valid for one-shot runtimes without implementing
+    /// this method. They report the capability as unsupported until they can
+    /// separate reusable configuration from provider-owned session state.
+    fn fresh_session_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "fresh_session_scope".to_string(),
+        ))
+    }
+
     /// Lists models available from the provider.
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
 
@@ -131,6 +147,70 @@ pub trait Provider: Send + Sync {
         Err(ProviderError::UnsupportedCapability(
             "memory_summarization".to_string(),
         ))
+    }
+}
+
+/// One high-level provider bound to one provider-owned session-state scope.
+///
+/// Cloning this value deliberately shares the current scope. Use
+/// [`Provider::fresh_session_scope`] to retain provider configuration while
+/// allocating independent turn, response-chain, connection, and in-flight
+/// state. Neither operation implicitly opens or warms a connection.
+#[derive(Clone)]
+pub struct ProviderSessionScope {
+    inner: Arc<dyn Provider>,
+}
+
+impl ProviderSessionScope {
+    /// Wraps a provider whose current session state is the scope to share.
+    pub fn new<P>(provider: P) -> Self
+    where
+        P: Provider + 'static,
+    {
+        Self {
+            inner: Arc::new(provider),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ProviderSessionScope {
+    fn descriptor(&self) -> ProviderDescriptor {
+        self.inner.descriptor()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn fresh_session_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        self.inner.fresh_session_scope()
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        self.inner.list_models().await
+    }
+
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        self.inner.stream(request).await
+    }
+
+    async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
+        self.inner.send(request).await
+    }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.inner.compact(request).await
+    }
+
+    async fn summarize_memories(
+        &self,
+        request: MemorySummarizeRequest<'_>,
+    ) -> Result<MemorySummarizeResponse, ProviderError> {
+        self.inner.summarize_memories(request).await
     }
 }
 
@@ -441,6 +521,13 @@ where
         self.inner.definition().capabilities
     }
 
+    fn fresh_session_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        let scope = mentra_provider::Provider::fresh_session_scope(&self.inner)?;
+        Ok(ProviderSessionScope::new(SharedProviderProxy {
+            inner: scope,
+        }))
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         self.inner.list_models().await
     }
@@ -521,6 +608,10 @@ pub mod openai {
 
         fn capabilities(&self) -> ProviderCapabilities {
             self.inner.capabilities()
+        }
+
+        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
+            self.inner.fresh_session_scope()
         }
 
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -609,6 +700,10 @@ pub mod openrouter {
             self.inner.capabilities()
         }
 
+        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
+            self.inner.fresh_session_scope()
+        }
+
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
             self.inner.list_models().await
         }
@@ -668,6 +763,10 @@ pub mod anthropic {
             self.inner.capabilities()
         }
 
+        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
+            self.inner.fresh_session_scope()
+        }
+
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
             self.inner.list_models().await
         }
@@ -719,6 +818,10 @@ pub mod gemini {
 
         fn capabilities(&self) -> super::ProviderCapabilities {
             self.inner.capabilities()
+        }
+
+        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
+            self.inner.fresh_session_scope()
         }
 
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -828,6 +931,10 @@ pub mod openai_compatible {
             self.inner.capabilities()
         }
 
+        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
+            self.inner.fresh_session_scope()
+        }
+
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
             self.inner.list_models().await
         }
@@ -899,6 +1006,10 @@ pub mod ollama {
 
         fn capabilities(&self) -> super::ProviderCapabilities {
             self.inner.capabilities()
+        }
+
+        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
+            self.inner.fresh_session_scope()
         }
 
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -973,6 +1084,10 @@ pub mod lmstudio {
 
         fn capabilities(&self) -> super::ProviderCapabilities {
             self.inner.capabilities()
+        }
+
+        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
+            self.inner.fresh_session_scope()
         }
 
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {

@@ -24,6 +24,15 @@ pub enum RuntimeError {
     FailedToSendRequest(#[source] ProviderError),
     #[error("failed to list provider models: {0}")]
     FailedToListModels(#[source] ProviderError),
+    #[error("failed to create a fresh provider session scope: {0}")]
+    FailedToCreateProviderSessionScope(#[source] ProviderError),
+    #[error(
+        "fresh provider session scope changed provider identity from '{expected}' to '{actual}'"
+    )]
+    ProviderSessionScopeIdentityMismatch {
+        expected: ProviderId,
+        actual: ProviderId,
+    },
     #[error("failed to stream provider response: {0}")]
     FailedToStreamResponse(#[source] ProviderError),
     #[error("failed to compact history: {0}")]
@@ -115,6 +124,8 @@ impl RuntimeError {
             // Configuration and logic errors are permanent.
             Self::ProviderNotFound(_)
             | Self::NoModelsAvailable(_)
+            | Self::FailedToCreateProviderSessionScope(_)
+            | Self::ProviderSessionScopeIdentityMismatch { .. }
             | Self::OperationDenied(_)
             | Self::Cancelled
             | Self::DeadlineExceeded

@@ -96,6 +96,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Fresh provider scopes for rebuilt runtimes
+
+A host rebuilding a private runtime can ask the current runtime for a cold,
+independent provider session scope and feed it through the existing provider
+instance seam:
+
+```rust,no_run
+use mentra::Runtime;
+
+# fn rebuild(runtime: Runtime) -> Result<Runtime, Box<dyn std::error::Error>> {
+let provider = runtime.fresh_provider_session_scope(None)?;
+drop(runtime);
+let replacement = Runtime::builder()
+    .with_provider_instance(provider)
+    .build()?;
+# Ok(replacement)
+# }
+```
+
+Cloning the returned scope shares it; calling `Provider::fresh_session_scope`
+again splits it. Minting preserves provider configuration and reusable endpoint
+knowledge while resetting provider-owned turn, response-chain, WebSocket, and
+in-flight state. It performs no network I/O and does not implicitly prewarm a
+connection. Hosts with a prewarm contract must retain their explicit warm
+path over the concrete provider; this high-level scope solves cold freshness,
+not provider-specific warming.
+
 More examples can be found in the [`examples/`](./examples) workspace crate,
 including:
 

@@ -20,7 +20,7 @@ use tokio::sync::broadcast;
 
 use crate::{
     agent::{Agent, AgentConfig, AgentSpawnOptions, AgentStatus},
-    provider::{Provider, ProviderRegistry},
+    provider::{Provider, ProviderRegistry, ProviderSessionScope},
     session::{
         Session, SessionEvent, SessionId, SessionMetadata, hooks::SessionHookBridge,
         permission::PendingPermissionStore,
@@ -616,6 +616,38 @@ impl Runtime {
             .read()
             .expect("provider registry poisoned")
             .descriptors()
+    }
+
+    /// Mints the selected provider's configuration into an independent session scope.
+    ///
+    /// `None` selects the runtime's default provider. The operation is local and
+    /// synchronous: it allocates provider-owned scope state but does not open or
+    /// warm a connection. The returned [`ProviderSessionScope`] implements
+    /// [`Provider`] and can be passed directly to
+    /// [`RuntimeBuilder::with_provider_instance`]. Ordinary clones share the
+    /// returned scope; call [`Provider::fresh_session_scope`] again to split it.
+    pub fn fresh_provider_session_scope(
+        &self,
+        provider: Option<&ProviderId>,
+    ) -> Result<ProviderSessionScope, RuntimeError> {
+        let source = {
+            self.provider_registry
+                .read()
+                .expect("provider registry poisoned")
+                .get_provider(provider)
+        }
+        .ok_or_else(|| RuntimeError::ProviderNotFound(provider.cloned()))?;
+        let expected = source.descriptor().id;
+        let scope = source
+            .fresh_session_scope()
+            .map_err(RuntimeError::FailedToCreateProviderSessionScope)?;
+        let actual = scope.descriptor().id;
+
+        if actual != expected {
+            return Err(RuntimeError::ProviderSessionScopeIdentityMismatch { expected, actual });
+        }
+
+        Ok(scope)
     }
 
     /// The Responses transport this runtime chose for every request it makes,

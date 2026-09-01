@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Runtimes can mint fresh provider session scopes
+
+- Both provider abstraction levels expose an object-safe
+  `fresh_session_scope` operation and a cloneable `ProviderSessionScope`. An
+  ordinary scope clone shares its current provider-owned state; freshening it
+  preserves provider identity and configuration while allocating independent
+  turn, response-chain, WebSocket, and in-flight state
+  ([#46](https://github.com/oops-rs/mentra/issues/46)).
+- `Runtime::fresh_provider_session_scope` selects the default or an explicit
+  registered provider, mints outside the registry lock, and rejects a provider
+  that changes descriptor identity. The returned high-level scope goes through
+  the existing `with_provider_instance` seam; provider-core scopes likewise go
+  through `with_registered_provider`.
+- Existing custom providers remain source-compatible and report
+  `UnsupportedCapability("fresh_session_scope")` until they opt in. Builtin
+  Responses providers use their existing state-splitting operation; Anthropic,
+  Gemini, and Chat Completions providers clone their stateless session shape
+  while retaining shared credentials and HTTP pools.
+- Scope creation is cold and performs no network I/O. It does not replace a
+  host's explicit provider warm callback or prewarm a Responses WebSocket;
+  Basis's current `WarmOnce` prewarm path therefore remains necessary until a
+  separate provider-owned warm contract exists.
+
 ### Compaction reports exact provider usage
 
 - `CompactionResponse::usage` retains the provider's optional token-usage

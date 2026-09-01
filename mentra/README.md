@@ -66,6 +66,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `with_ollama()` targets `http://127.0.0.1:11434/` and `with_lmstudio()` targets
 `http://127.0.0.1:1234/`, using each server's OpenAI-compatible API surface.
 
+## Rebuilding With Fresh Provider Session State
+
+An embedding host that rebuilds a private runtime can reuse the selected
+provider configuration without carrying response-chain, turn-affinity,
+WebSocket, or in-flight state into the replacement:
+
+```rust,no_run
+use mentra::Runtime;
+
+# fn rebuild(runtime: Runtime) -> Result<Runtime, Box<dyn std::error::Error>> {
+let provider = runtime.fresh_provider_session_scope(None)?;
+drop(runtime);
+let replacement = Runtime::builder()
+    .with_provider_instance(provider)
+    .build()?;
+# Ok(replacement)
+# }
+```
+
+`None` selects the default provider; pass a `ProviderId` to select another.
+Ordinary clones of the returned `ProviderSessionScope` share one newly minted
+scope, which lets a runtime and a retained handle observe the same connection
+state. Calling `Provider::fresh_session_scope` again creates another independent
+scope. The host remains responsible for quiescing and dropping work attached to
+the old runtime before reusing its resources.
+
+Scope minting is deliberately cold and local. It preserves credentials,
+configuration, HTTP connection pools, and endpoint knowledge, but it performs no
+network I/O and does not prewarm a WebSocket. A host that requires prewarming
+must keep its explicit concrete-provider factory/warm path; the high-level scope
+does not expose provider-specific warm operations or silently replace that
+lifecycle.
+
 ## Custom Compatible Providers
 
 If you need a non-default OpenAI-compatible or Anthropic-compatible endpoint,

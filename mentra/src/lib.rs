@@ -46,7 +46,7 @@ pub use mentra_provider::{
     provider_event_stream_from_response,
 };
 
-pub use provider::{Provider, ProviderRegistry};
+pub use provider::{Provider, ProviderRegistry, ProviderSessionScope};
 
 pub use agent::{
     Agent, AgentConfig, AgentWaitFuture, AgentWaitHandle, FinalOutput, QueueMode, ReasoningChange,
