@@ -6,7 +6,10 @@
 //! parallel lane, because the two lanes are separate code paths and the
 //! ordering is a contract hosts build permission ladders on.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex, OnceLock, Weak,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -74,6 +77,60 @@ impl ToolExecutor for GateTool {
     async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
         self.ran.lock().expect("ran poisoned").push(input);
         Ok("ran".to_string())
+    }
+}
+
+struct GenerationTool {
+    label: &'static str,
+    execution_category: ToolExecutionCategory,
+    ran: Arc<AtomicUsize>,
+}
+
+impl ToolDefinition for GenerationTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder(TOOL)
+            .description(self.label)
+            .execution_category(self.execution_category)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for GenerationTool {
+    fn execution_category(&self, _input: &Value) -> ToolExecutionCategory {
+        self.execution_category
+    }
+
+    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        Ok(self.label.to_string())
+    }
+}
+
+struct ReplaceGenerationDuringAdmission {
+    runtime: Arc<OnceLock<Weak<Runtime>>>,
+    replacement: Mutex<Option<GenerationTool>>,
+}
+
+#[async_trait]
+impl PreExecutionHook for ReplaceGenerationDuringAdmission {
+    async fn pre_tool_execution(
+        &self,
+        _context: &PreExecutionContext,
+    ) -> Result<HookDecision, RuntimeError> {
+        if let Some(replacement) = self
+            .replacement
+            .lock()
+            .expect("replacement poisoned")
+            .take()
+        {
+            self.runtime
+                .get()
+                .and_then(Weak::upgrade)
+                .expect("runtime installed before execution")
+                .register_tool(replacement);
+        }
+        Ok(HookDecision::Allow)
     }
 }
 
@@ -516,6 +573,69 @@ async fn an_allowing_hook_changes_nothing() {
         );
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_call_executes_the_generation_snapshot_the_scheduler_classified() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", TOOL, r#"{}"#),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let original_ran = Arc::new(AtomicUsize::new(0));
+    let replacement_ran = Arc::new(AtomicUsize::new(0));
+    let runtime_slot = Arc::new(OnceLock::new());
+    let runtime = Arc::new(
+        Runtime::empty_builder()
+            .with_provider_instance(provider)
+            .with_tool(GenerationTool {
+                label: "original",
+                execution_category: ToolExecutionCategory::ReadOnlyParallel,
+                ran: Arc::clone(&original_ran),
+            })
+            .with_pre_hook(ReplaceGenerationDuringAdmission {
+                runtime: Arc::clone(&runtime_slot),
+                replacement: Mutex::new(Some(GenerationTool {
+                    label: "replacement",
+                    execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
+                    ran: Arc::clone(&replacement_ran),
+                })),
+            })
+            .build()
+            .expect("build runtime"),
+    );
+    runtime_slot
+        .set(Arc::downgrade(&runtime))
+        .expect("runtime installed once");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("go")])
+        .await
+        .expect("run completes");
+
+    assert_eq!(original_ran.load(Ordering::SeqCst), 1);
+    assert_eq!(replacement_ran.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        runtime
+            .tool_descriptor(TOOL)
+            .expect("replacement remains registered")
+            .provider
+            .description
+            .as_deref(),
+        Some("replacement")
+    );
+    let result = agent
+        .history()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .expect("tool result");
+    assert_eq!(result_text(result), ("original".to_string(), false));
 }
 
 #[tokio::test]

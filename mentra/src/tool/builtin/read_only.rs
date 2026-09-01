@@ -31,7 +31,7 @@ fn check_background_descriptor() -> RuntimeToolDescriptor {
 }
 
 fn load_skill_descriptor() -> RuntimeToolDescriptor {
-    RuntimeToolDescriptor::builder("load_skill")
+    RuntimeToolDescriptor::builder(crate::tool::LOAD_SKILL_TOOL_NAME)
         .description("Load the full body of a named skill when it is relevant.")
         .input_schema(json!({
             "type": "object",

@@ -11,8 +11,9 @@ use crate::{
     runtime::control::{HookDecision, PostExecutionContext, PreExecutionContext, ResultDecision},
     runtime::{RunOptions, RuntimeHookEvent},
     tool::{
-        ExecutableTool, ParallelToolContext, RuntimeToolDescriptor, ToolAuthorizationOutcome,
-        ToolAuthorizationRequest, ToolCall, ToolCapability, ToolContext, ToolExecutionCategory,
+        ExecutableTool, ParallelToolContext, ResolvedTool, RuntimeToolDescriptor,
+        ToolAuthorizationOutcome, ToolAuthorizationRequest, ToolCall, ToolCapability, ToolContext,
+        ToolExecutionCategory,
     },
 };
 
@@ -47,12 +48,26 @@ pub(crate) struct ToolRuntime {
 
 #[derive(Clone)]
 enum ToolCallBatch {
-    Exclusive(ToolCall),
-    Parallel(Vec<ToolCall>),
+    Exclusive(Box<ScheduledToolCall>),
+    Parallel(Vec<ScheduledToolCall>),
 }
 
 struct ToolCallSchedule {
     batches: Vec<ToolCallBatch>,
+}
+
+#[derive(Clone)]
+struct ScheduledToolCall {
+    call: ToolCall,
+    tool: ScheduledTool,
+    execution_category: ToolExecutionCategory,
+}
+
+#[derive(Clone)]
+enum ScheduledTool {
+    Resolved(Box<ResolvedTool>),
+    Unavailable,
+    Missing,
 }
 
 /// What the pre-execution hooks left of a call.
@@ -161,7 +176,7 @@ impl ToolRuntime {
 
             let executions = match batch {
                 ToolCallBatch::Exclusive(call) => {
-                    vec![self.execute_one_tool(agent, options, call).await?]
+                    vec![self.execute_one_tool(agent, options, *call).await?]
                 }
                 ToolCallBatch::Parallel(calls) => {
                     self.execute_parallel_batch(agent, options, calls).await?
@@ -258,21 +273,29 @@ impl ToolRuntime {
         }
     }
 
-    fn call_execution_category_for_agent(
-        &self,
-        call: &ToolCall,
-        agent: Option<&Agent>,
-    ) -> ToolExecutionCategory {
-        if agent.is_some_and(|agent| !agent.can_use_tool(&call.name)) {
-            return ToolExecutionCategory::ExclusiveLocalMutation;
+    fn schedule_call(&self, agent: &Agent, call: ToolCall) -> ScheduledToolCall {
+        if !agent.can_use_tool(&call.name) {
+            return ScheduledToolCall {
+                call,
+                tool: ScheduledTool::Unavailable,
+                execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
+            };
         }
 
-        let Some(tool) = self.runtime.get_tool(&call.name) else {
-            return ToolExecutionCategory::ExclusiveLocalMutation;
+        let Some(tool) = self.runtime.resolve_tool(&call.name) else {
+            return ScheduledToolCall {
+                call,
+                tool: ScheduledTool::Missing,
+                execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
+            };
         };
 
-        let declared = tool.execution_category(&call.input);
-        let scheduled = self.scheduled_execution_category(call, &tool);
+        let declared = tool.handler.execution_category(&call.input);
+        let scheduled = if tool.descriptor().terminal && declared.allows_parallel() {
+            ToolExecutionCategory::ExclusiveLocalMutation
+        } else {
+            declared
+        };
         if scheduled != declared {
             eprintln!(
                 "warning: tool '{}' is marked terminal but declared a parallel \
@@ -281,38 +304,11 @@ impl ToolRuntime {
             );
         }
 
-        scheduled
-    }
-
-    /// The lane a call will actually run in.
-    ///
-    /// The tool's category is asked for with the call's input, because a tool
-    /// may answer differently per call -- `files` reports a parallel read for a
-    /// batch that only reads. A terminal-marked tool is then never scheduled in
-    /// parallel whatever it declared, coerced rather than panicked, matching
-    /// the fallback-to-exclusive precedent above.
-    ///
-    /// The authorization path reads the same answer, so what a host is told a
-    /// call will do is what the scheduler then does. A preview built from the
-    /// tool's *static* descriptor could disagree -- and for a tool declaring a
-    /// parallel category while returning a mutating one, it would disagree in
-    /// the permissive direction.
-    fn scheduled_execution_category(
-        &self,
-        call: &ToolCall,
-        tool: &Arc<dyn ExecutableTool>,
-    ) -> ToolExecutionCategory {
-        let category = tool.execution_category(&call.input);
-        let terminal = self
-            .runtime
-            .get_tool_descriptor(&call.name)
-            .is_some_and(|descriptor| descriptor.terminal);
-
-        if terminal && category.allows_parallel() {
-            return ToolExecutionCategory::ExclusiveLocalMutation;
+        ScheduledToolCall {
+            call,
+            tool: ScheduledTool::Resolved(Box::new(tool)),
+            execution_category: scheduled,
         }
-
-        category
     }
 
     fn note_tool_started(
@@ -527,6 +523,7 @@ impl ToolRuntime {
         call: &mut ToolCall,
         tool: &Arc<dyn ExecutableTool>,
         descriptor: &RuntimeToolDescriptor,
+        execution_category: ToolExecutionCategory,
     ) -> Result<Admission, RuntimeError> {
         let modified = match self.apply_pre_hooks(call).await? {
             HookOutcome::Proceed { modified } => modified,
@@ -555,7 +552,10 @@ impl ToolRuntime {
         }
 
         let ctx = self.parallel_tool_context(agent, options, call);
-        if let Some(result) = self.authorize_tool_call(call, tool, &ctx).await? {
+        if let Some(result) = self
+            .authorize_tool_call(call, tool, &ctx, execution_category)
+            .await?
+        {
             let execution = self.completed_execution(
                 agent,
                 call,
@@ -665,6 +665,42 @@ impl ToolRuntime {
             tool_use_id: call.id,
             content: format!("Tool '{}' is not available for this agent", call.name).into(),
             is_error: true,
+        }
+    }
+
+    fn unavailable_tool_execution(&self, agent: &Agent, call: ToolCall) -> CompletedToolExecution {
+        let result = self.unavailable_tool_result(call.clone());
+        agent.emit_event(AgentEvent::ToolExecutionFinished {
+            result: result.clone(),
+        });
+        CompletedToolExecution {
+            result,
+            task_succeeded: false,
+            should_end_turn: false,
+            terminated: false,
+            tool_name: call.name,
+            input_json: serde_json::to_string(&call.input).unwrap_or_default(),
+            details: None,
+        }
+    }
+
+    fn missing_tool_execution(&self, agent: &Agent, call: ToolCall) -> CompletedToolExecution {
+        let result = ContentBlock::ToolResult {
+            tool_use_id: call.id.clone(),
+            content: "Tool not found".into(),
+            is_error: true,
+        };
+        agent.emit_event(AgentEvent::ToolExecutionFinished {
+            result: result.clone(),
+        });
+        CompletedToolExecution {
+            result,
+            task_succeeded: false,
+            should_end_turn: false,
+            terminated: false,
+            tool_name: call.name,
+            input_json: serde_json::to_string(&call.input).unwrap_or_default(),
+            details: None,
         }
     }
 
@@ -803,18 +839,12 @@ impl ToolRuntime {
         }
     }
 
-    fn registered_tool(
-        &self,
-        name: &str,
-    ) -> Option<(Arc<dyn ExecutableTool>, RuntimeToolDescriptor)> {
-        self.runtime.resolve_tool(name)
-    }
-
     async fn authorize_tool_call(
         &self,
         call: &ToolCall,
         tool: &Arc<dyn ExecutableTool>,
         ctx: &ParallelToolContext,
+        execution_category: ToolExecutionCategory,
     ) -> Result<Option<ContentBlock>, RuntimeError> {
         let Some(authorizer) = self.runtime.execution.tool_authorizer.clone() else {
             return Ok(None);
@@ -839,7 +869,7 @@ impl ToolRuntime {
         // that will actually run, for every tool at once rather than for
         // whichever preview builders remember to do it.
         let preview = crate::tool::ToolAuthorizationPreview {
-            execution_category: self.scheduled_execution_category(call, tool),
+            execution_category,
             ..preview
         };
 
@@ -906,67 +936,67 @@ impl ToolRuntime {
         &mut self,
         agent: &mut Agent,
         options: &RunOptions,
-        call: ToolCall,
+        scheduled: ScheduledToolCall,
     ) -> Result<CompletedToolExecution, RuntimeError> {
+        let ScheduledToolCall {
+            call,
+            tool,
+            execution_category,
+        } = scheduled;
         self.note_tool_started(agent, &call)?;
-        if !agent.can_use_tool(&call.name) {
-            let result = self.unavailable_tool_result(call.clone());
-            agent.emit_event(AgentEvent::ToolExecutionFinished {
-                result: result.clone(),
-            });
-            return Ok(CompletedToolExecution {
-                result,
-                task_succeeded: false,
-                should_end_turn: false,
-                terminated: false,
-                tool_name: call.name.clone(),
-                input_json: serde_json::to_string(&call.input).unwrap_or_default(),
-                details: None,
-            });
+        match tool {
+            ScheduledTool::Unavailable => Ok(self.unavailable_tool_execution(agent, call)),
+            ScheduledTool::Missing => Ok(self.missing_tool_execution(agent, call)),
+            ScheduledTool::Resolved(tool) => Ok(self
+                .execute_registered_tool(agent, options, call, *tool, execution_category)
+                .await),
         }
-
-        Ok(self.execute_registered_tool(agent, options, call).await)
     }
 
     async fn execute_parallel_batch(
         &mut self,
         agent: &mut Agent,
         options: &RunOptions,
-        calls: Vec<ToolCall>,
+        calls: Vec<ScheduledToolCall>,
     ) -> Result<Vec<CompletedToolExecution>, RuntimeError> {
         let len = calls.len();
         let mut results = (0..len).map(|_| None).collect::<Vec<_>>();
         let mut join_set = JoinSet::new();
 
-        for (index, mut call) in calls.iter().cloned().enumerate() {
+        for (index, scheduled) in calls.into_iter().enumerate() {
+            let ScheduledToolCall {
+                mut call,
+                tool,
+                execution_category,
+            } = scheduled;
             if let Err(error) = self.note_tool_started(agent, &call) {
                 join_set.abort_all();
                 return Err(error);
             }
 
-            let Some((tool, descriptor)) = self.registered_tool(&call.name) else {
-                let result = ContentBlock::ToolResult {
-                    tool_use_id: call.id.clone(),
-                    content: "Tool not found".into(),
-                    is_error: true,
-                };
-                agent.emit_event(AgentEvent::ToolExecutionFinished {
-                    result: result.clone(),
-                });
-                results[index] = Some(CompletedToolExecution {
-                    result,
-                    task_succeeded: false,
-                    should_end_turn: false,
-                    terminated: false,
-                    tool_name: call.name.clone(),
-                    input_json: serde_json::to_string(&call.input).unwrap_or_default(),
-                    details: None,
-                });
-                continue;
+            let resolved = match tool {
+                ScheduledTool::Resolved(tool) => *tool,
+                ScheduledTool::Unavailable => {
+                    results[index] = Some(self.unavailable_tool_execution(agent, call));
+                    continue;
+                }
+                ScheduledTool::Missing => {
+                    results[index] = Some(self.missing_tool_execution(agent, call));
+                    continue;
+                }
             };
+            let descriptor = resolved.descriptor().clone();
+            let tool = resolved.handler;
 
             let ctx = match self
-                .admit_call(agent, options, &mut call, &tool, &descriptor)
+                .admit_call(
+                    agent,
+                    options,
+                    &mut call,
+                    &tool,
+                    &descriptor,
+                    execution_category,
+                )
                 .await?
             {
                 Admission::Run(ctx) => *ctx,
@@ -1064,29 +1094,21 @@ impl ToolRuntime {
         agent: &mut Agent,
         options: &RunOptions,
         mut call: ToolCall,
+        resolved: ResolvedTool,
+        execution_category: ToolExecutionCategory,
     ) -> CompletedToolExecution {
-        let Some((tool, descriptor)) = self.registered_tool(&call.name) else {
-            let result = ContentBlock::ToolResult {
-                tool_use_id: call.id.clone(),
-                content: "Tool not found".into(),
-                is_error: true,
-            };
-            agent.emit_event(AgentEvent::ToolExecutionFinished {
-                result: result.clone(),
-            });
-            return CompletedToolExecution {
-                result,
-                task_succeeded: false,
-                should_end_turn: false,
-                terminated: false,
-                tool_name: call.name.clone(),
-                input_json: serde_json::to_string(&call.input).unwrap_or_default(),
-                details: None,
-            };
-        };
+        let descriptor = resolved.descriptor().clone();
+        let tool = resolved.handler;
 
         let authorization_ctx = match self
-            .admit_call(agent, options, &mut call, &tool, &descriptor)
+            .admit_call(
+                agent,
+                options,
+                &mut call,
+                &tool,
+                &descriptor,
+                execution_category,
+            )
             .await
         {
             Ok(Admission::Run(ctx)) => *ctx,
@@ -1156,8 +1178,9 @@ impl ToolCallSchedule {
         let mut pending_parallel = Vec::new();
 
         for call in calls {
-            match runtime.call_execution_category_for_agent(&call, Some(agent)) {
-                ToolExecutionCategory::ReadOnlyParallel => pending_parallel.push(call),
+            let scheduled = runtime.schedule_call(agent, call);
+            match scheduled.execution_category {
+                ToolExecutionCategory::ReadOnlyParallel => pending_parallel.push(scheduled),
                 ToolExecutionCategory::ExclusiveLocalMutation
                 | ToolExecutionCategory::ExclusivePersistentMutation
                 | ToolExecutionCategory::BackgroundJob
@@ -1167,7 +1190,7 @@ impl ToolCallSchedule {
                             &mut pending_parallel,
                         )));
                     }
-                    batches.push(ToolCallBatch::Exclusive(call));
+                    batches.push(ToolCallBatch::Exclusive(Box::new(scheduled)));
                 }
             }
         }
@@ -1192,8 +1215,10 @@ impl ToolCallBatch {
     /// Used to build not-executed results for batches skipped by termination.
     fn into_calls(self) -> Vec<ToolCall> {
         match self {
-            ToolCallBatch::Exclusive(call) => vec![call],
-            ToolCallBatch::Parallel(calls) => calls,
+            ToolCallBatch::Exclusive(call) => vec![call.call],
+            ToolCallBatch::Parallel(calls) => {
+                calls.into_iter().map(|scheduled| scheduled.call).collect()
+            }
         }
     }
 }
