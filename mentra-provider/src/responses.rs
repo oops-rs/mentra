@@ -22,6 +22,7 @@ use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
 use crate::ProviderSessionFactory;
+use crate::ProviderSessionScope;
 use crate::RegisteredProvider;
 use crate::RetryPolicy;
 use crate::StaticCredentialSource;
@@ -273,6 +274,12 @@ where
 {
     fn definition(&self) -> ProviderDefinition {
         self.definition.clone()
+    }
+
+    fn fresh_session_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        Ok(ProviderSessionScope::new(
+            ResponsesProvider::fresh_session_scope(self),
+        ))
     }
 }
 

@@ -52,6 +52,7 @@ pub use registry::Provider;
 pub use registry::ProviderRegistry;
 pub use registry::ProviderSession;
 pub use registry::ProviderSessionFactory;
+pub use registry::ProviderSessionScope;
 pub use registry::RegisteredProvider;
 pub use request::AnthropicRequestOptions;
 pub use request::CompactionInputItem;
