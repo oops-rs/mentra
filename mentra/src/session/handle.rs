@@ -262,6 +262,11 @@ impl Session {
         self.agent.config()
     }
 
+    /// Returns this live session's ephemeral tool audience, if any.
+    pub fn tool_audience(&self) -> Option<&crate::tool::ToolAudience> {
+        self.agent.tool_audience()
+    }
+
     /// Updates the live session model and persists the new setting so future
     /// resumes observe the same model.
     pub fn set_model(&mut self, model: crate::ModelInfo) -> Result<(), RuntimeError> {

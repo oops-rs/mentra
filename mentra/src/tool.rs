@@ -515,7 +515,6 @@ impl ToolRegistry {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn resolve_audience_tool(
         &self,
         audience: &ToolAudience,
@@ -531,6 +530,24 @@ impl ToolRegistry {
                 },
                 handler: Arc::clone(&tool.handler),
             })
+    }
+
+    pub(crate) fn audience_registrations(&self, audience: &ToolAudience) -> Vec<ToolRegistration> {
+        self.audience_tools
+            .get(audience)
+            .into_iter()
+            .flat_map(HashMap::values)
+            .map(|tool| ToolRegistration {
+                generation: tool.generation,
+                descriptor: tool.descriptor.clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn any_audience_contains(&self, name: &str) -> bool {
+        self.audience_tools
+            .values()
+            .any(|tools| tools.contains_key(name))
     }
 
     pub(crate) fn detach_audience_registration(

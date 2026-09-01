@@ -33,7 +33,9 @@ use crate::{
         TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
         TeamRequestFilter, TeammateHost,
     },
-    tool::{ExecutableTool, ToolAuthorizer, ToolRegistrationGeneration, ToolRegistry},
+    tool::{
+        ExecutableTool, ToolAudience, ToolAuthorizer, ToolRegistrationGeneration, ToolRegistry,
+    },
 };
 
 use super::skill::{SkillRegistry, SkillRoot};
@@ -45,6 +47,7 @@ pub struct RuntimeHandle {
     pub(crate) collaboration: CollaborationServices,
     pub(crate) tooling: ToolingServices,
     pub(crate) runtime_intrinsics_enabled: bool,
+    tool_audience: Option<ToolAudience>,
     runtime_instance_id: String,
     persisted_runtime_identifier: Arc<str>,
     lease_keys: Arc<Mutex<BTreeSet<String>>>,
@@ -129,6 +132,16 @@ impl Drop for RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    pub(crate) fn with_tool_audience(&self, audience: Option<ToolAudience>) -> Self {
+        let mut handle = self.clone();
+        handle.tool_audience = audience;
+        handle
+    }
+
+    pub(crate) fn tool_audience(&self) -> Option<&ToolAudience> {
+        self.tool_audience.as_ref()
+    }
+
     pub(crate) fn get_provider(&self, id: Option<&ProviderId>) -> Option<Arc<dyn Provider>> {
         self.provider_registry
             .read()
@@ -190,6 +203,7 @@ impl RuntimeHandle {
             collaboration: self.collaboration.clone(),
             tooling: self.tooling.clone(),
             runtime_intrinsics_enabled: self.runtime_intrinsics_enabled,
+            tool_audience: self.tool_audience.clone(),
             runtime_instance_id: self.runtime_instance_id.clone(),
             persisted_runtime_identifier: self.persisted_runtime_identifier.clone(),
             lease_keys: self.lease_keys.clone(),

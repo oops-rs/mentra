@@ -480,6 +480,11 @@ impl Agent {
         &self.config
     }
 
+    /// Returns this live agent's ephemeral tool audience, if any.
+    pub fn tool_audience(&self) -> Option<&crate::tool::ToolAudience> {
+        self.runtime.tool_audience()
+    }
+
     /// Returns the committed transcript history.
     pub fn history(&self) -> &[Message] {
         self.memory.history()

@@ -21,7 +21,8 @@ use mentra::{
         Response, Role, provider_event_stream_from_response,
     },
     runtime::{
-        CommandOutput, CommandRequest, RuntimeExecutor, RuntimePolicy, VolatileRuntimeStore,
+        CommandOutput, CommandRequest, RuntimeExecutor, RuntimePolicy, SessionOptions,
+        VolatileRuntimeStore,
     },
     tool::{
         ExecutableTool, ParallelToolContext, ToolAuthorizationDecision, ToolAuthorizationPreview,
@@ -418,8 +419,9 @@ fn runtime_builder_publicly_disables_builtin_file_tools() {
 #[test]
 fn runtime_publicly_registers_audience_tools_with_guard_lifetimes() {
     let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
-    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model.clone()]);
     let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
@@ -444,6 +446,28 @@ fn runtime_publicly_registers_audience_tools_with_guard_lifetimes() {
     assert_eq!(guard.audience(), &audience);
     assert_eq!(guard.descriptor(), &EchoTool.descriptor());
     assert!(runtime.tool_descriptor("echo_tool").is_none());
+    let agent = runtime
+        .spawn_with_config_for_audience(
+            "audience-agent",
+            model.clone(),
+            Default::default(),
+            audience.clone(),
+        )
+        .expect("spawn audience agent");
+    assert_eq!(agent.tool_audience(), Some(&audience));
+    let session = runtime
+        .create_session_with_options(
+            "audience-session",
+            model,
+            SessionOptions {
+                config: Default::default(),
+                tool_audience: Some(audience.clone()),
+                project_id: None,
+                runtime_identifier: None,
+            },
+        )
+        .expect("create audience session");
+    assert_eq!(session.tool_audience(), Some(&audience));
     assert!(
         runtime
             .try_register_tool_for_audience(audience.clone(), EchoTool)

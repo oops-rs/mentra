@@ -3428,8 +3428,15 @@ async fn teammate_inherits_tool_profile_and_internal_team_hides() {
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
+    let audience = crate::tool::ToolAudience::new("teammate-audience");
+    let _audience_guard = runtime
+        .try_register_tool_for_audience(
+            audience.clone(),
+            StaticTool::success("audience_inherited", "ok"),
+        )
+        .expect("audience tool");
     let mut lead = runtime
-        .spawn_with_config(
+        .spawn_with_config_for_audience(
             "lead",
             model,
             AgentConfig {
@@ -3447,9 +3454,11 @@ async fn teammate_inherits_tool_profile_and_internal_team_hides() {
                     "task_update",
                     "task_list",
                     "task_get",
+                    "audience_inherited",
                 ]),
                 ..Default::default()
             },
+            audience,
         )
         .unwrap();
 
@@ -3474,6 +3483,7 @@ async fn teammate_inherits_tool_profile_and_internal_team_hides() {
     assert!(child_tools.contains("task_update"));
     assert!(child_tools.contains("task_list"));
     assert!(child_tools.contains("task_get"));
+    assert!(child_tools.contains("audience_inherited"));
     assert!(!child_tools.contains("team_spawn"));
     assert!(!child_tools.contains("task_create"));
     assert!(!child_tools.contains("team_broadcast"));

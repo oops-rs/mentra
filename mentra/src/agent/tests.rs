@@ -17,5 +17,6 @@ mod stream_startup;
 mod subagent_template;
 mod support;
 mod terminal_output;
+mod tool_audience;
 mod tool_output;
 mod tool_paging;

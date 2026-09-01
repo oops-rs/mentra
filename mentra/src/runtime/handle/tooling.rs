@@ -191,15 +191,34 @@ impl RuntimeHandle {
         agent_id: &str,
     ) -> Vec<crate::tool::ToolRegistration> {
         let (registry, scoped_tools) = self.tool_registries();
-        registry
-            .registrations()
-            .into_iter()
-            .filter(|registration| {
-                scoped_tools.get(registration.name()).is_none_or(|owner| {
-                    owner.generation != registration.generation() || owner.agent_id == agent_id
-                })
-            })
-            .collect()
+        let global = registry.registrations();
+        let mut selected = HashMap::new();
+
+        for registration in &global {
+            if scoped_tools.get(registration.name()).is_some_and(|owner| {
+                owner.generation == registration.generation() && owner.agent_id == agent_id
+            }) {
+                selected.insert(registration.name().to_string(), registration.clone());
+            }
+        }
+        if let Some(audience) = self.tool_audience() {
+            for registration in registry.audience_registrations(audience) {
+                selected
+                    .entry(registration.name().to_string())
+                    .or_insert(registration);
+            }
+        }
+        for registration in global {
+            let actively_scoped = scoped_tools
+                .get(registration.name())
+                .is_some_and(|owner| owner.generation == registration.generation());
+            if !actively_scoped {
+                selected
+                    .entry(registration.name().to_string())
+                    .or_insert(registration);
+            }
+        }
+        selected.into_values().collect()
     }
 
     pub(crate) fn resolve_tool_for_agent(
@@ -208,15 +227,32 @@ impl RuntimeHandle {
         agent_id: &str,
     ) -> crate::tool::ToolResolution {
         let (registry, scoped_tools) = self.tool_registries();
-        let Some(resolved) = registry.resolve_tool(name) else {
-            return crate::tool::ToolResolution::Missing;
-        };
-        if scoped_tools.get(name).is_some_and(|owner| {
-            owner.generation == resolved.registration.generation() && owner.agent_id != agent_id
-        }) {
+        let global = registry.resolve_tool(name);
+        let mut foreign_exact = false;
+        if let Some(global) = global.as_ref()
+            && let Some(owner) = scoped_tools
+                .get(name)
+                .filter(|owner| owner.generation == global.registration.generation())
+        {
+            if owner.agent_id == agent_id {
+                return crate::tool::ToolResolution::Visible(Box::new(global.clone()));
+            }
+            foreign_exact = true;
+        }
+        if let Some(audience) = self.tool_audience()
+            && let Some(tool) = registry.resolve_audience_tool(audience, name)
+        {
+            return crate::tool::ToolResolution::Visible(Box::new(tool));
+        }
+        if let Some(global) = global
+            && !foreign_exact
+        {
+            return crate::tool::ToolResolution::Visible(Box::new(global));
+        }
+        if foreign_exact || registry.any_audience_contains(name) {
             crate::tool::ToolResolution::Hidden
         } else {
-            crate::tool::ToolResolution::Visible(Box::new(resolved))
+            crate::tool::ToolResolution::Missing
         }
     }
 

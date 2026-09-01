@@ -117,6 +117,8 @@ pub struct PersistedAgentSummary {
 #[derive(Debug, Clone, Default)]
 pub struct SessionOptions {
     pub config: AgentConfig,
+    /// Ephemeral tool audience for this live session and its descendants.
+    pub tool_audience: Option<crate::tool::ToolAudience>,
     /// Scopes this session's permission rules to a project.
     pub project_id: Option<String>,
     /// The runtime identifier this session's persisted rows are tagged with.
@@ -126,6 +128,15 @@ pub struct SessionOptions {
     /// [`list_persisted_agents`](Runtime::list_persisted_agents) that cannot
     /// separate one workspace's sessions from another's.
     pub runtime_identifier: Option<std::sync::Arc<str>>,
+}
+
+/// Ephemeral scope applied while resuming a persisted agent as a session.
+#[derive(Debug, Clone, Default)]
+pub struct SessionResumeOptions {
+    /// Project scope used by resumed session permission rules.
+    pub project_id: Option<String>,
+    /// Ephemeral tool audience for this live resume and its descendants.
+    pub tool_audience: Option<crate::tool::ToolAudience>,
 }
 
 impl Runtime {
@@ -345,8 +356,29 @@ impl Runtime {
         model: ModelInfo,
         config: AgentConfig,
     ) -> Result<Agent, RuntimeError> {
+        self.spawn_with_config_and_audience(name, model, config, None)
+    }
+
+    /// Spawns a new agent in an ephemeral tool audience.
+    pub fn spawn_with_config_for_audience(
+        &self,
+        name: impl Into<String>,
+        model: ModelInfo,
+        config: AgentConfig,
+        audience: crate::tool::ToolAudience,
+    ) -> Result<Agent, RuntimeError> {
+        self.spawn_with_config_and_audience(name, model, config, Some(audience))
+    }
+
+    fn spawn_with_config_and_audience(
+        &self,
+        name: impl Into<String>,
+        model: ModelInfo,
+        config: AgentConfig,
+        audience: Option<crate::tool::ToolAudience>,
+    ) -> Result<Agent, RuntimeError> {
         Agent::new(
-            self.handle.clone(),
+            self.handle.with_tool_audience(audience),
             model.id,
             model.context_window,
             name.into(),
@@ -362,6 +394,23 @@ impl Runtime {
 
     /// Restores a previously persisted agent by identifier.
     pub fn resume_agent(&self, agent_id: &str) -> Result<Agent, RuntimeError> {
+        self.resume_agent_with_audience(agent_id, None)
+    }
+
+    /// Restores a persisted agent in the supplied live tool audience.
+    pub fn resume_agent_for_audience(
+        &self,
+        agent_id: &str,
+        audience: crate::tool::ToolAudience,
+    ) -> Result<Agent, RuntimeError> {
+        self.resume_agent_with_audience(agent_id, Some(audience))
+    }
+
+    fn resume_agent_with_audience(
+        &self,
+        agent_id: &str,
+        audience: Option<crate::tool::ToolAudience>,
+    ) -> Result<Agent, RuntimeError> {
         let Some(state) = self.handle.store().load_agent(agent_id)? else {
             return Err(RuntimeError::Store(format!(
                 "No persisted agent with id '{agent_id}'"
@@ -375,11 +424,28 @@ impl Runtime {
             .ok_or_else(|| {
                 RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))
             })?;
-        Agent::from_loaded(self.handle.clone(), state, provider)
+        Agent::from_loaded(self.handle.with_tool_audience(audience), state, provider)
     }
 
     /// Restores every persisted agent that belongs to the provided runtime identifier.
     pub fn resume(&self, runtime_identifier: &str) -> Result<Vec<Agent>, RuntimeError> {
+        self.resume_with_audience(runtime_identifier, None)
+    }
+
+    /// Restores every persisted agent under an ephemeral tool audience.
+    pub fn resume_for_audience(
+        &self,
+        runtime_identifier: &str,
+        audience: crate::tool::ToolAudience,
+    ) -> Result<Vec<Agent>, RuntimeError> {
+        self.resume_with_audience(runtime_identifier, Some(audience))
+    }
+
+    fn resume_with_audience(
+        &self,
+        runtime_identifier: &str,
+        audience: Option<crate::tool::ToolAudience>,
+    ) -> Result<Vec<Agent>, RuntimeError> {
         let states = self
             .handle
             .store()
@@ -394,7 +460,11 @@ impl Runtime {
                 .ok_or_else(|| {
                     RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))
                 })?;
-            let agent = Agent::from_loaded(self.handle.clone(), state, provider)?;
+            let agent = Agent::from_loaded(
+                self.handle.with_tool_audience(audience.clone()),
+                state,
+                provider,
+            )?;
             if agent.is_teammate() {
                 agent.revive_teammate_actor()?;
             } else {
@@ -781,6 +851,7 @@ impl Runtime {
             model,
             SessionOptions {
                 config,
+                tool_audience: None,
                 project_id,
                 runtime_identifier: None,
             },
@@ -814,6 +885,7 @@ impl Runtime {
     ) -> Result<Session, RuntimeError> {
         let SessionOptions {
             config,
+            tool_audience,
             project_id,
             runtime_identifier,
         } = options;
@@ -834,7 +906,8 @@ impl Runtime {
         let session_handle = match runtime_identifier {
             Some(identifier) => session_handle.with_runtime_identifier(identifier),
             None => session_handle,
-        };
+        }
+        .with_tool_audience(tool_audience);
         let provider = self
             .provider_registry
             .read()
@@ -875,7 +948,7 @@ impl Runtime {
     /// Convenience wrapper around [`resume_session_with_project`](Self::resume_session_with_project)
     /// that passes `None` for `project_id`.
     pub fn resume_session(&self, agent_id: &str) -> Result<Session, RuntimeError> {
-        self.resume_session_with_project(agent_id, None)
+        self.resume_session_with_options(agent_id, SessionResumeOptions::default())
     }
 
     /// Resumes a previously persisted agent, wraps it in a session, and associates
@@ -890,6 +963,25 @@ impl Runtime {
         agent_id: &str,
         project_id: Option<String>,
     ) -> Result<Session, RuntimeError> {
+        self.resume_session_with_options(
+            agent_id,
+            SessionResumeOptions {
+                project_id,
+                tool_audience: None,
+            },
+        )
+    }
+
+    /// Resumes a persisted agent with live, non-persisted session scope.
+    pub fn resume_session_with_options(
+        &self,
+        agent_id: &str,
+        options: SessionResumeOptions,
+    ) -> Result<Session, RuntimeError> {
+        let SessionResumeOptions {
+            project_id,
+            tool_audience,
+        } = options;
         let session_id = SessionId::new();
         let (event_tx, _) = broadcast::channel(512);
         let rule_store = crate::session::RuleStore::new();
@@ -902,7 +994,8 @@ impl Runtime {
                 event_tx.clone(),
                 pending_permissions.clone(),
                 rule_store.clone(),
-            )));
+            )))
+            .with_tool_audience(tool_audience);
         let Some(state) = self.handle.store().load_agent(agent_id)? else {
             return Err(RuntimeError::Store(format!(
                 "No persisted agent with id '{agent_id}'"
