@@ -274,28 +274,26 @@ impl ToolRuntime {
     }
 
     fn schedule_call(&self, agent: &Agent, call: ToolCall) -> ScheduledToolCall {
-        if !agent.can_use_tool(&call.name) {
-            return ScheduledToolCall {
-                call,
-                tool: ScheduledTool::Unavailable,
-                execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
-            };
-        }
-
-        let Some(tool) = self.runtime.resolve_tool(&call.name) else {
-            return ScheduledToolCall {
-                call,
-                tool: ScheduledTool::Missing,
-                execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
-            };
+        let tool = match agent.resolve_tool(&call.name) {
+            crate::tool::ToolResolution::Visible(tool) => tool,
+            crate::tool::ToolResolution::Hidden => {
+                return ScheduledToolCall {
+                    call,
+                    tool: ScheduledTool::Unavailable,
+                    execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
+                };
+            }
+            crate::tool::ToolResolution::Missing => {
+                return ScheduledToolCall {
+                    call,
+                    tool: ScheduledTool::Missing,
+                    execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
+                };
+            }
         };
 
-        let declared = tool.handler.execution_category(&call.input);
-        let scheduled = if tool.descriptor().terminal && declared.allows_parallel() {
-            ToolExecutionCategory::ExclusiveLocalMutation
-        } else {
-            declared
-        };
+        let (declared, scheduled) =
+            Self::execution_categories_for_snapshot(&call, &tool.handler, tool.descriptor());
         if scheduled != declared {
             eprintln!(
                 "warning: tool '{}' is marked terminal but declared a parallel \
@@ -306,9 +304,23 @@ impl ToolRuntime {
 
         ScheduledToolCall {
             call,
-            tool: ScheduledTool::Resolved(Box::new(tool)),
+            tool: ScheduledTool::Resolved(tool),
             execution_category: scheduled,
         }
+    }
+
+    fn execution_categories_for_snapshot(
+        call: &ToolCall,
+        tool: &Arc<dyn ExecutableTool>,
+        descriptor: &RuntimeToolDescriptor,
+    ) -> (ToolExecutionCategory, ToolExecutionCategory) {
+        let declared = tool.execution_category(&call.input);
+        let scheduled = if descriptor.terminal && declared.allows_parallel() {
+            ToolExecutionCategory::ExclusiveLocalMutation
+        } else {
+            declared
+        };
+        (declared, scheduled)
     }
 
     fn note_tool_started(
@@ -534,6 +546,24 @@ impl ToolRuntime {
             }
         };
 
+        let authorization_category = if modified {
+            let (_, rewritten_category) =
+                Self::execution_categories_for_snapshot(call, tool, descriptor);
+            if execution_category.allows_parallel() && !rewritten_category.allows_parallel() {
+                let reason = format!(
+                    "pre-execution hook changed '{}' from a parallel call into {:?}; refusing to \
+                     run mutating work in the parallel lane",
+                    call.name, rewritten_category
+                );
+                return Ok(Admission::Refused(Box::new(
+                    self.hook_blocked_execution(agent, call, descriptor, &reason),
+                )));
+            }
+            rewritten_category
+        } else {
+            execution_category
+        };
+
         if let Some(error) = self.schema_violation(call, descriptor) {
             // The model is told what to fix when the shape is its own. When a
             // hook produced the shape, blaming the model would send it
@@ -553,7 +583,7 @@ impl ToolRuntime {
 
         let ctx = self.parallel_tool_context(agent, options, call);
         if let Some(result) = self
-            .authorize_tool_call(call, tool, &ctx, execution_category)
+            .authorize_tool_call(call, tool, &ctx, authorization_category)
             .await?
         {
             let execution = self.completed_execution(

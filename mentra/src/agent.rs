@@ -604,33 +604,78 @@ impl Agent {
             .expect("terminal tool gate poisoned")
             .clone();
         self.runtime
-            .tools()
-            .iter()
-            .filter(|tool| match &gate {
+            .visible_tool_registrations(&self.id)
+            .into_iter()
+            .filter(|registration| match &gate {
                 Some(gate) if !gate.keeps_tools => {
-                    gate.tool_name == tool.name
-                        && self.runtime.tool_is_visible_to_agent(&tool.name, &self.id)
+                    gate.registration.is_same_registration(registration)
                 }
-                _ => self.can_use_tool(&tool.name),
+                _ => self.registration_is_allowed(registration, gate.as_ref()),
             })
-            .cloned()
+            .map(|registration| registration.descriptor().provider.clone())
             .collect::<Vec<_>>()
             .into()
     }
 
     pub(crate) fn can_use_tool(&self, name: &str) -> bool {
-        if !self.runtime.tool_is_visible_to_agent(name, &self.id) {
-            return false;
+        matches!(
+            self.resolve_tool(name),
+            crate::tool::ToolResolution::Visible(_) | crate::tool::ToolResolution::Missing
+        )
+    }
+
+    pub(crate) fn resolve_tool(&self, name: &str) -> crate::tool::ToolResolution {
+        match self.runtime.resolve_tool_for_agent(name, &self.id) {
+            crate::tool::ToolResolution::Visible(tool) => {
+                let gate = self
+                    .terminal_tool_gate
+                    .lock()
+                    .expect("terminal tool gate poisoned")
+                    .clone();
+                if self.registration_is_allowed(&tool.registration, gate.as_ref()) {
+                    crate::tool::ToolResolution::Visible(tool)
+                } else {
+                    crate::tool::ToolResolution::Hidden
+                }
+            }
+            crate::tool::ToolResolution::Missing if self.unregistered_name_is_allowed(name) => {
+                crate::tool::ToolResolution::Missing
+            }
+            crate::tool::ToolResolution::Hidden | crate::tool::ToolResolution::Missing => {
+                crate::tool::ToolResolution::Hidden
+            }
+        }
+    }
+
+    fn registration_is_allowed(
+        &self,
+        registration: &crate::tool::ToolRegistration,
+        gate: Option<&TerminalToolGate>,
+    ) -> bool {
+        if let Some(gate) = gate {
+            if gate.registration.is_same_registration(registration) {
+                return true;
+            }
+            if gate.registration.name() == registration.name() {
+                return false;
+            }
         }
 
-        if self
+        self.name_is_allowed(registration.name(), gate)
+    }
+
+    fn unregistered_name_is_allowed(&self, name: &str) -> bool {
+        let gate = self
             .terminal_tool_gate
             .lock()
             .expect("terminal tool gate poisoned")
-            .as_ref()
-            .is_some_and(|gate| gate.tool_name == name)
-        {
-            return true;
+            .clone();
+        self.name_is_allowed(name, gate.as_ref())
+    }
+
+    fn name_is_allowed(&self, name: &str, gate: Option<&TerminalToolGate>) -> bool {
+        if gate.is_some_and(|gate| gate.registration.name() == name) {
+            return false;
         }
 
         if self.hidden_tools.contains(name) {
@@ -706,11 +751,22 @@ impl Agent {
             .expect("terminal tool gate poisoned")
             .clone();
         if let Some(gate) = gate {
+            let active = matches!(
+                self.runtime
+                    .resolve_tool_for_agent(gate.registration.name(), &self.id),
+                crate::tool::ToolResolution::Visible(tool)
+                    if tool
+                        .registration
+                        .is_same_registration(&gate.registration)
+            );
+            if !active {
+                return Some(ToolChoice::Auto);
+            }
             return Some(if gate.keeps_tools {
                 ToolChoice::Auto
             } else {
                 ToolChoice::Tool {
-                    name: gate.tool_name,
+                    name: gate.registration.name().to_string(),
                 }
             });
         }

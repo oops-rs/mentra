@@ -151,13 +151,38 @@ impl RuntimeHandle {
         drop(detached_handler);
     }
 
-    pub(crate) fn tool_is_visible_to_agent(&self, name: &str, agent_id: &str) -> bool {
-        self.tooling
-            .scoped_tools
-            .read()
-            .expect("scoped tool registry poisoned")
-            .get(name)
-            .is_none_or(|owner| owner.agent_id == agent_id)
+    pub(crate) fn visible_tool_registrations(
+        &self,
+        agent_id: &str,
+    ) -> Vec<crate::tool::ToolRegistration> {
+        let (registry, scoped_tools) = self.tool_registries();
+        registry
+            .registrations()
+            .into_iter()
+            .filter(|registration| {
+                scoped_tools.get(registration.name()).is_none_or(|owner| {
+                    owner.generation != registration.generation() || owner.agent_id == agent_id
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn resolve_tool_for_agent(
+        &self,
+        name: &str,
+        agent_id: &str,
+    ) -> crate::tool::ToolResolution {
+        let (registry, scoped_tools) = self.tool_registries();
+        let Some(resolved) = registry.resolve_tool(name) else {
+            return crate::tool::ToolResolution::Missing;
+        };
+        if scoped_tools.get(name).is_some_and(|owner| {
+            owner.generation == resolved.registration.generation() && owner.agent_id != agent_id
+        }) {
+            crate::tool::ToolResolution::Hidden
+        } else {
+            crate::tool::ToolResolution::Visible(Box::new(resolved))
+        }
     }
 
     /// Commits already-loaded skill roots and enables the `load_skill` tool.
@@ -278,6 +303,25 @@ impl RuntimeHandle {
         (registry, scoped_tools)
     }
 
+    fn tool_registries(
+        &self,
+    ) -> (
+        RwLockReadGuard<'_, ToolRegistry>,
+        RwLockReadGuard<'_, HashMap<String, ScopedToolOwner>>,
+    ) {
+        let registry = self
+            .tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned");
+        let scoped_tools = self
+            .tooling
+            .scoped_tools
+            .read()
+            .expect("scoped tool registry poisoned");
+        (registry, scoped_tools)
+    }
+
     #[cfg(test)]
     pub fn get_tool(&self, name: &str) -> Option<Arc<dyn ExecutableTool>> {
         self.tooling
@@ -294,19 +338,15 @@ impl RuntimeHandle {
             .expect("tool registry poisoned")
             .get_tool_descriptor(name)
     }
-
-    pub(crate) fn resolve_tool(&self, name: &str) -> Option<crate::tool::ResolvedTool> {
-        self.tooling
-            .tool_registry
-            .read()
-            .expect("tool registry poisoned")
-            .resolve_tool(name)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, thread, time::Duration};
+    use std::{
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use async_trait::async_trait;
 
@@ -345,6 +385,13 @@ mod tests {
     #[async_trait]
     impl ToolExecutor for ReentrantDropTool {}
 
+    fn is_visible(runtime: &RuntimeHandle, name: &str, agent_id: &str) -> bool {
+        matches!(
+            runtime.resolve_tool_for_agent(name, agent_id),
+            crate::tool::ToolResolution::Visible(_)
+        )
+    }
+
     impl Drop for ReentrantDropTool {
         fn drop(&mut self) {
             self.runtime.register_tool(NamedTool {
@@ -365,13 +412,13 @@ mod tests {
                 description: "scoped",
             },
         );
-        assert!(!runtime.tool_is_visible_to_agent("replaced", "other"));
+        assert!(!is_visible(&runtime, "replaced", "other"));
 
         runtime.register_tool(NamedTool {
             name: "replaced",
             description: "global",
         });
-        assert!(runtime.tool_is_visible_to_agent("replaced", "other"));
+        assert!(is_visible(&runtime, "replaced", "other"));
         runtime.unregister_scoped_tool("owner", &replaced);
         assert_eq!(
             runtime
@@ -403,7 +450,19 @@ mod tests {
                 description: "global",
             })
             .expect("stale ownership does not block a free global name");
-        assert!(runtime.tool_is_visible_to_agent("stale", "other"));
+        assert!(is_visible(&runtime, "stale", "other"));
+        assert_eq!(
+            runtime
+                .visible_tool_registrations("other")
+                .into_iter()
+                .find(|registration| registration.name() == "stale")
+                .expect("stale marker is ignored by the roster")
+                .descriptor()
+                .provider
+                .description
+                .as_deref(),
+            Some("global")
+        );
         runtime.unregister_scoped_tool("owner", &stale);
         assert!(runtime.get_tool_descriptor("stale").is_some());
 
@@ -420,8 +479,68 @@ mod tests {
             description: "global",
         });
         runtime.unregister_scoped_tool("owner", &removed);
-        assert!(runtime.tool_is_visible_to_agent("removed", "other"));
+        assert!(is_visible(&runtime, "removed", "other"));
         assert!(runtime.get_tool_descriptor("removed").is_some());
+    }
+
+    #[test]
+    fn roster_reader_cannot_split_a_global_to_scoped_registration() {
+        let runtime = RuntimeHandle::new(false);
+        runtime.register_tool(NamedTool {
+            name: "interleaved",
+            description: "global",
+        });
+        let scoped_lock = runtime
+            .tooling
+            .scoped_tools
+            .write()
+            .expect("scoped tool registry poisoned");
+        let writer_runtime = runtime.clone();
+        let (registered, registration_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let registration = writer_runtime.register_scoped_tool(
+                "owner",
+                NamedTool {
+                    name: "interleaved",
+                    description: "scoped",
+                },
+            );
+            registered.send(registration).expect("registration result");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.tooling.tool_registry.try_read().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "writer never acquired registry lock"
+            );
+            thread::yield_now();
+        }
+        let reader_runtime = runtime.clone();
+        let reader = thread::spawn(move || reader_runtime.visible_tool_registrations("other"));
+        drop(scoped_lock);
+
+        let registration = registration_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("scoped registration completes");
+        let foreign_roster = reader.join().expect("roster reader");
+        writer.join().expect("registration writer");
+        assert!(
+            foreign_roster
+                .iter()
+                .all(|tool| tool.name() != "interleaved"),
+            "foreign reader sees neither stale global spec nor scoped replacement"
+        );
+        let owner = runtime
+            .visible_tool_registrations("owner")
+            .into_iter()
+            .find(|tool| tool.name() == "interleaved")
+            .expect("owner sees scoped registration");
+        assert_eq!(
+            owner.descriptor().provider.description.as_deref(),
+            Some("scoped")
+        );
+        runtime.unregister_scoped_tool("owner", &registration);
     }
 
     #[test]

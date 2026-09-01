@@ -128,7 +128,7 @@ type TerminalOutputValidator = dyn Fn(&Value) -> TerminalOutputDecision + Send +
 /// to agree about which turn this is, and a name cannot say.
 #[derive(Debug, Clone)]
 pub(super) struct TerminalToolGate {
-    pub(super) tool_name: String,
+    pub(super) registration: crate::tool::ToolRegistration,
     pub(super) keeps_tools: bool,
 }
 
@@ -202,7 +202,7 @@ impl Agent {
             .terminal_tool_gate
             .lock()
             .expect("terminal tool gate poisoned") = Some(TerminalToolGate {
-            tool_name: tool_name.clone(),
+            registration: registration.clone(),
             keeps_tools,
         });
         let _guard = TerminalToolGuard {
@@ -272,7 +272,7 @@ impl Agent {
             .terminal_tool_gate
             .lock()
             .expect("terminal tool gate poisoned") = Some(TerminalToolGate {
-            tool_name: tool_name.clone(),
+            registration: registration.clone(),
             keeps_tools,
         });
         let _guard = TerminalToolGuard {
@@ -430,11 +430,10 @@ struct TerminalToolGuard {
 
 impl Drop for TerminalToolGuard {
     fn drop(&mut self) {
-        let tool_name = self.registration.name();
         let mut gate = self.gate.lock().expect("terminal tool gate poisoned");
         if gate
             .as_ref()
-            .is_some_and(|open| open.tool_name == tool_name)
+            .is_some_and(|open| open.registration.is_same_registration(&self.registration))
         {
             *gate = None;
         }

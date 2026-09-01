@@ -86,7 +86,7 @@ impl PreparedTool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ToolRegistrationGeneration(u64);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct ToolRegistration {
     generation: ToolRegistrationGeneration,
     descriptor: RuntimeToolDescriptor,
@@ -103,6 +103,10 @@ impl ToolRegistration {
 
     pub(crate) fn name(&self) -> &str {
         &self.descriptor.provider.name
+    }
+
+    pub(crate) fn is_same_registration(&self, other: &Self) -> bool {
+        self.generation == other.generation
     }
 }
 
@@ -127,6 +131,12 @@ impl ResolvedTool {
     pub(crate) fn descriptor(&self) -> &RuntimeToolDescriptor {
         self.registration.descriptor()
     }
+}
+
+pub(crate) enum ToolResolution {
+    Visible(Box<ResolvedTool>),
+    Hidden,
+    Missing,
 }
 
 /// A tool could not be registered because its name was already taken.
@@ -219,6 +229,16 @@ impl ToolRegistry {
             },
             handler: Arc::clone(&tool.handler),
         })
+    }
+
+    pub(crate) fn registrations(&self) -> Vec<ToolRegistration> {
+        self.tools
+            .values()
+            .map(|tool| ToolRegistration {
+                generation: tool.generation,
+                descriptor: tool.descriptor.clone(),
+            })
+            .collect()
     }
 
     pub(crate) fn detach_registration(

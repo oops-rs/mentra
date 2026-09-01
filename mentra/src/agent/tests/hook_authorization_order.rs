@@ -360,6 +360,45 @@ fn result_text(block: &ContentBlock) -> (String, bool) {
     }
 }
 
+async fn run_files_rewrite(
+    original: &'static str,
+    rewritten: &'static str,
+) -> (ContentBlock, Vec<ToolAuthorizationRequest>) {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "files", original),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_pre_hook(Rewrite(rewritten))
+        .with_tool_authorizer(RecordingAuthorizer {
+            allow: false,
+            requests: Arc::clone(&requests),
+        })
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    agent
+        .send(vec![ContentBlock::text("go")])
+        .await
+        .expect("run completes");
+    let result = agent
+        .history()
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .cloned()
+        .expect("tool result");
+    let requests = requests.lock().expect("requests poisoned").clone();
+    (result, requests)
+}
+
 fn rewritten() -> Value {
     serde_json::from_str(REWRITTEN).expect("fixture parses")
 }
@@ -504,6 +543,49 @@ async fn a_hook_rewriting_into_schema_invalid_input_is_refused_before_anyone_is_
         assert!(blocked[0].contains("pre-execution hook"));
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_files_hook_cannot_turn_a_parallel_read_into_an_exclusive_write() {
+    let (result, requests) = run_files_rewrite(
+        r#"{"operations":[{"op":"read","path":"missing.txt"}]}"#,
+        r#"{"operations":[{"op":"create","path":"created.txt","content":"write"}]}"#,
+    )
+    .await;
+
+    assert!(
+        requests.is_empty(),
+        "unsafe rewrite stops before authorization"
+    );
+    let (text, is_error) = result_text(&result);
+    assert!(is_error);
+    assert!(
+        text.contains("parallel lane") && text.contains("pre-execution hook"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn an_exclusive_files_call_stays_serial_when_a_hook_rewrites_it_to_a_read() {
+    let (result, requests) = run_files_rewrite(
+        r#"{"operations":[{"op":"create","path":"created.txt","content":"write"}]}"#,
+        r#"{"operations":[{"op":"read","path":"missing.txt"}]}"#,
+    )
+    .await;
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].preview.execution_category,
+        ToolExecutionCategory::ReadOnlyParallel,
+        "the approver sees the rewritten call's category while execution stays on its serial lane"
+    );
+    assert_eq!(
+        result_text(&result),
+        (
+            "Tool execution denied: authorizer said no".to_string(),
+            true
+        )
+    );
 }
 
 #[tokio::test]
