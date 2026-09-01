@@ -69,6 +69,91 @@ fn tool_results(messages: &[Message]) -> Vec<(String, String, bool)> {
         .collect()
 }
 
+#[test]
+fn paging_readers_are_exact_agent_lifetime_registrations() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let paged_a = runtime
+        .spawn_with_config("paged-a", model.clone(), paged_config(100, 100))
+        .expect("paged agent a");
+    let paged_b = runtime
+        .spawn_with_config("paged-b", model.clone(), paged_config(100, 100))
+        .expect("paged agent b");
+    let unpaged = runtime.spawn("unpaged", model).expect("unpaged agent");
+    let runtime_handle = paged_a.runtime_handle();
+
+    for agent in [&paged_a, &paged_b] {
+        assert!(
+            agent
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "read_tool_result")
+        );
+    }
+    assert!(
+        unpaged
+            .tools()
+            .iter()
+            .all(|tool| tool.name != "read_tool_result")
+    );
+    assert!(runtime.tool_descriptor("read_tool_result").is_none());
+    {
+        let registry = runtime_handle
+            .tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned");
+        assert!(
+            registry
+                .resolve_agent_tool(paged_a.id(), "read_tool_result")
+                .is_some()
+        );
+        assert!(
+            registry
+                .resolve_agent_tool(paged_b.id(), "read_tool_result")
+                .is_some()
+        );
+        assert!(
+            registry
+                .resolve_agent_tool(unpaged.id(), "read_tool_result")
+                .is_none()
+        );
+    }
+
+    let paged_a_id = paged_a.id().to_string();
+    drop(paged_a);
+    assert!(
+        runtime_handle
+            .tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned")
+            .resolve_agent_tool(&paged_a_id, "read_tool_result")
+            .is_none()
+    );
+    assert!(
+        paged_b
+            .tools()
+            .iter()
+            .any(|tool| tool.name == "read_tool_result")
+    );
+    let paged_b_id = paged_b.id().to_string();
+    drop(paged_b);
+    assert!(
+        runtime_handle
+            .tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned")
+            .resolve_agent_tool(&paged_b_id, "read_tool_result")
+            .is_none()
+    );
+}
+
 fn multi_tool_use_stream(model: &str, calls: &[(&str, &str, &str)]) -> StreamScript {
     let mut events = vec![ProviderEvent::MessageStarted {
         id: "msg-multi-tool".to_string(),

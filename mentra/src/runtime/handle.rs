@@ -33,9 +33,7 @@ use crate::{
         TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
         TeamRequestFilter, TeammateHost,
     },
-    tool::{
-        ExecutableTool, ToolAudience, ToolAuthorizer, ToolRegistrationGeneration, ToolRegistry,
-    },
+    tool::{ExecutableTool, ToolAudience, ToolAuthorizer, ToolRegistry},
 };
 
 use super::skill::{SkillRegistry, SkillRoot};
@@ -82,15 +80,8 @@ pub(crate) struct CollaborationServices {
 #[derive(Clone)]
 pub(crate) struct ToolingServices {
     pub(crate) tool_registry: Arc<RwLock<ToolRegistry>>,
-    pub(crate) scoped_tools: Arc<RwLock<HashMap<String, ScopedToolOwner>>>,
     pub(crate) skills: Arc<RwLock<SkillRegistry>>,
     pub(crate) app_contexts: Arc<RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ScopedToolOwner {
-    pub(crate) agent_id: String,
-    pub(crate) generation: ToolRegistrationGeneration,
 }
 
 #[derive(Clone)]

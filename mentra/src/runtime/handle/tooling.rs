@@ -3,12 +3,11 @@ use super::*;
 impl RuntimeHandle {
     pub fn configure_file_tools(&self, profile: crate::tool::FileToolProfile) {
         let detached_handlers = {
-            let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let detached_handlers = registry.configure_file_tools(profile);
-            for name in ["files", "read", "ls", "grep", "glob", "write", "edit"] {
-                scoped_tools.remove(name);
-            }
-            detached_handlers
+            self.tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned")
+                .configure_file_tools(profile)
         };
         drop(detached_handlers);
     }
@@ -52,12 +51,13 @@ impl RuntimeHandle {
         T: ExecutableTool + 'static,
     {
         let prepared = ToolRegistry::prepare_tool(tool);
-        let name = prepared.name().to_string();
         let displaced_handlers = {
-            let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let (_, displaced_handlers) = registry.insert_prepared(prepared).into_parts();
-            scoped_tools.remove(&name);
-            displaced_handlers
+            let mut registry = self
+                .tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned");
+            registry.insert_prepared(prepared).into_parts().1
         };
         drop(displaced_handlers);
     }
@@ -68,19 +68,17 @@ impl RuntimeHandle {
         T: ExecutableTool + 'static,
     {
         let prepared = ToolRegistry::prepare_tool(tool);
-        let name = prepared.name().to_string();
         let outcome = {
-            let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            match registry.try_insert_prepared(prepared) {
-                Ok(insertion) => {
-                    scoped_tools.remove(&name);
-                    Ok(insertion.into_parts().1)
-                }
-                Err(error) => Err(error),
-            }
+            let mut registry = self
+                .tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned");
+            registry.try_insert_prepared(prepared)
         };
         match outcome {
-            Ok(displaced_handlers) => {
+            Ok(insertion) => {
+                let (_, displaced_handlers) = insertion.into_parts();
                 debug_assert!(displaced_handlers.is_empty());
                 Ok(())
             }
@@ -128,78 +126,56 @@ impl RuntimeHandle {
     /// Removes a tool by name, reporting whether one was there.
     pub fn unregister_tool_by_name(&self, name: &str) -> bool {
         let detached_handler = {
-            let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let detached_handler = registry.detach_tool(name);
-            scoped_tools.remove(name);
-            detached_handler
+            self.tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned")
+                .detach_tool(name)
         };
         let removed = detached_handler.is_some();
         drop(detached_handler);
         removed
     }
 
-    pub(crate) fn register_scoped_tool<T>(
+    pub(crate) fn register_agent_tool<T>(
         &self,
         agent_id: &str,
         tool: T,
-    ) -> crate::tool::ToolRegistration
+    ) -> crate::tool::AgentToolRegistration
     where
         T: ExecutableTool + 'static,
     {
         let prepared = ToolRegistry::prepare_tool(tool);
-        let name = prepared.name().to_string();
         let (registration, displaced_handlers) = {
-            let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let (registration, displaced_handlers) =
-                registry.insert_prepared(prepared).into_parts();
-            scoped_tools.insert(
-                name,
-                ScopedToolOwner {
-                    agent_id: agent_id.to_string(),
-                    generation: registration.generation(),
-                },
-            );
-            (registration, displaced_handlers)
+            let mut registry = self
+                .tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned");
+            registry
+                .insert_agent_prepared(agent_id, prepared)
+                .into_parts()
         };
         drop(displaced_handlers);
-        registration
-    }
-
-    pub(crate) fn unregister_scoped_tool(
-        &self,
-        agent_id: &str,
-        registration: &crate::tool::ToolRegistration,
-    ) {
-        let detached_handler = {
-            let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let owner_matches = scoped_tools.get(registration.name()).is_some_and(|owner| {
-                owner.agent_id == agent_id && owner.generation == registration.generation()
-            });
-            if !owner_matches {
-                None
-            } else {
-                let detached_handler = registry.detach_registration(registration);
-                scoped_tools.remove(registration.name());
-                detached_handler
-            }
-        };
-        drop(detached_handler);
+        crate::tool::AgentToolRegistration::new(
+            Arc::downgrade(&self.tooling.tool_registry),
+            agent_id.to_string(),
+            registration,
+        )
     }
 
     pub(crate) fn visible_tool_registrations(
         &self,
         agent_id: &str,
     ) -> Vec<crate::tool::ToolRegistration> {
-        let (registry, scoped_tools) = self.tool_registries();
-        let global = registry.registrations();
+        let registry = self
+            .tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned");
         let mut selected = HashMap::new();
-
-        for registration in &global {
-            if scoped_tools.get(registration.name()).is_some_and(|owner| {
-                owner.generation == registration.generation() && owner.agent_id == agent_id
-            }) {
-                selected.insert(registration.name().to_string(), registration.clone());
-            }
+        for registration in registry.agent_registrations(agent_id) {
+            selected.insert(registration.name().to_string(), registration);
         }
         if let Some(audience) = self.tool_audience() {
             for registration in registry.audience_registrations(audience) {
@@ -208,15 +184,10 @@ impl RuntimeHandle {
                     .or_insert(registration);
             }
         }
-        for registration in global {
-            let actively_scoped = scoped_tools
-                .get(registration.name())
-                .is_some_and(|owner| owner.generation == registration.generation());
-            if !actively_scoped {
-                selected
-                    .entry(registration.name().to_string())
-                    .or_insert(registration);
-            }
+        for registration in registry.registrations() {
+            selected
+                .entry(registration.name().to_string())
+                .or_insert(registration);
         }
         let mut registrations = selected.into_values().collect::<Vec<_>>();
         registrations.sort_by(|left, right| left.name().cmp(right.name()));
@@ -228,30 +199,23 @@ impl RuntimeHandle {
         name: &str,
         agent_id: &str,
     ) -> crate::tool::ToolResolution {
-        let (registry, scoped_tools) = self.tool_registries();
-        let global = registry.resolve_tool(name);
-        let mut foreign_exact = false;
-        if let Some(global) = global.as_ref()
-            && let Some(owner) = scoped_tools
-                .get(name)
-                .filter(|owner| owner.generation == global.registration.generation())
-        {
-            if owner.agent_id == agent_id {
-                return crate::tool::ToolResolution::Visible(Box::new(global.clone()));
-            }
-            foreign_exact = true;
+        let registry = self
+            .tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned");
+        if let Some(tool) = registry.resolve_agent_tool(agent_id, name) {
+            return crate::tool::ToolResolution::Visible(Box::new(tool));
         }
         if let Some(audience) = self.tool_audience()
             && let Some(tool) = registry.resolve_audience_tool(audience, name)
         {
             return crate::tool::ToolResolution::Visible(Box::new(tool));
         }
-        if let Some(global) = global
-            && !foreign_exact
-        {
+        if let Some(global) = registry.resolve_tool(name) {
             return crate::tool::ToolResolution::Visible(Box::new(global));
         }
-        if foreign_exact || registry.any_audience_contains(name) {
+        if registry.any_agent_contains(name) || registry.any_audience_contains(name) {
             crate::tool::ToolResolution::Hidden
         } else {
             crate::tool::ToolResolution::Missing
@@ -270,10 +234,13 @@ impl RuntimeHandle {
 
         self.skill_registry_mut().insert(roots);
         let displaced_handlers = {
-            let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-            let (registration, displaced_handlers) = registry.register_skill_tool().into_parts();
-            scoped_tools.remove(registration.name());
-            displaced_handlers
+            self.tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned")
+                .register_skill_tool()
+                .into_parts()
+                .1
         };
         drop(displaced_handlers);
     }
@@ -301,10 +268,11 @@ impl RuntimeHandle {
 
         if removed && empty {
             let detached_handler = {
-                let (mut registry, mut scoped_tools) = self.tool_registries_mut();
-                let detached_handler = registry.unregister_skill_tool();
-                scoped_tools.remove(crate::tool::LOAD_SKILL_TOOL_NAME);
-                detached_handler
+                self.tooling
+                    .tool_registry
+                    .write()
+                    .expect("tool registry poisoned")
+                    .unregister_skill_tool()
             };
             drop(detached_handler);
         }
@@ -357,44 +325,6 @@ impl RuntimeHandle {
             .expect("skill registry poisoned")
     }
 
-    fn tool_registries_mut(
-        &self,
-    ) -> (
-        RwLockWriteGuard<'_, ToolRegistry>,
-        RwLockWriteGuard<'_, HashMap<String, ScopedToolOwner>>,
-    ) {
-        let registry = self
-            .tooling
-            .tool_registry
-            .write()
-            .expect("tool registry poisoned");
-        let scoped_tools = self
-            .tooling
-            .scoped_tools
-            .write()
-            .expect("scoped tool registry poisoned");
-        (registry, scoped_tools)
-    }
-
-    fn tool_registries(
-        &self,
-    ) -> (
-        RwLockReadGuard<'_, ToolRegistry>,
-        RwLockReadGuard<'_, HashMap<String, ScopedToolOwner>>,
-    ) {
-        let registry = self
-            .tooling
-            .tool_registry
-            .read()
-            .expect("tool registry poisoned");
-        let scoped_tools = self
-            .tooling
-            .scoped_tools
-            .read()
-            .expect("scoped tool registry poisoned");
-        (registry, scoped_tools)
-    }
-
     #[cfg(test)]
     pub fn get_tool(&self, name: &str) -> Option<Arc<dyn ExecutableTool>> {
         self.tooling
@@ -423,7 +353,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
         thread,
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     use async_trait::async_trait;
@@ -511,9 +441,9 @@ mod tests {
     }
 
     #[test]
-    fn global_mutations_clear_scoped_ownership_without_empowering_old_guards() {
+    fn global_mutations_evict_agent_entries_without_empowering_old_guards() {
         let runtime = RuntimeHandle::new(false);
-        let replaced = runtime.register_scoped_tool(
+        let replaced = runtime.register_agent_tool(
             "owner",
             NamedTool {
                 name: "replaced",
@@ -527,7 +457,7 @@ mod tests {
             description: "global",
         });
         assert!(is_visible(&runtime, "replaced", "other"));
-        runtime.unregister_scoped_tool("owner", &replaced);
+        assert!(!replaced.unregister());
         assert_eq!(
             runtime
                 .get_tool_descriptor("replaced")
@@ -538,57 +468,80 @@ mod tests {
             Some("global")
         );
 
-        let stale = runtime.register_scoped_tool(
+        let occupied = runtime.register_agent_tool(
             "owner",
             NamedTool {
-                name: "stale",
-                description: "scoped",
+                name: "occupied",
+                description: "agent",
             },
         );
-        let detached_handler = runtime
-            .tooling
-            .tool_registry
-            .write()
-            .expect("tool registry poisoned")
-            .detach_registration(&stale);
-        drop(detached_handler);
-        runtime
-            .try_register_tool(NamedTool {
-                name: "stale",
-                description: "global",
-            })
-            .expect("stale ownership does not block a free global name");
-        assert!(is_visible(&runtime, "stale", "other"));
-        assert_eq!(
+        assert!(
             runtime
-                .visible_tool_registrations("other")
-                .into_iter()
-                .find(|registration| registration.name() == "stale")
-                .expect("stale marker is ignored by the roster")
-                .descriptor()
-                .provider
-                .description
-                .as_deref(),
-            Some("global")
+                .try_register_tool(NamedTool {
+                    name: "occupied",
+                    description: "global",
+                })
+                .is_err()
         );
-        runtime.unregister_scoped_tool("owner", &stale);
-        assert!(runtime.get_tool_descriptor("stale").is_some());
+        assert!(occupied.unregister());
 
-        let removed = runtime.register_scoped_tool(
-            "owner",
-            NamedTool {
-                name: "removed",
-                description: "scoped",
-            },
-        );
-        assert!(runtime.unregister_tool_by_name("removed"));
         runtime.register_tool(NamedTool {
-            name: "removed",
+            name: "coexists",
             description: "global",
         });
-        runtime.unregister_scoped_tool("owner", &removed);
-        assert!(is_visible(&runtime, "removed", "other"));
-        assert!(runtime.get_tool_descriptor("removed").is_some());
+        let exact = runtime.register_agent_tool(
+            "owner",
+            NamedTool {
+                name: "coexists",
+                description: "agent",
+            },
+        );
+        assert!(runtime.unregister_tool_by_name("coexists"));
+        assert!(is_visible(&runtime, "coexists", "owner"));
+        assert!(!is_visible(&runtime, "coexists", "other"));
+        assert!(exact.unregister());
+    }
+
+    #[test]
+    fn same_name_agent_registrations_coexist_and_drop_independently() {
+        let runtime = RuntimeHandle::new(false);
+        let first = runtime.register_agent_tool(
+            "first",
+            NamedTool {
+                name: "agent_shared",
+                description: "first",
+            },
+        );
+        let second = runtime.register_agent_tool(
+            "second",
+            NamedTool {
+                name: "agent_shared",
+                description: "second",
+            },
+        );
+        for (agent_id, expected) in [("first", "first"), ("second", "second")] {
+            let crate::tool::ToolResolution::Visible(tool) =
+                runtime.resolve_tool_for_agent("agent_shared", agent_id)
+            else {
+                panic!("{agent_id} resolves its own tool");
+            };
+            assert_eq!(
+                tool.descriptor().provider.description.as_deref(),
+                Some(expected)
+            );
+        }
+        assert!(!is_visible(&runtime, "agent_shared", "other"));
+        assert!(
+            runtime
+                .try_register_tool(NamedTool {
+                    name: "agent_shared",
+                    description: "safe global",
+                })
+                .is_err()
+        );
+        assert!(first.unregister());
+        assert!(is_visible(&runtime, "agent_shared", "second"));
+        assert!(second.unregister());
     }
 
     #[test]
@@ -753,66 +706,6 @@ mod tests {
     }
 
     #[test]
-    fn roster_reader_cannot_split_a_global_to_scoped_registration() {
-        let runtime = RuntimeHandle::new(false);
-        runtime.register_tool(NamedTool {
-            name: "interleaved",
-            description: "global",
-        });
-        let scoped_lock = runtime
-            .tooling
-            .scoped_tools
-            .write()
-            .expect("scoped tool registry poisoned");
-        let writer_runtime = runtime.clone();
-        let (registered, registration_rx) = mpsc::channel();
-        let writer = thread::spawn(move || {
-            let registration = writer_runtime.register_scoped_tool(
-                "owner",
-                NamedTool {
-                    name: "interleaved",
-                    description: "scoped",
-                },
-            );
-            registered.send(registration).expect("registration result");
-        });
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while runtime.tooling.tool_registry.try_read().is_ok() {
-            assert!(
-                Instant::now() < deadline,
-                "writer never acquired registry lock"
-            );
-            thread::yield_now();
-        }
-        let reader_runtime = runtime.clone();
-        let reader = thread::spawn(move || reader_runtime.visible_tool_registrations("other"));
-        drop(scoped_lock);
-
-        let registration = registration_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("scoped registration completes");
-        let foreign_roster = reader.join().expect("roster reader");
-        writer.join().expect("registration writer");
-        assert!(
-            foreign_roster
-                .iter()
-                .all(|tool| tool.name() != "interleaved"),
-            "foreign reader sees neither stale global spec nor scoped replacement"
-        );
-        let owner = runtime
-            .visible_tool_registrations("owner")
-            .into_iter()
-            .find(|tool| tool.name() == "interleaved")
-            .expect("owner sees scoped registration");
-        assert_eq!(
-            owner.descriptor().provider.description.as_deref(),
-            Some("scoped")
-        );
-        runtime.unregister_scoped_tool("owner", &registration);
-    }
-
-    #[test]
     fn replacing_a_tool_drops_its_handler_after_registry_unlock() {
         let runtime = RuntimeHandle::new(false);
         let (dropped, observed) = mpsc::channel();
@@ -838,28 +731,53 @@ mod tests {
     }
 
     #[test]
-    fn scoped_unregister_drops_its_handler_after_registry_unlock() {
+    fn agent_guard_drops_its_handler_after_registry_unlock() {
         let runtime = RuntimeHandle::new(false);
         let (dropped, observed) = mpsc::channel();
-        let registration = runtime.register_scoped_tool(
+        let registration = runtime.register_agent_tool(
             "owner",
             ReentrantDropTool {
                 runtime: runtime.clone(),
-                name: "reentrant_scoped",
-                probe_name: "scoped_drop_probe",
+                name: "reentrant_agent",
+                probe_name: "agent_drop_probe",
                 dropped,
             },
         );
 
-        let worker_runtime = runtime.clone();
-        let worker = thread::spawn(move || {
-            worker_runtime.unregister_scoped_tool("owner", &registration);
-        });
+        let worker = thread::spawn(move || drop(registration));
         observed
             .recv_timeout(Duration::from_secs(5))
-            .expect("reentrant Drop must not deadlock on scoped registry locks");
+            .expect("reentrant Drop must not deadlock on agent registry lock");
         worker.join().expect("unregister worker");
-        assert!(runtime.get_tool_descriptor("scoped_drop_probe").is_some());
+        assert!(runtime.get_tool_descriptor("agent_drop_probe").is_some());
+    }
+
+    #[test]
+    fn agent_guard_recovers_a_poisoned_registry_without_panicking() {
+        let runtime = RuntimeHandle::new(false);
+        let guard = runtime.register_agent_tool(
+            "owner",
+            NamedTool {
+                name: "poisoned_agent_tool",
+                description: "registered",
+            },
+        );
+        let registry = Arc::clone(&runtime.tooling.tool_registry);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _lock = registry.write().expect("unpoisoned before test");
+                panic!("poison registry");
+            }))
+            .is_err()
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(guard))).is_ok());
+        assert!(
+            registry
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .resolve_agent_tool("owner", "poisoned_agent_tool")
+                .is_none()
+        );
     }
 
     #[test]

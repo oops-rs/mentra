@@ -242,6 +242,61 @@ impl Drop for AudienceToolRegistration {
     }
 }
 
+#[must_use = "dropping the guard immediately unregisters the agent-scoped tool"]
+pub(crate) struct AgentToolRegistration {
+    registry: Weak<RwLock<ToolRegistry>>,
+    agent_id: String,
+    registration: ToolRegistration,
+    active: bool,
+}
+
+impl AgentToolRegistration {
+    pub(crate) fn new(
+        registry: Weak<RwLock<ToolRegistry>>,
+        agent_id: String,
+        registration: ToolRegistration,
+    ) -> Self {
+        Self {
+            registry,
+            agent_id,
+            registration,
+            active: true,
+        }
+    }
+
+    pub(crate) fn registration(&self) -> &ToolRegistration {
+        &self.registration
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unregister(mut self) -> bool {
+        self.unregister_inner()
+    }
+
+    fn unregister_inner(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.active = false;
+        let Some(registry) = self.registry.upgrade() else {
+            return false;
+        };
+        let detached_handler = {
+            let mut registry = registry.write().unwrap_or_else(|error| error.into_inner());
+            registry.detach_agent_registration(&self.agent_id, &self.registration)
+        };
+        let removed = detached_handler.is_some();
+        drop(detached_handler);
+        removed
+    }
+}
+
+impl Drop for AgentToolRegistration {
+    fn drop(&mut self) {
+        self.unregister_inner();
+    }
+}
+
 pub(crate) struct ToolInsertion {
     registration: ToolRegistration,
     displaced_handlers: Vec<Arc<dyn ExecutableTool>>,
@@ -282,6 +337,7 @@ pub struct ToolNameCollision {
 /// Registry of tools available to a runtime instance.
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
+    agent_tools: HashMap<String, HashMap<String, RegisteredTool>>,
     audience_tools: HashMap<ToolAudience, HashMap<String, RegisteredTool>>,
     provider_specs: Arc<[ProviderToolSpec]>,
 }
@@ -374,6 +430,7 @@ impl ToolRegistry {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn detach_registration(
         &mut self,
         registration: &ToolRegistration,
@@ -385,7 +442,6 @@ impl ToolRegistry {
         if !matches_generation {
             return None;
         }
-
         self.detach_tool(registration.name())
     }
 
@@ -441,6 +497,12 @@ impl ToolRegistry {
             }
             !tools.is_empty()
         });
+        self.agent_tools.retain(|_, tools| {
+            if let Some(tool) = tools.remove(registration.name()) {
+                displaced_handlers.push(tool.handler);
+            }
+            !tools.is_empty()
+        });
         self.refresh_provider_specs();
         ToolInsertion {
             registration,
@@ -453,6 +515,10 @@ impl ToolRegistry {
         prepared: PreparedTool,
     ) -> Result<ToolInsertion, (ToolNameCollision, Box<PreparedTool>)> {
         if self.tools.contains_key(prepared.name())
+            || self
+                .agent_tools
+                .values()
+                .any(|tools| tools.contains_key(prepared.name()))
             || self
                 .audience_tools
                 .values()
@@ -521,6 +587,87 @@ impl ToolRegistry {
             registration,
             displaced_handlers,
         }
+    }
+
+    pub(crate) fn insert_agent_prepared(
+        &mut self,
+        agent_id: &str,
+        prepared: PreparedTool,
+    ) -> ToolInsertion {
+        let generation = next_tool_registration_generation();
+        let registration = ToolRegistration {
+            generation,
+            descriptor: prepared.descriptor.clone(),
+        };
+        let displaced_handlers = self
+            .agent_tools
+            .entry(agent_id.to_string())
+            .or_default()
+            .insert(
+                registration.name().to_string(),
+                RegisteredTool {
+                    generation,
+                    descriptor: prepared.descriptor,
+                    handler: prepared.handler,
+                },
+            )
+            .map(|tool| tool.handler)
+            .into_iter()
+            .collect();
+        ToolInsertion {
+            registration,
+            displaced_handlers,
+        }
+    }
+
+    pub(crate) fn resolve_agent_tool(&self, agent_id: &str, name: &str) -> Option<ResolvedTool> {
+        self.agent_tools
+            .get(agent_id)?
+            .get(name)
+            .map(|tool| ResolvedTool {
+                registration: ToolRegistration {
+                    generation: tool.generation,
+                    descriptor: tool.descriptor.clone(),
+                },
+                handler: Arc::clone(&tool.handler),
+            })
+    }
+
+    pub(crate) fn agent_registrations(&self, agent_id: &str) -> Vec<ToolRegistration> {
+        self.agent_tools
+            .get(agent_id)
+            .into_iter()
+            .flat_map(HashMap::values)
+            .map(|tool| ToolRegistration {
+                generation: tool.generation,
+                descriptor: tool.descriptor.clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn any_agent_contains(&self, name: &str) -> bool {
+        self.agent_tools
+            .values()
+            .any(|tools| tools.contains_key(name))
+    }
+
+    pub(crate) fn detach_agent_registration(
+        &mut self,
+        agent_id: &str,
+        registration: &ToolRegistration,
+    ) -> Option<Arc<dyn ExecutableTool>> {
+        let tools = self.agent_tools.get_mut(agent_id)?;
+        let matches_generation = tools
+            .get(registration.name())
+            .is_some_and(|tool| tool.generation == registration.generation());
+        if !matches_generation {
+            return None;
+        }
+        let removed = tools.remove(registration.name())?;
+        if tools.is_empty() {
+            self.agent_tools.remove(agent_id);
+        }
+        Some(removed.handler)
     }
 
     pub(crate) fn resolve_audience_tool(

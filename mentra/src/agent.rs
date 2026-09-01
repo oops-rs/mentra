@@ -106,6 +106,9 @@ pub struct Agent {
     /// `tool_use_id` — the backing store for `read_tool_result`. Empty and
     /// unused unless `config.tool_result_paging` is set.
     paged_tool_results: crate::tool::paging::PagedToolResults,
+    /// Exact-agent registration for `read_tool_result`, retained only while
+    /// this paging agent is live.
+    _tool_result_reader: Option<crate::tool::AgentToolRegistration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,6 +295,7 @@ impl Agent {
             idle_requested: false,
             current_run_id: None,
             paged_tool_results: Default::default(),
+            _tool_result_reader: None,
         };
         agent
             .runtime
@@ -381,6 +385,7 @@ impl Agent {
             idle_requested: state.record.idle_requested,
             current_run_id: None,
             paged_tool_results: Default::default(),
+            _tool_result_reader: None,
         };
         let execution_config = AgentExecutionConfig {
             name: agent.name.clone(),
@@ -695,11 +700,8 @@ impl Agent {
             return self.teammate_identity.is_some();
         }
 
-        // The pager's reader exists for the model only while there can be
-        // paged results to read. Registration is runtime-wide (the registry
-        // is keyed by tool name), so this per-agent gate — not registration —
-        // is what keeps the tool out of an unpaged agent's roster, even when
-        // a paging agent shares the same runtime.
+        // The pager's reader is registered in this exact agent's namespace;
+        // this config check keeps name-level policy aligned with that lifetime.
         if name == crate::tool::paging::READ_TOOL_RESULT_TOOL {
             return self.config.tool_result_paging.is_some();
         }
@@ -711,14 +713,13 @@ impl Agent {
         self.runtime.clone()
     }
 
-    /// Registers the pager's reader when this agent enables paging. The tool
-    /// itself is stateless — it resolves both the retained results and the
-    /// page size from the calling agent's context — so one registration
-    /// serves every paging agent on the runtime, and re-registering is a
-    /// no-op.
-    fn register_tool_result_pager(&self) {
+    /// Registers this paging agent's exact reader for its live lifetime.
+    fn register_tool_result_pager(&mut self) {
         if self.config.tool_result_paging.is_some() {
-            self.runtime.register_tool(crate::tool::ReadToolResultTool);
+            self._tool_result_reader = Some(
+                self.runtime
+                    .register_agent_tool(&self.id, crate::tool::ReadToolResultTool),
+            );
         }
     }
 

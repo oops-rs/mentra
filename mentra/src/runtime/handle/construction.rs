@@ -111,7 +111,6 @@ impl RuntimeHandle {
             },
             tooling: ToolingServices {
                 tool_registry: Arc::new(RwLock::new(tool_registry)),
-                scoped_tools: Arc::new(RwLock::new(HashMap::new())),
                 skills: Arc::new(RwLock::new(SkillRegistry::default())),
                 app_contexts: Arc::new(RwLock::new(HashMap::new())),
             },

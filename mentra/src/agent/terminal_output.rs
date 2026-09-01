@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::{
     ContentBlock, Message, Role,
     error::RuntimeError,
-    runtime::{RunOptions, RuntimeHandle},
+    runtime::RunOptions,
     tool::{
         ToolContext, ToolDefinition, ToolDurability, ToolExecutor, ToolOutput, ToolSideEffectLevel,
         ToolSpec,
@@ -197,17 +197,15 @@ impl Agent {
             validator: None,
             accepted_call_id: None,
         };
-        let registration = self.runtime.register_scoped_tool(&self.id, terminal_tool);
+        let registration = self.runtime.register_agent_tool(&self.id, terminal_tool);
         *self
             .terminal_tool_gate
             .lock()
             .expect("terminal tool gate poisoned") = Some(TerminalToolGate {
-            registration: registration.clone(),
+            registration: registration.registration().clone(),
             keeps_tools,
         });
         let _guard = TerminalToolGuard {
-            runtime: self.runtime.clone(),
-            agent_id: self.id.clone(),
             registration,
             gate: Arc::clone(&self.terminal_tool_gate),
         };
@@ -267,17 +265,15 @@ impl Agent {
             validator: Some(Arc::new(validator)),
             accepted_call_id: Some(Arc::clone(&accepted_call_id)),
         };
-        let registration = self.runtime.register_scoped_tool(&self.id, terminal_tool);
+        let registration = self.runtime.register_agent_tool(&self.id, terminal_tool);
         *self
             .terminal_tool_gate
             .lock()
             .expect("terminal tool gate poisoned") = Some(TerminalToolGate {
-            registration: registration.clone(),
+            registration: registration.registration().clone(),
             keeps_tools,
         });
         let _guard = TerminalToolGuard {
-            runtime: self.runtime.clone(),
-            agent_id: self.id.clone(),
             registration,
             gate: Arc::clone(&self.terminal_tool_gate),
         };
@@ -422,24 +418,20 @@ impl ToolExecutor for TerminalOutputTool {
 }
 
 struct TerminalToolGuard {
-    runtime: RuntimeHandle,
-    agent_id: String,
-    registration: crate::tool::ToolRegistration,
+    registration: crate::tool::AgentToolRegistration,
     gate: Arc<Mutex<Option<TerminalToolGate>>>,
 }
 
 impl Drop for TerminalToolGuard {
     fn drop(&mut self) {
         let mut gate = self.gate.lock().expect("terminal tool gate poisoned");
-        if gate
-            .as_ref()
-            .is_some_and(|open| open.registration.is_same_registration(&self.registration))
-        {
+        if gate.as_ref().is_some_and(|open| {
+            open.registration
+                .is_same_registration(self.registration.registration())
+        }) {
             *gate = None;
         }
         drop(gate);
-        self.runtime
-            .unregister_scoped_tool(&self.agent_id, &self.registration);
     }
 }
 

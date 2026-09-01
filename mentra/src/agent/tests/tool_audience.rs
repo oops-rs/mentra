@@ -234,6 +234,7 @@ async fn roster_order_and_same_name_precedence_are_stable() {
         .expect("build runtime");
     runtime.register_tool(StaticTool::success("z_global", "z"));
     runtime.register_tool(StaticTool::success("a_global", "a"));
+    runtime.register_tool(LayeredTool { label: "global" });
     let audience = ToolAudience::new("layered");
     let mut exact = runtime
         .spawn_with_config_for_audience(
@@ -244,12 +245,7 @@ async fn roster_order_and_same_name_precedence_are_stable() {
         )
         .expect("exact agent");
     let handle = exact.runtime_handle();
-    let exact_registration = handle.register_scoped_tool(
-        exact.id(),
-        LayeredTool {
-            label: "exact/global",
-        },
-    );
+    let exact_registration = handle.register_agent_tool(exact.id(), LayeredTool { label: "exact" });
     let prepared = crate::tool::ToolRegistry::prepare_tool(LayeredTool { label: "audience" });
     let displaced = {
         let mut registry = handle
@@ -298,12 +294,6 @@ async fn roster_order_and_same_name_precedence_are_stable() {
         .await
         .expect("audience run");
 
-    handle
-        .tooling
-        .scoped_tools
-        .write()
-        .expect("scoped tools poisoned")
-        .remove("layered_tool");
     let mut audience_fallback = runtime
         .spawn_with_config_for_audience(
             "audience-fallback",
@@ -322,19 +312,19 @@ async fn roster_order_and_same_name_precedence_are_stable() {
         .await
         .expect("global run");
 
-    assert_eq!(result_for(&exact, "exact-call"), "exact/global");
+    assert_eq!(result_for(&exact, "exact-call"), "exact");
     assert_eq!(result_for(&audience_agent, "audience-call"), "audience");
     assert_eq!(
         result_for(&audience_fallback, "audience-fallback-call"),
         "audience"
     );
-    assert_eq!(result_for(&global, "global-call"), "exact/global");
+    assert_eq!(result_for(&global, "global-call"), "global");
     let requests = provider_handle.recorded_requests().await;
     for (index, expected) in [
-        (0, "exact/global"),
+        (0, "exact"),
         (2, "audience"),
         (4, "audience"),
-        (6, "exact/global"),
+        (6, "global"),
     ] {
         assert_eq!(
             requests[index]
@@ -345,7 +335,7 @@ async fn roster_order_and_same_name_precedence_are_stable() {
             Some(expected)
         );
     }
-    handle.unregister_scoped_tool(exact.id(), &exact_registration);
+    assert!(exact_registration.unregister());
 }
 
 #[tokio::test]
