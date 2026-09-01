@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Hosts can register live tool namespaces for explicit audiences
+
+- `ToolAudience` and `Runtime::try_register_tool_for_audience` let a shared
+  runtime expose different implementations of the same tool name to different
+  live audiences. Resolution is exact-agent intrinsic, then matching audience,
+  then global; a foreign audience's tool is unavailable even when a model
+  guesses its name ([#47](https://github.com/oops-rs/mentra/issues/47)).
+- Audience registration returns a non-cloneable `AudienceToolRegistration`.
+  Keeping the guard keeps that exact registration live; dropping it or calling
+  `unregister` removes only its generation. Existing sessions see registration
+  and removal immediately, and a call already admitted against the removed
+  generation may finish.
+- Audiences are live execution scope, not persisted agent configuration.
+  Creation and resume APIs must receive the audience explicitly; disposable
+  subagents and teammates inherit it from their live parent runtime handle.
+- `Runtime::try_register_tool` remains collision-safe across all scopes.
+  Legacy infallible `Runtime::register_tool` and builtin registration install a
+  truly global replacement by evicting every same-name audience and
+  exact-agent entry, which makes their outstanding guards stale.
+- **Source-breaking:** `SessionOptions` gained `tool_audience`. Exhaustive
+  struct literals must provide it; `..Default::default()` keeps the prior
+  global-only behavior. `SessionResumeOptions` and the audience-specific raw
+  agent creation/resume helpers are additive.
+
 ## 0.25.0
 
 ### Model stream startup honors run bounds

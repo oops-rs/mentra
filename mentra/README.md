@@ -402,6 +402,79 @@ When a tool needs disposable delegated work, `ParallelToolContext::spawn_subagen
 
 Override `ToolExecutor::authorization_preview(...)` when your custom tool needs to expose structured metadata to the installed `ToolAuthorizer`. The default preview includes the resolved working directory, tool capabilities, side-effect level, durability, the raw JSON input, and the same JSON as `structured_input`.
 
+## Audience-Scoped Tools
+
+Use `ToolAudience` when one live runtime serves several workspaces or tenants
+whose custom tool sets must remain distinct. The identity is opaque routing
+context, not a permission or credential. Keep the returned registration guard
+alive for as long as the tool should be available, and attach the audience
+explicitly whenever an agent or session is created or resumed:
+
+```rust,no_run
+use mentra::runtime::{SessionOptions, SessionResumeOptions};
+use mentra::tool::ExecutableTool;
+use mentra::{AudienceToolRegistration, ModelInfo, Runtime, Session, ToolAudience};
+
+fn open_workspace<T>(
+    runtime: &Runtime,
+    model: ModelInfo,
+    tool: T,
+) -> Result<(Session, AudienceToolRegistration), Box<dyn std::error::Error>>
+where
+    T: ExecutableTool + 'static,
+{
+    let audience = ToolAudience::new("workspace-open-42");
+    let registration = runtime.try_register_tool_for_audience(audience.clone(), tool)?;
+    let session = runtime.create_session_with_options(
+        "Acme workspace",
+        model,
+        SessionOptions {
+            tool_audience: Some(audience),
+            ..Default::default()
+        },
+    )?;
+    Ok((session, registration))
+}
+
+fn resume_workspace(
+    runtime: &Runtime,
+    agent_id: &str,
+    audience: ToolAudience,
+) -> Result<Session, mentra::error::RuntimeError> {
+    runtime.resume_session_with_options(
+        agent_id,
+        SessionResumeOptions {
+            tool_audience: Some(audience),
+            ..Default::default()
+        },
+    )
+}
+```
+
+For raw agents, use `spawn_with_config_for_audience`,
+`resume_agent_for_audience`, or `resume_for_audience`. The ordinary spawn and
+resume methods deliberately attach no audience.
+
+Resolution is deterministic: an exact-agent intrinsic wins first, then a tool
+from the matching audience, then a global tool. Different audiences may use
+the same name. Safe audience registration rejects a global or same-audience
+collision, while safe global registration rejects a collision in any scope.
+The legacy infallible global registration APIs deliberately evict every
+same-name scoped entry.
+
+Dropping `AudienceToolRegistration` (or consuming it with `unregister`) removes
+only that exact generation; an already admitted call may still finish. The
+descriptor is evaluated once and is available from the guard. Registrations
+are shared live, so matching sessions that already exist observe later
+registration and removal. `Runtime::tools`, `Runtime::tool_descriptor`, and
+`Runtime::unregister_tool` remain global-only.
+
+Audiences are not persisted in `AgentConfig`; pass them again on resume.
+Disposable subagents and teammates inherit their live parent's audience.
+`ToolProfile` can only narrow the roster already available through that scope;
+it is not ownership or security provenance. A guessed foreign tool name is
+rejected before hooks, authorization, or tool execution.
+
 ## Tooling Layers
 
 Mentra now separates tool contracts into explicit layers:
@@ -660,7 +733,10 @@ client.shutdown().await;
 
 ## Tool Profiles
 
-Register tools once on the runtime, then use `AgentConfig::tool_profile` to expose different subsets for different operating modes.
+`ToolProfile` filters the roster already visible to an agent; it cannot grant a
+tool from another audience. Register tools once on the runtime, then use
+`AgentConfig::tool_profile` to expose different subsets for different operating
+modes.
 
 ```rust,no_run
 use mentra::{BuiltinProvider, ModelSelector, Runtime};
