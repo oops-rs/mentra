@@ -94,6 +94,7 @@ impl RuntimeHandle {
                 hooks: hooks.clone(),
                 pre_hooks: PreExecutionHooks::new(),
                 post_hooks: PostExecutionHooks::new(),
+                execution_hooks: ExecutionHooks::new(),
             },
             persistence: PersistenceServices {
                 store: store.clone(),
@@ -187,6 +188,7 @@ impl RuntimeHandle {
                 hooks: self.execution.hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
                 post_hooks: self.execution.post_hooks.clone(),
+                execution_hooks: self.execution.execution_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -228,6 +230,7 @@ impl RuntimeHandle {
                 hooks: self.execution.hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
                 post_hooks: self.execution.post_hooks.clone(),
+                execution_hooks: self.execution.execution_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -269,6 +272,7 @@ impl RuntimeHandle {
                 hooks: hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
                 post_hooks: self.execution.post_hooks.clone(),
+                execution_hooks: self.execution.execution_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -307,6 +311,7 @@ impl RuntimeHandle {
                 hooks: self.execution.hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
                 post_hooks,
+                execution_hooks: self.execution.execution_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -348,6 +353,7 @@ impl RuntimeHandle {
                 hooks: self.execution.hooks.clone(),
                 pre_hooks,
                 post_hooks: self.execution.post_hooks.clone(),
+                execution_hooks: self.execution.execution_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),
@@ -378,6 +384,12 @@ impl RuntimeHandle {
             agent_contexts: Arc::new(RwLock::new(HashMap::new())),
             provider_registry: self.provider_registry.clone(),
         }
+    }
+
+    pub fn with_execution_hooks(&self, execution_hooks: ExecutionHooks) -> Self {
+        let mut handle = self.clone();
+        handle.execution.execution_hooks = execution_hooks;
+        handle
     }
 
     pub fn with_runtime_identifier(&self, runtime_identifier: impl Into<Arc<str>>) -> Self {
@@ -423,6 +435,7 @@ impl RuntimeHandle {
                 hooks: self.execution.hooks.clone(),
                 pre_hooks: self.execution.pre_hooks.clone(),
                 post_hooks: self.execution.post_hooks.clone(),
+                execution_hooks: self.execution.execution_hooks.clone(),
             },
             persistence: PersistenceServices {
                 store: self.persistence.store.clone(),

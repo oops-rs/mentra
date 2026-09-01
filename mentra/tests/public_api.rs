@@ -21,7 +21,8 @@ use mentra::{
         Response, Role, provider_event_stream_from_response,
     },
     runtime::{
-        CommandOutput, CommandRequest, HookDecision, PostExecutionContext, PostExecutionHook,
+        BeforeDecision, CommandOutput, CommandRequest, ExecutionHookParticipant,
+        ExecutionHookRegistration, HookDecision, PostExecutionContext, PostExecutionHook,
         PostExecutionHookRegistration, PreExecutionContext, PreExecutionHook,
         PreExecutionHookRegistration, ResultDecision, RuntimeExecutor, RuntimePolicy,
         SessionOptions, VolatileRuntimeStore,
@@ -187,6 +188,19 @@ struct EndTurnTool;
 struct SubagentSummaryTool;
 
 struct PublicExecutionHook;
+
+struct PublicMixedHook(&'static str);
+
+#[async_trait]
+impl ExecutionHookParticipant for PublicMixedHook {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    async fn before(&self, _context: &PreExecutionContext) -> Result<BeforeDecision, RuntimeError> {
+        Ok(BeforeDecision::Continue)
+    }
+}
 
 #[async_trait]
 impl PreExecutionHook for PublicExecutionHook {
@@ -538,6 +552,45 @@ fn runtime_publicly_registers_live_hook_guards_without_owning_the_runtime() {
     assert!(!audience_pre.unregister());
     assert!(!global_post.unregister());
     assert!(!audience_post.unregister());
+}
+
+#[test]
+fn runtime_publicly_registers_atomic_mixed_hook_batches() {
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let permanent: Arc<dyn ExecutionHookParticipant> = Arc::new(PublicMixedHook("permanent-batch"));
+    let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .with_execution_hook(PublicMixedHook("permanent"))
+        .with_execution_hooks([permanent])
+        .build()
+        .expect("build runtime");
+    let audience = ToolAudience::new("mixed-workspace");
+
+    let global_single: ExecutionHookRegistration =
+        runtime.register_execution_hook(PublicMixedHook("global-single"));
+    let global_batch: ExecutionHookRegistration = runtime.register_execution_hooks([
+        Arc::new(PublicMixedHook("global-a")) as Arc<dyn ExecutionHookParticipant>,
+        Arc::new(PublicMixedHook("global-b")) as Arc<dyn ExecutionHookParticipant>,
+    ]);
+    let audience_single: ExecutionHookRegistration = runtime
+        .register_execution_hook_for_audience(audience.clone(), PublicMixedHook("audience-single"));
+    let audience_batch: ExecutionHookRegistration = runtime.register_execution_hooks_for_audience(
+        audience.clone(),
+        [Arc::new(PublicMixedHook("audience-batch")) as Arc<dyn ExecutionHookParticipant>],
+    );
+
+    assert_eq!(global_single.audience(), None);
+    assert_eq!(global_batch.audience(), None);
+    assert_eq!(audience_single.audience(), Some(&audience));
+    assert_eq!(audience_batch.audience(), Some(&audience));
+
+    drop(runtime);
+    assert!(!global_single.unregister());
+    assert!(!global_batch.unregister());
+    assert!(!audience_single.unregister());
+    assert!(!audience_batch.unregister());
 }
 
 #[tokio::test]

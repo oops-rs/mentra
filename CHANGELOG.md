@@ -50,6 +50,33 @@
   initialize those fields; `None` and an empty vector reproduce the previous
   behavior.
 
+### Ordered mixed execution hooks share one live participant chain
+
+- `ExecutionHookParticipant` gives one named, object-safe participant defaulted
+  `before` and `after` methods over the existing pre/post contexts. Typed
+  `BeforeDecision` and `AfterDecision` make wrong-event answers unrepresentable,
+  add short-circuiting post denial, thread replacements, preserve an omitted
+  `is_error`, and aggregate every modifier attribution in stable order
+  ([#49](https://github.com/oops-rs/mentra/issues/49)).
+- The mixed chain deliberately runs **forward before and forward after**. This
+  differs from legacy `PostExecutionHooks`, which remain reverse-order. It keeps
+  a host participant ahead of workspace subprocess adapters on both sides, so a
+  host can redact a result before less-trusted participants receive it. Exact
+  block order is legacy pre hooks, mixed before, tool, mixed after, legacy post
+  hooks. A mixed post denial skips the legacy post block and becomes an error
+  result; a replacement flows into it.
+- One audience-filtered participant snapshot is captured after legacy pre hooks
+  admit the call and retained through the genuine serial or parallel execution.
+  The same `Arc` participants run after, in original result order. Dropping its
+  registration affects future admissions only; a participant registered while
+  a tool runs cannot appear after without having run before.
+- Builder APIs install permanent single participants or ordered batches.
+  Runtime global/audience APIs atomically install one complete batch and return
+  one non-cloneable, weak, must-use RAII guard. Batch insertion/removal uses one
+  lock; callbacks and capture destruction happen after unlocking. Participant
+  `Err` values propagate with existing runtime semantics; adapters continue to
+  own transport, panic isolation, reporting, and fail-open/closed policy.
+
 ### Runtimes can register and remove live execution hooks
 
 - `Runtime::register_pre_hook` and `register_post_hook` add runtime-global

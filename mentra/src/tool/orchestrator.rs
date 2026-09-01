@@ -8,12 +8,15 @@ use crate::{
     ContentBlock,
     agent::{Agent, AgentEvent, AgentStatus},
     error::RuntimeError,
-    runtime::control::{HookDecision, PostExecutionContext, PreExecutionContext, ResultDecision},
+    runtime::control::{
+        AfterDecision, BeforeDecision, ExecutionHookSnapshot, HookDecision, PostExecutionContext,
+        PreExecutionContext, ResultDecision,
+    },
     runtime::{RunOptions, RuntimeHookEvent},
     tool::{
         ExecutableTool, ParallelToolContext, ResolvedTool, RuntimeToolDescriptor,
         ToolAuthorizationOutcome, ToolAuthorizationRequest, ToolCall, ToolCapability, ToolContext,
-        ToolExecutionCategory,
+        ToolExecutionCategory, ToolResultContent,
     },
 };
 
@@ -79,6 +82,14 @@ enum HookOutcome {
     Refused(String),
 }
 
+enum MixedHookOutcome {
+    Proceed {
+        modified: bool,
+        attribution: Option<String>,
+    },
+    Refused(String),
+}
+
 /// Whether a scheduled call made it through hooks, schema check, and
 /// authorization.
 ///
@@ -86,9 +97,14 @@ enum HookOutcome {
 /// that an unboxed enum pays the larger one's size on every admission.
 enum Admission {
     /// Execute with this context.
-    Run(Box<ParallelToolContext>),
+    Run(Box<AdmittedToolCall>),
     /// Already answered; nothing runs.
     Refused(Box<CompletedToolExecution>),
+}
+
+struct AdmittedToolCall {
+    context: ParallelToolContext,
+    execution_hooks: Option<ExecutionHookSnapshot>,
 }
 
 struct CompletedToolExecution {
@@ -114,6 +130,9 @@ struct CompletedToolExecution {
     /// This execution's opaque `ToolOutput::details`, if any — collected by
     /// [`ToolRuntime::execute_calls`] into [`ToolExecutionOutcome::details`].
     details: Option<serde_json::Value>,
+    /// The one mixed participant snapshot that admitted and then reviews this
+    /// genuine execution. Synthetic/refused results carry `None`.
+    execution_hooks: Option<ExecutionHookSnapshot>,
 }
 
 /// How a single execution affects the current round — bundled so
@@ -188,10 +207,11 @@ impl ToolRuntime {
                 successful_task |= execution.task_succeeded;
                 end_turn |= execution.should_end_turn;
                 let reviewed = self
-                    .run_post_hooks(
+                    .review_result(
                         &execution.tool_name,
                         &execution.input_json,
                         execution.result,
+                        execution.execution_hooks,
                     )
                     .await?;
                 let result = self.page_result(agent, &execution.tool_name, reviewed);
@@ -431,6 +451,82 @@ impl ToolRuntime {
         hooks.run(&context).await
     }
 
+    async fn review_result(
+        &mut self,
+        tool_name: &str,
+        input_json: &str,
+        result: ContentBlock,
+        execution_hooks: Option<ExecutionHookSnapshot>,
+    ) -> Result<ContentBlock, RuntimeError> {
+        let (result, run_legacy) = match execution_hooks {
+            Some(hooks) => {
+                self.run_execution_after(&hooks, tool_name, input_json, result)
+                    .await?
+            }
+            None => (result, true),
+        };
+        if run_legacy {
+            self.run_post_hooks(tool_name, input_json, result).await
+        } else {
+            Ok(result)
+        }
+    }
+
+    async fn run_execution_after(
+        &mut self,
+        hooks: &ExecutionHookSnapshot,
+        tool_name: &str,
+        input_json: &str,
+        result: ContentBlock,
+    ) -> Result<(ContentBlock, bool), RuntimeError> {
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } = result
+        else {
+            return Ok((result, true));
+        };
+        let context = PostExecutionContext {
+            agent_id: self.agent_id.clone(),
+            tool_name: tool_name.to_string(),
+            tool_call_id: tool_use_id.clone(),
+            input_json: input_json.to_string(),
+            working_directory: self.working_directory(),
+            content,
+            is_error,
+        };
+
+        Ok(match hooks.after(&context).await? {
+            AfterDecision::Continue => (
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content: context.content,
+                    is_error: context.is_error,
+                },
+                true,
+            ),
+            AfterDecision::Deny(reason) => (
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content: ToolResultContent::text(reason),
+                    is_error: true,
+                },
+                false,
+            ),
+            AfterDecision::Replace {
+                content, is_error, ..
+            } => (
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error: is_error.unwrap_or(context.is_error),
+                },
+                true,
+            ),
+        })
+    }
+
     /// Offers a finished result to the post-execution hooks and applies what
     /// they decided.
     ///
@@ -521,6 +617,44 @@ impl ToolRuntime {
         }
     }
 
+    async fn apply_execution_before(
+        &mut self,
+        call: &mut ToolCall,
+        hooks: &ExecutionHookSnapshot,
+    ) -> Result<MixedHookOutcome, RuntimeError> {
+        let context = PreExecutionContext {
+            agent_id: self.agent_id.clone(),
+            tool_name: call.name.clone(),
+            tool_call_id: call.id.clone(),
+            input_json: serde_json::to_string(&call.input).unwrap_or_default(),
+            working_directory: self.working_directory(),
+        };
+        match hooks.before(&context).await? {
+            BeforeDecision::Continue => Ok(MixedHookOutcome::Proceed {
+                modified: false,
+                attribution: None,
+            }),
+            BeforeDecision::Deny(reason) => Ok(MixedHookOutcome::Refused(reason)),
+            BeforeDecision::Modify {
+                input_json,
+                attribution,
+            } => match serde_json::from_str(&input_json) {
+                Ok(input) => {
+                    call.input = input;
+                    Ok(MixedHookOutcome::Proceed {
+                        modified: true,
+                        attribution,
+                    })
+                }
+                Err(error) => Ok(MixedHookOutcome::Refused(format!(
+                    "{} returned invalid JSON for '{}': {error}",
+                    mixed_rewrite_source(attribution.as_deref()),
+                    call.name
+                ))),
+            },
+        }
+    }
+
     /// Everything that stands between a scheduled call and its execution, in
     /// the one order both lanes share: pre-execution hooks, then the schema
     /// check, then the [`ToolAuthorizer`](crate::tool::ToolAuthorizer).
@@ -545,7 +679,7 @@ impl ToolRuntime {
         descriptor: &RuntimeToolDescriptor,
         execution_category: ToolExecutionCategory,
     ) -> Result<Admission, RuntimeError> {
-        let modified = match self.apply_pre_hooks(call).await? {
+        let legacy_modified = match self.apply_pre_hooks(call).await? {
             HookOutcome::Proceed { modified } => modified,
             HookOutcome::Refused(reason) => {
                 return Ok(Admission::Refused(Box::new(
@@ -554,18 +688,51 @@ impl ToolRuntime {
             }
         };
 
+        let execution_hooks = self
+            .runtime
+            .execution_hooks()
+            .snapshot(self.runtime.tool_audience());
+        let mut mixed_modified = false;
+        let mut mixed_attribution = None;
+        if !execution_hooks.is_empty() {
+            match self.apply_execution_before(call, &execution_hooks).await? {
+                MixedHookOutcome::Proceed {
+                    modified,
+                    attribution,
+                } => {
+                    mixed_modified = modified;
+                    mixed_attribution = attribution;
+                }
+                MixedHookOutcome::Refused(reason) => {
+                    return Ok(Admission::Refused(Box::new(
+                        self.mixed_hook_blocked_execution(agent, call, descriptor, &reason),
+                    )));
+                }
+            }
+        }
+        let modified = legacy_modified || mixed_modified;
+
         let authorization_category = if modified {
             let (_, rewritten_category) =
                 Self::execution_categories_for_snapshot(call, tool, descriptor);
             if execution_category.allows_parallel() && !rewritten_category.allows_parallel() {
                 let reason = format!(
-                    "pre-execution hook changed '{}' from a parallel call into {:?}; refusing to \
+                    "{} changed '{}' from a parallel call into {:?}; refusing to \
                      run mutating work in the parallel lane",
-                    call.name, rewritten_category
+                    if mixed_modified {
+                        mixed_rewrite_source(mixed_attribution.as_deref())
+                    } else {
+                        "pre-execution hook".to_string()
+                    },
+                    call.name,
+                    rewritten_category
                 );
-                return Ok(Admission::Refused(Box::new(
-                    self.hook_blocked_execution(agent, call, descriptor, &reason),
-                )));
+                let execution = if mixed_modified {
+                    self.mixed_hook_blocked_execution(agent, call, descriptor, &reason)
+                } else {
+                    self.hook_blocked_execution(agent, call, descriptor, &reason)
+                };
+                return Ok(Admission::Refused(Box::new(execution)));
             }
             rewritten_category
         } else {
@@ -577,7 +744,14 @@ impl ToolRuntime {
             // hook produced the shape, blaming the model would send it
             // correcting an input it never wrote; the host component is the
             // one that failed, and the record says so.
-            return Ok(Admission::Refused(Box::new(if modified {
+            return Ok(Admission::Refused(Box::new(if mixed_modified {
+                let reason = format!(
+                    "{} rewrote '{}' into input that does not fit its schema: {error}",
+                    mixed_rewrite_source(mixed_attribution.as_deref()),
+                    call.name
+                );
+                self.mixed_hook_blocked_execution(agent, call, descriptor, &reason)
+            } else if modified {
                 let reason = format!(
                     "pre-execution hook rewrote '{}' into input that does not fit its schema: \
                      {error}",
@@ -605,7 +779,10 @@ impl ToolRuntime {
             return Ok(Admission::Refused(Box::new(execution)));
         }
 
-        Ok(Admission::Run(Box::new(ctx)))
+        Ok(Admission::Run(Box::new(AdmittedToolCall {
+            context: ctx,
+            execution_hooks: (!execution_hooks.is_empty()).then_some(execution_hooks),
+        })))
     }
 
     fn hook_blocked_execution(
@@ -619,6 +796,29 @@ impl ToolRuntime {
         let result = ContentBlock::ToolResult {
             tool_use_id: call.id.clone(),
             content: format!("Blocked by pre-execution hook: {reason}").into(),
+            is_error: true,
+        };
+        self.completed_execution(
+            agent,
+            call,
+            descriptor,
+            result,
+            RoundEffect::default(),
+            None,
+        )
+    }
+
+    fn mixed_hook_blocked_execution(
+        &self,
+        agent: &Agent,
+        call: &ToolCall,
+        descriptor: &RuntimeToolDescriptor,
+        reason: &str,
+    ) -> CompletedToolExecution {
+        self.emit_tool_execution_blocked(call, reason);
+        let result = ContentBlock::ToolResult {
+            tool_use_id: call.id.clone(),
+            content: format!("Blocked by mixed execution hook: {reason}").into(),
             is_error: true,
         };
         self.completed_execution(
@@ -656,6 +856,7 @@ impl ToolRuntime {
             tool_name: call.name.clone(),
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details: None,
+            execution_hooks: None,
         }
     }
 
@@ -719,6 +920,7 @@ impl ToolRuntime {
             tool_name: call.name,
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details: None,
+            execution_hooks: None,
         }
     }
 
@@ -739,6 +941,7 @@ impl ToolRuntime {
             tool_name: call.name,
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details: None,
+            execution_hooks: None,
         }
     }
 
@@ -839,6 +1042,7 @@ impl ToolRuntime {
             tool_name: call.name.clone(),
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details,
+            execution_hooks: None,
         }
     }
 
@@ -1034,7 +1238,7 @@ impl ToolRuntime {
             let descriptor = resolved.descriptor().clone();
             let tool = resolved.handler;
 
-            let ctx = match self
+            let admitted = match self
                 .admit_call(
                     agent,
                     options,
@@ -1045,12 +1249,16 @@ impl ToolRuntime {
                 )
                 .await?
             {
-                Admission::Run(ctx) => *ctx,
+                Admission::Run(admitted) => *admitted,
                 Admission::Refused(execution) => {
                     results[index] = Some(*execution);
                     continue;
                 }
             };
+            let AdmittedToolCall {
+                context: ctx,
+                execution_hooks,
+            } = admitted;
 
             if let Err(error) = self.emit_tool_runtime_started(&call) {
                 let result = self.blocked_tool_result(&call, error);
@@ -1073,7 +1281,7 @@ impl ToolRuntime {
                     tool.execute_output(ctx, call.input.clone()),
                 )
                 .await;
-                (index, call, descriptor, output)
+                (index, call, descriptor, output, execution_hooks)
             });
         }
 
@@ -1083,7 +1291,7 @@ impl ToolRuntime {
                 return Err(error);
             }
             match tokio::time::timeout(PARALLEL_JOIN_POLL_INTERVAL, join_set.join_next()).await {
-                Ok(Some(Ok((index, call, descriptor, output)))) => {
+                Ok(Some(Ok((index, call, descriptor, output, execution_hooks)))) => {
                     let (result, details, terminate) = self.tool_output_block(&call, output).await;
                     // RUNTIME defense: a parallel-lane execution can never end
                     // the run — a `terminate: true` surfacing here is a tool
@@ -1100,14 +1308,16 @@ impl ToolRuntime {
                     } else {
                         (result, details)
                     };
-                    results[index] = Some(self.completed_execution(
+                    let mut execution = self.completed_execution(
                         agent,
                         &call,
                         &descriptor,
                         result,
                         RoundEffect::default(),
                         details,
-                    ));
+                    );
+                    execution.execution_hooks = execution_hooks;
+                    results[index] = Some(execution);
                 }
                 Ok(Some(Err(error))) => {
                     join_set.abort_all();
@@ -1146,7 +1356,7 @@ impl ToolRuntime {
         let descriptor = resolved.descriptor().clone();
         let tool = resolved.handler;
 
-        let authorization_ctx = match self
+        let admitted = match self
             .admit_call(
                 agent,
                 options,
@@ -1157,7 +1367,7 @@ impl ToolRuntime {
             )
             .await
         {
-            Ok(Admission::Run(ctx)) => *ctx,
+            Ok(Admission::Run(admitted)) => *admitted,
             Ok(Admission::Refused(execution)) => return *execution,
             Err(error) => {
                 let result = self.blocked_tool_result(&call, error);
@@ -1171,6 +1381,10 @@ impl ToolRuntime {
                 );
             }
         };
+        let AdmittedToolCall {
+            context: authorization_ctx,
+            execution_hooks,
+        } = admitted;
 
         if let Err(error) = self.emit_tool_runtime_started(&call) {
             let result = self.blocked_tool_result(&call, error);
@@ -1214,7 +1428,17 @@ impl ToolRuntime {
             should_end_turn: agent.take_idle_requested() || terminate,
             terminated: terminate,
         };
-        self.completed_execution(agent, &call, &descriptor, result, effect, details)
+        let mut execution =
+            self.completed_execution(agent, &call, &descriptor, result, effect, details);
+        execution.execution_hooks = execution_hooks;
+        execution
+    }
+}
+
+fn mixed_rewrite_source(attribution: Option<&str>) -> String {
+    match attribution {
+        Some(attribution) => format!("mixed execution hooks ({attribution})"),
+        None => "mixed execution hooks".to_string(),
     }
 }
 

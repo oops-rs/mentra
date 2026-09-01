@@ -2,6 +2,7 @@ mod budgets;
 mod event_tap;
 mod hook_authorization_order;
 mod live_hooks;
+mod mixed_hooks;
 mod pending;
 mod round_strategy;
 mod runtime;

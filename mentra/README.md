@@ -616,6 +616,48 @@ bracket a tool call, it must retain both guards until the call has quiesced.
 Dropping a post guard after pre admission does not guarantee the result will be
 reviewed.
 
+## Ordered Mixed Execution Hooks
+
+Use `ExecutionHookParticipant` when in-process and transported participants
+must occupy one exact order. Each participant has a required `name` and default
+`before`/`after` methods. `BeforeDecision` can continue, deny, or modify input;
+`AfterDecision` can continue, deny, or replace a result while optionally
+preserving its current `is_error`. Denials are named and short-circuit, while
+every modification's participant and attribution are retained in order.
+
+The mixed chain is independent of the legacy hook containers and runs forward
+on both sides. The complete runtime order is:
+
+```text
+legacy pre hooks (forward)
+mixed participants before (forward)
+tool execution
+mixed participants after (forward)
+legacy post hooks (reverse)
+```
+
+Forward-after is intentional and differs from legacy post hooks: a host adapter
+placed before a workspace subprocess can redact output before the subprocess
+receives it. A mixed after-denial prevents remaining mixed participants and the
+legacy post block from running, then reaches the model as an error result. A
+mixed replacement is threaded into every later mixed participant and then the
+legacy post block.
+
+Install permanent participants with `RuntimeBuilder::with_execution_hook` or
+`with_execution_hooks`. Live runtimes provide matching single and atomic-batch
+`register_execution_*` methods, including `*_for_audience`. Use the batch API
+for heterogeneous participants whose relative order must become visible as one
+unit; one must-use guard owns the entire batch lifetime.
+
+One matching-audience snapshot is captured after legacy pre hooks and retained
+through each admitted tool call. The same participants run after a genuine
+serial or parallel execution even if the guard drops meanwhile. Late
+registration governs the next admission and cannot appear only on the way out.
+Participant futures run without registry locks. A participant `Err` propagates
+as `RuntimeError`; participant adapters should translate their own expected
+fail-open/fail-closed, reporting, subprocess, or panic policy into typed
+decisions.
+
 ## Tooling Layers
 
 Mentra now separates tool contracts into explicit layers:

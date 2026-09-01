@@ -5,8 +5,9 @@ use crate::{
     mcp::{McpManager, McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig},
     provider::{Provider, ProviderRegistry, ResponsesTransport},
     runtime::{
-        RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks, RuntimePolicy, RuntimeStore,
-        control::PreExecutionHook, error::RuntimeError, skill::SkillLoadError,
+        ExecutionHookParticipant, RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks,
+        RuntimePolicy, RuntimeStore, control::PreExecutionHook, error::RuntimeError,
+        skill::SkillLoadError,
     },
     tool::{ExecutableTool, FileToolProfile, ToolAuthorizer},
 };
@@ -200,6 +201,36 @@ impl RuntimeBuilder {
         let post_hooks = self.handle.post_hooks().clone().with_hook(hook);
         Self {
             handle: self.handle.with_post_hooks(post_hooks),
+            provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
+        }
+    }
+
+    /// Appends one permanent participant to the ordered mixed hook chain.
+    pub fn with_execution_hook<H>(self, participant: H) -> Self
+    where
+        H: ExecutionHookParticipant + 'static,
+    {
+        let hooks = self
+            .handle
+            .execution_hooks()
+            .clone()
+            .with_participant(participant);
+        Self {
+            handle: self.handle.with_execution_hooks(hooks),
+            provider_registry: self.provider_registry,
+            mcp_configs: self.mcp_configs,
+        }
+    }
+
+    /// Appends one permanent ordered batch to the mixed hook chain.
+    pub fn with_execution_hooks<I>(self, participants: I) -> Self
+    where
+        I: IntoIterator<Item = Arc<dyn ExecutionHookParticipant>>,
+    {
+        let hooks = self.handle.execution_hooks().clone().extend(participants);
+        Self {
+            handle: self.handle.with_execution_hooks(hooks),
             provider_registry: self.provider_registry,
             mcp_configs: self.mcp_configs,
         }

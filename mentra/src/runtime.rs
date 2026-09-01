@@ -32,13 +32,14 @@ use mentra_provider::{BuiltinProvider, ModelInfo, ModelSelector, ProviderDescrip
 pub use builder::RuntimeBuilder;
 pub use control::sandbox::{ExecutionEnvironment, detect_environment};
 pub use control::{
-    AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
-    CommandSpec, EarlyEnd, ExecOutput, HookDecision, LocalRuntimeExecutor, PostExecutionContext,
-    PostExecutionHook, PostExecutionHookRegistration, PostExecutionHooks, PreExecutionContext,
-    PreExecutionHook, PreExecutionHookRegistration, PreExecutionHooks, ProviderRetry,
-    ResultDecision, RunOptions, RuntimeExecutor, RuntimeHook, RuntimeHookEvent, RuntimeHooks,
-    RuntimePolicy, ShellValidationMode, is_transient_provider_error, is_transient_runtime_error,
-    normalize_policy_root,
+    AfterDecision, AuditHook, AuditLogHook, BeforeDecision, CancellationFlag, CancellationToken,
+    CommandOutput, CommandRequest, CommandSpec, EarlyEnd, ExecOutput, ExecutionHookParticipant,
+    ExecutionHookRegistration, ExecutionHookSnapshot, ExecutionHooks, HookDecision,
+    LocalRuntimeExecutor, PostExecutionContext, PostExecutionHook, PostExecutionHookRegistration,
+    PostExecutionHooks, PreExecutionContext, PreExecutionHook, PreExecutionHookRegistration,
+    PreExecutionHooks, ProviderRetry, ResultDecision, RunOptions, RuntimeExecutor, RuntimeHook,
+    RuntimeHookEvent, RuntimeHooks, RuntimePolicy, ShellValidationMode,
+    is_transient_provider_error, is_transient_runtime_error, normalize_policy_root,
 };
 pub use error::{ErrorCategory, RuntimeError};
 pub use file_store::FileRuntimeStore;
@@ -316,6 +317,58 @@ impl Runtime {
         H: PostExecutionHook + 'static,
     {
         self.handle.post_hooks().register_live(Some(audience), hook)
+    }
+
+    /// Registers one live runtime-global participant in the ordered mixed chain.
+    pub fn register_execution_hook<H>(&self, participant: H) -> ExecutionHookRegistration
+    where
+        H: ExecutionHookParticipant + 'static,
+    {
+        self.register_execution_hooks([Arc::new(participant) as Arc<dyn ExecutionHookParticipant>])
+    }
+
+    /// Atomically registers one ordered runtime-global participant batch.
+    pub fn register_execution_hooks<I>(&self, participants: I) -> ExecutionHookRegistration
+    where
+        I: IntoIterator<Item = Arc<dyn ExecutionHookParticipant>>,
+    {
+        self.handle
+            .execution_hooks()
+            .register_live(None, participants.into_iter().collect())
+    }
+
+    /// Registers one live participant for an exact [`crate::tool::ToolAudience`].
+    pub fn register_execution_hook_for_audience<H>(
+        &self,
+        audience: crate::tool::ToolAudience,
+        participant: H,
+    ) -> ExecutionHookRegistration
+    where
+        H: ExecutionHookParticipant + 'static,
+    {
+        self.register_execution_hooks_for_audience(
+            audience,
+            [Arc::new(participant) as Arc<dyn ExecutionHookParticipant>],
+        )
+    }
+
+    /// Atomically registers one ordered batch for an exact [`ToolAudience`].
+    ///
+    /// Existing matching agents observe the complete batch on their next
+    /// admitted call. The returned guard removes the batch as one unit.
+    ///
+    /// [`ToolAudience`]: crate::tool::ToolAudience
+    pub fn register_execution_hooks_for_audience<I>(
+        &self,
+        audience: crate::tool::ToolAudience,
+        participants: I,
+    ) -> ExecutionHookRegistration
+    where
+        I: IntoIterator<Item = Arc<dyn ExecutionHookParticipant>>,
+    {
+        self.handle
+            .execution_hooks()
+            .register_live(Some(audience), participants.into_iter().collect())
     }
 
     /// Registers a skills directory and enables the builtin `load_skill` tool.

@@ -1,4 +1,5 @@
 mod command;
+mod execution_hooks;
 mod hooks;
 mod policy;
 mod run;
@@ -8,6 +9,10 @@ pub mod sandbox;
 pub use command::{
     CommandOutput, CommandRequest, CommandSpec, ExecOutput, LocalRuntimeExecutor, RuntimeExecutor,
     read_limited_file,
+};
+pub use execution_hooks::{
+    AfterDecision, BeforeDecision, ExecutionHookParticipant, ExecutionHookRegistration,
+    ExecutionHookSnapshot, ExecutionHooks,
 };
 pub use hooks::{
     AuditHook, AuditLogHook, HookDecision, PostExecutionContext, PostExecutionHook,

@@ -21,9 +21,9 @@ use crate::{
     provider::{Provider, ProviderId, ProviderRegistry},
     runtime::{
         control::{
-            AuditHook, CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor,
-            PostExecutionHooks, PreExecutionHooks, RuntimeExecutor, RuntimeHookEvent, RuntimeHooks,
-            RuntimePolicy, read_limited_file,
+            AuditHook, CommandOutput, CommandRequest, CommandSpec, ExecutionHooks,
+            LocalRuntimeExecutor, PostExecutionHooks, PreExecutionHooks, RuntimeExecutor,
+            RuntimeHookEvent, RuntimeHooks, RuntimePolicy, read_limited_file,
         },
         error::RuntimeError,
         store::RuntimeStore,
@@ -61,6 +61,7 @@ pub(crate) struct ExecutionServices {
     pub(crate) hooks: RuntimeHooks,
     pub(crate) pre_hooks: PreExecutionHooks,
     pub(crate) post_hooks: PostExecutionHooks,
+    pub(crate) execution_hooks: ExecutionHooks,
 }
 
 #[derive(Clone)]
@@ -178,6 +179,10 @@ impl RuntimeHandle {
 
     pub(crate) fn post_hooks(&self) -> &PostExecutionHooks {
         &self.execution.post_hooks
+    }
+
+    pub(crate) fn execution_hooks(&self) -> &ExecutionHooks {
+        &self.execution.execution_hooks
     }
 
     pub(crate) fn hooks(&self) -> &RuntimeHooks {
