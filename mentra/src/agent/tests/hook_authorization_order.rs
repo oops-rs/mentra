@@ -204,6 +204,24 @@ struct RecordingAuthorizer {
     requests: Arc<Mutex<Vec<ToolAuthorizationRequest>>>,
 }
 
+struct PromptingRecordingAuthorizer {
+    requests: Arc<Mutex<Vec<ToolAuthorizationRequest>>>,
+}
+
+#[async_trait]
+impl ToolAuthorizer for PromptingRecordingAuthorizer {
+    async fn authorize(
+        &self,
+        request: &ToolAuthorizationRequest,
+    ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+        self.requests
+            .lock()
+            .expect("requests poisoned")
+            .push(request.clone());
+        Ok(ToolAuthorizationDecision::prompt("ask the session"))
+    }
+}
+
 #[async_trait]
 impl ToolAuthorizer for RecordingAuthorizer {
     async fn authorize(
@@ -282,6 +300,23 @@ impl Case {
     fn session_authorizer(self, allow: bool, rules: RuleStore) -> Self {
         let inner = RecordingAuthorizer {
             allow,
+            requests: Arc::clone(&self.requests),
+        };
+        let (event_tx, _) = broadcast::channel(8);
+        let authorizer = SessionToolAuthorizer::new(
+            Some(Arc::new(inner)),
+            event_tx,
+            PendingPermissionStore::new(),
+            rules,
+        );
+        Self {
+            authorizer: Some(Arc::new(authorizer)),
+            ..self
+        }
+    }
+
+    fn prompting_session_authorizer(self, rules: RuleStore) -> Self {
+        let inner = PromptingRecordingAuthorizer {
             requests: Arc::clone(&self.requests),
         };
         let (event_tx, _) = broadcast::channel(8);
@@ -408,13 +443,21 @@ fn original() -> Value {
 }
 
 fn allow_rule_for(pattern: &str) -> RuleStore {
+    rule_for(pattern, true)
+}
+
+fn deny_rule_for(pattern: &str) -> RuleStore {
+    rule_for(pattern, false)
+}
+
+fn rule_for(pattern: &str, allow: bool) -> RuleStore {
     let store = RuleStore::new();
     store.add_rule(RememberedRule {
         key: RuleKey {
             tool_name: TOOL.to_string(),
             pattern: Some(pattern.to_string()),
         },
-        allow: true,
+        allow,
         scope: PermissionRuleScope::Session,
         reason: None,
     });
@@ -482,7 +525,7 @@ async fn the_authorizer_is_asked_about_the_input_the_tool_runs_with() {
 }
 
 #[tokio::test]
-async fn a_remembered_rule_written_against_the_rewritten_input_answers_the_call() {
+async fn a_current_denial_beats_a_remembered_allow_after_rewrite() {
     for_both_lanes(|parallel| async move {
         let outcome = Case::new(parallel)
             .pre_hook(Rewrite(REWRITTEN))
@@ -490,31 +533,60 @@ async fn a_remembered_rule_written_against_the_rewritten_input_answers_the_call(
             .run()
             .await;
 
-        assert_eq!(outcome.ran, vec![rewritten()], "parallel={parallel}");
-        assert!(
-            outcome.authorized.is_empty(),
-            "parallel={parallel}: the rule answered, so the approver was not asked"
+        assert!(outcome.ran.is_empty(), "parallel={parallel}");
+        assert_eq!(outcome.authorized.len(), 1, "parallel={parallel}");
+        assert_eq!(
+            outcome.authorized[0].preview.structured_input,
+            rewritten(),
+            "parallel={parallel}: the current policy must judge the rewritten call"
+        );
+        assert_eq!(
+            result_text(&outcome.tool_result),
+            (
+                "Tool execution denied: authorizer said no".to_string(),
+                true
+            )
         );
     })
     .await;
 }
 
 #[tokio::test]
-async fn a_remembered_rule_written_against_the_original_input_no_longer_matches() {
+async fn a_current_allow_beats_a_remembered_denial_after_rewrite() {
     for_both_lanes(|parallel| async move {
         let outcome = Case::new(parallel)
             .pre_hook(Rewrite(REWRITTEN))
-            .session_authorizer(false, allow_rule_for(r#"{"command":"rm -rf /"}"#))
+            .session_authorizer(true, deny_rule_for(r#"{"command":"ls"}"#))
             .run()
             .await;
 
-        assert!(outcome.ran.is_empty(), "parallel={parallel}");
+        assert_eq!(outcome.ran, vec![rewritten()], "parallel={parallel}");
+        assert_eq!(outcome.authorized.len(), 1, "parallel={parallel}");
+        assert_eq!(outcome.authorized[0].preview.structured_input, rewritten());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_current_prompt_uses_a_remembered_answer_for_the_rewritten_input() {
+    for_both_lanes(|parallel| async move {
+        let outcome = Case::new(parallel)
+            .pre_hook(Rewrite(REWRITTEN))
+            .prompting_session_authorizer(allow_rule_for(r#"{"command":"ls"}"#))
+            .run()
+            .await;
+
+        assert_eq!(outcome.ran, vec![rewritten()], "parallel={parallel}");
         assert_eq!(
             outcome.authorized.len(),
             1,
-            "parallel={parallel}: a rule for the discarded input does not answer"
+            "parallel={parallel}: current policy is consulted before the cached answer"
         );
         assert_eq!(outcome.authorized[0].preview.structured_input, rewritten());
+        assert_eq!(
+            result_text(&outcome.tool_result),
+            ("ran".to_string(), false)
+        );
     })
     .await;
 }

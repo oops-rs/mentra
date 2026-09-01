@@ -284,9 +284,11 @@ pub(crate) struct PendingPermissionEntry {
 
 /// Session-scoped wrapper around the runtime tool authorizer.
 ///
-/// This is the bridge that turns `Prompt` outcomes into typed
-/// `SessionEvent::PermissionRequested` events, stores the pending request, and
-/// suspends execution until a matching decision arrives.
+/// This is the bridge that first asks the current authorizer, then lets a
+/// remembered rule answer only its `Prompt` outcome. An authoritative `Allow`
+/// or `Deny` is returned unchanged. A prompt with no remembered answer becomes
+/// a typed `SessionEvent::PermissionRequested` event and suspends execution
+/// until a matching decision arrives.
 #[derive(Clone)]
 pub(crate) struct SessionToolAuthorizer {
     inner: Option<Arc<dyn ToolAuthorizer>>,
@@ -317,6 +319,19 @@ impl ToolAuthorizer for SessionToolAuthorizer {
         &self,
         request: &ToolAuthorizationRequest,
     ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+        let Some(inner) = self.inner.as_ref().cloned() else {
+            return Ok(ToolAuthorizationDecision::allow());
+        };
+
+        // Sample one authorizer for this call before awaiting it. A stateful
+        // session policy may change while a permission dialog is open; that
+        // change governs the next call, while this call keeps the policy that
+        // decided it needed a prompt.
+        let decision = inner.authorize(request).await?;
+        if decision.outcome != ToolAuthorizationOutcome::Prompt {
+            return Ok(decision);
+        }
+
         let input_json = serde_json::to_string(&request.preview.structured_input).ok();
         if let Some(rule) = self
             .rule_store
@@ -325,19 +340,10 @@ impl ToolAuthorizer for SessionToolAuthorizer {
             return Ok(if rule.allow {
                 ToolAuthorizationDecision::allow()
             } else {
-                // The approver is not consulted again, so the rule is the only
-                // place the original reason can still come from.
+                // The session approver is not consulted again, so the rule is
+                // the only place the original reason can still come from.
                 ToolAuthorizationDecision::deny(remembered_denial(rule.reason.as_deref()))
             });
-        }
-
-        let Some(inner) = &self.inner else {
-            return Ok(ToolAuthorizationDecision::allow());
-        };
-
-        let decision = inner.authorize(request).await?;
-        if decision.outcome != ToolAuthorizationOutcome::Prompt {
-            return Ok(decision);
         }
 
         let request_id = format!("perm-{}", request.tool_call_id);
@@ -397,6 +403,7 @@ impl ToolAuthorizer for SessionToolAuthorizer {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     use crate::tool::{
         ToolApprovalCategory, ToolAuthorizationPreview, ToolCapability, ToolClassification,
@@ -416,21 +423,65 @@ mod tests {
         }
     }
 
-    /// Refuses in words no remembered rule would use, so a call that reached
-    /// the approver shows up as a wrong string rather than as a test that
-    /// blocks forever waiting for an answer nobody will give.
     #[derive(Clone)]
-    struct ApproverOfLastResort;
+    struct CountingAuthorizer {
+        outcome: ToolAuthorizationOutcome,
+        calls: Arc<AtomicUsize>,
+    }
 
     #[async_trait]
-    impl ToolAuthorizer for ApproverOfLastResort {
+    impl ToolAuthorizer for CountingAuthorizer {
         async fn authorize(
             &self,
             _request: &ToolAuthorizationRequest,
         ) -> Result<ToolAuthorizationDecision, RuntimeError> {
-            Ok(ToolAuthorizationDecision::deny(
-                "the approver was asked again",
-            ))
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(match self.outcome {
+                ToolAuthorizationOutcome::Allow => ToolAuthorizationDecision::allow(),
+                ToolAuthorizationOutcome::Prompt => {
+                    ToolAuthorizationDecision::prompt("needs manual review")
+                }
+                ToolAuthorizationOutcome::Deny => {
+                    ToolAuthorizationDecision::deny("the current policy refuses")
+                }
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SwitchingAuthorizer {
+        outcome: Arc<AtomicU8>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl SwitchingAuthorizer {
+        const PROMPT: u8 = 0;
+        const DENY: u8 = 1;
+
+        fn prompting() -> Self {
+            Self {
+                outcome: Arc::new(AtomicU8::new(Self::PROMPT)),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn deny(&self) {
+            self.outcome.store(Self::DENY, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl ToolAuthorizer for SwitchingAuthorizer {
+        async fn authorize(
+            &self,
+            _request: &ToolAuthorizationRequest,
+        ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(if self.outcome.load(Ordering::SeqCst) == Self::PROMPT {
+                ToolAuthorizationDecision::prompt("needs manual review")
+            } else {
+                ToolAuthorizationDecision::deny("the current policy refuses")
+            })
         }
     }
 
@@ -634,12 +685,11 @@ mod tests {
         );
     }
 
-    /// Answers one authorize call from `store` alone. The approver behind it
-    /// refuses in its own words, so a rule that failed to answer is visible.
+    /// Answers one prompted authorize call from `store`.
     async fn answered_by_rule(store: RuleStore) -> ToolAuthorizationDecision {
         let (event_tx, _rx) = broadcast::channel(8);
         let authorizer = SessionToolAuthorizer::new(
-            Some(Arc::new(ApproverOfLastResort)),
+            Some(Arc::new(PromptAuthorizer)),
             event_tx,
             PendingPermissionStore::new(),
             store,
@@ -662,6 +712,144 @@ mod tests {
             scope: PermissionRuleScope::Session,
             reason: reason.map(str::to_owned),
         }
+    }
+
+    async fn current_policy_with_rule(
+        outcome: ToolAuthorizationOutcome,
+        rule: RememberedRule,
+    ) -> (ToolAuthorizationDecision, usize, bool) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = RuleStore::new();
+        store.add_rule(rule);
+        let (event_tx, mut rx) = broadcast::channel(8);
+        let authorizer = SessionToolAuthorizer::new(
+            Some(Arc::new(CountingAuthorizer {
+                outcome,
+                calls: Arc::clone(&calls),
+            })),
+            event_tx,
+            PendingPermissionStore::new(),
+            store,
+        );
+
+        let decision = authorizer
+            .authorize(&sample_request())
+            .await
+            .expect("authorization should resolve");
+        let emitted = rx.try_recv().is_ok();
+        (decision, calls.load(Ordering::SeqCst), emitted)
+    }
+
+    #[tokio::test]
+    async fn a_current_denial_beats_a_remembered_allow() {
+        let (decision, calls, emitted) =
+            current_policy_with_rule(ToolAuthorizationOutcome::Deny, shell_rule(true, None)).await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Deny);
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some("the current policy refuses")
+        );
+        assert_eq!(calls, 1, "the current policy must be consulted first");
+        assert!(!emitted, "a policy denial has nothing to ask about");
+    }
+
+    #[tokio::test]
+    async fn a_current_allow_beats_a_remembered_denial() {
+        let (decision, calls, emitted) = current_policy_with_rule(
+            ToolAuthorizationOutcome::Allow,
+            shell_rule(false, Some("an earlier policy refused")),
+        )
+        .await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Allow);
+        assert_eq!(calls, 1, "the current policy must be consulted first");
+        assert!(!emitted, "a policy allow has nothing to ask about");
+    }
+
+    #[tokio::test]
+    async fn a_current_prompt_consults_a_matching_remembered_rule() {
+        let (decision, calls, emitted) =
+            current_policy_with_rule(ToolAuthorizationOutcome::Prompt, shell_rule(true, None))
+                .await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Allow);
+        assert_eq!(calls, 1, "the current policy must be consulted first");
+        assert!(!emitted, "the remembered answer avoids a duplicate prompt");
+    }
+
+    #[tokio::test]
+    async fn no_inner_authorizer_allows_even_with_a_remembered_denial() {
+        let store = RuleStore::new();
+        store.add_rule(shell_rule(false, Some("an earlier policy refused")));
+        let (event_tx, mut rx) = broadcast::channel(8);
+        let authorizer =
+            SessionToolAuthorizer::new(None, event_tx, PendingPermissionStore::new(), store);
+
+        let decision = authorizer
+            .authorize(&sample_request())
+            .await
+            .expect("authorization should resolve");
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Allow);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_late_remembered_answer_applies_to_its_call_but_not_the_next_policy() {
+        let inner = SwitchingAuthorizer::prompting();
+        let store = RuleStore::new();
+        let pending = PendingPermissionStore::new();
+        let (event_tx, mut rx) = broadcast::channel(8);
+        let authorizer = SessionToolAuthorizer::new(
+            Some(Arc::new(inner.clone())),
+            event_tx,
+            pending.clone(),
+            store.clone(),
+        );
+
+        let first = tokio::spawn({
+            let authorizer = authorizer.clone();
+            async move { authorizer.authorize(&sample_request()).await.unwrap() }
+        });
+        let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("permission request should arrive")
+            .expect("event should be present");
+        let SessionEvent::PermissionRequested { request_id, .. } = event else {
+            panic!("expected PermissionRequested, got {event:?}");
+        };
+
+        inner.deny();
+        store.add_rule(shell_rule(true, None));
+        pending
+            .remove(&request_id)
+            .expect("pending permission should be registered")
+            .sender
+            .send(PermissionDecision::allow_and_remember(
+                PermissionRuleScope::Session,
+            ))
+            .expect("decision send should succeed");
+
+        let first = first
+            .await
+            .expect("first authorization task should succeed");
+        assert_eq!(
+            first.outcome,
+            ToolAuthorizationOutcome::Allow,
+            "the already-open request keeps the answer given to it"
+        );
+
+        let next = authorizer
+            .authorize(&sample_request())
+            .await
+            .expect("next authorization should resolve");
+        assert_eq!(next.outcome, ToolAuthorizationOutcome::Deny);
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            rx.try_recv().is_err(),
+            "the stricter next policy must not prompt or consult the stale allow"
+        );
     }
 
     #[tokio::test]

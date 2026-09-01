@@ -159,6 +159,13 @@ pub struct ToolAuthorizationRequest {
 ///
 /// The authorizer is not consulted for a call a hook denied, nor for one whose
 /// input — the model's or a hook's — does not fit the schema.
+///
+/// A [`Session`](crate::session::Session) consults its current authorizer before
+/// considering remembered permission answers. `Allow` and `Deny` are
+/// authoritative; only `Prompt` may be answered by a remembered rule or sent
+/// through the session's live permission flow. With no authorizer installed,
+/// the effective answer remains `Allow` and remembered rules are not a separate
+/// policy layer.
 #[async_trait]
 pub trait ToolAuthorizer: Send + Sync {
     async fn authorize(

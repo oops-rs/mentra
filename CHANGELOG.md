@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### The current authorizer is authoritative over remembered answers
+
+- A session now asks its current `ToolAuthorizer` before consulting remembered
+  permission rules. `Allow` and `Deny` are terminal; only `Prompt` may be
+  answered by a matching remembered rule or forwarded to the live permission
+  flow. A remembered allow can therefore no longer bypass a session switched
+  to a stricter authorizer, and a remembered denial cannot override a current
+  explicit allow ([#43](https://github.com/oops-rs/mentra/issues/43)).
+- The authorizer is sampled once per call. A permission request already shown
+  to a host keeps the answer given to that call, while a stateful policy change
+  governs the next call. With no authorizer installed, sessions retain their
+  existing effective-allow behavior even if rules were inserted manually.
+
 ### Sessions can replace the runtime policy
 
 - `SessionOptions::policy` and `SessionResumeOptions::policy` let one shared

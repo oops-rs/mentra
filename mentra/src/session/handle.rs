@@ -274,8 +274,10 @@ impl Session {
     /// from the runtime keep the runtime's authorizer. The session's own
     /// permission wrapper remains outermost, so a [`crate::tool::ToolAuthorizer`]
     /// that returns [`crate::tool::ToolAuthorizationOutcome::Prompt`] still
-    /// emits [`SessionEvent::PermissionRequested`] and waits for
-    /// [`resolve_permission`](Self::resolve_permission).
+    /// consults remembered answers, then emits [`SessionEvent::PermissionRequested`]
+    /// and waits for [`resolve_permission`](Self::resolve_permission) when none
+    /// matches. `Allow` and `Deny` remain authoritative and are never overridden
+    /// by an answer remembered under an earlier policy.
     ///
     /// The attachment is live-only and is not persisted with the agent. Attach
     /// the current authorizer again after resuming a session. A stateful
