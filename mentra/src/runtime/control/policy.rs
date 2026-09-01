@@ -449,7 +449,20 @@ fn path_is_allowed(path: &Path, default_root: &Path, extra_roots: &[PathBuf]) ->
             .any(|root| candidate_path.starts_with(root))
 }
 
-fn normalize_policy_root(path: &Path) -> PathBuf {
+/// Returns the best-effort normalized path spelling used for policy-root
+/// comparisons.
+///
+/// Absolute paths have lexical `.` and `..` components folded, existing
+/// symlink components resolved, and any non-existent suffix preserved. If
+/// that process fails, this falls back to [`fs::canonicalize`] and finally to
+/// the input path unchanged. A relative or otherwise unresolvable path may
+/// therefore remain relative or unresolved.
+///
+/// This function only normalizes a spelling. It does not validate, authorize,
+/// create, or confine filesystem access, and filesystem state can change after
+/// it returns. Enforcement that must resist races or shell side effects still
+/// requires an OS-level sandbox.
+pub fn normalize_policy_root(path: &Path) -> PathBuf {
     normalize_absolute_path(path)
         .ok()
         .and_then(|normalized| resolve_existing_components(&normalized).ok())

@@ -16,5 +16,5 @@ pub use hooks::{
     is_transient_runtime_error,
 };
 pub(crate) use policy::ShellValidation;
-pub use policy::{RuntimePolicy, ShellValidationMode};
+pub use policy::{RuntimePolicy, ShellValidationMode, normalize_policy_root};
 pub use run::{CancellationFlag, CancellationToken, EarlyEnd, ProviderRetry, RunOptions};

@@ -38,7 +38,7 @@ pub use control::{
     PostExecutionHook, PostExecutionHooks, PreExecutionContext, PreExecutionHook,
     PreExecutionHooks, ProviderRetry, ResultDecision, RunOptions, RuntimeExecutor, RuntimeHook,
     RuntimeHookEvent, RuntimeHooks, RuntimePolicy, ShellValidationMode,
-    is_transient_provider_error, is_transient_runtime_error,
+    is_transient_provider_error, is_transient_runtime_error, normalize_policy_root,
 };
 pub use error::{ErrorCategory, RuntimeError};
 pub use file_store::FileRuntimeStore;
