@@ -552,6 +552,37 @@ Disposable subagents and teammates inherit their live parent's audience.
 it is not ownership or security provenance. A guessed foreign tool name is
 rejected before hooks, authorization, or tool execution.
 
+## Live Execution Hooks
+
+`RuntimeBuilder::with_pre_hook` and `with_post_hook` install permanent hooks
+before a runtime exists. A long-lived runtime can add hooks later with
+`Runtime::register_pre_hook` and `register_post_hook`. Keep each returned guard
+alive while the hook should apply; dropping it, or consuming it with
+`unregister`, removes only that exact registration. Existing agents and sessions
+use the live registry, so their next hook snapshot observes the change.
+
+Use `register_pre_hook_for_audience` and
+`register_post_hook_for_audience` for workspace- or tenant-owned hooks. The
+scope is the opaque `ToolAudience` carried by the live runtime handle, not the
+hook context's `working_directory`: two audiences may point at the same path
+without seeing one another's hooks, and an agent with no audience sees only
+global hooks. Audiences are routing identity, not authentication, and must be
+reattached on resume.
+
+Within each seam, all applicable hooks share one order. Permanent builder hooks
+come first, then live global and matching-audience hooks in the order registered
+for that seam. Pre-execution walks its order forward; post-execution walks its
+own exact reverse, preserving the outer-hook wrapping contract. The two seams
+are registered independently. Registering the same hook independently as both
+global and matching-audience intentionally invokes it twice.
+
+Each pre or post invocation snapshots its applicable hooks before awaiting user
+code. Removing a registration affects later snapshots but does not cancel one
+already running. The two seams snapshot independently: if a host needs them to
+bracket a tool call, it must retain both guards until the call has quiesced.
+Dropping a post guard after pre admission does not guarantee the result will be
+reviewed.
+
 ## Tooling Layers
 
 Mentra now separates tool contracts into explicit layers:

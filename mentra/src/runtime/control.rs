@@ -11,9 +11,9 @@ pub use command::{
 };
 pub use hooks::{
     AuditHook, AuditLogHook, HookDecision, PostExecutionContext, PostExecutionHook,
-    PostExecutionHooks, PreExecutionContext, PreExecutionHook, PreExecutionHooks, ResultDecision,
-    RuntimeHook, RuntimeHookEvent, RuntimeHooks, is_transient_provider_error,
-    is_transient_runtime_error,
+    PostExecutionHookRegistration, PostExecutionHooks, PreExecutionContext, PreExecutionHook,
+    PreExecutionHookRegistration, PreExecutionHooks, ResultDecision, RuntimeHook, RuntimeHookEvent,
+    RuntimeHooks, is_transient_provider_error, is_transient_runtime_error,
 };
 pub(crate) use policy::ShellValidation;
 pub use policy::{RuntimePolicy, ShellValidationMode, normalize_policy_root};

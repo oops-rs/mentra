@@ -21,8 +21,10 @@ use mentra::{
         Response, Role, provider_event_stream_from_response,
     },
     runtime::{
-        CommandOutput, CommandRequest, RuntimeExecutor, RuntimePolicy, SessionOptions,
-        VolatileRuntimeStore,
+        CommandOutput, CommandRequest, HookDecision, PostExecutionContext, PostExecutionHook,
+        PostExecutionHookRegistration, PreExecutionContext, PreExecutionHook,
+        PreExecutionHookRegistration, ResultDecision, RuntimeExecutor, RuntimePolicy,
+        SessionOptions, VolatileRuntimeStore,
     },
     tool::{
         ExecutableTool, ParallelToolContext, ToolAuthorizationDecision, ToolAuthorizationPreview,
@@ -183,6 +185,28 @@ struct AlphaTool;
 struct EndTurnTool;
 
 struct SubagentSummaryTool;
+
+struct PublicExecutionHook;
+
+#[async_trait]
+impl PreExecutionHook for PublicExecutionHook {
+    async fn pre_tool_execution(
+        &self,
+        _context: &PreExecutionContext,
+    ) -> Result<HookDecision, RuntimeError> {
+        Ok(HookDecision::Allow)
+    }
+}
+
+#[async_trait]
+impl PostExecutionHook for PublicExecutionHook {
+    async fn post_tool_execution(
+        &self,
+        _context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError> {
+        Ok(ResultDecision::Keep)
+    }
+}
 
 #[async_trait]
 impl ToolDefinition for EchoTool {
@@ -483,6 +507,37 @@ fn runtime_publicly_registers_audience_tools_with_guard_lifetimes() {
         .expect("released audience name can register again");
     drop(replacement);
     drop(other_guard);
+}
+
+#[test]
+fn runtime_publicly_registers_live_hook_guards_without_owning_the_runtime() {
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let audience = ToolAudience::new("hook-workspace");
+
+    let global_pre: PreExecutionHookRegistration = runtime.register_pre_hook(PublicExecutionHook);
+    let audience_pre: PreExecutionHookRegistration =
+        runtime.register_pre_hook_for_audience(audience.clone(), PublicExecutionHook);
+    let global_post: PostExecutionHookRegistration =
+        runtime.register_post_hook(PublicExecutionHook);
+    let audience_post: PostExecutionHookRegistration =
+        runtime.register_post_hook_for_audience(audience.clone(), PublicExecutionHook);
+
+    assert_eq!(global_pre.audience(), None);
+    assert_eq!(audience_pre.audience(), Some(&audience));
+    assert_eq!(global_post.audience(), None);
+    assert_eq!(audience_post.audience(), Some(&audience));
+
+    drop(runtime);
+    assert!(!global_pre.unregister());
+    assert!(!audience_pre.unregister());
+    assert!(!global_post.unregister());
+    assert!(!audience_post.unregister());
 }
 
 #[tokio::test]

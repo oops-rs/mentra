@@ -1,4 +1,11 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    fmt,
+    path::PathBuf,
+    sync::{
+        Arc, RwLock, Weak,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -6,8 +13,18 @@ use serde::{Deserialize, Serialize};
 use crate::{
     provider::{ProviderError, TokenUsage},
     runtime::{AuditStore, RuntimeStore, error::RuntimeError},
-    tool::{ToolAuthorizationOutcome, ToolAuthorizationPreview, ToolResultContent},
+    tool::{ToolAudience, ToolAuthorizationOutcome, ToolAuthorizationPreview, ToolResultContent},
 };
+
+static NEXT_EXECUTION_HOOK_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_execution_hook_registration_id() -> u64 {
+    NEXT_EXECUTION_HOOK_REGISTRATION_ID
+        .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |id| {
+            id.checked_add(1)
+        })
+        .expect("execution hook registration identifiers exhausted")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -400,31 +417,48 @@ impl<T: PreExecutionHook + ?Sized> PreExecutionHook for Arc<T> {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct PreExecutionHooks {
+/// Keeps one live pre-execution hook registered.
+///
+/// Dropping the guard, or consuming it with [`unregister`](Self::unregister),
+/// removes only this exact registration. An invocation that already snapshotted
+/// the hook may still finish. The guard does not keep its runtime alive.
+#[must_use = "dropping the guard immediately unregisters the pre-execution hook"]
+pub struct PreExecutionHookRegistration {
+    inner: LiveHookRegistration<dyn PreExecutionHook>,
+}
+
+impl fmt::Debug for PreExecutionHookRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreExecutionHookRegistration")
+            .field("audience", &self.inner.audience)
+            .field("active", &self.inner.active)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreExecutionHookRegistration {
+    /// Returns the audience this hook is scoped to, or `None` when it is global.
+    pub fn audience(&self) -> Option<&ToolAudience> {
+        self.inner.audience.as_ref()
+    }
+
+    /// Unregisters this exact hook now.
+    pub fn unregister(mut self) -> bool {
+        self.inner.unregister()
+    }
+}
+
+pub(crate) struct PreExecutionHookSnapshot {
     hooks: Vec<Arc<dyn PreExecutionHook>>,
 }
 
-impl PreExecutionHooks {
-    pub fn new() -> Self {
-        Self { hooks: Vec::new() }
-    }
-
-    pub fn with_hook<H>(mut self, hook: H) -> Self
-    where
-        H: PreExecutionHook + 'static,
-    {
-        self.hooks.push(Arc::new(hook));
-        self
-    }
-
-    /// Runs every hook in order, threading any modification through the rest.
-    ///
-    /// Returns the surviving decision: a `Deny` from any hook short-circuits,
-    /// and otherwise the last `Modify` (if any) is what the tool should run
-    /// with. Each hook sees the input as its predecessors left it, so
-    /// modifications compose and no hook can route a call around a later one.
-    pub async fn run(&self, context: &PreExecutionContext) -> Result<HookDecision, RuntimeError> {
+impl PreExecutionHookSnapshot {
+    /// Runs every snapshotted hook in order, threading modifications through.
+    pub(crate) async fn run(
+        &self,
+        context: &PreExecutionContext,
+    ) -> Result<HookDecision, RuntimeError> {
         let mut current = context.clone();
         let mut modified = None;
 
@@ -441,10 +475,85 @@ impl PreExecutionHooks {
 
         Ok(modified.unwrap_or(HookDecision::Allow))
     }
+}
+
+#[derive(Clone)]
+pub struct PreExecutionHooks {
+    hooks: Vec<Arc<dyn PreExecutionHook>>,
+    live: Arc<RwLock<LiveHookRegistry<dyn PreExecutionHook>>>,
+}
+
+impl Default for PreExecutionHooks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PreExecutionHooks {
+    pub fn new() -> Self {
+        Self {
+            hooks: Vec::new(),
+            live: Arc::new(RwLock::new(LiveHookRegistry::new())),
+        }
+    }
+
+    pub fn with_hook<H>(mut self, hook: H) -> Self
+    where
+        H: PreExecutionHook + 'static,
+    {
+        self.hooks.push(Arc::new(hook));
+        self
+    }
+
+    pub(crate) fn register_live<H>(
+        &self,
+        audience: Option<ToolAudience>,
+        hook: H,
+    ) -> PreExecutionHookRegistration
+    where
+        H: PreExecutionHook + 'static,
+    {
+        let id = next_execution_hook_registration_id();
+        let guard_audience = audience.clone();
+        let hook: Arc<dyn PreExecutionHook> = Arc::new(hook);
+        self.live
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, audience, hook);
+        PreExecutionHookRegistration {
+            inner: LiveHookRegistration::new(Arc::downgrade(&self.live), id, guard_audience),
+        }
+    }
+
+    pub(crate) fn snapshot(&self, audience: Option<&ToolAudience>) -> PreExecutionHookSnapshot {
+        let live = self
+            .live
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut hooks = Vec::with_capacity(self.hooks.len() + live.entries.len());
+        hooks.extend(self.hooks.iter().cloned());
+        hooks.extend(live.matching(audience));
+        PreExecutionHookSnapshot { hooks }
+    }
+
+    /// Runs every hook in order, threading any modification through the rest.
+    ///
+    /// Returns the surviving decision: a `Deny` from any hook short-circuits,
+    /// and otherwise the last `Modify` (if any) is what the tool should run
+    /// with. Each hook sees the input as its predecessors left it, so
+    /// modifications compose and no hook can route a call around a later one.
+    pub async fn run(&self, context: &PreExecutionContext) -> Result<HookDecision, RuntimeError> {
+        self.snapshot(None).run(context).await
+    }
 
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty()
+            && self
+                .live
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
     }
 }
 
@@ -478,6 +587,97 @@ pub fn is_transient_provider_error(error: &ProviderError) -> bool {
 /// truth for error classification.
 pub fn is_transient_runtime_error(error: &RuntimeError) -> bool {
     error.category() == crate::error::ErrorCategory::Retryable
+}
+
+struct LiveHookEntry<T: ?Sized> {
+    id: u64,
+    audience: Option<ToolAudience>,
+    hook: Arc<T>,
+}
+
+struct LiveHookRegistry<T: ?Sized> {
+    entries: Vec<LiveHookEntry<T>>,
+}
+
+impl<T: ?Sized> LiveHookRegistry<T> {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, id: u64, audience: Option<ToolAudience>, hook: Arc<T>) {
+        self.entries.push(LiveHookEntry { id, audience, hook });
+    }
+
+    fn matching<'a>(
+        &'a self,
+        audience: Option<&'a ToolAudience>,
+    ) -> impl Iterator<Item = Arc<T>> + 'a {
+        self.entries
+            .iter()
+            .filter(move |entry| match &entry.audience {
+                None => true,
+                Some(expected) => audience == Some(expected),
+            })
+            .map(|entry| Arc::clone(&entry.hook))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn detach(&mut self, id: u64) -> Option<Arc<T>> {
+        let index = self.entries.iter().position(|entry| entry.id == id)?;
+        Some(self.entries.remove(index).hook)
+    }
+}
+
+struct LiveHookRegistration<T: ?Sized> {
+    registry: Weak<RwLock<LiveHookRegistry<T>>>,
+    id: u64,
+    audience: Option<ToolAudience>,
+    active: bool,
+}
+
+impl<T: ?Sized> LiveHookRegistration<T> {
+    fn new(
+        registry: Weak<RwLock<LiveHookRegistry<T>>>,
+        id: u64,
+        audience: Option<ToolAudience>,
+    ) -> Self {
+        Self {
+            registry,
+            id,
+            audience,
+            active: true,
+        }
+    }
+
+    fn unregister(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.active = false;
+        let Some(registry) = self.registry.upgrade() else {
+            return false;
+        };
+        let detached_hook = {
+            let mut registry = registry
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.detach(self.id)
+        };
+        let removed = detached_hook.is_some();
+        drop(detached_hook);
+        removed
+    }
+}
+
+impl<T: ?Sized> Drop for LiveHookRegistration<T> {
+    fn drop(&mut self) {
+        self.unregister();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,14 +761,87 @@ impl<T: PostExecutionHook + ?Sized> PostExecutionHook for Arc<T> {
     }
 }
 
-#[derive(Clone, Default)]
+/// Keeps one live post-execution hook registered.
+///
+/// Dropping the guard, or consuming it with [`unregister`](Self::unregister),
+/// removes only this exact registration. An invocation that already snapshotted
+/// the hook may still finish. The guard does not keep its runtime alive.
+#[must_use = "dropping the guard immediately unregisters the post-execution hook"]
+pub struct PostExecutionHookRegistration {
+    inner: LiveHookRegistration<dyn PostExecutionHook>,
+}
+
+impl fmt::Debug for PostExecutionHookRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PostExecutionHookRegistration")
+            .field("audience", &self.inner.audience)
+            .field("active", &self.inner.active)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PostExecutionHookRegistration {
+    /// Returns the audience this hook is scoped to, or `None` when it is global.
+    pub fn audience(&self) -> Option<&ToolAudience> {
+        self.inner.audience.as_ref()
+    }
+
+    /// Unregisters this exact hook now.
+    pub fn unregister(mut self) -> bool {
+        self.inner.unregister()
+    }
+}
+
+pub(crate) struct PostExecutionHookSnapshot {
+    hooks: Vec<Arc<dyn PostExecutionHook>>,
+}
+
+impl PostExecutionHookSnapshot {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+
+    /// Runs every snapshotted hook in reverse order, threading replacements.
+    pub(crate) async fn run(
+        &self,
+        context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError> {
+        let mut current = context.clone();
+        let mut replaced = ResultDecision::Keep;
+
+        for hook in self.hooks.iter().rev() {
+            if let ResultDecision::Replace { content, is_error } =
+                hook.post_tool_execution(&current).await?
+            {
+                current.content = content.clone();
+                current.is_error = is_error;
+                replaced = ResultDecision::Replace { content, is_error };
+            }
+        }
+
+        Ok(replaced)
+    }
+}
+
+#[derive(Clone)]
 pub struct PostExecutionHooks {
     hooks: Vec<Arc<dyn PostExecutionHook>>,
+    live: Arc<RwLock<LiveHookRegistry<dyn PostExecutionHook>>>,
+}
+
+impl Default for PostExecutionHooks {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PostExecutionHooks {
     pub fn new() -> Self {
-        Self { hooks: Vec::new() }
+        Self {
+            hooks: Vec::new(),
+            live: Arc::new(RwLock::new(LiveHookRegistry::new())),
+        }
     }
 
     pub fn with_hook<H>(mut self, hook: H) -> Self
@@ -579,8 +852,44 @@ impl PostExecutionHooks {
         self
     }
 
+    pub(crate) fn register_live<H>(
+        &self,
+        audience: Option<ToolAudience>,
+        hook: H,
+    ) -> PostExecutionHookRegistration
+    where
+        H: PostExecutionHook + 'static,
+    {
+        let id = next_execution_hook_registration_id();
+        let guard_audience = audience.clone();
+        let hook: Arc<dyn PostExecutionHook> = Arc::new(hook);
+        self.live
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, audience, hook);
+        PostExecutionHookRegistration {
+            inner: LiveHookRegistration::new(Arc::downgrade(&self.live), id, guard_audience),
+        }
+    }
+
+    pub(crate) fn snapshot(&self, audience: Option<&ToolAudience>) -> PostExecutionHookSnapshot {
+        let live = self
+            .live
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut hooks = Vec::with_capacity(self.hooks.len() + live.entries.len());
+        hooks.extend(self.hooks.iter().cloned());
+        hooks.extend(live.matching(audience));
+        PostExecutionHookSnapshot { hooks }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty()
+            && self
+                .live
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
     }
 
     /// Runs every hook in reverse registration order, threading each
@@ -599,24 +908,7 @@ impl PostExecutionHooks {
         &self,
         context: &PostExecutionContext,
     ) -> Result<ResultDecision, RuntimeError> {
-        if self.hooks.is_empty() {
-            return Ok(ResultDecision::Keep);
-        }
-
-        let mut current = context.clone();
-        let mut replaced = ResultDecision::Keep;
-
-        for hook in self.hooks.iter().rev() {
-            if let ResultDecision::Replace { content, is_error } =
-                hook.post_tool_execution(&current).await?
-            {
-                current.content = content.clone();
-                current.is_error = is_error;
-                replaced = ResultDecision::Replace { content, is_error };
-            }
-        }
-
-        Ok(replaced)
+        self.snapshot(None).run(context).await
     }
 }
 
@@ -1029,5 +1321,404 @@ mod pre_execution_tests {
             HookDecision::Deny("after awaiting".to_string()),
             "a hook doing real work must not need a multi-thread runtime"
         );
+    }
+}
+
+#[cfg(test)]
+mod live_registration_tests {
+    use std::{
+        panic::AssertUnwindSafe,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
+        time::Duration,
+    };
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    fn pre_context() -> PreExecutionContext {
+        PreExecutionContext {
+            agent_id: "agent".to_string(),
+            tool_name: "echo".to_string(),
+            tool_call_id: "call".to_string(),
+            input_json: "{}".to_string(),
+            working_directory: PathBuf::from("/same/root"),
+        }
+    }
+
+    fn post_context() -> PostExecutionContext {
+        PostExecutionContext {
+            agent_id: "agent".to_string(),
+            tool_name: "echo".to_string(),
+            tool_call_id: "call".to_string(),
+            input_json: "{}".to_string(),
+            working_directory: PathBuf::from("/same/root"),
+            content: ToolResultContent::text("out"),
+            is_error: false,
+        }
+    }
+
+    struct Records {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    struct Allows;
+
+    #[async_trait]
+    impl PreExecutionHook for Allows {
+        async fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            Ok(HookDecision::Allow)
+        }
+    }
+
+    #[async_trait]
+    impl PreExecutionHook for Records {
+        async fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            self.log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(self.label);
+            Ok(HookDecision::Allow)
+        }
+    }
+
+    #[async_trait]
+    impl PostExecutionHook for Records {
+        async fn post_tool_execution(
+            &self,
+            _context: &PostExecutionContext,
+        ) -> Result<ResultDecision, RuntimeError> {
+            self.log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(self.label);
+            Ok(ResultDecision::Keep)
+        }
+    }
+
+    fn recorded(log: &Arc<Mutex<Vec<&'static str>>>) -> Vec<&'static str> {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn clear(log: &Arc<Mutex<Vec<&'static str>>>) {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    #[tokio::test]
+    async fn builder_global_and_audience_hooks_share_one_filtered_order() {
+        let alpha = ToolAudience::new("alpha");
+        let beta = ToolAudience::new("beta");
+
+        let pre_log = Arc::new(Mutex::new(Vec::new()));
+        let pre = PreExecutionHooks::new().with_hook(Records {
+            label: "builder",
+            log: Arc::clone(&pre_log),
+        });
+        let _pre_global_one = pre.register_live(
+            None,
+            Records {
+                label: "global-one",
+                log: Arc::clone(&pre_log),
+            },
+        );
+        let _pre_alpha = pre.register_live(
+            Some(alpha.clone()),
+            Records {
+                label: "alpha",
+                log: Arc::clone(&pre_log),
+            },
+        );
+        let _pre_beta = pre.register_live(
+            Some(beta.clone()),
+            Records {
+                label: "beta",
+                log: Arc::clone(&pre_log),
+            },
+        );
+        let _pre_global_two = pre.register_live(
+            None,
+            Records {
+                label: "global-two",
+                log: Arc::clone(&pre_log),
+            },
+        );
+
+        pre.snapshot(Some(&alpha))
+            .run(&pre_context())
+            .await
+            .expect("alpha pre hooks");
+        assert_eq!(
+            recorded(&pre_log),
+            ["builder", "global-one", "alpha", "global-two"]
+        );
+        clear(&pre_log);
+        pre.snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("global pre hooks");
+        assert_eq!(recorded(&pre_log), ["builder", "global-one", "global-two"]);
+
+        let post_log = Arc::new(Mutex::new(Vec::new()));
+        let post = PostExecutionHooks::new().with_hook(Records {
+            label: "builder",
+            log: Arc::clone(&post_log),
+        });
+        let _post_global_one = post.register_live(
+            None,
+            Records {
+                label: "global-one",
+                log: Arc::clone(&post_log),
+            },
+        );
+        let _post_alpha = post.register_live(
+            Some(alpha),
+            Records {
+                label: "alpha",
+                log: Arc::clone(&post_log),
+            },
+        );
+        let _post_beta = post.register_live(
+            Some(beta),
+            Records {
+                label: "beta",
+                log: Arc::clone(&post_log),
+            },
+        );
+        let _post_global_two = post.register_live(
+            None,
+            Records {
+                label: "global-two",
+                log: Arc::clone(&post_log),
+            },
+        );
+
+        post.snapshot(Some(&ToolAudience::new("alpha")))
+            .run(&post_context())
+            .await
+            .expect("alpha post hooks");
+        assert_eq!(
+            recorded(&post_log),
+            ["global-two", "alpha", "global-one", "builder"]
+        );
+        clear(&post_log);
+        post.snapshot(None)
+            .run(&post_context())
+            .await
+            .expect("global post hooks");
+        assert_eq!(recorded(&post_log), ["global-two", "global-one", "builder"]);
+    }
+
+    #[tokio::test]
+    async fn duplicate_guards_and_middle_removal_are_registration_exact() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hooks = PreExecutionHooks::new();
+        let duplicate = Arc::new(Records {
+            label: "duplicate",
+            log: Arc::clone(&log),
+        });
+        let left = hooks.register_live(
+            None,
+            Records {
+                label: "left",
+                log: Arc::clone(&log),
+            },
+        );
+        let first = hooks.register_live(None, Arc::clone(&duplicate));
+        let middle = hooks.register_live(
+            None,
+            Records {
+                label: "middle",
+                log: Arc::clone(&log),
+            },
+        );
+        let last = hooks.register_live(None, duplicate);
+        let right = hooks.register_live(
+            None,
+            Records {
+                label: "right",
+                log: Arc::clone(&log),
+            },
+        );
+
+        drop(middle);
+        hooks
+            .snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("two duplicates remain");
+        assert_eq!(recorded(&log), ["left", "duplicate", "duplicate", "right"]);
+
+        clear(&log);
+        drop(first);
+        hooks
+            .snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("one duplicate remains");
+        assert_eq!(recorded(&log), ["left", "duplicate", "right"]);
+
+        assert!(last.unregister());
+        drop(left);
+        drop(right);
+        clear(&log);
+        hooks
+            .snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("all live hooks removed");
+        assert!(recorded(&log).is_empty());
+    }
+
+    struct BlockingPostHook {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl PostExecutionHook for BlockingPostHook {
+        async fn post_tool_execution(
+            &self,
+            _context: &PostExecutionContext,
+        ) -> Result<ResultDecision, RuntimeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(ResultDecision::Keep)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_an_in_flight_registration_finishes_that_snapshot_only() {
+        let hooks = PostExecutionHooks::new();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let guard = hooks.register_live(
+            None,
+            BlockingPostHook {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                calls: Arc::clone(&calls),
+            },
+        );
+        let snapshot = hooks.snapshot(None);
+        let running = tokio::spawn(async move { snapshot.run(&post_context()).await });
+
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("blocking hook enters");
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(guard);
+            let _ = dropped_tx.send(());
+        });
+        let dropped_before_release = dropped_rx.recv_timeout(Duration::from_millis(200)).is_ok();
+        // Always release and join before asserting, so a lock-across-await
+        // regression reports a bounded failure instead of hanging the suite.
+        release.notify_one();
+        let running_result = tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .expect("hook task finishes")
+            .expect("hook task joins")
+            .expect("hook runs");
+        if !dropped_before_release {
+            let _ = dropped_rx.recv_timeout(Duration::from_secs(2));
+        }
+        let drop_result = dropper.join();
+        assert!(hooks.snapshot(None).is_empty());
+        assert_eq!(running_result, ResultDecision::Keep);
+        assert!(
+            dropped_before_release,
+            "guard Drop must not wait for an in-flight hook callback"
+        );
+        drop_result.expect("guard dropper exits");
+        hooks
+            .snapshot(None)
+            .run(&post_context())
+            .await
+            .expect("later empty snapshot runs");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct ReentrantDrop {
+        hooks: PreExecutionHooks,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl PreExecutionHook for ReentrantDrop {
+        async fn pre_tool_execution(
+            &self,
+            _context: &PreExecutionContext,
+        ) -> Result<HookDecision, RuntimeError> {
+            Ok(HookDecision::Allow)
+        }
+    }
+
+    impl Drop for ReentrantDrop {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+            let transient = self.hooks.register_live(None, Allows);
+            drop(transient);
+        }
+    }
+
+    #[test]
+    fn hook_captures_are_destroyed_after_the_registry_unlocks() {
+        let hooks = PreExecutionHooks::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = hooks.register_live(
+            None,
+            ReentrantDrop {
+                hooks: hooks.clone(),
+                dropped: Arc::clone(&dropped),
+            },
+        );
+        let (done_tx, done_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(guard);
+            done_tx.send(()).expect("report guard drop");
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reentrant hook Drop must not deadlock");
+        dropper.join().expect("dropper exits");
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn registration_drop_recovers_a_poisoned_registry() {
+        let hooks = PreExecutionHooks::new();
+        let guard = hooks.register_live(None, Allows);
+        let registry = guard.inner.registry.upgrade().expect("live hook registry");
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _locked = registry.write().expect("initially healthy registry");
+            panic!("poison live hook registry");
+        }));
+
+        assert!(
+            std::panic::catch_unwind(AssertUnwindSafe(|| drop(guard))).is_ok(),
+            "registration Drop must recover the poisoned registry"
+        );
+        assert!(hooks.is_empty());
     }
 }

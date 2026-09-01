@@ -34,10 +34,11 @@ pub use control::sandbox::{ExecutionEnvironment, detect_environment};
 pub use control::{
     AuditHook, AuditLogHook, CancellationFlag, CancellationToken, CommandOutput, CommandRequest,
     CommandSpec, EarlyEnd, ExecOutput, HookDecision, LocalRuntimeExecutor, PostExecutionContext,
-    PostExecutionHook, PostExecutionHooks, PreExecutionContext, PreExecutionHook,
-    PreExecutionHooks, ProviderRetry, ResultDecision, RunOptions, RuntimeExecutor, RuntimeHook,
-    RuntimeHookEvent, RuntimeHooks, RuntimePolicy, ShellValidationMode,
-    is_transient_provider_error, is_transient_runtime_error, normalize_policy_root,
+    PostExecutionHook, PostExecutionHookRegistration, PostExecutionHooks, PreExecutionContext,
+    PreExecutionHook, PreExecutionHookRegistration, PreExecutionHooks, ProviderRetry,
+    ResultDecision, RunOptions, RuntimeExecutor, RuntimeHook, RuntimeHookEvent, RuntimeHooks,
+    RuntimePolicy, ShellValidationMode, is_transient_provider_error, is_transient_runtime_error,
+    normalize_policy_root,
 };
 pub use error::{ErrorCategory, RuntimeError};
 pub use file_store::FileRuntimeStore;
@@ -254,6 +255,67 @@ impl Runtime {
         T: Any + Send + Sync + 'static,
     {
         self.handle.app_context::<T>()
+    }
+
+    /// Registers a live pre-execution hook for every agent on this runtime.
+    ///
+    /// Agents and sessions that already exist observe the hook on their next
+    /// tool call. Builder-time hooks are permanent and run first; live global
+    /// and matching-audience hooks then run together in registration order.
+    /// Keep the returned guard alive for as long as the hook should apply.
+    pub fn register_pre_hook<H>(&self, hook: H) -> PreExecutionHookRegistration
+    where
+        H: PreExecutionHook + 'static,
+    {
+        self.handle.pre_hooks().register_live(None, hook)
+    }
+
+    /// Registers a live pre-execution hook for one [`ToolAudience`].
+    ///
+    /// The audience is opaque execution scope, not a working directory. Agents
+    /// with another audience, and agents with no audience, never run this hook.
+    ///
+    /// [`ToolAudience`]: crate::tool::ToolAudience
+    pub fn register_pre_hook_for_audience<H>(
+        &self,
+        audience: crate::tool::ToolAudience,
+        hook: H,
+    ) -> PreExecutionHookRegistration
+    where
+        H: PreExecutionHook + 'static,
+    {
+        self.handle.pre_hooks().register_live(Some(audience), hook)
+    }
+
+    /// Registers a live post-execution hook for every agent on this runtime.
+    ///
+    /// Builder-time hooks are permanent and outermost. Live hooks join one
+    /// registration order with them, then the complete post-execution chain
+    /// runs in exact reverse so the earliest registration has the final say.
+    /// A post-hook invocation already snapshotted may finish after its guard is
+    /// dropped; this does not retain the hook across the whole tool call.
+    pub fn register_post_hook<H>(&self, hook: H) -> PostExecutionHookRegistration
+    where
+        H: PostExecutionHook + 'static,
+    {
+        self.handle.post_hooks().register_live(None, hook)
+    }
+
+    /// Registers a live post-execution hook for one [`ToolAudience`].
+    ///
+    /// The audience is opaque execution scope, not a working directory. Agents
+    /// with another audience, and agents with no audience, never run this hook.
+    ///
+    /// [`ToolAudience`]: crate::tool::ToolAudience
+    pub fn register_post_hook_for_audience<H>(
+        &self,
+        audience: crate::tool::ToolAudience,
+        hook: H,
+    ) -> PostExecutionHookRegistration
+    where
+        H: PostExecutionHook + 'static,
+    {
+        self.handle.post_hooks().register_live(Some(audience), hook)
     }
 
     /// Registers a skills directory and enables the builtin `load_skill` tool.

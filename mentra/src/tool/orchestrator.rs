@@ -417,6 +417,10 @@ impl ToolRuntime {
     }
 
     async fn run_pre_hooks(&mut self, call: &ToolCall) -> Result<HookDecision, RuntimeError> {
+        let hooks = self
+            .runtime
+            .pre_hooks()
+            .snapshot(self.runtime.tool_audience());
         let context = PreExecutionContext {
             agent_id: self.agent_id.clone(),
             tool_name: call.name.clone(),
@@ -424,7 +428,7 @@ impl ToolRuntime {
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             working_directory: self.working_directory(),
         };
-        self.runtime.pre_hooks().run(&context).await
+        hooks.run(&context).await
     }
 
     /// Offers a finished result to the post-execution hooks and applies what
@@ -444,7 +448,11 @@ impl ToolRuntime {
         input_json: &str,
         result: ContentBlock,
     ) -> Result<ContentBlock, RuntimeError> {
-        if self.runtime.post_hooks().is_empty() {
+        let hooks = self
+            .runtime
+            .post_hooks()
+            .snapshot(self.runtime.tool_audience());
+        if hooks.is_empty() {
             return Ok(result);
         }
 
@@ -467,7 +475,7 @@ impl ToolRuntime {
             is_error,
         };
 
-        Ok(match self.runtime.post_hooks().run(&context).await? {
+        Ok(match hooks.run(&context).await? {
             ResultDecision::Keep => ContentBlock::ToolResult {
                 tool_use_id,
                 content: context.content,

@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Runtimes can register and remove live execution hooks
+
+- `Runtime::register_pre_hook` and `register_post_hook` add runtime-global
+  execution hooks after construction. Their `*_for_audience` counterparts bind
+  a hook to one ephemeral `ToolAudience`; a sibling audience and a no-audience
+  agent never run it, even when both agents use the same working directory
+  ([#40](https://github.com/oops-rs/mentra/issues/40)).
+- Registration returns a non-cloneable, must-use guard. Dropping it or calling
+  `unregister` removes only that exact entry; duplicate registrations remain
+  independent. Existing agents and sessions observe additions and removals on
+  later hook snapshots, while a hook already snapshotted may finish after its
+  guard drops. Guards hold only a weak registry reference and do not keep a
+  runtime alive.
+- Within each seam, builder hooks remain permanent and first in its combined
+  registration order. Applicable global and matching-audience live hooks retain
+  their insertion order in that seam; pre hooks run their order forward and
+  post hooks run their own exact reverse. A hook registered independently as
+  both global and matching-audience runs twice.
+- Pre and post execution snapshot independently. Hosts using the two seams as a
+  bracket must retain both registrations until their calls quiesce; dropping a
+  post guard after pre admission does not promise result review. Hook callbacks
+  run without registry locks, and removing a hook destroys arbitrary captures
+  only after unlocking.
+
 ### Sessions use the live permission store automatically
 
 - Every `Session` now binds its runtime store as the authoritative remembered
