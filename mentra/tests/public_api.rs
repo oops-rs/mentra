@@ -958,6 +958,46 @@ fn permission_rule_addresses_are_public_serializable_and_exact() {
     );
 }
 
+#[test]
+fn sessions_expose_live_permission_rule_mutation_without_store_attachment() {
+    use mentra::session::PermissionRuleScope;
+    use mentra::{PermissionRuleAddress, RememberedRule, RuleKey};
+
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model.clone()]);
+    let runtime = Runtime::empty_builder()
+        .with_runtime_identifier(format!("permission-public-{}", now_nanos()))
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let session = runtime
+        .create_session("permission-public", model)
+        .expect("create session");
+    let permissions = session.permission_handle();
+    assert_eq!(permissions.context().session_id, session.agent_id());
+    let rule = RememberedRule {
+        key: RuleKey {
+            tool_name: "shell".to_owned(),
+            pattern: None,
+        },
+        allow: true,
+        scope: PermissionRuleScope::Session,
+        reason: None,
+    };
+    let address = PermissionRuleAddress::from(&rule);
+
+    permissions.remember_rule(rule).expect("remember rule");
+    assert_eq!(session.remembered_rules().expect("list rules").len(), 1);
+    assert!(permissions.revoke_rule(&address).expect("revoke rule"));
+    assert_eq!(
+        permissions
+            .clear_scope(PermissionRuleScope::Session)
+            .expect("clear empty scope"),
+        0
+    );
+}
+
 /// The downstream shape this exists for, written from outside the crate: a
 /// host registers an executor that serves named targets and a tool that names
 /// one. Every guard around a shell command still applies — only the executor

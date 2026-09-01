@@ -14,7 +14,9 @@ use crate::{
     AgentConfig, ContentBlock, RuntimePolicy, ToolAudience,
     error::RuntimeError,
     runtime::{SessionOptions, VolatileRuntimeStore},
-    session::{Session, SessionEvent, TaskLifecycleStatus},
+    session::{
+        PermissionDecision, PermissionRuleScope, Session, SessionEvent, TaskLifecycleStatus,
+    },
     test::{MockRuntime, MockRuntimeBuilder, MockToolCall},
     tool::{
         ParallelToolContext, ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer,
@@ -278,19 +280,18 @@ async fn a_session_override_keeps_its_authorization_timeout() {
         .create_session("timed", mock.model())
         .expect("create session")
         .with_tool_authorizer(PromptWithTimeout);
+    let permissions = session.permission_handle();
     let mut events = session.subscribe();
 
     let append = tokio::spawn(async move { append_probe_turn(&mut session, 0).await });
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let request_id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if matches!(
-                events
-                    .recv()
-                    .await
-                    .expect("session event stream remains open"),
-                SessionEvent::PermissionRequested { .. }
-            ) {
-                break;
+            if let SessionEvent::PermissionRequested { request_id, .. } = events
+                .recv()
+                .await
+                .expect("session event stream remains open")
+            {
+                break request_id;
             }
         }
     })
@@ -306,6 +307,17 @@ async fn a_session_override_keeps_its_authorization_timeout() {
         0,
         "the outer session wrapper must forward the replacement timeout"
     );
+    assert!(!permissions.pending_permissions().contains(&request_id));
+    assert!(
+        permissions
+            .resolve_permission(
+                &request_id,
+                PermissionDecision::allow_and_remember(PermissionRuleScope::Session),
+            )
+            .is_err(),
+        "a timed-out request cannot persist a late allow"
+    );
+    assert!(permissions.remembered_rules().unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -308,6 +308,15 @@ waits for `resolve_permission`, while `Allow` and `Deny` keep their ordinary
 meaning. Sibling sessions keep the runtime default, and descendants created
 from the decorated session inherit its replacement.
 
+Every session uses its runtime store as the live remembered-rule source. The
+session permission namespace is the persisted agent id—not the fresh UI
+`SessionId` created on resume—and an optional project id adds project-wide
+inheritance. `SessionPermissionHandle::{remember_rule, revoke_rule,
+clear_scope, remembered_rules}` mutate or read those effective namespaces;
+project and global changes are visible to other already-live sessions on their
+next authorization lookup. No store attachment or manual rule reload is
+required.
+
 The attachment is live execution state rather than persisted agent
 configuration. Attach the current authorizer again after `resume_session`.
 Stateful authorizers can hold a shared mode or policy and change their answer

@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Sessions use the live permission store automatically
+
+- Every `Session` now binds its runtime store as the authoritative remembered
+  permission source. The session namespace is the stable persisted agent id,
+  not the ephemeral UI `SessionId`, so session rules survive a real resume;
+  project and global mutations are visible to other already-live sessions on
+  their next lookup.
+- The outer `SessionToolAuthorizer` is installed after `Agent::new` or
+  `Agent::from_loaded` reveals that stable id. It wraps the handle's current
+  authorizer without discarding per-session policy, tool audience, hooks,
+  runtime identifier, context, or leases. `Session::with_tool_authorizer`
+  rebuilds the same outer layer from the existing live permission handle.
+- `SessionPermissionHandle` exposes point `remember_rule`, exact `revoke_rule`,
+  effective `clear_scope`, and fallible live `remembered_rules`. A prompted
+  decision persists only its one new rule before emitting `PermissionResolved`
+  or waking execution. Invalid project scope is rejected before claiming the
+  pending request; a store failure restores it for retry and fails closed.
+- Pending permission waits carry generation-checked RAII cleanup. Authorizer
+  timeout, run cancellation, or deadline removes only that exact wait, and a
+  late response cannot write a rule after its call ended. Resolve and wait-Drop
+  serialize through one lifecycle token, so either a live response persists and
+  wakes the call or cancellation wins with no write; reused request ids cannot
+  let an old cleanup remove a newer wait. Emitted permission request ids include
+  that generation, so a stale UI response also cannot resolve a newer request
+  that reused the provider's tool-call id.
+- **Source-breaking:** manual `Session::set_permission_store`,
+  `load_persisted_rules`, and cached `rule_store` access were removed because
+  each could create a stale authorization overlay. `Session::remembered_rules`
+  now returns `Result<Vec<_>, RuntimeError>` because every call reads the live
+  backend. Standalone `RuleStore` remains available for callers that need an
+  isolated in-memory matcher.
+
 ### Permission stores mutate effective namespaces atomically
 
 - `PermissionRuleContext { session_id, project_id }` and new point operations on

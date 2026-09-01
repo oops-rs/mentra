@@ -5,6 +5,7 @@
 
 mod lossless_observer;
 mod memory_events;
+mod permission_store;
 mod terminal_output;
 mod tool_authorizer;
 
@@ -779,7 +780,7 @@ async fn resolve_permission_emits_event_and_sends_decision() {
 
     // Simulate a pending permission by inserting directly.
     let (tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    session.pending_permissions.insert(
+    let _guard = session.permission_handle().pending_permissions().insert(
         "perm-1".to_owned(),
         crate::session::permission::PendingPermissionEntry {
             tool_call_id: "tc-1".to_owned(),
@@ -817,7 +818,7 @@ async fn resolve_permission_emits_event_and_sends_decision() {
     );
 
     // The rule should have been remembered.
-    let rules = session.remembered_rules();
+    let rules = session.remembered_rules().expect("load remembered rules");
     assert_eq!(rules.len(), 1);
     assert!(rules[0].allow);
 }
@@ -829,7 +830,7 @@ async fn remembered_after(
     decision: PermissionDecision,
 ) -> Vec<crate::session::RememberedRule> {
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    session.pending_permissions.insert(
+    let _guard = session.permission_handle().pending_permissions().insert(
         "perm-1".to_owned(),
         crate::session::permission::PendingPermissionEntry {
             tool_call_id: "tc-1".to_owned(),
@@ -840,7 +841,7 @@ async fn remembered_after(
     session
         .resolve_permission("perm-1", decision)
         .expect("the pending permission should resolve");
-    session.remembered_rules()
+    session.remembered_rules().expect("load remembered rules")
 }
 
 #[tokio::test]
@@ -1999,18 +2000,17 @@ async fn compaction_events_appear_in_session_stream_and_session_continues() {
 #[cfg(feature = "store-sqlite")]
 #[tokio::test]
 async fn resume_session_with_permission_rules_restores_rules() {
-    use crate::runtime::{PermissionRuleStore, SqliteRuntimeStore};
-    use std::sync::Arc;
+    use crate::runtime::SqliteRuntimeStore;
 
     let unique = unique_test_base_dir("resume-rules");
     let store_path = unique.join("runtime.sqlite");
     let store = SqliteRuntimeStore::new(&store_path);
     let runtime_id = "resume-rules-test";
 
-    let session_id_str: String;
     let agent_id: String;
 
-    // Phase 1: Create session, add a permission rule, persist it.
+    // Phase 1: create a session and write through its automatically attached
+    // permission handle.
     {
         let mock = MockRuntime::builder()
             .runtime_identifier(runtime_id)
@@ -2024,30 +2024,21 @@ async fn resume_session_with_permission_rules_restores_rules() {
             .create_session("resume-rules", mock.model())
             .unwrap();
 
-        session.set_permission_store(Arc::new(store.clone()) as Arc<dyn PermissionRuleStore>);
-        session_id_str = session.id().as_str().to_owned();
         agent_id = session.agent_id().to_owned();
-
-        // Simulate a permission decision that gets remembered.
         let permission_handle = session.permission_handle();
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        session.pending_permissions.insert(
-            "perm-r1".to_owned(),
-            crate::session::permission::PendingPermissionEntry {
-                tool_call_id: "tc-r1".to_owned(),
-                tool_name: "shell".to_owned(),
-                sender: tx,
-            },
-        );
+        assert_eq!(permission_handle.context().session_id, agent_id);
         permission_handle
-            .resolve_permission(
-                "perm-r1",
-                PermissionDecision::allow_and_remember(PermissionRuleScope::Session),
-            )
-            .unwrap();
-
-        // Verify rule is in memory.
-        assert_eq!(session.remembered_rules().len(), 1);
+            .remember_rule(RememberedRule {
+                key: RuleKey {
+                    tool_name: "shell".to_owned(),
+                    pattern: None,
+                },
+                allow: true,
+                scope: PermissionRuleScope::Session,
+                reason: None,
+            })
+            .expect("remember session rule");
+        assert_eq!(session.remembered_rules().unwrap().len(), 1);
 
         // Submit a turn so the session has history.
         let _msg = session
@@ -2058,7 +2049,8 @@ async fn resume_session_with_permission_rules_restores_rules() {
         // Session + runtime dropped here.
     }
 
-    // Phase 2: Resume session, attach same store, load persisted rules.
+    // Phase 2: resume with the same store. The fresh UI SessionId is unrelated;
+    // the permission namespace remains the persisted Agent::id.
     let mock2 = MockRuntime::builder()
         .runtime_identifier(runtime_id)
         .with_store(store.clone())
@@ -2067,13 +2059,8 @@ async fn resume_session_with_permission_rules_restores_rules() {
         .unwrap();
 
     let mut resumed = mock2.runtime().resume_session(&agent_id).unwrap();
-    resumed.set_permission_store(Arc::new(store.clone()) as Arc<dyn PermissionRuleStore>);
-
-    // Load the persisted rules using the original session id.
-    // Note: resume_session creates a new SessionId, so we must load from the
-    // original session id that was used when persisting. This tests the store
-    // directly.
-    let loaded_rules = store.load_rules(&session_id_str, None).unwrap();
+    assert_eq!(resumed.permission_handle().context().session_id, agent_id);
+    let loaded_rules = resumed.remembered_rules().unwrap();
     assert_eq!(
         loaded_rules.len(),
         1,
@@ -2081,10 +2068,6 @@ async fn resume_session_with_permission_rules_restores_rules() {
     );
     assert!(loaded_rules[0].allow);
     assert_eq!(loaded_rules[0].key.tool_name, "shell");
-    assert!(
-        store.load_rules("perm-r1", None).unwrap().is_empty(),
-        "Expected rules to be saved under session id, not permission request id"
-    );
 
     // Verify resumed session has intact transcript.
     assert!(

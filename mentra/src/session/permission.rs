@@ -2,14 +2,20 @@ mod pattern;
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
-use super::event::{PermissionRuleScope, SessionEvent};
+use super::{
+    event::{PermissionRuleScope, SessionEvent},
+    handle::SessionPermissionHandle,
+};
 use crate::{
     runtime::RuntimeError,
     tool::{
@@ -339,7 +345,8 @@ impl RuleStore {
 /// Thread-safe store for pending permission requests that can be resolved later.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PendingPermissionStore {
-    inner: Arc<Mutex<HashMap<String, PendingPermissionEntry>>>,
+    inner: Arc<Mutex<HashMap<String, StoredPendingPermission>>>,
+    next_generation: Arc<AtomicU64>,
 }
 
 impl PendingPermissionStore {
@@ -347,20 +354,137 @@ impl PendingPermissionStore {
         Self::default()
     }
 
-    pub(crate) fn insert(&self, request_id: String, entry: PendingPermissionEntry) {
-        let mut pending = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        pending.insert(request_id, entry);
+    #[must_use = "the wait guard must live until the permission future completes"]
+    #[cfg(test)]
+    pub(crate) fn insert(
+        &self,
+        request_id: String,
+        entry: PendingPermissionEntry,
+    ) -> PendingPermissionWaitGuard {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        self.insert_with_generation(request_id, generation, entry)
     }
 
-    pub(crate) fn remove(&self, request_id: &str) -> Option<PendingPermissionEntry> {
+    pub(crate) fn insert_unique(
+        &self,
+        tool_call_id: &str,
+        entry: PendingPermissionEntry,
+    ) -> (String, PendingPermissionWaitGuard) {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let request_id = format!("perm-{tool_call_id}-{generation:016x}");
+        let guard = self.insert_with_generation(request_id.clone(), generation, entry);
+        (request_id, guard)
+    }
+
+    fn insert_with_generation(
+        &self,
+        request_id: String,
+        generation: u64,
+        entry: PendingPermissionEntry,
+    ) -> PendingPermissionWaitGuard {
+        let lifecycle = Arc::new(Mutex::new(true));
+        let stored = StoredPendingPermission {
+            generation,
+            lifecycle: lifecycle.clone(),
+            entry,
+        };
+        let replaced = {
+            let mut pending = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            pending.insert(request_id.clone(), stored)
+        };
+        if let Some(replaced) = replaced {
+            *replaced.lifecycle.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        }
+        PendingPermissionWaitGuard {
+            store: self.clone(),
+            request_id,
+            generation,
+            lifecycle,
+        }
+    }
+
+    pub(crate) fn claim(&self, request_id: &str) -> Option<ClaimedPendingPermission> {
         let mut pending = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        pending.remove(request_id)
+        pending
+            .remove(request_id)
+            .map(ClaimedPendingPermission::from)
+    }
+
+    pub(crate) fn restore(&self, request_id: String, claim: ClaimedPendingPermission) -> bool {
+        let mut pending = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.contains_key(&request_id) {
+            return false;
+        }
+        pending.insert(request_id, claim.into());
+        true
+    }
+
+    fn cancel_if_generation(&self, request_id: &str, generation: u64) {
+        let mut pending = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if pending
+            .get(request_id)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            pending.remove(request_id);
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn contains(&self, request_id: &str) -> bool {
         let pending = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         pending.contains_key(request_id)
+    }
+}
+
+#[derive(Debug)]
+struct StoredPendingPermission {
+    generation: u64,
+    lifecycle: Arc<Mutex<bool>>,
+    entry: PendingPermissionEntry,
+}
+
+pub(crate) struct ClaimedPendingPermission {
+    pub(crate) generation: u64,
+    pub(crate) lifecycle: Arc<Mutex<bool>>,
+    pub(crate) entry: PendingPermissionEntry,
+}
+
+impl From<StoredPendingPermission> for ClaimedPendingPermission {
+    fn from(stored: StoredPendingPermission) -> Self {
+        Self {
+            generation: stored.generation,
+            lifecycle: stored.lifecycle,
+            entry: stored.entry,
+        }
+    }
+}
+
+impl From<ClaimedPendingPermission> for StoredPendingPermission {
+    fn from(claim: ClaimedPendingPermission) -> Self {
+        Self {
+            generation: claim.generation,
+            lifecycle: claim.lifecycle,
+            entry: claim.entry,
+        }
+    }
+}
+
+pub(crate) struct PendingPermissionWaitGuard {
+    store: PendingPermissionStore,
+    request_id: String,
+    generation: u64,
+    lifecycle: Arc<Mutex<bool>>,
+}
+
+impl Drop for PendingPermissionWaitGuard {
+    fn drop(&mut self) {
+        let mut active = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+        if !*active {
+            return;
+        }
+        *active = false;
+        self.store
+            .cancel_if_generation(&self.request_id, self.generation);
     }
 }
 
@@ -375,31 +499,23 @@ pub(crate) struct PendingPermissionEntry {
 /// Session-scoped wrapper around the runtime tool authorizer.
 ///
 /// This is the bridge that first asks the current authorizer, then lets a
-/// remembered rule answer only its `Prompt` outcome. An authoritative `Allow`
-/// or `Deny` is returned unchanged. A prompt with no remembered answer becomes
-/// a typed `SessionEvent::PermissionRequested` event and suspends execution
-/// until a matching decision arrives.
+/// remembered rule from the session's live runtime store answer only its
+/// `Prompt` outcome. Store failures fail closed. An authoritative `Allow` or
+/// `Deny` is returned unchanged. A prompt with no remembered answer becomes a
+/// typed `SessionEvent::PermissionRequested` event and suspends execution until
+/// a matching decision arrives.
 #[derive(Clone)]
 pub(crate) struct SessionToolAuthorizer {
     inner: Option<Arc<dyn ToolAuthorizer>>,
-    event_tx: broadcast::Sender<SessionEvent>,
-    pending_permissions: PendingPermissionStore,
-    rule_store: RuleStore,
+    permissions: SessionPermissionHandle,
 }
 
 impl SessionToolAuthorizer {
     pub(crate) fn new(
         inner: Option<Arc<dyn ToolAuthorizer>>,
-        event_tx: broadcast::Sender<SessionEvent>,
-        pending_permissions: PendingPermissionStore,
-        rule_store: RuleStore,
+        permissions: SessionPermissionHandle,
     ) -> Self {
-        Self {
-            inner,
-            event_tx,
-            pending_permissions,
-            rule_store,
-        }
+        Self { inner, permissions }
     }
 }
 
@@ -424,8 +540,8 @@ impl ToolAuthorizer for SessionToolAuthorizer {
 
         let input_json = serde_json::to_string(&request.preview.structured_input).ok();
         if let Some(rule) = self
-            .rule_store
-            .matching_rule(&request.tool_name, input_json.as_deref())
+            .permissions
+            .matching_rule(&request.tool_name, input_json.as_deref())?
         {
             return Ok(if rule.allow {
                 ToolAuthorizationDecision::allow()
@@ -436,7 +552,6 @@ impl ToolAuthorizer for SessionToolAuthorizer {
             });
         }
 
-        let request_id = format!("perm-{}", request.tool_call_id);
         let description = decision
             .reason
             .clone()
@@ -445,8 +560,8 @@ impl ToolAuthorizer for SessionToolAuthorizer {
             .unwrap_or_else(|_| "{}".to_string());
         let (sender, receiver) = oneshot::channel();
 
-        self.pending_permissions.insert(
-            request_id.clone(),
+        let (request_id, _pending_guard) = self.permissions.pending_permissions().insert_unique(
+            &request.tool_call_id,
             PendingPermissionEntry {
                 tool_call_id: request.tool_call_id.clone(),
                 tool_name: request.tool_name.clone(),
@@ -454,16 +569,19 @@ impl ToolAuthorizer for SessionToolAuthorizer {
             },
         );
 
-        let _ = self.event_tx.send(SessionEvent::PermissionRequested {
-            request_id: request_id.clone(),
-            tool_call_id: request.tool_call_id.clone(),
-            tool_name: request.tool_name.clone(),
-            description,
-            preview,
-            // Nothing downstream can work this out again: this is the last
-            // layer holding the preview the authorizer was given.
-            classification: Some(request.preview.classification()),
-        });
+        let _ = self
+            .permissions
+            .event_tx()
+            .send(SessionEvent::PermissionRequested {
+                request_id: request_id.clone(),
+                tool_call_id: request.tool_call_id.clone(),
+                tool_name: request.tool_name.clone(),
+                description,
+                preview,
+                // Nothing downstream can work this out again: this is the last
+                // layer holding the preview the authorizer was given.
+                classification: Some(request.preview.classification()),
+            });
 
         let resolved = receiver
             .await
@@ -494,7 +612,9 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+    use tokio::sync::broadcast;
 
+    use crate::runtime::{PermissionRuleStore, RuntimeStore, VolatileRuntimeStore};
     use crate::tool::{
         ToolApprovalCategory, ToolAuthorizationPreview, ToolCapability, ToolClassification,
         ToolDurability, ToolExecutionCategory, ToolSideEffectLevel,
@@ -596,16 +716,132 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn session_tool_authorizer_emits_permission_request_and_waits() {
-        let (event_tx, mut rx) = broadcast::channel(8);
+    fn test_authorizer(
+        inner: Option<Arc<dyn ToolAuthorizer>>,
+        rules: RuleStore,
+    ) -> (
+        SessionToolAuthorizer,
+        broadcast::Receiver<SessionEvent>,
+        PendingPermissionStore,
+        SessionPermissionHandle,
+    ) {
+        let store = VolatileRuntimeStore::new();
+        let context = crate::runtime::PermissionRuleContext {
+            session_id: "agent-1".to_owned(),
+            project_id: None,
+        };
+        for rule in rules.rules() {
+            store
+                .upsert_rule(&context, &rule)
+                .expect("seed remembered rule");
+        }
+        let store: Arc<dyn RuntimeStore> = Arc::new(store);
+        let (event_tx, rx) = broadcast::channel(8);
         let pending = PendingPermissionStore::new();
-        let authorizer = SessionToolAuthorizer::new(
-            Some(Arc::new(PromptAuthorizer)),
+        let permissions = SessionPermissionHandle::new(
+            "agent-1".to_owned(),
+            None,
+            store,
             event_tx,
             pending.clone(),
-            RuleStore::new(),
         );
+        (
+            SessionToolAuthorizer::new(inner, permissions.clone()),
+            rx,
+            pending,
+            permissions,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_stale_wait_guard_cannot_remove_a_reused_request_id() {
+        let pending = PendingPermissionStore::new();
+        let (first_sender, first_receiver) = oneshot::channel();
+        let first_guard = pending.insert(
+            "perm-reused".to_owned(),
+            PendingPermissionEntry {
+                tool_call_id: "call-first".to_owned(),
+                tool_name: "shell".to_owned(),
+                sender: first_sender,
+            },
+        );
+        let (second_sender, second_receiver) = oneshot::channel();
+        let second_guard = pending.insert(
+            "perm-reused".to_owned(),
+            PendingPermissionEntry {
+                tool_call_id: "call-second".to_owned(),
+                tool_name: "shell".to_owned(),
+                sender: second_sender,
+            },
+        );
+
+        assert!(
+            first_receiver.await.is_err(),
+            "replacement closes the old wait"
+        );
+        drop(first_guard);
+        assert!(
+            pending.contains("perm-reused"),
+            "the old generation cannot remove the replacement"
+        );
+        pending
+            .claim("perm-reused")
+            .expect("claim replacement")
+            .entry
+            .sender
+            .send(PermissionDecision::allow())
+            .expect("resolve replacement");
+        assert!(second_receiver.await.expect("receive replacement").allow);
+        drop(second_guard);
+        assert!(!pending.contains("perm-reused"));
+    }
+
+    #[tokio::test]
+    async fn a_stale_emitted_id_cannot_resolve_a_new_generation() {
+        let (_authorizer, _rx, pending, permissions) = test_authorizer(None, RuleStore::new());
+        let (first_sender, first_receiver) = oneshot::channel();
+        let (first_id, first_guard) = pending.insert_unique(
+            "same-tool-call-id",
+            PendingPermissionEntry {
+                tool_call_id: "same-tool-call-id".to_owned(),
+                tool_name: "shell".to_owned(),
+                sender: first_sender,
+            },
+        );
+        drop(first_guard);
+        assert!(first_receiver.await.is_err());
+
+        let (second_sender, second_receiver) = oneshot::channel();
+        let (second_id, _second_guard) = pending.insert_unique(
+            "same-tool-call-id",
+            PendingPermissionEntry {
+                tool_call_id: "same-tool-call-id".to_owned(),
+                tool_name: "files".to_owned(),
+                sender: second_sender,
+            },
+        );
+        assert_ne!(first_id, second_id);
+
+        assert!(
+            permissions
+                .resolve_permission(
+                    &first_id,
+                    PermissionDecision::allow_and_remember(PermissionRuleScope::Global),
+                )
+                .is_err(),
+            "the first event id cannot answer the replacement request"
+        );
+        assert!(permissions.remembered_rules().unwrap().is_empty());
+        permissions
+            .resolve_permission(&second_id, PermissionDecision::deny())
+            .expect("the live event id resolves its own request");
+        assert!(!second_receiver.await.expect("receive live decision").allow);
+    }
+
+    #[tokio::test]
+    async fn session_tool_authorizer_emits_permission_request_and_waits() {
+        let (authorizer, mut rx, pending, _) =
+            test_authorizer(Some(Arc::new(PromptAuthorizer)), RuleStore::new());
         let request = sample_request();
 
         let authorize_task = tokio::spawn({
@@ -635,8 +871,9 @@ mod tests {
 
         assert!(pending.contains(&request_id));
         let entry = pending
-            .remove(&request_id)
-            .expect("pending permission should be registered");
+            .claim(&request_id)
+            .expect("pending permission should be registered")
+            .entry;
         entry
             .sender
             .send(PermissionDecision::allow())
@@ -654,14 +891,8 @@ mod tests {
     /// preview, and everything past it sees only the event.
     #[tokio::test]
     async fn the_emitted_request_carries_the_classification_the_authorizer_saw() {
-        let (event_tx, mut rx) = broadcast::channel(8);
-        let pending = PendingPermissionStore::new();
-        let authorizer = SessionToolAuthorizer::new(
-            Some(Arc::new(PromptAuthorizer)),
-            event_tx,
-            pending.clone(),
-            RuleStore::new(),
-        );
+        let (authorizer, mut rx, pending, _) =
+            test_authorizer(Some(Arc::new(PromptAuthorizer)), RuleStore::new());
         let request = sample_request();
 
         let authorize_task = tokio::spawn({
@@ -695,8 +926,9 @@ mod tests {
         );
 
         pending
-            .remove(&request_id)
+            .claim(&request_id)
             .expect("pending permission should be registered")
+            .entry
             .sender
             .send(PermissionDecision::allow())
             .expect("decision send should succeed");
@@ -706,14 +938,8 @@ mod tests {
     /// Runs one authorize-and-resolve round trip, answering with `decision`,
     /// and returns what the authorizer handed back to the tool loop.
     async fn resolved_with(decision: PermissionDecision) -> ToolAuthorizationDecision {
-        let (event_tx, mut rx) = broadcast::channel(8);
-        let pending = PendingPermissionStore::new();
-        let authorizer = SessionToolAuthorizer::new(
-            Some(Arc::new(PromptAuthorizer)),
-            event_tx,
-            pending.clone(),
-            RuleStore::new(),
-        );
+        let (authorizer, mut rx, pending, _) =
+            test_authorizer(Some(Arc::new(PromptAuthorizer)), RuleStore::new());
 
         let authorize_task = tokio::spawn({
             let authorizer = authorizer.clone();
@@ -729,8 +955,9 @@ mod tests {
         };
 
         pending
-            .remove(request_id)
+            .claim(request_id)
             .expect("pending permission should be registered")
+            .entry
             .sender
             .send(decision)
             .expect("decision send should succeed");
@@ -777,13 +1004,7 @@ mod tests {
 
     /// Answers one prompted authorize call from `store`.
     async fn answered_by_rule(store: RuleStore) -> ToolAuthorizationDecision {
-        let (event_tx, _rx) = broadcast::channel(8);
-        let authorizer = SessionToolAuthorizer::new(
-            Some(Arc::new(PromptAuthorizer)),
-            event_tx,
-            PendingPermissionStore::new(),
-            store,
-        );
+        let (authorizer, _rx, _, _) = test_authorizer(Some(Arc::new(PromptAuthorizer)), store);
 
         authorizer
             .authorize(&sample_request())
@@ -821,14 +1042,11 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let store = RuleStore::new();
         store.add_rule(rule);
-        let (event_tx, mut rx) = broadcast::channel(8);
-        let authorizer = SessionToolAuthorizer::new(
+        let (authorizer, mut rx, _, _) = test_authorizer(
             Some(Arc::new(CountingAuthorizer {
                 outcome,
                 calls: Arc::clone(&calls),
             })),
-            event_tx,
-            PendingPermissionStore::new(),
             store,
         );
 
@@ -882,9 +1100,7 @@ mod tests {
     async fn no_inner_authorizer_allows_even_with_a_remembered_denial() {
         let store = RuleStore::new();
         store.add_rule(shell_rule(false, Some("an earlier policy refused")));
-        let (event_tx, mut rx) = broadcast::channel(8);
-        let authorizer =
-            SessionToolAuthorizer::new(None, event_tx, PendingPermissionStore::new(), store);
+        let (authorizer, mut rx, _, _) = test_authorizer(None, store);
 
         let decision = authorizer
             .authorize(&sample_request())
@@ -898,15 +1114,8 @@ mod tests {
     #[tokio::test]
     async fn a_late_remembered_answer_applies_to_its_call_but_not_the_next_policy() {
         let inner = SwitchingAuthorizer::prompting();
-        let store = RuleStore::new();
-        let pending = PendingPermissionStore::new();
-        let (event_tx, mut rx) = broadcast::channel(8);
-        let authorizer = SessionToolAuthorizer::new(
-            Some(Arc::new(inner.clone())),
-            event_tx,
-            pending.clone(),
-            store.clone(),
-        );
+        let (authorizer, mut rx, pending, permissions) =
+            test_authorizer(Some(Arc::new(inner.clone())), RuleStore::new());
 
         let first = tokio::spawn({
             let authorizer = authorizer.clone();
@@ -921,10 +1130,13 @@ mod tests {
         };
 
         inner.deny();
-        store.add_rule(shell_rule(true, None));
+        permissions
+            .remember_rule(shell_rule(true, None))
+            .expect("remember late answer");
         pending
-            .remove(&request_id)
+            .claim(&request_id)
             .expect("pending permission should be registered")
+            .entry
             .sender
             .send(PermissionDecision::allow_and_remember(
                 PermissionRuleScope::Session,

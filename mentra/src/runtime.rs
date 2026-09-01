@@ -22,9 +22,8 @@ use crate::{
     agent::{Agent, AgentConfig, AgentSpawnOptions, AgentStatus},
     provider::{Provider, ProviderRegistry},
     session::{
-        Session, SessionEvent, SessionId, SessionMetadata,
-        hooks::SessionHookBridge,
-        permission::{PendingPermissionStore, SessionToolAuthorizer},
+        Session, SessionEvent, SessionId, SessionMetadata, hooks::SessionHookBridge,
+        permission::PendingPermissionStore,
     },
     tool::ExecutableTool,
 };
@@ -854,10 +853,9 @@ impl Runtime {
     /// Creates a new session wrapping a freshly spawned agent with explicit config and
     /// an optional project identifier.
     ///
-    /// The `project_id` is threaded into the
-    /// [`SessionPermissionHandle`](crate::SessionPermissionHandle) so that
-    /// permission rules are scoped to the project when a [`PermissionRuleStore`] is
-    /// attached.
+    /// The `project_id` is threaded into the automatically attached
+    /// [`SessionPermissionHandle`](crate::SessionPermissionHandle), so project
+    /// permission rules use the runtime's [`PermissionRuleStore`] immediately.
     pub fn create_session_full(
         &self,
         name: impl Into<String>,
@@ -899,18 +897,15 @@ impl Runtime {
 
     /// Derives every piece of live session scope before an agent is registered.
     ///
-    /// The order is intentional: the session event hook is installed first,
-    /// the complete policy replacement is applied while the handle has no
-    /// agent context or leases, and the session permission authorizer remains
-    /// the outer wrapper around the runtime's authorizer. Runtime identifiers
-    /// and tool audiences then refine persistence and live tool visibility
-    /// without changing the selected policy. All derived handles share the
-    /// runtime's live tooling registry.
+    /// The order is intentional: the session event hook and complete policy are
+    /// applied before registration, then runtime identity and tool audience
+    /// refine persistence and live visibility without changing that policy.
+    /// [`Session::new_with_parts`] installs the outer permission authorizer only
+    /// after `Agent::new` or `Agent::from_loaded` exposes the stable agent id,
+    /// preserving every scoped handle service assembled here.
     fn session_scoped_handle(
         &self,
         event_tx: &broadcast::Sender<SessionEvent>,
-        pending_permissions: &PendingPermissionStore,
-        rule_store: &crate::session::RuleStore,
         policy: Option<RuntimePolicy>,
         runtime_identifier: Option<Arc<str>>,
         tool_audience: Option<crate::tool::ToolAudience>,
@@ -920,12 +915,6 @@ impl Runtime {
             Some(policy) => handle.with_policy(policy),
             None => handle,
         };
-        let handle = handle.with_tool_authorizer(Arc::new(SessionToolAuthorizer::new(
-            self.handle.execution.tool_authorizer.clone(),
-            event_tx.clone(),
-            pending_permissions.clone(),
-            rule_store.clone(),
-        )));
         let handle = match runtime_identifier {
             Some(identifier) => handle.with_runtime_identifier(identifier),
             None => handle,
@@ -949,16 +938,9 @@ impl Runtime {
         let session_id = SessionId::new();
         let metadata = SessionMetadata::new(session_id.clone(), &name, &model.id);
         let (event_tx, _) = broadcast::channel(512);
-        let rule_store = crate::session::RuleStore::new();
         let pending_permissions = PendingPermissionStore::new();
-        let session_handle = self.session_scoped_handle(
-            &event_tx,
-            &pending_permissions,
-            &rule_store,
-            policy,
-            runtime_identifier,
-            tool_audience,
-        );
+        let session_handle =
+            self.session_scoped_handle(&event_tx, policy, runtime_identifier, tool_audience);
         let provider = self
             .provider_registry
             .read()
@@ -979,7 +961,6 @@ impl Runtime {
             metadata,
             agent,
             event_tx,
-            rule_store,
             pending_permissions,
             project_id,
         );
@@ -1005,10 +986,9 @@ impl Runtime {
     /// Resumes a previously persisted agent, wraps it in a session, and associates
     /// the session with an optional project identifier.
     ///
-    /// The `project_id` is threaded into the
-    /// [`SessionPermissionHandle`](crate::SessionPermissionHandle) so that
-    /// permission rules are scoped to the project when a [`PermissionRuleStore`] is
-    /// attached.
+    /// The `project_id` is threaded into the automatically attached
+    /// [`SessionPermissionHandle`](crate::SessionPermissionHandle), so project
+    /// permission rules use the current runtime store immediately.
     pub fn resume_session_with_project(
         &self,
         agent_id: &str,
@@ -1037,16 +1017,8 @@ impl Runtime {
         } = options;
         let session_id = SessionId::new();
         let (event_tx, _) = broadcast::channel(512);
-        let rule_store = crate::session::RuleStore::new();
         let pending_permissions = PendingPermissionStore::new();
-        let session_handle = self.session_scoped_handle(
-            &event_tx,
-            &pending_permissions,
-            &rule_store,
-            policy,
-            None,
-            tool_audience,
-        );
+        let session_handle = self.session_scoped_handle(&event_tx, policy, None, tool_audience);
         let Some(state) = self.handle.store().load_agent(agent_id)? else {
             return Err(RuntimeError::Store(format!(
                 "No persisted agent with id '{agent_id}'"
@@ -1067,7 +1039,6 @@ impl Runtime {
             metadata,
             agent,
             event_tx,
-            rule_store,
             pending_permissions,
             project_id,
         );

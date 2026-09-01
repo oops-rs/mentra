@@ -914,23 +914,31 @@ impl ToolRuntime {
             preview,
         };
 
-        let result = match authorizer.timeout() {
-            Some(timeout) => {
-                match tokio::time::timeout(timeout, authorizer.authorize(&request)).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        return self.handle_authorization_block(
-                            call,
-                            ToolAuthorizationOutcome::Deny,
-                            Some(format!(
-                                "authorizer timed out after {}",
-                                format_duration(timeout)
-                            )),
-                        );
-                    }
-                }
+        ctx.run_options.check_limits()?;
+        let timeout = authorizer.timeout();
+        let authorization = authorizer.authorize(&request);
+        let timeout_wait = async move {
+            match timeout {
+                Some(timeout) => tokio::time::sleep(timeout).await,
+                None => std::future::pending().await,
             }
-            None => authorizer.authorize(&request).await,
+        };
+        let hard_limit = wait_for_hard_run_limit(&ctx.run_options);
+        tokio::pin!(authorization, timeout_wait, hard_limit);
+        let result = tokio::select! {
+            result = &mut authorization => result,
+            () = &mut timeout_wait => {
+                let timeout = timeout.expect("a disabled timeout never completes");
+                return self.handle_authorization_block(
+                    call,
+                    ToolAuthorizationOutcome::Deny,
+                    Some(format!(
+                        "authorizer timed out after {}",
+                        format_duration(timeout)
+                    )),
+                );
+            }
+            error = &mut hard_limit => return Err(error),
         };
 
         match result {
@@ -1275,6 +1283,19 @@ fn parallel_termination_rejected(call: &ToolCall) -> ContentBlock {
         )
         .into(),
         is_error: true,
+    }
+}
+
+async fn wait_for_hard_run_limit(options: &RunOptions) -> RuntimeError {
+    if options.cancellation.is_none() && options.deadline.is_none() {
+        return std::future::pending().await;
+    }
+
+    loop {
+        if let Err(error) = options.check_limits() {
+            return error;
+        }
+        tokio::time::sleep(PARALLEL_JOIN_POLL_INTERVAL).await;
     }
 }
 

@@ -18,14 +18,15 @@ use tokio::sync::broadcast;
 use crate::{
     BuiltinProvider, ContentBlock,
     runtime::{
-        Runtime, RuntimeError, RuntimeHook, RuntimeHookEvent,
+        PermissionRuleContext, PermissionRuleStore, Runtime, RuntimeError, RuntimeHook,
+        RuntimeHookEvent, RuntimeStore, VolatileRuntimeStore,
         control::{
             HookDecision, PostExecutionContext, PostExecutionHook, PreExecutionContext,
             PreExecutionHook, ResultDecision,
         },
     },
     session::{
-        PermissionRuleScope, RememberedRule, RuleKey,
+        PermissionRuleScope, RememberedRule, RuleKey, SessionPermissionHandle,
         permission::{PendingPermissionStore, RuleStore, SessionToolAuthorizer},
     },
     tool::{
@@ -302,13 +303,8 @@ impl Case {
             allow,
             requests: Arc::clone(&self.requests),
         };
-        let (event_tx, _) = broadcast::channel(8);
-        let authorizer = SessionToolAuthorizer::new(
-            Some(Arc::new(inner)),
-            event_tx,
-            PendingPermissionStore::new(),
-            rules,
-        );
+        let authorizer =
+            SessionToolAuthorizer::new(Some(Arc::new(inner)), permission_handle(rules));
         Self {
             authorizer: Some(Arc::new(authorizer)),
             ..self
@@ -319,13 +315,8 @@ impl Case {
         let inner = PromptingRecordingAuthorizer {
             requests: Arc::clone(&self.requests),
         };
-        let (event_tx, _) = broadcast::channel(8);
-        let authorizer = SessionToolAuthorizer::new(
-            Some(Arc::new(inner)),
-            event_tx,
-            PendingPermissionStore::new(),
-            rules,
-        );
+        let authorizer =
+            SessionToolAuthorizer::new(Some(Arc::new(inner)), permission_handle(rules));
         Self {
             authorizer: Some(Arc::new(authorizer)),
             ..self
@@ -384,6 +375,28 @@ impl Case {
             hook_events: hook_events.lock().expect("events poisoned").clone(),
         }
     }
+}
+
+fn permission_handle(rules: RuleStore) -> SessionPermissionHandle {
+    let store = VolatileRuntimeStore::new();
+    let context = PermissionRuleContext {
+        session_id: "hook-order-agent".to_owned(),
+        project_id: None,
+    };
+    for rule in rules.rules() {
+        store
+            .upsert_rule(&context, &rule)
+            .expect("seed remembered rule");
+    }
+    let store: Arc<dyn RuntimeStore> = Arc::new(store);
+    let (event_tx, _) = broadcast::channel(8);
+    SessionPermissionHandle::new(
+        context.session_id,
+        context.project_id,
+        store,
+        event_tx,
+        PendingPermissionStore::new(),
+    )
 }
 
 fn result_text(block: &ContentBlock) -> (String, bool) {
