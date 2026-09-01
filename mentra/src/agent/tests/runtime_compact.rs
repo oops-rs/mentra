@@ -772,6 +772,7 @@ async fn remote_compaction_succeeds_when_provider_supports_it() {
             output: vec![CompactionInputItem::CompactionSummary {
                 content: "Summary of previous work".to_string(),
             }],
+            usage: None,
         }))
         .await;
 
@@ -901,7 +902,10 @@ async fn remote_compaction_falls_back_to_local_on_empty_remote_response() {
     });
 
     provider
-        .push_compact_response(Ok(CompactionResponse { output: vec![] }))
+        .push_compact_response(Ok(CompactionResponse {
+            output: vec![],
+            usage: None,
+        }))
         .await;
 
     let runtime = Runtime::empty_builder()
@@ -1362,6 +1366,7 @@ async fn a_provider_that_says_the_request_is_too_long_gets_a_compacted_one() {
             output: vec![CompactionInputItem::CompactionSummary {
                 content: "Summary of previous work".to_string(),
             }],
+            usage: None,
         }))
         .await;
 
@@ -1432,6 +1437,7 @@ async fn overflow_recovery_survives_a_store_that_refuses_the_summary_write() {
             output: vec![CompactionInputItem::CompactionSummary {
                 content: "Summary of previous work".to_string(),
             }],
+            usage: None,
         }))
         .await;
 
@@ -1510,6 +1516,7 @@ async fn a_second_overflow_after_compacting_is_not_retried_again() {
             output: vec![CompactionInputItem::CompactionSummary {
                 content: "Summary".to_string(),
             }],
+            usage: None,
         }))
         .await;
 

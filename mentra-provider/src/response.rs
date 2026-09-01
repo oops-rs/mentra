@@ -31,6 +31,12 @@ pub struct Response {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionResponse {
     pub output: Vec<CompactionInputItem>,
+    /// Token usage reported for the provider request that produced this response.
+    ///
+    /// `None` means the provider reported no usage; it must not be interpreted as
+    /// a zero-token request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
 }
 
 /// A complete memory summarize response collected from a provider.
@@ -96,8 +102,8 @@ impl Response {
 
     /// Converts a normal response into a compaction response by collecting its text output.
     pub fn into_compaction_response(self) -> CompactionResponse {
-        let text = self
-            .content
+        let Response { content, usage, .. } = self;
+        let text = content
             .into_iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text),
@@ -108,7 +114,10 @@ impl Response {
             .trim()
             .to_string();
 
-        CompactionResponse::from_text(text)
+        CompactionResponse {
+            output: vec![CompactionInputItem::CompactionSummary { content: text }],
+            usage,
+        }
     }
 
     /// Converts a normal response into a memory summarize response by parsing its text output.
@@ -136,6 +145,7 @@ impl CompactionResponse {
             output: vec![CompactionInputItem::CompactionSummary {
                 content: text.into(),
             }],
+            usage: None,
         }
     }
 }
@@ -705,6 +715,19 @@ fn merge_structured_text(value: serde_json::Value, delta: String) -> serde_json:
 mod tests {
     use super::*;
 
+    fn reported_zero_usage() -> TokenUsage {
+        TokenUsage {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            total_tokens: Some(0),
+            cache_read_input_tokens: Some(0),
+            cache_creation_input_tokens: Some(0),
+            reasoning_tokens: Some(0),
+            thoughts_tokens: Some(0),
+            tool_input_tokens: Some(0),
+        }
+    }
+
     #[tokio::test]
     async fn response_round_trip_preserves_usage() {
         let response = Response {
@@ -827,7 +850,17 @@ mod tests {
     }
 
     #[test]
-    fn response_into_compaction_response_collects_text_blocks() {
+    fn response_into_compaction_response_preserves_text_and_every_usage_field() {
+        let usage = TokenUsage {
+            input_tokens: Some(101),
+            output_tokens: Some(23),
+            total_tokens: Some(124),
+            cache_read_input_tokens: Some(17),
+            cache_creation_input_tokens: Some(5),
+            reasoning_tokens: Some(11),
+            thoughts_tokens: Some(7),
+            tool_input_tokens: Some(3),
+        };
         let response = Response {
             id: "resp-3".to_string(),
             model: "model".to_string(),
@@ -842,7 +875,7 @@ mod tests {
                 ContentBlock::text("second"),
             ],
             stop_reason: None,
-            usage: None,
+            usage: Some(usage.clone()),
         };
 
         let compaction = response.into_compaction_response();
@@ -852,6 +885,55 @@ mod tests {
             vec![CompactionInputItem::CompactionSummary {
                 content: "first\nsecond".to_string(),
             }]
+        );
+        assert_eq!(compaction.usage, Some(usage));
+    }
+
+    #[test]
+    fn compaction_response_distinguishes_absent_from_reported_zero_usage() {
+        let response = |usage| Response {
+            id: "resp-usage".to_string(),
+            model: "model".to_string(),
+            role: Role::Assistant,
+            content: vec![ContentBlock::text("summary")],
+            stop_reason: None,
+            usage,
+        };
+
+        let absent = response(None).into_compaction_response();
+        let reported_empty = response(Some(TokenUsage::default())).into_compaction_response();
+        let zero_usage = reported_zero_usage();
+        let reported_zero = response(Some(zero_usage.clone())).into_compaction_response();
+
+        assert_eq!(absent.usage, None);
+        assert_eq!(reported_empty.usage, Some(TokenUsage::default()));
+        assert_eq!(reported_zero.usage, Some(zero_usage));
+    }
+
+    #[test]
+    fn compaction_response_usage_is_backward_compatible_in_serde() {
+        let legacy: CompactionResponse = serde_json::from_value(serde_json::json!({
+            "output": []
+        }))
+        .expect("a response serialized before usage existed should load");
+
+        assert_eq!(legacy.usage, None);
+        assert_eq!(
+            serde_json::to_value(&legacy).expect("serialize response without usage"),
+            serde_json::json!({ "output": [] }),
+            "absent usage stays omitted on the wire"
+        );
+
+        let reported_zero = CompactionResponse {
+            output: Vec::new(),
+            usage: Some(reported_zero_usage()),
+        };
+        assert!(
+            serde_json::to_value(reported_zero)
+                .expect("serialize reported zero usage")
+                .get("usage")
+                .is_some(),
+            "a provider-reported zero must remain distinguishable from absence"
         );
     }
 

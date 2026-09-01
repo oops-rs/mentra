@@ -1835,7 +1835,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n",
             "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[]}}\n\n",
             "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"goal\\\":\\\"keep going\\\"}\"}]}}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\",\"usage\":{\"input_tokens\":328,\"input_tokens_details\":{\"cached_tokens\":12},\"output_tokens\":52,\"output_tokens_details\":{\"reasoning_tokens\":7},\"total_tokens\":380}}}\n\n"
         );
         let (base_url, handle) = spawn_compaction_response_server(sse_body);
 
@@ -1879,6 +1879,19 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             crate::CompactionInputItem::CompactionSummary {
                 content: "{\"goal\":\"keep going\"}".to_string()
             }
+        );
+        assert_eq!(
+            response.usage,
+            Some(crate::TokenUsage {
+                input_tokens: Some(328),
+                output_tokens: Some(52),
+                total_tokens: Some(380),
+                cache_read_input_tokens: Some(12),
+                cache_creation_input_tokens: None,
+                reasoning_tokens: Some(7),
+                thoughts_tokens: None,
+                tool_input_tokens: None,
+            })
         );
     }
 
