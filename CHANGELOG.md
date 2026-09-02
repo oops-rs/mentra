@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.26.0 / mentra-provider 0.8.0
 
 ### Runtimes can mint fresh provider session scopes
 
