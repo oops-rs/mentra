@@ -902,7 +902,8 @@ impl AgentStore for SqliteRuntimeStore {
     fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError> {
         let conn = self.open()?;
         // One transaction, because a record without its memory cannot be
-        // resumed and memory without its record is unreachable.
+        // resumed, memory without its record is unreachable, and session
+        // permission rules are private state owned by the agent.
         conn.execute("BEGIN", []).map_err(sqlite_error)?;
         let result = (|| -> Result<(), RuntimeError> {
             conn.execute(
@@ -912,6 +913,11 @@ impl AgentStore for SqliteRuntimeStore {
             .map_err(sqlite_error)?;
             conn.execute("DELETE FROM agents WHERE id = ?1", params![agent_id])
                 .map_err(sqlite_error)?;
+            clear_permission_namespace(
+                &conn,
+                &permission_context(agent_id, None),
+                PermissionRuleScope::Session,
+            )?;
             Ok(())
         })();
 

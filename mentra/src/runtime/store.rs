@@ -91,11 +91,15 @@ pub trait AgentStore: Send + Sync {
         memory: &AgentMemoryState,
     ) -> Result<(), RuntimeError>;
     fn load_agent(&self, agent_id: &str) -> Result<Option<LoadedAgentState>, RuntimeError>;
-    /// Removes an agent's record and its persisted memory.
+    /// Removes an agent's record, persisted memory, and session-scoped
+    /// permission rules.
     ///
-    /// Removing one without the other leaves a row that cannot be resumed, so
-    /// implementations must remove both. Deleting an agent that is not there
-    /// succeeds: the caller's goal is that it be gone.
+    /// Removing the record without its memory leaves an unreachable row;
+    /// retaining its session rules leaves private, unreachable decisions.
+    /// Implementations must remove all three while preserving shared project-
+    /// and global-scoped rules. Deleting an agent that is not there succeeds
+    /// and still removes orphaned session rules: the caller's goal is that all
+    /// state owned by that agent be gone.
     fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError>;
     fn list_agents(&self) -> Result<Vec<LoadedAgentState>, RuntimeError>;
     fn list_agents_by_runtime(

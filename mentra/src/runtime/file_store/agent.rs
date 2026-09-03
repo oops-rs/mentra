@@ -10,11 +10,15 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Message,
     memory::journal::{AgentMemoryState, CompactionState, PendingTurnState, RunMemoryState},
+    session::PermissionRuleScope,
     transcript::{AgentTranscript, EntryId, TranscriptItem},
 };
 
 use super::{
-    super::store::{AgentStore, LoadedAgentState, PersistedAgentRecord, now_secs},
+    super::store::{
+        AgentStore, LoadedAgentState, PermissionRuleContext, PermissionRuleStore,
+        PersistedAgentRecord, now_secs,
+    },
     FileRuntimeStore, RuntimeError, SCHEMA_VERSION, fs_util, lock_unpoisoned, parse_versioned,
     store_error, to_pretty_json, transcript_log,
 };
@@ -159,7 +163,20 @@ impl AgentStore for FileRuntimeStore {
             // The caller's goal is that the agent be gone; it already is.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(store_error(&format!("remove '{}'", dir.display()), error)),
-        }
+        }?;
+
+        // The record is the deletion commit point. Clear its owned rules only
+        // after that commit so a rule-store failure cannot strip permissions
+        // from an agent that remains resumable. A retry against an absent
+        // record reaches this step again and finishes the orphan cleanup.
+        self.clear_scope(
+            &PermissionRuleContext {
+                session_id: agent_id.to_owned(),
+                project_id: None,
+            },
+            PermissionRuleScope::Session,
+        )?;
+        Ok(())
     }
 
     fn list_agents(&self) -> Result<Vec<LoadedAgentState>, RuntimeError> {

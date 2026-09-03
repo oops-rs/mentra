@@ -13,8 +13,10 @@ use serde_json::{Value, json};
 use crate::{
     ContentBlock,
     error::RuntimeError,
+    runtime::{
+        AgentStore, FileRuntimeStore, PermissionRuleStore, RuntimeStore, VolatileRuntimeStore,
+    },
     runtime::{CancellationToken, RunOptions},
-    runtime::{FileRuntimeStore, PermissionRuleStore, RuntimeStore, VolatileRuntimeStore},
     session::{
         PermissionDecision, PermissionRuleAddress, PermissionRuleScope, RememberedRule, RuleKey,
         SessionEvent,
@@ -36,15 +38,261 @@ fn now_nanos() -> u128 {
 }
 
 fn rule(scope: PermissionRuleScope, allow: bool) -> RememberedRule {
+    named_rule(PROBE_TOOL, scope, allow)
+}
+
+fn named_rule(tool_name: &str, scope: PermissionRuleScope, allow: bool) -> RememberedRule {
     RememberedRule {
         key: RuleKey {
-            tool_name: PROBE_TOOL.to_owned(),
+            tool_name: tool_name.to_owned(),
             pattern: None,
         },
         allow,
         scope,
         reason: (!allow).then(|| format!("{scope:?} refuses")),
     }
+}
+
+fn assert_delete_agent_clears_only_its_session_rules<S>(store: S, label: &str)
+where
+    S: RuntimeStore + Clone + 'static,
+{
+    let mock = MockRuntime::builder()
+        .with_store(store.clone())
+        .build()
+        .expect("build runtime");
+    let deleted = mock
+        .runtime()
+        .create_session_full(
+            "deleted",
+            mock.model(),
+            Default::default(),
+            Some("shared-project".to_owned()),
+        )
+        .expect("create deleted session");
+    let survivor = mock
+        .runtime()
+        .create_session_full(
+            "survivor",
+            mock.model(),
+            Default::default(),
+            Some("shared-project".to_owned()),
+        )
+        .expect("create surviving session");
+    let deleted_context = deleted.permission_handle().context().clone();
+    let survivor_context = survivor.permission_handle().context().clone();
+
+    store
+        .upsert_rule(
+            &deleted_context,
+            &named_rule("deleted-session", PermissionRuleScope::Session, false),
+        )
+        .expect("remember deleted session rule");
+    store
+        .upsert_rule(
+            &survivor_context,
+            &named_rule("survivor-session", PermissionRuleScope::Session, true),
+        )
+        .expect("remember surviving session rule");
+    store
+        .upsert_rule(
+            &deleted_context,
+            &named_rule("shared-project", PermissionRuleScope::Project, false),
+        )
+        .expect("remember shared project rule");
+    store
+        .upsert_rule(
+            &deleted_context,
+            &named_rule("shared-global", PermissionRuleScope::Global, true),
+        )
+        .expect("remember shared global rule");
+
+    store
+        .delete_agent(&deleted_context.session_id)
+        .unwrap_or_else(|error| panic!("delete {label} agent: {error}"));
+
+    assert_eq!(
+        store
+            .load_applicable_rules(&deleted_context)
+            .expect("load deleted session namespace")
+            .iter()
+            .map(|rule| rule.scope)
+            .collect::<Vec<_>>(),
+        vec![PermissionRuleScope::Project, PermissionRuleScope::Global],
+        "{label} delete must remove only the deleted agent's session scope"
+    );
+    assert_eq!(
+        store
+            .load_applicable_rules(&survivor_context)
+            .expect("load surviving session namespace")
+            .iter()
+            .map(|rule| rule.scope)
+            .collect::<Vec<_>>(),
+        vec![
+            PermissionRuleScope::Session,
+            PermissionRuleScope::Project,
+            PermissionRuleScope::Global,
+        ],
+        "{label} delete must retain sibling, project, and global scopes"
+    );
+
+    // A retry must also clean a legacy orphan even though the agent record is
+    // already absent: deletion is idempotent and its goal is that all owned
+    // state be gone.
+    store
+        .upsert_rule(
+            &deleted_context,
+            &named_rule("legacy-orphan", PermissionRuleScope::Session, false),
+        )
+        .expect("seed legacy orphan");
+    mock.runtime()
+        .delete_agent(&deleted_context.session_id)
+        .unwrap_or_else(|error| panic!("delete absent {label} agent: {error}"));
+    assert_eq!(
+        store
+            .load_applicable_rules(&deleted_context)
+            .expect("load retried deleted session namespace")
+            .iter()
+            .map(|rule| rule.scope)
+            .collect::<Vec<_>>(),
+        vec![PermissionRuleScope::Project, PermissionRuleScope::Global],
+        "{label} retry must remove an orphaned session scope"
+    );
+}
+
+#[test]
+fn volatile_agent_delete_clears_only_the_agents_session_rules() {
+    assert_delete_agent_clears_only_its_session_rules(VolatileRuntimeStore::new(), "volatile");
+}
+
+#[test]
+fn file_agent_delete_clears_only_the_agents_session_rules() {
+    let root = std::env::temp_dir().join(format!(
+        "mentra-delete-permissions-file-{}-{}",
+        std::process::id(),
+        now_nanos()
+    ));
+    assert_delete_agent_clears_only_its_session_rules(FileRuntimeStore::new(root), "file");
+}
+
+#[test]
+fn file_agent_delete_commits_before_rule_cleanup_and_retry_finishes() {
+    let root = std::env::temp_dir().join(format!(
+        "mentra-delete-permissions-file-failure-{}-{}",
+        std::process::id(),
+        now_nanos()
+    ));
+    let store = FileRuntimeStore::new(root);
+    let mock = MockRuntime::builder()
+        .with_store(store.clone())
+        .build()
+        .expect("build runtime");
+    let session = mock
+        .runtime()
+        .create_session("deleted", mock.model())
+        .expect("create session");
+    let context = session.permission_handle().context().clone();
+    store
+        .upsert_rule(
+            &context,
+            &named_rule("session-rule", PermissionRuleScope::Session, false),
+        )
+        .expect("remember session rule");
+    let valid_rules = std::fs::read(store.rules_path()).expect("read valid rules");
+    std::fs::write(store.rules_path(), b"{").expect("corrupt rules file");
+
+    store
+        .delete_agent(&context.session_id)
+        .expect_err("rule cleanup failure must be reported");
+    assert!(
+        store
+            .load_agent(&context.session_id)
+            .expect("load deleted agent")
+            .is_none(),
+        "the agent record is the deletion commit point"
+    );
+
+    std::fs::write(store.rules_path(), valid_rules).expect("restore rules file");
+    store
+        .delete_agent(&context.session_id)
+        .expect("retry absent agent deletion");
+    assert!(
+        store
+            .load_applicable_rules(&context)
+            .expect("load rules after retry")
+            .is_empty(),
+        "retry must finish orphan cleanup"
+    );
+}
+
+#[cfg(feature = "store-sqlite")]
+#[test]
+fn sqlite_agent_delete_clears_only_the_agents_session_rules() {
+    let path = std::env::temp_dir().join(format!(
+        "mentra-delete-permissions-sqlite-{}-{}.sqlite",
+        std::process::id(),
+        now_nanos()
+    ));
+    assert_delete_agent_clears_only_its_session_rules(
+        crate::runtime::SqliteRuntimeStore::new(path),
+        "sqlite",
+    );
+}
+
+#[cfg(feature = "store-sqlite")]
+#[test]
+fn sqlite_agent_delete_rolls_back_when_rule_cleanup_fails() {
+    let path = std::env::temp_dir().join(format!(
+        "mentra-delete-permissions-sqlite-failure-{}-{}.sqlite",
+        std::process::id(),
+        now_nanos()
+    ));
+    let store = crate::runtime::SqliteRuntimeStore::new(path);
+    let mock = MockRuntime::builder()
+        .with_store(store.clone())
+        .build()
+        .expect("build runtime");
+    let session = mock
+        .runtime()
+        .create_session("retained", mock.model())
+        .expect("create session");
+    let context = session.permission_handle().context().clone();
+    store
+        .upsert_rule(
+            &context,
+            &named_rule("session-rule", PermissionRuleScope::Session, false),
+        )
+        .expect("remember session rule");
+    rusqlite::Connection::open(store.path())
+        .expect("open store")
+        .execute_batch(
+            "CREATE TRIGGER reject_permission_delete \
+             BEFORE DELETE ON permission_rules \
+             BEGIN \
+                 SELECT RAISE(ABORT, 'injected permission delete failure'); \
+             END;",
+        )
+        .expect("install failure trigger");
+
+    store
+        .delete_agent(&context.session_id)
+        .expect_err("the injected permission cleanup failure must abort deletion");
+    assert!(
+        store
+            .load_agent(&context.session_id)
+            .expect("load rolled-back agent")
+            .is_some(),
+        "agent and rule deletion must share one transaction"
+    );
+    assert_eq!(
+        store
+            .load_applicable_rules(&context)
+            .expect("load rolled-back rules")
+            .iter()
+            .map(|rule| rule.scope)
+            .collect::<Vec<_>>(),
+        vec![PermissionRuleScope::Session]
+    );
 }
 
 fn address(scope: PermissionRuleScope) -> PermissionRuleAddress {

@@ -636,9 +636,10 @@ impl Runtime {
     ///
     /// Deleting the record without its memory would leave a row that
     /// [`resume`](Self::resume) refuses with "missing persisted memory", so
-    /// this removes both. It does not stop a live [`Agent`] already holding
-    /// that id — an agent in memory keeps running, and persists itself again
-    /// on its next write.
+    /// this removes both, along with remembered permission rules scoped to the
+    /// agent's session. Project- and global-scoped rules are shared and remain.
+    /// It does not stop a live [`Agent`] already holding that id — an agent in
+    /// memory keeps running, and persists itself again on its next write.
     pub fn delete_agent(&self, agent_id: &str) -> Result<(), RuntimeError> {
         self.handle.store().delete_agent(agent_id)
     }
