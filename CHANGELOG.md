@@ -2,12 +2,30 @@
 
 ## Unreleased
 
+### File-backed permission rules stay current across processes
+
+- `FileRuntimeStore` serializes every `rules.json` read-modify-replace with a
+  stable advisory `rules.lock`, so independently constructed stores and
+  cooperating processes cannot silently overwrite one another's remembered
+  answers ([#50](https://github.com/oops-rs/mentra/issues/50)).
+- Repeated reads reuse an identity-checked parsed snapshot. Mutations still
+  reload authoritative disk state under the lock and invalidate the shared
+  clone cache after committing, preserving freshness without turning a durable
+  write into a cache-maintenance failure
+  ([#52](https://github.com/oops-rs/mentra/issues/52)).
+- Deleting an agent now also removes that agent's durable session-scoped
+  permission rules while preserving sibling, project, and global rules. SQLite
+  performs the cleanup in its existing delete transaction; the file store
+  retains its documented commit point and retry semantics
+  ([#51](https://github.com/oops-rs/mentra/issues/51)).
+
 ### Permission answers can stay process-local
 
 - `PermissionRuleScope::Process` adds a highest-precedence remembered-answer
   rung owned by one live `SessionPermissionHandle` binding. Its clones and the
   session's installed authorizer share the same rules; a separately created or
-  resumed session starts with an empty rung, even for the same stable agent id.
+  resumed session starts with an empty rung, even for the same stable agent id
+  ([#53](https://github.com/oops-rs/mentra/issues/53)).
 - Process rules reuse `RuleStore` matching, ordering, exact revocation, and
   scope clearing, but never enter `PermissionRuleStore`. A matching process
   rule answers before the durable backend is read, so a corrupt or unavailable
@@ -19,6 +37,39 @@
 - **Source-breaking:** `PermissionRuleScope` gained the `Process` variant,
   serialized as `"process"`. Exhaustive matches must decide how to present the
   new live-only duration.
+
+### Resumed agents keep their persisted runtime namespace
+
+- Every persisted-agent reconstruction now retains the row's stored runtime
+  identifier, including session, by-id, audience-scoped, filtered bulk, and
+  heterogeneous `resume_all` paths. The rebind changes only the persisted tag;
+  shared runtime services, leases, and agent contexts remain intact
+  ([#54](https://github.com/oops-rs/mentra/issues/54)).
+
+### Scoped tool registration is observable and single-snapshot
+
+- `Runtime::tools_for_audience` returns the deterministic audience-plus-global
+  descriptor roster without exposing exact-agent registrations. Roster
+  construction and execution lookup now share the same exact-agent, audience,
+  then global resolution helper
+  ([#55](https://github.com/oops-rs/mentra/issues/55)).
+- Public `PreparedTool` captures a tool and its descriptor once, so callers can
+  validate the exact immutable snapshot later used for collision checks,
+  registration identity, metadata, and generation-safe removal. Existing
+  registration APIs delegate through the same prepared path
+  ([#58](https://github.com/oops-rs/mentra/issues/58)).
+
+### Live hooks can be shared without duplicate execution
+
+- Caller-keyed pre, post, and mixed-hook registration APIs return clone-counted
+  holders. Re-registering the same audience and exact `Arc` identity shares one
+  chain entry; conflicting identities are refused, and the final holder removes
+  only its generation. Existing unkeyed registrations remain additive
+  ([#56](https://github.com/oops-rs/mentra/issues/56)).
+- Authorizer, runtime-policy, and tool failures after a hook rewrite now retain
+  the rewriting source. Named mixed-hook attribution and generic legacy-hook
+  attribution reach both serial and parallel results, while unmodified outputs
+  remain byte-compatible ([#57](https://github.com/oops-rs/mentra/issues/57)).
 
 ## 0.26.0 / mentra-provider 0.8.0
 
