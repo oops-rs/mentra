@@ -43,9 +43,24 @@ pub enum PermissionOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionRuleScope {
+    /// The durable stable-agent namespace, restored when that agent resumes.
     Session,
+    /// The durable namespace shared by sessions with the same project id.
     Project,
+    /// The durable namespace shared by every session using the runtime store.
     Global,
+    /// This one live session's in-process permission binding.
+    ///
+    /// Process rules are shared by clones of its
+    /// [`SessionPermissionHandle`](crate::SessionPermissionHandle), precede
+    /// every durable scope, and disappear when the last clone of that binding
+    /// is dropped. They are never sent to a
+    /// [`PermissionRuleStore`](crate::PermissionRuleStore).
+    ///
+    /// This variant is declared after the durable variants to preserve their
+    /// discriminants in non-self-describing serialization formats; lookup
+    /// precedence is defined independently by [`RuleStore`](crate::RuleStore).
+    Process,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

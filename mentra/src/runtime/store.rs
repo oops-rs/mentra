@@ -195,6 +195,20 @@ impl PermissionRuleContext {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_persisted_scope(
+        &self,
+        scope: PermissionRuleScope,
+    ) -> Result<(), RuntimeError> {
+        self.validate_scope(scope)?;
+        if scope == PermissionRuleScope::Process {
+            return Err(RuntimeError::OperationDenied(
+                "process-scoped permission rules belong to a live session and cannot be persisted"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn compare_duplicate_rules(left: &RememberedRule, right: &RememberedRule) -> std::cmp::Ordering {
@@ -243,7 +257,10 @@ pub(crate) fn canonicalize_permission_rules(
 
 /// Persistence backend for remembered permission rules.
 ///
-/// Permission rules survive session restarts when backed by a persistent store.
+/// This contract accepts only durable session, project, and global rules.
+/// [`PermissionRuleScope::Process`] belongs to a live
+/// [`SessionPermissionHandle`](crate::SessionPermissionHandle) and must be
+/// rejected by mutation methods and omitted from loads.
 ///
 /// Point operations are the authoritative mutation API. Implementations must
 /// resolve the rule's namespace from [`PermissionRuleContext`] and perform each
@@ -264,7 +281,7 @@ pub trait PermissionRuleStore: Send + Sync {
         rule: &RememberedRule,
     ) -> Result<(), RuntimeError>;
 
-    /// Loads the unique rules applicable to `context` in stable order.
+    /// Loads the unique durable rules applicable to `context` in stable order.
     fn load_applicable_rules(
         &self,
         context: &PermissionRuleContext,

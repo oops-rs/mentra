@@ -1110,6 +1110,7 @@ fn delete_permission_address(
 ) -> Result<usize, RuntimeError> {
     let scope = to_json(&address.scope)?;
     let removed = match address.scope {
+        PermissionRuleScope::Process => unreachable!("process scope is rejected before SQL"),
         PermissionRuleScope::Session => conn.execute(
             "DELETE FROM permission_rules WHERE scope = ?1 AND session_id = ?2 AND tool_name = ?3 AND pattern IS ?4",
             params![scope, context.session_id, address.key.tool_name, address.key.pattern],
@@ -1134,6 +1135,7 @@ fn clear_permission_namespace(
 ) -> Result<usize, RuntimeError> {
     let scope_json = to_json(&scope)?;
     let removed = match scope {
+        PermissionRuleScope::Process => unreachable!("process scope is rejected before SQL"),
         PermissionRuleScope::Session => conn.execute(
             "DELETE FROM permission_rules WHERE scope = ?1 AND session_id = ?2",
             params![scope_json, context.session_id],
@@ -1159,7 +1161,9 @@ fn insert_permission_rule(
     let scope = to_json(&rule.scope)?;
     let project_id = match rule.scope {
         PermissionRuleScope::Project => context.project_id.as_deref(),
-        PermissionRuleScope::Session | PermissionRuleScope::Global => None,
+        PermissionRuleScope::Process
+        | PermissionRuleScope::Session
+        | PermissionRuleScope::Global => None,
     };
     conn.execute(
         r#"
@@ -1186,7 +1190,7 @@ impl PermissionRuleStore for SqliteRuntimeStore {
         context: &PermissionRuleContext,
         rule: &RememberedRule,
     ) -> Result<(), RuntimeError> {
-        context.validate_scope(rule.scope)?;
+        context.validate_persisted_scope(rule.scope)?;
         let mut conn = self.open()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1256,7 +1260,7 @@ impl PermissionRuleStore for SqliteRuntimeStore {
         context: &PermissionRuleContext,
         address: &PermissionRuleAddress,
     ) -> Result<bool, RuntimeError> {
-        context.validate_scope(address.scope)?;
+        context.validate_persisted_scope(address.scope)?;
         let mut conn = self.open()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1271,7 +1275,7 @@ impl PermissionRuleStore for SqliteRuntimeStore {
         context: &PermissionRuleContext,
         scope: PermissionRuleScope,
     ) -> Result<usize, RuntimeError> {
-        context.validate_scope(scope)?;
+        context.validate_persisted_scope(scope)?;
         let mut conn = self.open()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1289,7 +1293,7 @@ impl PermissionRuleStore for SqliteRuntimeStore {
     ) -> Result<(), RuntimeError> {
         let context = permission_context(session_id, project_id);
         for rule in rules {
-            context.validate_scope(rule.scope)?;
+            context.validate_persisted_scope(rule.scope)?;
         }
         let mut conn = self.open()?;
         let tx = conn

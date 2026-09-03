@@ -17,7 +17,7 @@ use crate::{
     runtime::{FileRuntimeStore, PermissionRuleStore, RuntimeStore, VolatileRuntimeStore},
     session::{
         PermissionDecision, PermissionRuleAddress, PermissionRuleScope, RememberedRule, RuleKey,
-        SessionEvent,
+        SessionEvent, SessionPermissionHandle,
     },
     test::{MockRuntime, MockToolCall},
     tool::{
@@ -55,6 +55,239 @@ fn address(scope: PermissionRuleScope) -> PermissionRuleAddress {
             pattern: None,
         },
     }
+}
+
+fn permission_handle(agent_id: &str, store: Arc<dyn RuntimeStore>) -> SessionPermissionHandle {
+    let (event_tx, _) = tokio::sync::broadcast::channel(8);
+    SessionPermissionHandle::new(
+        agent_id.to_owned(),
+        None,
+        store,
+        event_tx,
+        crate::session::permission::PendingPermissionStore::new(),
+    )
+}
+
+#[test]
+fn process_rules_belong_to_one_in_process_session_binding() {
+    let store: Arc<dyn RuntimeStore> = Arc::new(VolatileRuntimeStore::new());
+    let first = permission_handle("same-agent", Arc::clone(&store));
+    let first_clone = first.clone();
+    let independent = permission_handle("same-agent", Arc::clone(&store));
+
+    first
+        .remember_rule(rule(PermissionRuleScope::Process, true))
+        .expect("remember process rule");
+
+    assert_eq!(
+        first_clone
+            .matching_rule(PROBE_TOOL, None)
+            .expect("match cloned handle")
+            .expect("cloned handle shares the live binding")
+            .scope,
+        PermissionRuleScope::Process
+    );
+    assert!(
+        independent
+            .matching_rule(PROBE_TOOL, None)
+            .expect("match independent handle")
+            .is_none(),
+        "the stable agent id must not make process rules durable or shared"
+    );
+
+    drop(first);
+    drop(first_clone);
+    let replacement = permission_handle("same-agent", store);
+    assert!(
+        replacement
+            .matching_rule(PROBE_TOOL, None)
+            .expect("match replacement handle")
+            .is_none(),
+        "a new live binding must start empty after the old one is dropped"
+    );
+}
+
+#[test]
+fn process_rules_precede_every_durable_scope() {
+    let store = VolatileRuntimeStore::new();
+    let mock = MockRuntime::builder()
+        .with_store(store)
+        .build()
+        .expect("build runtime");
+    let session = mock
+        .runtime()
+        .create_session_full(
+            "precedence",
+            mock.model(),
+            Default::default(),
+            Some("project-1".to_owned()),
+        )
+        .expect("create session");
+    let permissions = session.permission_handle();
+
+    for scope in [
+        PermissionRuleScope::Global,
+        PermissionRuleScope::Project,
+        PermissionRuleScope::Session,
+    ] {
+        permissions
+            .remember_rule(rule(scope, false))
+            .expect("remember durable denial");
+    }
+    permissions
+        .remember_rule(rule(PermissionRuleScope::Process, true))
+        .expect("remember process allow");
+
+    let matched = permissions
+        .matching_rule(PROBE_TOOL, None)
+        .expect("match rule")
+        .expect("a rule should match");
+    assert_eq!(matched.scope, PermissionRuleScope::Process);
+    assert!(matched.allow);
+    assert_eq!(
+        permissions
+            .remembered_rules()
+            .expect("list effective rules")
+            .into_iter()
+            .map(|rule| rule.scope)
+            .collect::<Vec<_>>(),
+        vec![
+            PermissionRuleScope::Process,
+            PermissionRuleScope::Session,
+            PermissionRuleScope::Project,
+            PermissionRuleScope::Global,
+        ]
+    );
+
+    assert_eq!(
+        permissions
+            .clear_scope(PermissionRuleScope::Process)
+            .expect("clear process rules"),
+        1
+    );
+    let fallback = permissions
+        .matching_rule(PROBE_TOOL, None)
+        .expect("match after process clear")
+        .expect("durable session rule should remain");
+    assert_eq!(fallback.scope, PermissionRuleScope::Session);
+    assert!(!fallback.allow);
+
+    let process_rule = rule(PermissionRuleScope::Process, true);
+    let process_address = PermissionRuleAddress::from(&process_rule);
+    permissions
+        .remember_rule(process_rule)
+        .expect("remember replacement process allow");
+    assert!(
+        permissions
+            .revoke_rule(&process_address)
+            .expect("revoke process rule")
+    );
+    assert_eq!(
+        permissions
+            .matching_rule(PROBE_TOOL, None)
+            .expect("match after process revoke")
+            .expect("durable session rule should remain")
+            .scope,
+        PermissionRuleScope::Session
+    );
+}
+
+#[test]
+fn process_resolution_never_reads_or_writes_the_durable_backend() {
+    let root = std::env::temp_dir().join(format!(
+        "mentra-process-permission-{}-{}",
+        std::process::id(),
+        now_nanos()
+    ));
+    let store = FileRuntimeStore::new(&root);
+    let mock = MockRuntime::builder()
+        .with_store(store.clone())
+        .build()
+        .expect("build runtime");
+    let session = mock
+        .runtime()
+        .create_session("non-persisted", mock.model())
+        .expect("create session");
+    let permissions = session.permission_handle();
+    let mut events = session.subscribe();
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    let _guard = permissions.pending_permissions().insert(
+        "perm-live-session".to_owned(),
+        crate::session::permission::PendingPermissionEntry {
+            tool_call_id: "call-live-session".to_owned(),
+            tool_name: PROBE_TOOL.to_owned(),
+            sender,
+        },
+    );
+    let rules_path = store.rules_path();
+    assert!(!rules_path.exists());
+    std::fs::write(&rules_path, b"{").expect("install corrupt durable-rule sentinel");
+
+    permissions
+        .resolve_permission(
+            "perm-live-session",
+            PermissionDecision::allow_and_remember(PermissionRuleScope::Process),
+        )
+        .expect("resolve with a process rule");
+    assert!(receiver.try_recv().expect("receive decision").allow);
+    assert!(matches!(
+        events.try_recv().expect("permission resolved event"),
+        SessionEvent::PermissionResolved {
+            rule_scope: Some(PermissionRuleScope::Process),
+            ..
+        }
+    ));
+    assert_eq!(
+        std::fs::read(&rules_path).expect("read durable-rule sentinel after resolution"),
+        b"{",
+        "resolving a process answer must neither read nor rewrite durable state"
+    );
+
+    let matched = permissions
+        .matching_rule(PROBE_TOOL, None)
+        .expect("the live rule must answer before reading durable state")
+        .expect("live rule should match");
+    assert_eq!(matched.scope, PermissionRuleScope::Process);
+    assert_eq!(
+        std::fs::read(&rules_path).expect("read durable-rule sentinel"),
+        b"{",
+        "matching a live rule must not rewrite durable state"
+    );
+}
+
+#[test]
+fn process_rules_do_not_survive_resume() {
+    let store = VolatileRuntimeStore::new();
+    let mock = MockRuntime::builder()
+        .with_store(store)
+        .build()
+        .expect("build runtime");
+    let session = mock
+        .runtime()
+        .create_session("live-lifetime", mock.model())
+        .expect("create session");
+    let agent_id = session.agent_id().to_owned();
+    session
+        .permission_handle()
+        .remember_rule(rule(PermissionRuleScope::Process, true))
+        .expect("remember process rule");
+    assert_eq!(
+        session.remembered_rules().expect("list live rules").len(),
+        1
+    );
+    drop(session);
+
+    let resumed = mock
+        .runtime()
+        .resume_session(&agent_id)
+        .expect("resume persisted agent");
+    assert!(
+        resumed
+            .remembered_rules()
+            .expect("list resumed rules")
+            .is_empty(),
+        "resuming the same stable agent must create a fresh process rung"
+    );
 }
 
 #[test]

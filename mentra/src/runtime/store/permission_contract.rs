@@ -58,6 +58,40 @@ pub(crate) fn assert_permission_rule_store_contract(store: &dyn PermissionRuleSt
         )
         .expect("upsert session rule");
 
+    let durable_before_process_rejections = store
+        .load_applicable_rules(&session_a)
+        .expect("snapshot durable rules");
+    let process_rule = rule(
+        PermissionRuleScope::Process,
+        "process-only",
+        true,
+        "process",
+    );
+    let process_address = PermissionRuleAddress::from(&process_rule);
+    assert!(store.upsert_rule(&session_a, &process_rule).is_err());
+    assert!(store.revoke_rule(&session_a, &process_address).is_err());
+    assert!(
+        store
+            .clear_scope(&session_a, PermissionRuleScope::Process)
+            .is_err()
+    );
+    assert!(
+        store
+            .save_rules(
+                &session_a.session_id,
+                session_a.project_id.as_deref(),
+                &[process_rule],
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .load_applicable_rules(&session_a)
+            .expect("load after rejected process mutations"),
+        durable_before_process_rejections,
+        "rejected process mutations must leave durable state unchanged"
+    );
+
     let applicable_a = store
         .load_applicable_rules(&session_a)
         .expect("load session-a rules");

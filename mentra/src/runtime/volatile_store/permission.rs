@@ -12,8 +12,10 @@ struct StoredRule {
     rule: RememberedRule,
 }
 
-/// Permission rules mirroring the default store's session/project/global
-/// scoping in `permission_rules`.
+/// Durable permission rules mirroring the default store's
+/// session/project/global scoping in `permission_rules`. Process rules belong
+/// to a live session binding and are rejected here even though this backend is
+/// itself in memory: the backend can outlive and be shared by many sessions.
 #[derive(Default)]
 pub(super) struct PermissionState {
     rules: Vec<StoredRule>,
@@ -35,6 +37,7 @@ fn in_namespace(
         return false;
     }
     match scope {
+        PermissionRuleScope::Process => false,
         PermissionRuleScope::Session => stored.session_id == context.session_id,
         PermissionRuleScope::Project => {
             context.project_id.is_some()
@@ -57,7 +60,9 @@ fn stored_rule(context: &PermissionRuleContext, rule: &RememberedRule) -> Stored
         session_id: context.session_id.clone(),
         project_id: match rule.scope {
             PermissionRuleScope::Project => context.project_id.clone(),
-            PermissionRuleScope::Session | PermissionRuleScope::Global => None,
+            PermissionRuleScope::Process
+            | PermissionRuleScope::Session
+            | PermissionRuleScope::Global => None,
         },
         rule: rule.clone(),
     }
@@ -75,7 +80,7 @@ impl PermissionRuleStore for VolatileRuntimeStore {
         context: &PermissionRuleContext,
         rule: &RememberedRule,
     ) -> Result<(), RuntimeError> {
-        context.validate_scope(rule.scope)?;
+        context.validate_persisted_scope(rule.scope)?;
         let mut state = self.lock();
         upsert(&mut state.permissions.rules, context, rule);
         Ok(())
@@ -101,7 +106,7 @@ impl PermissionRuleStore for VolatileRuntimeStore {
         context: &PermissionRuleContext,
         address: &PermissionRuleAddress,
     ) -> Result<bool, RuntimeError> {
-        context.validate_scope(address.scope)?;
+        context.validate_persisted_scope(address.scope)?;
         let mut state = self.lock();
         let before = state.permissions.rules.len();
         state
@@ -116,7 +121,7 @@ impl PermissionRuleStore for VolatileRuntimeStore {
         context: &PermissionRuleContext,
         scope: PermissionRuleScope,
     ) -> Result<usize, RuntimeError> {
-        context.validate_scope(scope)?;
+        context.validate_persisted_scope(scope)?;
         let mut state = self.lock();
         let before = state.permissions.rules.len();
         state
@@ -134,7 +139,7 @@ impl PermissionRuleStore for VolatileRuntimeStore {
     ) -> Result<(), RuntimeError> {
         let context = context(session_id, project_id);
         for rule in rules {
-            context.validate_scope(rule.scope)?;
+            context.validate_persisted_scope(rule.scope)?;
         }
         let mut state = self.lock();
         state

@@ -144,8 +144,8 @@ pub struct RuleKey {
 /// Exact in-memory identity of one remembered permission rule.
 ///
 /// Scope is part of the address rather than metadata on the stored value, so
-/// the same tool and pattern can carry independent session, project, and global
-/// answers. Construct this from a listed [`RememberedRule`] with
+/// the same tool and pattern can carry independent process, session, project,
+/// and global answers. Construct this from a listed [`RememberedRule`] with
 /// `PermissionRuleAddress::from(&rule)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PermissionRuleAddress {
@@ -153,7 +153,11 @@ pub struct PermissionRuleAddress {
     pub key: RuleKey,
 }
 
-/// A stored permission rule that was previously decided by the user.
+/// A remembered permission rule that was previously decided by the user.
+///
+/// Process rules live only in a [`SessionPermissionHandle`]'s in-memory
+/// binding. Session, project, and global rules are stored in the runtime's
+/// [`PermissionRuleStore`](crate::PermissionRuleStore).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RememberedRule {
     pub key: RuleKey,
@@ -185,7 +189,8 @@ impl From<&RememberedRule> for PermissionRuleAddress {
     }
 }
 
-const SCOPE_PRECEDENCE: [PermissionRuleScope; 3] = [
+const SCOPE_PRECEDENCE: [PermissionRuleScope; 4] = [
+    PermissionRuleScope::Process,
     PermissionRuleScope::Session,
     PermissionRuleScope::Project,
     PermissionRuleScope::Global,
@@ -193,9 +198,10 @@ const SCOPE_PRECEDENCE: [PermissionRuleScope; 3] = [
 
 fn scope_rank(scope: PermissionRuleScope) -> u8 {
     match scope {
-        PermissionRuleScope::Session => 0,
-        PermissionRuleScope::Project => 1,
-        PermissionRuleScope::Global => 2,
+        PermissionRuleScope::Process => 0,
+        PermissionRuleScope::Session => 1,
+        PermissionRuleScope::Project => 2,
+        PermissionRuleScope::Global => 3,
     }
 }
 
@@ -234,9 +240,9 @@ fn compare_pattern_candidates(
 /// Thread-safe in-memory store for remembered permission rules.
 ///
 /// Rules are addressed by [`PermissionRuleAddress`]. Lookup considers scopes
-/// in session, project, then global order. Within one scope a matching pattern
-/// precedes the bare rule; overlapping patterns prefer a denial and then stable
-/// [`RuleKey`] order.
+/// in process, session, project, then global order. Within one scope a matching
+/// pattern precedes the bare rule; overlapping patterns prefer a denial and
+/// then stable [`RuleKey`] order.
 #[derive(Debug, Clone)]
 pub struct RuleStore {
     inner: Arc<Mutex<HashMap<PermissionRuleAddress, RememberedRule>>>,
@@ -264,12 +270,12 @@ impl RuleStore {
 
     /// Checks whether a tool is allowed by a remembered rule.
     ///
-    /// Scopes are considered in session, project, then global order. Within one
-    /// scope, pattern rules are matched against `input_json` with the wildcard
-    /// syntax documented on [`RuleKey::pattern`] and take precedence over the
-    /// bare (no-pattern) rule. Overlapping patterns prefer denial, then stable
-    /// key order. Returns `Some(true)` if allowed, `Some(false)` if denied, or
-    /// `None` if no matching rule exists.
+    /// Scopes are considered in process, session, project, then global order.
+    /// Within one scope, pattern rules are matched against `input_json` with
+    /// the wildcard syntax documented on [`RuleKey::pattern`] and take
+    /// precedence over the bare (no-pattern) rule. Overlapping patterns prefer
+    /// denial, then stable key order. Returns `Some(true)` if allowed,
+    /// `Some(false)` if denied, or `None` if no matching rule exists.
     /// Use [`RuleStore::matching_rule`] when the rule's own reason matters.
     pub fn check(&self, tool_name: &str, input_json: Option<&str>) -> Option<bool> {
         self.matching_rule(tool_name, input_json)
@@ -317,9 +323,9 @@ impl RuleStore {
 
     /// Returns all remembered rules in deterministic lookup-oriented order.
     ///
-    /// Session rules precede project and global rules. Within one scope, tools
-    /// and patterns use stable lexical ordering, with patterned rules before a
-    /// tool's bare fallback.
+    /// Process rules precede session, project, and global rules. Within one
+    /// scope, tools and patterns use stable lexical ordering, with patterned
+    /// rules before a tool's bare fallback.
     pub fn rules(&self) -> Vec<RememberedRule> {
         let rules = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut listed: Vec<_> = rules.values().cloned().collect();
@@ -499,11 +505,11 @@ pub(crate) struct PendingPermissionEntry {
 /// Session-scoped wrapper around the runtime tool authorizer.
 ///
 /// This is the bridge that first asks the current authorizer, then lets a
-/// remembered rule from the session's live runtime store answer only its
-/// `Prompt` outcome. Store failures fail closed. An authoritative `Allow` or
-/// `Deny` is returned unchanged. A prompt with no remembered answer becomes a
-/// typed `SessionEvent::PermissionRequested` event and suspends execution until
-/// a matching decision arrives.
+/// remembered rule from the session's live binding or runtime store answer
+/// only its `Prompt` outcome. Durable-store failures fail closed. An
+/// authoritative `Allow` or `Deny` is returned unchanged. A prompt with no
+/// remembered answer becomes a typed `SessionEvent::PermissionRequested` event
+/// and suspends execution until a matching decision arrives.
 #[derive(Clone)]
 pub(crate) struct SessionToolAuthorizer {
     inner: Option<Arc<dyn ToolAuthorizer>>,
@@ -1457,13 +1463,20 @@ mod tests {
             true,
             Some("session"),
         ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Process,
+            "shell",
+            None,
+            false,
+            Some("process"),
+        ));
 
-        assert_eq!(store.rules().len(), 3);
+        assert_eq!(store.rules().len(), 4);
         let matched = store
             .matching_rule("shell", None)
             .expect("one scoped rule should match");
-        assert_eq!(matched.scope, PermissionRuleScope::Session);
-        assert_eq!(matched.reason.as_deref(), Some("session"));
+        assert_eq!(matched.scope, PermissionRuleScope::Process);
+        assert_eq!(matched.reason.as_deref(), Some("process"));
     }
 
     #[test]
@@ -1479,16 +1492,23 @@ mod tests {
         store.add_rule(rule_at(
             PermissionRuleScope::Session,
             "shell",
+            Some("*cargo test*"),
+            false,
+            Some("session pattern"),
+        ));
+        store.add_rule(rule_at(
+            PermissionRuleScope::Process,
+            "shell",
             None,
             true,
-            Some("session bare"),
+            Some("process bare"),
         ));
 
         let matched = store
             .matching_rule("shell", Some(r#"{"command":"cargo test"}"#))
             .expect("one scoped rule should match");
-        assert_eq!(matched.scope, PermissionRuleScope::Session);
-        assert_eq!(matched.reason.as_deref(), Some("session bare"));
+        assert_eq!(matched.scope, PermissionRuleScope::Process);
+        assert_eq!(matched.reason.as_deref(), Some("process bare"));
     }
 
     #[test]
@@ -1538,6 +1558,7 @@ mod tests {
             PermissionRuleScope::Global,
             PermissionRuleScope::Project,
             PermissionRuleScope::Session,
+            PermissionRuleScope::Process,
         ] {
             store.add_rule(rule_at(scope, "shell", None, true, None));
         }
@@ -1559,12 +1580,15 @@ mod tests {
         assert!(store.revoke_rule(&project_shell));
         assert!(!store.revoke_rule(&project_shell));
         let rules = store.rules();
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 4);
         assert!(rules.iter().any(|rule| {
             rule.scope == PermissionRuleScope::Global && rule.key.tool_name == "shell"
         }));
         assert!(rules.iter().any(|rule| {
             rule.scope == PermissionRuleScope::Session && rule.key.tool_name == "shell"
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.scope == PermissionRuleScope::Process && rule.key.tool_name == "shell"
         }));
         assert!(rules.iter().any(|rule| rule.key.tool_name == "files"));
     }
@@ -1611,6 +1635,13 @@ mod tests {
             None,
         ));
         store.add_rule(rule_at(
+            PermissionRuleScope::Process,
+            "shell",
+            None,
+            false,
+            None,
+        ));
+        store.add_rule(rule_at(
             PermissionRuleScope::Session,
             "shell",
             None,
@@ -1647,6 +1678,7 @@ mod tests {
         assert_eq!(
             listed,
             vec![
+                (PermissionRuleScope::Process, "shell".to_owned(), None),
                 (
                     PermissionRuleScope::Session,
                     "files".to_owned(),
