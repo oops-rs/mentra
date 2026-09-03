@@ -4,11 +4,18 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use async_trait::async_trait;
 use serde_json::json;
 
 use crate::{
     AgentConfig, BuiltinProvider, ContentBlock, FileToolProfile, Message, RuntimePolicy,
-    runtime::{Runtime, SessionOptions, SessionResumeOptions, VolatileRuntimeStore},
+    runtime::{
+        Runtime, RuntimeError, SessionOptions, SessionResumeOptions, VolatileRuntimeStore,
+        control::{
+            BeforeDecision, ExecutionHookParticipant, HookDecision, PreExecutionContext,
+            PreExecutionHook,
+        },
+    },
     session::{Session, SessionEvent, TaskLifecycleStatus},
 };
 
@@ -73,6 +80,130 @@ async fn append_turn(session: &mut Session, prompt: &str) {
         .append_turn(vec![ContentBlock::text(prompt)])
         .await
         .expect("scripted turn succeeds");
+}
+
+const ORIGINAL_SAFE_WRITE: &str = r#"{"path":"notes.md","content":"safe"}"#;
+const REWRITTEN_PROTECTED_WRITE: &str = r#"{"path":".git/config","content":"denied"}"#;
+
+#[derive(Clone, Copy)]
+enum PolicyRewrite {
+    None,
+    Legacy,
+    Mixed,
+}
+
+struct LegacyPolicyRewrite;
+
+#[async_trait]
+impl PreExecutionHook for LegacyPolicyRewrite {
+    async fn pre_tool_execution(
+        &self,
+        _context: &PreExecutionContext,
+    ) -> Result<HookDecision, RuntimeError> {
+        Ok(HookDecision::Modify {
+            input_json: REWRITTEN_PROTECTED_WRITE.to_string(),
+            reason: Some("redirected to protected config".to_string()),
+        })
+    }
+}
+
+struct MixedPolicyRewrite;
+
+#[async_trait]
+impl ExecutionHookParticipant for MixedPolicyRewrite {
+    fn name(&self) -> &str {
+        "workspace-policy"
+    }
+
+    async fn before(&self, _context: &PreExecutionContext) -> Result<BeforeDecision, RuntimeError> {
+        Ok(BeforeDecision::Modify {
+            input_json: REWRITTEN_PROTECTED_WRITE.to_string(),
+            attribution: Some("redirected to protected config".to_string()),
+        })
+    }
+}
+
+async fn protected_write_denial(rewrite: PolicyRewrite) -> (String, String) {
+    let directory = TestDirectory::new("rewritten-protected-write");
+    let protected_root = directory.path().join(".git");
+    fs::create_dir_all(&protected_root).expect("create protected root");
+    let protected_target = fs::canonicalize(&protected_root)
+        .expect("canonical protected root")
+        .join("config");
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let model_input = match rewrite {
+        PolicyRewrite::None => REWRITTEN_PROTECTED_WRITE,
+        PolicyRewrite::Legacy | PolicyRewrite::Mixed => ORIGINAL_SAFE_WRITE,
+    };
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "protected-write", "write", model_input),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let mut builder = Runtime::builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .with_file_tools(FileToolProfile::Split)
+        .with_policy(
+            RuntimePolicy::workspace_bounded(directory.path())
+                .with_denied_write_root(&protected_root),
+        );
+    builder = match rewrite {
+        PolicyRewrite::None => builder,
+        PolicyRewrite::Legacy => builder.with_pre_hook(LegacyPolicyRewrite),
+        PolicyRewrite::Mixed => builder.with_execution_hook(MixedPolicyRewrite),
+    };
+    let runtime = builder.build().expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config("agent", model, workspace_config(directory.path()))
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("write the file")])
+        .await
+        .expect("run completes");
+
+    let (result, is_error) = result_for(agent.history(), "protected-write");
+    assert!(is_error, "the protected write must fail: {result}");
+    assert!(
+        !directory.path().join(".git/config").exists(),
+        "the denied write must not reach the filesystem"
+    );
+    let policy_denial = format!(
+        "Path '{}' is inside a runtime policy denied write root",
+        protected_target.display()
+    );
+    (result, policy_denial)
+}
+
+#[tokio::test]
+async fn rewritten_runtime_policy_denials_name_legacy_and_mixed_hooks() {
+    let (legacy, legacy_policy_denial) = protected_write_denial(PolicyRewrite::Legacy).await;
+    assert_eq!(
+        legacy,
+        format!(
+            "pre-execution hook rewrote this call; the rewritten call then failed: \
+             {legacy_policy_denial}"
+        )
+    );
+
+    let (mixed, mixed_policy_denial) = protected_write_denial(PolicyRewrite::Mixed).await;
+    assert_eq!(
+        mixed,
+        format!(
+            "mixed execution hooks (execution hook 'workspace-policy': redirected to protected \
+             config) rewrote this call; the rewritten call then failed: {mixed_policy_denial}"
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_unmodified_runtime_policy_denial_keeps_its_exact_content() {
+    let (result, policy_denial) = protected_write_denial(PolicyRewrite::None).await;
+    assert_eq!(result, policy_denial);
 }
 
 #[tokio::test]

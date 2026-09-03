@@ -105,6 +105,9 @@ enum Admission {
 struct AdmittedToolCall {
     context: ParallelToolContext,
     execution_hooks: Option<ExecutionHookSnapshot>,
+    /// The admission-owned identity of the hook chain that rewrote this call.
+    /// Carried forward so later failures describe the input that actually ran.
+    rewrite_source: Option<String>,
 }
 
 struct CompletedToolExecution {
@@ -710,22 +713,25 @@ impl ToolRuntime {
                 }
             }
         }
-        let modified = legacy_modified || mixed_modified;
+        // Mixed hooks run after legacy hooks, so their aggregate attribution is
+        // the source nearest the final input. This is the same precedence the
+        // existing lane- and schema-refusal paths use.
+        let rewrite_source = if mixed_modified {
+            Some(mixed_rewrite_source(mixed_attribution.as_deref()))
+        } else if legacy_modified {
+            Some("pre-execution hook".to_string())
+        } else {
+            None
+        };
 
-        let authorization_category = if modified {
+        let authorization_category = if let Some(rewrite_source) = rewrite_source.as_deref() {
             let (_, rewritten_category) =
                 Self::execution_categories_for_snapshot(call, tool, descriptor);
             if execution_category.allows_parallel() && !rewritten_category.allows_parallel() {
                 let reason = format!(
                     "{} changed '{}' from a parallel call into {:?}; refusing to \
                      run mutating work in the parallel lane",
-                    if mixed_modified {
-                        mixed_rewrite_source(mixed_attribution.as_deref())
-                    } else {
-                        "pre-execution hook".to_string()
-                    },
-                    call.name,
-                    rewritten_category
+                    rewrite_source, call.name, rewritten_category
                 );
                 let execution = if mixed_modified {
                     self.mixed_hook_blocked_execution(agent, call, descriptor, &reason)
@@ -744,28 +750,32 @@ impl ToolRuntime {
             // hook produced the shape, blaming the model would send it
             // correcting an input it never wrote; the host component is the
             // one that failed, and the record says so.
-            return Ok(Admission::Refused(Box::new(if mixed_modified {
-                let reason = format!(
-                    "{} rewrote '{}' into input that does not fit its schema: {error}",
-                    mixed_rewrite_source(mixed_attribution.as_deref()),
-                    call.name
-                );
-                self.mixed_hook_blocked_execution(agent, call, descriptor, &reason)
-            } else if modified {
-                let reason = format!(
-                    "pre-execution hook rewrote '{}' into input that does not fit its schema: \
-                     {error}",
-                    call.name
-                );
-                self.hook_blocked_execution(agent, call, descriptor, &reason)
-            } else {
-                self.schema_violation_execution(agent, call, error)
-            })));
+            return Ok(Admission::Refused(Box::new(
+                if let Some(rewrite_source) = rewrite_source.as_deref() {
+                    let reason = format!(
+                        "{} rewrote '{}' into input that does not fit its schema: {error}",
+                        rewrite_source, call.name
+                    );
+                    if mixed_modified {
+                        self.mixed_hook_blocked_execution(agent, call, descriptor, &reason)
+                    } else {
+                        self.hook_blocked_execution(agent, call, descriptor, &reason)
+                    }
+                } else {
+                    self.schema_violation_execution(agent, call, error)
+                },
+            )));
         }
 
         let ctx = self.parallel_tool_context(agent, options, call);
         if let Some(result) = self
-            .authorize_tool_call(call, tool, &ctx, authorization_category)
+            .authorize_tool_call(
+                call,
+                tool,
+                &ctx,
+                authorization_category,
+                rewrite_source.as_deref(),
+            )
             .await?
         {
             let execution = self.completed_execution(
@@ -782,6 +792,7 @@ impl ToolRuntime {
         Ok(Admission::Run(Box::new(AdmittedToolCall {
             context: ctx,
             execution_hooks: (!execution_hooks.is_empty()).then_some(execution_hooks),
+            rewrite_source,
         })))
     }
 
@@ -958,15 +969,25 @@ impl ToolRuntime {
         call: &ToolCall,
         outcome: ToolAuthorizationOutcome,
         reason: Option<String>,
+        rewrite_source: Option<&str>,
     ) -> ContentBlock {
         let content = match outcome {
             ToolAuthorizationOutcome::Allow => "Tool execution blocked by authorizer".to_string(),
             ToolAuthorizationOutcome::Prompt => reason
                 .map(|reason| format!("Tool execution requires approval: {reason}"))
                 .unwrap_or_else(|| "Tool execution requires approval".to_string()),
-            ToolAuthorizationOutcome::Deny => reason
-                .map(|reason| format!("Tool execution denied: {reason}"))
-                .unwrap_or_else(|| "Tool execution denied by authorizer".to_string()),
+            ToolAuthorizationOutcome::Deny => match rewrite_source {
+                Some(_) => format!(
+                    "Tool execution denied: {}",
+                    rewritten_call_failure(
+                        rewrite_source,
+                        reason.unwrap_or_else(|| "denied by authorizer".to_string()),
+                    )
+                ),
+                None => reason
+                    .map(|reason| format!("Tool execution denied: {reason}"))
+                    .unwrap_or_else(|| "Tool execution denied by authorizer".to_string()),
+            },
         };
 
         ContentBlock::ToolResult {
@@ -984,6 +1005,7 @@ impl ToolRuntime {
         &self,
         call: &ToolCall,
         output: Result<crate::tool::ToolOutput, String>,
+        rewrite_source: Option<&str>,
     ) -> (ContentBlock, Option<serde_json::Value>, bool) {
         match output {
             Ok(output) => (
@@ -1000,7 +1022,9 @@ impl ToolRuntime {
                     tool_use_id: call.id.clone(),
                     content: self
                         .output_limiter
-                        .apply(mentra_provider::ToolResultContent::Text(content))
+                        .apply(mentra_provider::ToolResultContent::Text(
+                            rewritten_call_failure(rewrite_source, content),
+                        ))
                         .await,
                     is_error: true,
                 },
@@ -1087,6 +1111,7 @@ impl ToolRuntime {
         tool: &Arc<dyn ExecutableTool>,
         ctx: &ParallelToolContext,
         execution_category: ToolExecutionCategory,
+        rewrite_source: Option<&str>,
     ) -> Result<Option<ContentBlock>, RuntimeError> {
         let Some(authorizer) = self.runtime.execution.tool_authorizer.clone() else {
             return Ok(None);
@@ -1099,6 +1124,7 @@ impl ToolRuntime {
                     call,
                     ToolAuthorizationOutcome::Deny,
                     Some(error),
+                    rewrite_source,
                 )));
             }
         };
@@ -1148,6 +1174,7 @@ impl ToolRuntime {
                         "authorizer timed out after {}",
                         format_duration(timeout)
                     )),
+                    rewrite_source,
                 );
             }
             error = &mut hard_limit => return Err(error),
@@ -1159,12 +1186,15 @@ impl ToolRuntime {
                     self.emit_tool_authorization_finished(call, decision.outcome, decision.reason)?;
                     Ok(None)
                 }
-                outcome => self.handle_authorization_block(call, outcome, decision.reason),
+                outcome => {
+                    self.handle_authorization_block(call, outcome, decision.reason, rewrite_source)
+                }
             },
             Err(error) => self.handle_authorization_block(
                 call,
                 ToolAuthorizationOutcome::Deny,
                 Some(error.to_string()),
+                rewrite_source,
             ),
         }
     }
@@ -1174,12 +1204,16 @@ impl ToolRuntime {
         call: &ToolCall,
         outcome: ToolAuthorizationOutcome,
         reason: Option<String>,
+        rewrite_source: Option<&str>,
     ) -> Result<Option<ContentBlock>, RuntimeError> {
         self.emit_tool_authorization_finished(call, outcome, reason.clone())?;
         self.emit_tool_authorization_blocked(call, outcome, reason.clone())?;
-        Ok(Some(
-            self.blocked_authorization_result(call, outcome, reason),
-        ))
+        Ok(Some(self.blocked_authorization_result(
+            call,
+            outcome,
+            reason,
+            rewrite_source,
+        )))
     }
 
     async fn execute_one_tool(
@@ -1258,6 +1292,7 @@ impl ToolRuntime {
             let AdmittedToolCall {
                 context: ctx,
                 execution_hooks,
+                rewrite_source,
             } = admitted;
 
             if let Err(error) = self.emit_tool_runtime_started(&call) {
@@ -1281,7 +1316,14 @@ impl ToolRuntime {
                     tool.execute_output(ctx, call.input.clone()),
                 )
                 .await;
-                (index, call, descriptor, output, execution_hooks)
+                (
+                    index,
+                    call,
+                    descriptor,
+                    output,
+                    execution_hooks,
+                    rewrite_source,
+                )
             });
         }
 
@@ -1291,8 +1333,17 @@ impl ToolRuntime {
                 return Err(error);
             }
             match tokio::time::timeout(PARALLEL_JOIN_POLL_INTERVAL, join_set.join_next()).await {
-                Ok(Some(Ok((index, call, descriptor, output, execution_hooks)))) => {
-                    let (result, details, terminate) = self.tool_output_block(&call, output).await;
+                Ok(Some(Ok((
+                    index,
+                    call,
+                    descriptor,
+                    output,
+                    execution_hooks,
+                    rewrite_source,
+                )))) => {
+                    let (result, details, terminate) = self
+                        .tool_output_block(&call, output, rewrite_source.as_deref())
+                        .await;
                     // RUNTIME defense: a parallel-lane execution can never end
                     // the run — a `terminate: true` surfacing here is a tool
                     // misuse (or a static-coercion gap), never honored as
@@ -1384,6 +1435,7 @@ impl ToolRuntime {
         let AdmittedToolCall {
             context: authorization_ctx,
             execution_hooks,
+            rewrite_source,
         } = admitted;
 
         if let Err(error) = self.emit_tool_runtime_started(&call) {
@@ -1422,6 +1474,7 @@ impl ToolRuntime {
                     ),
                 )
                 .await,
+                rewrite_source.as_deref(),
             )
             .await;
         let effect = RoundEffect {
@@ -1439,6 +1492,15 @@ fn mixed_rewrite_source(attribution: Option<&str>) -> String {
     match attribution {
         Some(attribution) => format!("mixed execution hooks ({attribution})"),
         None => "mixed execution hooks".to_string(),
+    }
+}
+
+fn rewritten_call_failure(rewrite_source: Option<&str>, failure: String) -> String {
+    match rewrite_source {
+        Some(rewrite_source) => {
+            format!("{rewrite_source} rewrote this call; the rewritten call then failed: {failure}")
+        }
+        None => failure,
     }
 }
 
