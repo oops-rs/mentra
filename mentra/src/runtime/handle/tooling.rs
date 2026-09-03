@@ -50,7 +50,10 @@ impl RuntimeHandle {
     where
         T: ExecutableTool + 'static,
     {
-        let prepared = ToolRegistry::prepare_tool(tool);
+        self.register_prepared_tool(crate::tool::PreparedTool::new(tool));
+    }
+
+    pub fn register_prepared_tool(&self, prepared: crate::tool::PreparedTool) {
         let displaced_handlers = {
             let mut registry = self
                 .tooling
@@ -67,7 +70,13 @@ impl RuntimeHandle {
     where
         T: ExecutableTool + 'static,
     {
-        let prepared = ToolRegistry::prepare_tool(tool);
+        self.try_register_prepared_tool(crate::tool::PreparedTool::new(tool))
+    }
+
+    pub fn try_register_prepared_tool(
+        &self,
+        prepared: crate::tool::PreparedTool,
+    ) -> Result<(), crate::tool::ToolNameCollision> {
         let outcome = {
             let mut registry = self
                 .tooling
@@ -97,7 +106,14 @@ impl RuntimeHandle {
     where
         T: ExecutableTool + 'static,
     {
-        let prepared = ToolRegistry::prepare_tool(tool);
+        self.try_register_prepared_tool_for_audience(audience, crate::tool::PreparedTool::new(tool))
+    }
+
+    pub fn try_register_prepared_tool_for_audience(
+        &self,
+        audience: crate::tool::ToolAudience,
+        prepared: crate::tool::PreparedTool,
+    ) -> Result<crate::tool::AudienceToolRegistration, crate::tool::ToolNameCollision> {
         let outcome = {
             let mut registry = self
                 .tooling
@@ -145,7 +161,14 @@ impl RuntimeHandle {
     where
         T: ExecutableTool + 'static,
     {
-        let prepared = ToolRegistry::prepare_tool(tool);
+        self.register_prepared_tool_for_agent(agent_id, crate::tool::PreparedTool::new(tool))
+    }
+
+    pub(crate) fn register_prepared_tool_for_agent(
+        &self,
+        agent_id: &str,
+        prepared: crate::tool::PreparedTool,
+    ) -> crate::tool::AgentToolRegistration {
         let (registration, displaced_handlers) = {
             let mut registry = self
                 .tooling
@@ -381,6 +404,11 @@ mod tests {
         calls: StdArc<AtomicUsize>,
     }
 
+    struct CountingNameTool {
+        calls: StdArc<AtomicUsize>,
+        prefix: &'static str,
+    }
+
     impl ToolDefinition for CountingDescriptorTool {
         fn descriptor(&self) -> ToolSpec {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
@@ -392,6 +420,18 @@ mod tests {
 
     #[async_trait]
     impl ToolExecutor for CountingDescriptorTool {}
+
+    impl ToolDefinition for CountingNameTool {
+        fn descriptor(&self) -> ToolSpec {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            ToolSpec::builder(format!("{}_descriptor_{call}", self.prefix))
+                .description(format!("descriptor call {call}"))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for CountingNameTool {}
 
     struct ReentrantDropTool {
         runtime: RuntimeHandle,
@@ -703,6 +743,79 @@ mod tests {
         );
         assert!(new_guard.unregister());
         assert!(audience_description(&runtime, &audience, "counted_audience").is_none());
+    }
+
+    #[test]
+    fn prepared_scoped_registration_keeps_validated_names_and_generations_together() {
+        let runtime = RuntimeHandle::new(false);
+
+        let audience = crate::tool::ToolAudience::new("prepared-counted");
+        let audience_calls = StdArc::new(AtomicUsize::new(0));
+        let audience_tool = crate::tool::PreparedTool::new(CountingNameTool {
+            calls: StdArc::clone(&audience_calls),
+            prefix: "prepared_audience",
+        });
+        let audience_name = audience_tool.descriptor().provider.name.clone();
+        let old_audience = runtime
+            .try_register_prepared_tool_for_audience(audience.clone(), audience_tool)
+            .expect("prepared audience registration");
+        assert_eq!(audience_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(old_audience.descriptor().provider.name, audience_name);
+        assert_eq!(
+            audience_description(&runtime, &audience, &audience_name).as_deref(),
+            Some("descriptor call 1")
+        );
+
+        let detached_handler = runtime
+            .tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .detach_audience_registration(&audience, old_audience.registration());
+        drop(detached_handler);
+        let new_audience = runtime
+            .try_register_tool_for_audience(
+                audience.clone(),
+                NamedTool {
+                    name: "prepared_audience_descriptor_1",
+                    description: "new audience generation",
+                },
+            )
+            .expect("replacement audience generation");
+        drop(old_audience);
+        assert_eq!(
+            audience_description(&runtime, &audience, &audience_name).as_deref(),
+            Some("new audience generation")
+        );
+        assert!(new_audience.unregister());
+
+        let agent_calls = StdArc::new(AtomicUsize::new(0));
+        let agent_tool = crate::tool::PreparedTool::new(CountingNameTool {
+            calls: StdArc::clone(&agent_calls),
+            prefix: "prepared_agent",
+        });
+        let agent_name = agent_tool.descriptor().provider.name.clone();
+        let old_agent = runtime.register_prepared_tool_for_agent("owner", agent_tool);
+        assert_eq!(agent_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(old_agent.registration().name(), agent_name);
+        let new_agent = runtime.register_agent_tool(
+            "owner",
+            NamedTool {
+                name: "prepared_agent_descriptor_1",
+                description: "new agent generation",
+            },
+        );
+        drop(old_agent);
+        let crate::tool::ToolResolution::Visible(resolved) =
+            runtime.resolve_tool_for_agent(&agent_name, "owner")
+        else {
+            panic!("new exact-agent generation remains visible");
+        };
+        assert_eq!(
+            resolved.descriptor().provider.description.as_deref(),
+            Some("new agent generation")
+        );
+        assert!(new_agent.unregister());
     }
 
     #[test]

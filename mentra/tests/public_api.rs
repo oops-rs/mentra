@@ -12,8 +12,8 @@ use std::{
 
 use async_trait::async_trait;
 use mentra::{
-    Agent, BuiltinProvider, ContentBlock, FileToolProfile, ModelInfo, ModelSelector, Runtime,
-    ToolAudience,
+    Agent, BuiltinProvider, ContentBlock, FileToolProfile, ModelInfo, ModelSelector, PreparedTool,
+    Runtime, ToolAudience,
     agent::{AgentEvent, AgentEventTapGuard},
     error::RuntimeError,
     provider::{
@@ -30,7 +30,7 @@ use mentra::{
     tool::{
         ExecutableTool, ParallelToolContext, ToolAuthorizationDecision, ToolAuthorizationPreview,
         ToolAuthorizationRequest, ToolAuthorizer, ToolContext, ToolDefinition, ToolExecutor,
-        ToolResult, ToolSideEffectLevel, ToolSpec,
+        ToolRegistry, ToolResult, ToolSideEffectLevel, ToolSpec,
     },
 };
 use serde_json::{Value, json};
@@ -183,6 +183,11 @@ struct EchoTool;
 
 struct AlphaTool;
 
+struct CountingNameTool {
+    calls: Arc<AtomicUsize>,
+    prefix: &'static str,
+}
+
 struct EndTurnTool;
 
 struct SubagentSummaryTool;
@@ -241,6 +246,18 @@ impl ToolExecutor for EchoTool {
         Ok("echoed".to_string())
     }
 }
+
+impl ToolDefinition for CountingNameTool {
+    fn descriptor(&self) -> ToolSpec {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        ToolSpec::builder(format!("{}_descriptor_{call}", self.prefix))
+            .description(format!("descriptor call {call}"))
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for CountingNameTool {}
 
 #[async_trait]
 impl ToolDefinition for AlphaTool {
@@ -521,6 +538,102 @@ fn runtime_publicly_registers_audience_tools_with_guard_lifetimes() {
         .expect("released audience name can register again");
     drop(replacement);
     drop(other_guard);
+}
+
+#[test]
+fn prepared_tool_publicly_binds_validation_to_registration_identity() {
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+
+    let global_calls = Arc::new(AtomicUsize::new(0));
+    let global = PreparedTool::new(CountingNameTool {
+        calls: Arc::clone(&global_calls),
+        prefix: "caller_validated_global",
+    });
+    let global_name = global.descriptor().provider.name.clone();
+    assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+    runtime
+        .try_register_prepared_tool(global)
+        .expect("register prepared global tool");
+    assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime
+            .tool_descriptor(&global_name)
+            .expect("validated global name is registered")
+            .provider
+            .name,
+        global_name
+    );
+    let global_collision_calls = Arc::new(AtomicUsize::new(0));
+    let global_collision = PreparedTool::new(CountingNameTool {
+        calls: Arc::clone(&global_collision_calls),
+        prefix: "caller_validated_global",
+    });
+    let collision = runtime
+        .try_register_prepared_tool(global_collision)
+        .expect_err("validated global name is occupied");
+    assert_eq!(collision.name, global_name);
+    assert_eq!(global_collision_calls.load(Ordering::SeqCst), 1);
+
+    let registry_calls = Arc::new(AtomicUsize::new(0));
+    let registry_tool = PreparedTool::new(CountingNameTool {
+        calls: Arc::clone(&registry_calls),
+        prefix: "caller_validated_registry",
+    });
+    let registry_name = registry_tool.descriptor().provider.name.clone();
+    let mut registry = ToolRegistry::default();
+    registry
+        .try_register_prepared_tool(registry_tool)
+        .expect("register directly into tool registry");
+    assert_eq!(registry_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        registry
+            .get_tool_descriptor(&registry_name)
+            .expect("validated registry name is registered")
+            .provider
+            .name,
+        registry_name
+    );
+
+    let audience = ToolAudience::new("prepared-workspace");
+    let audience_calls = Arc::new(AtomicUsize::new(0));
+    let audience_tool = PreparedTool::new(CountingNameTool {
+        calls: Arc::clone(&audience_calls),
+        prefix: "caller_validated_audience",
+    });
+    let audience_name = audience_tool.descriptor().provider.name.clone();
+    let guard = runtime
+        .try_register_prepared_tool_for_audience(audience.clone(), audience_tool)
+        .expect("register prepared audience tool");
+    assert_eq!(audience_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(guard.descriptor().provider.name, audience_name);
+
+    let audience_collision_calls = Arc::new(AtomicUsize::new(0));
+    let audience_collision = PreparedTool::new(CountingNameTool {
+        calls: Arc::clone(&audience_collision_calls),
+        prefix: "caller_validated_audience",
+    });
+    let collision = runtime
+        .try_register_prepared_tool_for_audience(audience.clone(), audience_collision)
+        .expect_err("validated audience name is occupied");
+    assert_eq!(collision.name, audience_name);
+    assert_eq!(audience_collision_calls.load(Ordering::SeqCst), 1);
+    drop(guard);
+    let replacement = runtime
+        .try_register_tool_for_audience(
+            audience,
+            CountingNameTool {
+                calls: Arc::new(AtomicUsize::new(0)),
+                prefix: "caller_validated_audience",
+            },
+        )
+        .expect("dropping the guard releases the validated audience name");
+    drop(replacement);
 }
 
 #[test]

@@ -189,6 +189,17 @@ impl Runtime {
         self.handle.register_tool(tool);
     }
 
+    /// Registers a custom tool from an already validated descriptor snapshot.
+    ///
+    /// Construction of [`PreparedTool`](crate::tool::PreparedTool) evaluates
+    /// the tool descriptor exactly once. This method consumes that prepared
+    /// value and uses its captured name and metadata without re-evaluation.
+    /// Like [`register_tool`](Self::register_tool), it deliberately replaces a
+    /// same-name registration.
+    pub fn register_prepared_tool(&self, prepared: crate::tool::PreparedTool) {
+        self.handle.register_prepared_tool(prepared);
+    }
+
     /// Registers a custom tool unless its name is already taken.
     ///
     /// [`register_tool`](Self::register_tool) replaces a tool of the same
@@ -200,6 +211,18 @@ impl Runtime {
         T: ExecutableTool + 'static,
     {
         self.handle.try_register_tool(tool)
+    }
+
+    /// Registers an already prepared custom tool unless its captured name is taken.
+    ///
+    /// Use this after validating [`PreparedTool::descriptor`](crate::tool::PreparedTool::descriptor)
+    /// when validation identity and registry identity must be the same immutable
+    /// snapshot.
+    pub fn try_register_prepared_tool(
+        &self,
+        prepared: crate::tool::PreparedTool,
+    ) -> Result<(), crate::tool::ToolNameCollision> {
+        self.handle.try_register_prepared_tool(prepared)
     }
 
     /// Registers a custom tool visible only to agents in `audience`.
@@ -217,6 +240,20 @@ impl Runtime {
         T: ExecutableTool + 'static,
     {
         self.handle.try_register_tool_for_audience(audience, tool)
+    }
+
+    /// Registers an already prepared tool for one audience.
+    ///
+    /// The collision key and the descriptor returned by the registration guard
+    /// both come from the exact snapshot the caller could validate before this
+    /// call. The tool definition is not evaluated again.
+    pub fn try_register_prepared_tool_for_audience(
+        &self,
+        audience: crate::tool::ToolAudience,
+        prepared: crate::tool::PreparedTool,
+    ) -> Result<crate::tool::AudienceToolRegistration, crate::tool::ToolNameCollision> {
+        self.handle
+            .try_register_prepared_tool_for_audience(audience, prepared)
     }
 
     /// Removes a registered tool by name, reporting whether one was there.

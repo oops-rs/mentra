@@ -246,7 +246,7 @@ async fn roster_order_and_same_name_precedence_are_stable() {
         .expect("exact agent");
     let handle = exact.runtime_handle();
     let exact_registration = handle.register_agent_tool(exact.id(), LayeredTool { label: "exact" });
-    let prepared = crate::tool::ToolRegistry::prepare_tool(LayeredTool { label: "audience" });
+    let prepared = crate::tool::PreparedTool::new(LayeredTool { label: "audience" });
     let displaced = {
         let mut registry = handle
             .tooling
