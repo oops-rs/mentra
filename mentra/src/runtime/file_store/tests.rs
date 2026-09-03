@@ -777,7 +777,7 @@ fn a_process_rule_mutation_waits_for_the_sidecar_lock() {
 }
 
 #[test]
-fn clones_share_rule_cache_updates_without_reparsing() {
+fn clones_share_rule_cache_and_mutation_invalidation() {
     let store = FileRuntimeStore::new(temp_root("rules-clone-cache"));
     store
         .upsert_rule(
@@ -797,9 +797,18 @@ fn clones_share_rule_cache_updates_without_reparsing() {
     );
     assert_eq!(
         store.rules_cache_misses(),
-        misses_after_write,
-        "a clone reads the write-through cache"
+        misses_after_write + 1,
+        "a changed mutation invalidates the cache shared by its clones"
     );
+    let misses_after_first_load = store.rules_cache_misses();
+    assert_eq!(
+        store
+            .load_applicable_rules(&rules_context())
+            .expect("original reuses clone load")
+            .len(),
+        1
+    );
+    assert_eq!(store.rules_cache_misses(), misses_after_first_load);
 
     clone
         .upsert_rule(
@@ -817,9 +826,18 @@ fn clones_share_rule_cache_updates_without_reparsing() {
     );
     assert_eq!(
         store.rules_cache_misses(),
-        misses_after_clone_write,
-        "a clone mutation refreshes the cache shared by the original"
+        misses_after_clone_write + 1,
+        "a clone mutation invalidates the cache shared by the original"
     );
+    let misses_after_reload = store.rules_cache_misses();
+    assert_eq!(
+        clone
+            .load_applicable_rules(&rules_context())
+            .expect("clone reuses original reload")
+            .len(),
+        2
+    );
+    assert_eq!(store.rules_cache_misses(), misses_after_reload);
 }
 
 #[test]

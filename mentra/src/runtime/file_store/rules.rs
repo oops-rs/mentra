@@ -72,13 +72,6 @@ impl ObservedRulesFile {
             Self::Present { identity, .. } => identity,
         }
     }
-
-    fn into_identity(self) -> RulesFileIdentity {
-        match self {
-            Self::Missing => RulesFileIdentity::Missing,
-            Self::Present { identity, .. } => identity,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -244,9 +237,14 @@ impl FileRuntimeStore {
         let (result, changed) = mutation(&mut snapshot.rules);
         if changed {
             self.write_rules(&snapshot.rules)?;
-            snapshot.identity = self.observe_rules_file()?.into_identity();
+            // The replacement is authoritative. No later path observation is
+            // transactionally tied to that exact file, so invalidate instead
+            // of risking a cache-only error or pairing these rows with a file
+            // another (non-locking) actor installed after the commit.
+            state.cached = None;
+        } else {
+            state.cached = Some(snapshot);
         }
-        state.cached = Some(snapshot);
         Ok(result)
     }
 
