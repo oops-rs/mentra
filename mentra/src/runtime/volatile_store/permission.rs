@@ -19,6 +19,23 @@ pub(super) struct PermissionState {
     rules: Vec<StoredRule>,
 }
 
+impl PermissionState {
+    fn clear_scope(
+        &mut self,
+        context: &PermissionRuleContext,
+        scope: PermissionRuleScope,
+    ) -> usize {
+        let before = self.rules.len();
+        self.rules
+            .retain(|stored| !in_namespace(stored, context, scope));
+        before - self.rules.len()
+    }
+
+    pub(super) fn clear_session(&mut self, session_id: &str) {
+        self.clear_scope(&context(session_id, None), PermissionRuleScope::Session);
+    }
+}
+
 fn context(session_id: &str, project_id: Option<&str>) -> PermissionRuleContext {
     PermissionRuleContext {
         session_id: session_id.to_owned(),
@@ -118,12 +135,7 @@ impl PermissionRuleStore for VolatileRuntimeStore {
     ) -> Result<usize, RuntimeError> {
         context.validate_scope(scope)?;
         let mut state = self.lock();
-        let before = state.permissions.rules.len();
-        state
-            .permissions
-            .rules
-            .retain(|stored| !in_namespace(stored, context, scope));
-        Ok(before - state.permissions.rules.len())
+        Ok(state.permissions.clear_scope(context, scope))
     }
 
     fn save_rules(

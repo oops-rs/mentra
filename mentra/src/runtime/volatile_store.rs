@@ -224,6 +224,7 @@ impl AgentStore for VolatileRuntimeStore {
         // The order list is what listing iterates; leaving the id in it turns
         // a deleted agent into an entry that cannot be loaded.
         state.agent_order.retain(|id| id != agent_id);
+        state.permissions.clear_session(agent_id);
         Ok(())
     }
 
