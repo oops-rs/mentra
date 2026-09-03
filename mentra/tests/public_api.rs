@@ -1284,6 +1284,10 @@ fn permission_rule_addresses_are_public_serializable_and_exact() {
     };
     assert_eq!(context.session_id, "session-1");
     assert_eq!(context.project_id.as_deref(), Some("project-1"));
+    assert_eq!(
+        serde_json::to_value(PermissionRuleScope::Process).expect("serialize process scope"),
+        json!("process")
+    );
 
     let address = PermissionRuleAddress {
         scope: PermissionRuleScope::Project,

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Permission answers can stay process-local
+
+- `PermissionRuleScope::Process` adds a highest-precedence remembered-answer
+  rung owned by one live `SessionPermissionHandle` binding. Its clones and the
+  session's installed authorizer share the same rules; a separately created or
+  resumed session starts with an empty rung, even for the same stable agent id.
+- Process rules reuse `RuleStore` matching, ordering, exact revocation, and
+  scope clearing, but never enter `PermissionRuleStore`. A matching process
+  rule answers before the durable backend is read, so a corrupt or unavailable
+  `rules.json` cannot block an already-remembered process answer. Direct
+  attempts to write process rules through a runtime store are rejected.
+- Durable `Session`, `Project`, and `Global` behavior is unchanged. Listing a
+  live session's effective rules still reads the backend and remains fallible,
+  with process rules listed first.
+- **Source-breaking:** `PermissionRuleScope` gained the `Process` variant,
+  serialized as `"process"`. Exhaustive matches must decide how to present the
+  new live-only duration.
+
 ## 0.26.0 / mentra-provider 0.8.0
 
 ### Runtimes can mint fresh provider session scopes

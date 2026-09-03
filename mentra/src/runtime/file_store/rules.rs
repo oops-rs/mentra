@@ -1,8 +1,9 @@
-//! [`PermissionRuleStore`] on one `rules.json` holding every scope, replaced
-//! atomically. Scoping semantics mirror the volatile and SQLite stores:
-//! saving replaces only the session-scoped rules of that session; loading
-//! unions session, matching-project, and global rules. Loads reuse a parsed
-//! snapshot while the file handle identity and metadata stay unchanged;
+//! [`PermissionRuleStore`] on one `rules.json` holding every durable scope,
+//! replaced atomically. Scoping semantics mirror the volatile and SQLite
+//! stores: saving replaces only the session-scoped rules of that session;
+//! loading unions session, matching-project, and global rules. Process rules
+//! belong to a live session binding and are rejected here. Loads reuse a
+//! parsed snapshot while the file handle identity and metadata stay unchanged;
 //! mutations always reread disk under `rules.lock` before changing that cache.
 
 use std::{fs::File, io::Read as _, time::SystemTime};
@@ -97,6 +98,7 @@ fn in_namespace(
         return false;
     }
     match scope {
+        PermissionRuleScope::Process => false,
         PermissionRuleScope::Session => stored.session_id == context.session_id,
         PermissionRuleScope::Project => {
             context.project_id.is_some()
@@ -119,7 +121,9 @@ fn stored_rule(context: &PermissionRuleContext, rule: &RememberedRule) -> Stored
         session_id: context.session_id.clone(),
         project_id: match rule.scope {
             PermissionRuleScope::Project => context.project_id.clone(),
-            PermissionRuleScope::Session | PermissionRuleScope::Global => None,
+            PermissionRuleScope::Process
+            | PermissionRuleScope::Session
+            | PermissionRuleScope::Global => None,
         },
         rule: rule.clone(),
     }
@@ -137,7 +141,7 @@ impl PermissionRuleStore for FileRuntimeStore {
         context: &PermissionRuleContext,
         rule: &RememberedRule,
     ) -> Result<(), RuntimeError> {
-        context.validate_scope(rule.scope)?;
+        context.validate_persisted_scope(rule.scope)?;
         self.mutate_rules(|stored| {
             upsert(stored, context, rule);
             ((), true)
@@ -161,7 +165,7 @@ impl PermissionRuleStore for FileRuntimeStore {
         context: &PermissionRuleContext,
         address: &PermissionRuleAddress,
     ) -> Result<bool, RuntimeError> {
-        context.validate_scope(address.scope)?;
+        context.validate_persisted_scope(address.scope)?;
         self.mutate_rules(|stored| {
             let before = stored.len();
             stored.retain(|entry| !at_address(entry, context, address));
@@ -175,7 +179,7 @@ impl PermissionRuleStore for FileRuntimeStore {
         context: &PermissionRuleContext,
         scope: PermissionRuleScope,
     ) -> Result<usize, RuntimeError> {
-        context.validate_scope(scope)?;
+        context.validate_persisted_scope(scope)?;
         self.mutate_rules(|stored| {
             let before = stored.len();
             stored.retain(|entry| !in_namespace(entry, context, scope));
@@ -192,7 +196,7 @@ impl PermissionRuleStore for FileRuntimeStore {
     ) -> Result<(), RuntimeError> {
         let context = context(session_id, project_id);
         for rule in rules {
-            context.validate_scope(rule.scope)?;
+            context.validate_persisted_scope(rule.scope)?;
         }
         self.mutate_rules(|stored| {
             stored.retain(|entry| !in_namespace(entry, &context, PermissionRuleScope::Session));

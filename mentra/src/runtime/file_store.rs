@@ -11,7 +11,7 @@
 //!     state.json        working memory minus entry contents         (atomic replace)
 //!     transcript.jsonl  one transcript entry per line               (append-only)
 //!     leaf              the active entry id                         (atomic replace)
-//!   rules.json          permission rules, all scopes                (atomic replace)
+//!   rules.json          durable permission rules                    (atomic replace)
 //!   rules.lock          stable advisory lock for rules mutations
 //!   runs.jsonl          run lifecycle events                        (append-only)
 //! ```

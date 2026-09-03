@@ -44,6 +44,7 @@ pub struct SubagentHandle {
 pub struct SessionPermissionHandle {
     context: PermissionRuleContext,
     store: Arc<dyn RuntimeStore>,
+    process_rules: RuleStore,
     event_tx: broadcast::Sender<SessionEvent>,
     pending_permissions: PendingPermissionStore,
 }
@@ -62,6 +63,7 @@ impl SessionPermissionHandle {
                 project_id,
             },
             store,
+            process_rules: RuleStore::new(),
             event_tx,
             pending_permissions,
         }
@@ -73,23 +75,53 @@ impl SessionPermissionHandle {
     }
 
     /// Atomically inserts or replaces one rule in its effective namespace.
+    ///
+    /// [`PermissionRuleScope::Process`] stays in this live binding's
+    /// in-memory rule store. Every other scope is written directly to the
+    /// runtime store.
     pub fn remember_rule(&self, rule: RememberedRule) -> Result<(), RuntimeError> {
-        self.store.upsert_rule(&self.context, &rule)
+        if rule.scope == PermissionRuleScope::Process {
+            self.process_rules.add_rule(rule);
+            Ok(())
+        } else {
+            self.store.upsert_rule(&self.context, &rule)
+        }
     }
 
     /// Atomically revokes one exact rule address from its effective namespace.
     pub fn revoke_rule(&self, address: &PermissionRuleAddress) -> Result<bool, RuntimeError> {
-        self.store.revoke_rule(&self.context, address)
+        if address.scope == PermissionRuleScope::Process {
+            Ok(self.process_rules.revoke_rule(address))
+        } else {
+            self.store.revoke_rule(&self.context, address)
+        }
     }
 
     /// Atomically clears one effective scope and returns stored rows removed.
     pub fn clear_scope(&self, scope: PermissionRuleScope) -> Result<usize, RuntimeError> {
-        self.store.clear_scope(&self.context, scope)
+        if scope == PermissionRuleScope::Process {
+            Ok(self.process_rules.clear_scope(scope))
+        } else {
+            self.store.clear_scope(&self.context, scope)
+        }
     }
 
     /// Loads the rules currently applicable to this session in stable order.
+    ///
+    /// Process rules come from this live binding; session, project, and global
+    /// rules come from the runtime store.
     pub fn remembered_rules(&self) -> Result<Vec<RememberedRule>, RuntimeError> {
-        self.store.load_applicable_rules(&self.context)
+        let rules = RuleStore::new();
+        for rule in self
+            .store
+            .load_applicable_rules(&self.context)?
+            .into_iter()
+            .filter(|rule| rule.scope != PermissionRuleScope::Process)
+            .chain(self.process_rules.rules())
+        {
+            rules.add_rule(rule);
+        }
+        Ok(rules.rules())
     }
 
     pub(crate) fn matching_rule(
@@ -97,8 +129,17 @@ impl SessionPermissionHandle {
         tool_name: &str,
         input_json: Option<&str>,
     ) -> Result<Option<RememberedRule>, RuntimeError> {
+        if let Some(rule) = self.process_rules.matching_rule(tool_name, input_json) {
+            return Ok(Some(rule));
+        }
+
         let rule_store = RuleStore::new();
-        for rule in self.remembered_rules()? {
+        for rule in self
+            .store
+            .load_applicable_rules(&self.context)?
+            .into_iter()
+            .filter(|rule| rule.scope != PermissionRuleScope::Process)
+        {
             rule_store.add_rule(rule);
         }
         Ok(rule_store.matching_rule(tool_name, input_json))
@@ -162,7 +203,7 @@ impl SessionPermissionHandle {
                     decision.reason.clone()
                 },
             };
-            if let Err(error) = self.store.upsert_rule(&self.context, &rule) {
+            if let Err(error) = self.remember_rule(rule) {
                 let restored = self.pending_permissions.restore(
                     request_id.to_owned(),
                     ClaimedPendingPermission {
@@ -705,10 +746,12 @@ impl Session {
 
     /// Resolves a pending permission request with the given decision.
     ///
-    /// If `remember_as` is set, the one rule is atomically persisted before a
-    /// [`SessionEvent::PermissionResolved`] event is emitted and the decision is
-    /// sent to the waiting caller. Validation or persistence failure leaves the
-    /// pending request available for a corrected retry.
+    /// If `remember_as` is set, the one rule is atomically remembered before a
+    /// [`SessionEvent::PermissionResolved`] event is emitted and the decision
+    /// is sent to the waiting caller. Process scope remains in this live
+    /// session binding; every other scope is persisted. Validation or durable
+    /// store failure leaves the pending request available for a corrected
+    /// retry.
     pub fn resolve_permission(
         &self,
         request_id: &str,
@@ -719,7 +762,7 @@ impl Session {
     }
 
     /// Loads all remembered permission rules currently applicable to this
-    /// session from its runtime store.
+    /// session from its live process binding and runtime store.
     pub fn remembered_rules(&self) -> Result<Vec<RememberedRule>, RuntimeError> {
         self.permission_handle.remembered_rules()
     }

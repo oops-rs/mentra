@@ -341,14 +341,22 @@ waits for `resolve_permission`, while `Allow` and `Deny` keep their ordinary
 meaning. Sibling sessions keep the runtime default, and descendants created
 from the decorated session inherit its replacement.
 
-Every session uses its runtime store as the live remembered-rule source. The
-session permission namespace is the persisted agent id—not the fresh UI
-`SessionId` created on resume—and an optional project id adds project-wide
-inheritance. `SessionPermissionHandle::{remember_rule, revoke_rule,
-clear_scope, remembered_rules}` mutate or read those effective namespaces;
-project and global changes are visible to other already-live sessions on their
-next authorization lookup. No store attachment or manual rule reload is
-required.
+Every session has a process-local remembered-rule rung ahead of its runtime
+store. `PermissionRuleScope::Process` belongs to that one live
+`SessionPermissionHandle` binding: handle clones and the installed authorizer
+share it, but a separately created or resumed session starts empty. It is never
+written to `PermissionRuleStore`, and a match answers without reading the
+durable backend. The durable `Session` namespace is instead the persisted agent
+id—not the fresh UI `SessionId` created on resume—and an optional project id
+adds project-wide inheritance. Lookup order is `Process`, `Session`, `Project`,
+then `Global`.
+
+`SessionPermissionHandle::{remember_rule, revoke_rule, clear_scope,
+remembered_rules}` route each mutation to the live or durable namespace it
+names; project and global changes are visible to other already-live sessions on
+their next authorization lookup. Effective-rule listing includes both sources
+and remains fallible because it reads the durable store. No store attachment or
+manual rule reload is required.
 
 The attachment is live execution state rather than persisted agent
 configuration. Attach the current authorizer again after `resume_session`.
