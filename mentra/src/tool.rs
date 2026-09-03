@@ -122,13 +122,38 @@ struct RegisteredTool {
     handler: Arc<dyn ExecutableTool>,
 }
 
-pub(crate) struct PreparedTool {
+/// A tool bundled with the immutable descriptor snapshot used to register it.
+///
+/// Construction evaluates [`ToolDefinition::descriptor`] exactly once. A
+/// caller can validate [`descriptor`](Self::descriptor) and then pass the
+/// value to a prepared registration API, which consumes the same snapshot and
+/// handler without consulting the tool definition again.
+#[must_use = "validate and register the prepared tool, or drop it intentionally"]
+pub struct PreparedTool {
     descriptor: RuntimeToolDescriptor,
     handler: Arc<dyn ExecutableTool>,
 }
 
 impl PreparedTool {
-    pub(crate) fn name(&self) -> &str {
+    /// Captures a tool and its descriptor for later registration.
+    pub fn new<T>(tool: T) -> Self
+    where
+        T: ExecutableTool + 'static,
+    {
+        let handler: Arc<dyn ExecutableTool> = Arc::new(tool);
+        let descriptor = handler.descriptor();
+        Self {
+            descriptor,
+            handler,
+        }
+    }
+
+    /// Returns the exact descriptor snapshot that registration will use.
+    pub fn descriptor(&self) -> &RuntimeToolDescriptor {
+        &self.descriptor
+    }
+
+    fn name(&self) -> &str {
         &self.descriptor.provider.name
     }
 }
@@ -354,7 +379,16 @@ impl ToolRegistry {
     where
         T: ExecutableTool + 'static,
     {
-        let prepared = Self::prepare_tool(tool);
+        self.register_prepared_tool(PreparedTool::new(tool));
+    }
+
+    /// Registers a previously prepared tool and refreshes the cached specs.
+    ///
+    /// The descriptor exposed by [`PreparedTool::descriptor`] is used as the
+    /// registry identity without another descriptor evaluation. Like
+    /// [`register_tool`](Self::register_tool), this deliberately replaces a
+    /// same-name registration.
+    pub fn register_prepared_tool(&mut self, prepared: PreparedTool) {
         let (_, displaced_handlers) = self.insert_prepared(prepared).into_parts();
         drop(displaced_handlers);
     }
@@ -369,7 +403,18 @@ impl ToolRegistry {
     where
         T: ExecutableTool + 'static,
     {
-        let prepared = Self::prepare_tool(tool);
+        self.try_register_prepared_tool(PreparedTool::new(tool))
+    }
+
+    /// Registers a previously prepared tool unless its captured name is taken.
+    ///
+    /// Collision checks and insertion both use the descriptor snapshot exposed
+    /// by [`PreparedTool::descriptor`]; the tool definition is not evaluated
+    /// again.
+    pub fn try_register_prepared_tool(
+        &mut self,
+        prepared: PreparedTool,
+    ) -> Result<(), ToolNameCollision> {
         match self.try_insert_prepared(prepared) {
             Ok(insertion) => {
                 let (_, displaced_handlers) = insertion.into_parts();
@@ -458,18 +503,6 @@ impl ToolRegistry {
             .map(|tool| tool.descriptor.provider.clone())
             .collect::<Vec<_>>()
             .into();
-    }
-
-    pub(crate) fn prepare_tool<T>(tool: T) -> PreparedTool
-    where
-        T: ExecutableTool + 'static,
-    {
-        let handler: Arc<dyn ExecutableTool> = Arc::new(tool);
-        let descriptor = handler.descriptor();
-        PreparedTool {
-            descriptor,
-            handler,
-        }
     }
 
     pub(crate) fn insert_prepared(&mut self, prepared: PreparedTool) -> ToolInsertion {
@@ -738,7 +771,7 @@ fn next_tool_registration_generation() -> ToolRegistrationGeneration {
 
 impl ToolRegistry {
     pub(crate) fn register_skill_tool(&mut self) -> ToolInsertion {
-        let prepared = Self::prepare_tool(LoadSkillTool);
+        let prepared = PreparedTool::new(LoadSkillTool);
         self.insert_prepared(prepared)
     }
 
@@ -776,15 +809,15 @@ impl ToolRegistry {
         };
 
         if register_batched {
-            self.insert_prepared_collect(Self::prepare_tool(FilesTool), &mut detached_handlers);
+            self.insert_prepared_collect(PreparedTool::new(FilesTool), &mut detached_handlers);
         }
         if register_split {
-            self.insert_prepared_collect(Self::prepare_tool(ReadTool), &mut detached_handlers);
-            self.insert_prepared_collect(Self::prepare_tool(ListTool), &mut detached_handlers);
-            self.insert_prepared_collect(Self::prepare_tool(GrepTool), &mut detached_handlers);
-            self.insert_prepared_collect(Self::prepare_tool(GlobTool), &mut detached_handlers);
-            self.insert_prepared_collect(Self::prepare_tool(WriteTool), &mut detached_handlers);
-            self.insert_prepared_collect(Self::prepare_tool(EditTool), &mut detached_handlers);
+            self.insert_prepared_collect(PreparedTool::new(ReadTool), &mut detached_handlers);
+            self.insert_prepared_collect(PreparedTool::new(ListTool), &mut detached_handlers);
+            self.insert_prepared_collect(PreparedTool::new(GrepTool), &mut detached_handlers);
+            self.insert_prepared_collect(PreparedTool::new(GlobTool), &mut detached_handlers);
+            self.insert_prepared_collect(PreparedTool::new(WriteTool), &mut detached_handlers);
+            self.insert_prepared_collect(PreparedTool::new(EditTool), &mut detached_handlers);
         }
         self.refresh_provider_specs();
         detached_handlers
@@ -918,7 +951,7 @@ mod tests {
     fn registration_evaluates_one_descriptor_and_resolves_its_matching_handler_snapshot() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ToolRegistry::default();
-        let prepared = ToolRegistry::prepare_tool(CountingDescriptorTool {
+        let prepared = PreparedTool::new(CountingDescriptorTool {
             calls: Arc::clone(&calls),
             label: "first",
             execution_category: ToolExecutionCategory::ReadOnlyParallel,
@@ -954,7 +987,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ToolRegistry::default();
         let (first, displaced_handlers) = registry
-            .insert_prepared(ToolRegistry::prepare_tool(CountingDescriptorTool {
+            .insert_prepared(PreparedTool::new(CountingDescriptorTool {
                 calls: Arc::clone(&calls),
                 label: "first",
                 execution_category: ToolExecutionCategory::ReadOnlyParallel,
@@ -962,7 +995,7 @@ mod tests {
             .into_parts();
         assert!(displaced_handlers.is_empty());
         let (second, displaced_handlers) = registry
-            .insert_prepared(ToolRegistry::prepare_tool(CountingDescriptorTool {
+            .insert_prepared(PreparedTool::new(CountingDescriptorTool {
                 calls: Arc::clone(&calls),
                 label: "second",
                 execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
