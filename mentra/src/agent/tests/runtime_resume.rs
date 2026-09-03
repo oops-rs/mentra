@@ -14,7 +14,7 @@ use tokio::sync::{Notify, watch};
 
 use crate::{
     BuiltinProvider, ContentBlock, Message, ProviderId, ReasoningFormat, ReasoningProvenance, Role,
-    TranscriptKind,
+    ToolAudience, TranscriptKind,
     agent::{AgentConfig, AgentSnapshot, AgentStatus, TeamConfig},
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
     runtime::{AgentStore, Runtime},
@@ -373,6 +373,29 @@ async fn resume_all_rebuilds_agents_from_agent_memory() {
     );
 }
 
+#[test]
+fn resume_all_preserves_heterogeneous_runtime_identifiers_on_write() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let store = temp_store("resume-all-runtime-identifiers");
+    let first_id = mint_agent(&store, &model, "workspace-a", "agent-a");
+    let second_id = mint_agent(&store, &model, "workspace-b", "agent-b");
+    let runtime = runtime_with_identifier(&store, &model, "reboot-runtime");
+
+    let mut resumed = runtime.resume_all().expect("resume every agent");
+    assert_eq!(resumed.len(), 2);
+    for agent in &mut resumed {
+        let name = format!("{} resumed", agent.name());
+        agent.set_name(name).expect("persist resumed agent");
+    }
+
+    assert_eq!(persisted_agent_ids(&runtime, "workspace-a"), vec![first_id]);
+    assert_eq!(
+        persisted_agent_ids(&runtime, "workspace-b"),
+        vec![second_id]
+    );
+    assert!(persisted_agent_ids(&runtime, "reboot-runtime").is_empty());
+}
+
 #[tokio::test]
 async fn signed_and_redacted_thinking_survive_commit_persist_resume_and_replay() {
     let provider_id = ProviderId::new("anthropic-edge");
@@ -594,58 +617,72 @@ async fn resumed_agent_keeps_tool_result_details_after_restart() {
     );
 }
 
-#[tokio::test]
-async fn resume_filters_agents_by_runtime_identifier() {
+#[test]
+fn resume_agent_paths_preserve_stored_runtime_identifiers_on_write() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let store = temp_store("resume-agent-runtime-identifiers");
+    let plain_id = mint_agent(&store, &model, "workspace-plain", "plain");
+    let audience_id = mint_agent(&store, &model, "workspace-audience", "audience");
+    let runtime = runtime_with_identifier(&store, &model, "reboot-runtime");
+
+    let mut plain = runtime.resume_agent(&plain_id).expect("resume by id");
+    let current_audience = ToolAudience::new("current-audience");
+    let mut audience = runtime
+        .resume_agent_for_audience(&audience_id, current_audience.clone())
+        .expect("resume by id for audience");
+    assert_eq!(plain.tool_audience(), None);
+    assert_eq!(audience.tool_audience(), Some(&current_audience));
+
+    plain
+        .set_name("plain resumed")
+        .expect("persist plain agent");
+    audience
+        .set_name("audience resumed")
+        .expect("persist audience agent");
+
+    assert_eq!(
+        persisted_agent_ids(&runtime, "workspace-plain"),
+        vec![plain_id]
+    );
+    assert_eq!(
+        persisted_agent_ids(&runtime, "workspace-audience"),
+        vec![audience_id]
+    );
+    assert!(persisted_agent_ids(&runtime, "reboot-runtime").is_empty());
+}
+
+#[test]
+fn resume_filters_agents_by_runtime_identifier() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let store = temp_store("resume-filter");
+    let first_a_id = mint_agent(&store, &model, "session-a", "agent-a-1");
+    let second_a_id = mint_agent(&store, &model, "session-a", "agent-a-2");
+    let agent_b_id = mint_agent(&store, &model, "session-b", "agent-b");
+    let runtime = runtime_with_identifier(&store, &model, "reboot-runtime");
 
-    let runtime_a = Runtime::empty_builder()
-        .with_runtime_identifier("session-a")
-        .with_store(store.clone())
-        .with_provider_instance(ScriptedProvider::new(
-            BuiltinProvider::Anthropic,
-            vec![model.clone()],
-            Vec::new(),
-        ))
-        .build()
-        .expect("build runtime a");
-    let agent_a = runtime_a
-        .spawn("agent-a", model.clone())
-        .expect("spawn agent a");
+    let mut resumed_a = runtime.resume("session-a").expect("resume session-a");
+    assert_eq!(resumed_a.len(), 2);
+    for agent in &mut resumed_a {
+        let name = format!("{} resumed", agent.name());
+        agent.set_name(name).expect("persist filtered agent");
+    }
 
-    let runtime_b = Runtime::empty_builder()
-        .with_runtime_identifier("session-b")
-        .with_store(store.clone())
-        .with_provider_instance(ScriptedProvider::new(
-            BuiltinProvider::Anthropic,
-            vec![model.clone()],
-            Vec::new(),
-        ))
-        .build()
-        .expect("build runtime b");
-    let _agent_b = runtime_b
-        .spawn("agent-b", model.clone())
-        .expect("spawn agent b");
+    let bulk_audience = ToolAudience::new("bulk-current");
+    let mut resumed_b = runtime
+        .resume_for_audience("session-b", bulk_audience.clone())
+        .expect("resume session-b for audience");
+    assert_eq!(resumed_b.len(), 1);
+    assert_eq!(resumed_b[0].tool_audience(), Some(&bulk_audience));
+    resumed_b[0]
+        .set_name("agent-b resumed")
+        .expect("persist audience-filtered agent");
 
-    clear_leases(&store);
-
-    let reboot_runtime = Runtime::empty_builder()
-        .with_runtime_identifier("session-a")
-        .with_store(store.clone())
-        .with_provider_instance(ScriptedProvider::new(
-            BuiltinProvider::Anthropic,
-            vec![model],
-            Vec::new(),
-        ))
-        .build()
-        .expect("rebuild runtime");
-
-    let resumed = reboot_runtime
-        .resume("session-a")
-        .expect("resume session-a");
-    assert_eq!(resumed.len(), 1);
-    assert_eq!(resumed[0].id(), agent_a.id());
-    assert_eq!(resumed[0].name(), "agent-a");
+    assert_eq!(
+        persisted_agent_ids(&runtime, "session-a"),
+        vec![first_a_id, second_a_id]
+    );
+    assert_eq!(persisted_agent_ids(&runtime, "session-b"), vec![agent_b_id]);
+    assert!(persisted_agent_ids(&runtime, "reboot-runtime").is_empty());
 }
 
 #[tokio::test]
@@ -1137,6 +1174,45 @@ fn responses_reasoning_tool_stream(
 }
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+fn runtime_with_identifier(
+    store: &PersistentStore,
+    model: &crate::ModelInfo,
+    runtime_identifier: &str,
+) -> Runtime {
+    Runtime::empty_builder()
+        .with_runtime_identifier(runtime_identifier)
+        .with_store(store.clone())
+        .with_provider_instance(ScriptedProvider::new(
+            BuiltinProvider::Anthropic,
+            vec![model.clone()],
+            Vec::new(),
+        ))
+        .build()
+        .expect("build runtime")
+}
+
+fn mint_agent(
+    store: &PersistentStore,
+    model: &crate::ModelInfo,
+    runtime_identifier: &str,
+    name: &str,
+) -> String {
+    runtime_with_identifier(store, model, runtime_identifier)
+        .spawn(name, model.clone())
+        .expect("mint agent")
+        .id()
+        .to_string()
+}
+
+fn persisted_agent_ids(runtime: &Runtime, runtime_identifier: &str) -> Vec<String> {
+    runtime
+        .list_persisted_agents(runtime_identifier)
+        .expect("list persisted agents")
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect()
+}
 
 fn temp_store(label: &str) -> PersistentStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);

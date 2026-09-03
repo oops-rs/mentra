@@ -1169,14 +1169,12 @@ impl Runtime {
         let session_id = SessionId::new();
         let (event_tx, _) = broadcast::channel(512);
         let pending_permissions = PendingPermissionStore::new();
+        let session_handle = self.session_scoped_handle(&event_tx, policy, None, tool_audience);
         let Some(state) = self.handle.store().load_agent(agent_id)? else {
             return Err(RuntimeError::Store(format!(
                 "No persisted agent with id '{agent_id}'"
             )));
         };
-        let runtime_identifier = Arc::<str>::from(state.record.runtime_identifier.as_str());
-        let session_handle =
-            self.session_scoped_handle(&event_tx, policy, Some(runtime_identifier), tool_audience);
         let provider = self
             .provider_registry
             .read()

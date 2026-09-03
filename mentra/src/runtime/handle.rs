@@ -130,6 +130,16 @@ impl RuntimeHandle {
         handle
     }
 
+    /// Rebinds only the durable store tag while preserving this handle's live
+    /// services, lease ownership, and registered agent contexts.
+    pub(crate) fn rebind_persisted_runtime_identifier(
+        mut self,
+        runtime_identifier: impl Into<Arc<str>>,
+    ) -> Self {
+        self.persisted_runtime_identifier = runtime_identifier.into();
+        self
+    }
+
     pub(crate) fn tool_audience(&self) -> Option<&ToolAudience> {
         self.tool_audience.as_ref()
     }
@@ -206,5 +216,42 @@ impl RuntimeHandle {
             agent_contexts: self.agent_contexts.clone(),
             provider_registry,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_identifier_rebind_keeps_shared_runtime_state() {
+        let audience = ToolAudience::new("workspace");
+        let handle = RuntimeHandle::new(false).with_tool_audience(Some(audience.clone()));
+        let store = handle.persistence.store.clone();
+        let memory = handle.persistence.memory.clone();
+        let executor = handle.execution.executor.clone();
+        let policy = handle.execution.policy.clone();
+        let tool_registry = handle.tooling.tool_registry.clone();
+        let lease_keys = handle.lease_keys.clone();
+        let agent_contexts = handle.agent_contexts.clone();
+        let provider_registry = handle.provider_registry.clone();
+        let runtime_instance_id = handle.runtime_instance_id.clone();
+
+        let rebound = handle.rebind_persisted_runtime_identifier("persisted-workspace");
+
+        assert_eq!(
+            rebound.persisted_runtime_identifier.as_ref(),
+            "persisted-workspace"
+        );
+        assert_eq!(rebound.tool_audience(), Some(&audience));
+        assert_eq!(rebound.runtime_instance_id, runtime_instance_id);
+        assert!(Arc::ptr_eq(&rebound.persistence.store, &store));
+        assert!(Arc::ptr_eq(&rebound.persistence.memory, &memory));
+        assert!(Arc::ptr_eq(&rebound.execution.executor, &executor));
+        assert!(Arc::ptr_eq(&rebound.execution.policy, &policy));
+        assert!(Arc::ptr_eq(&rebound.tooling.tool_registry, &tool_registry));
+        assert!(Arc::ptr_eq(&rebound.lease_keys, &lease_keys));
+        assert!(Arc::ptr_eq(&rebound.agent_contexts, &agent_contexts));
+        assert!(Arc::ptr_eq(&rebound.provider_registry, &provider_registry));
     }
 }
