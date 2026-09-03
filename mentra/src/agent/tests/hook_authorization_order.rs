@@ -21,8 +21,8 @@ use crate::{
         PermissionRuleContext, PermissionRuleStore, Runtime, RuntimeError, RuntimeHook,
         RuntimeHookEvent, RuntimeStore, VolatileRuntimeStore,
         control::{
-            HookDecision, PostExecutionContext, PostExecutionHook, PreExecutionContext,
-            PreExecutionHook, ResultDecision,
+            BeforeDecision, ExecutionHookParticipant, HookDecision, PostExecutionContext,
+            PostExecutionHook, PreExecutionContext, PreExecutionHook, ResultDecision,
         },
     },
     session::{
@@ -46,6 +46,7 @@ const REWRITTEN: &str = r#"{"command":"ls"}"#;
 /// with.
 struct GateTool {
     parallel: bool,
+    failure: Option<&'static str>,
     ran: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -77,7 +78,10 @@ impl ToolExecutor for GateTool {
 
     async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
         self.ran.lock().expect("ran poisoned").push(input);
-        Ok("ran".to_string())
+        match self.failure {
+            Some(error) => Err(error.to_string()),
+            None => Ok("ran".to_string()),
+        }
     }
 }
 
@@ -146,6 +150,26 @@ impl PreExecutionHook for Rewrite {
         Ok(HookDecision::Modify {
             input_json: self.0.to_string(),
             reason: None,
+        })
+    }
+}
+
+struct MixedRewrite {
+    name: &'static str,
+    input_json: &'static str,
+    attribution: &'static str,
+}
+
+#[async_trait]
+impl ExecutionHookParticipant for MixedRewrite {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn before(&self, _context: &PreExecutionContext) -> Result<BeforeDecision, RuntimeError> {
+        Ok(BeforeDecision::Modify {
+            input_json: self.input_json.to_string(),
+            attribution: Some(self.attribution.to_string()),
         })
     }
 }
@@ -265,7 +289,9 @@ struct Outcome {
 
 struct Case {
     parallel: bool,
+    failure: Option<&'static str>,
     pre_hook: Option<Arc<dyn PreExecutionHook>>,
+    execution_hook: Option<Arc<dyn ExecutionHookParticipant>>,
     authorizer: Option<Arc<dyn ToolAuthorizer>>,
     requests: Arc<Mutex<Vec<ToolAuthorizationRequest>>>,
 }
@@ -274,15 +300,31 @@ impl Case {
     fn new(parallel: bool) -> Self {
         Self {
             parallel,
+            failure: None,
             pre_hook: None,
+            execution_hook: None,
             authorizer: None,
             requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn failure(self, failure: &'static str) -> Self {
+        Self {
+            failure: Some(failure),
+            ..self
         }
     }
 
     fn pre_hook(self, hook: impl PreExecutionHook + 'static) -> Self {
         Self {
             pre_hook: Some(Arc::new(hook)),
+            ..self
+        }
+    }
+
+    fn execution_hook(self, hook: impl ExecutionHookParticipant + 'static) -> Self {
+        Self {
+            execution_hook: Some(Arc::new(hook)),
             ..self
         }
     }
@@ -341,12 +383,16 @@ impl Case {
             .with_provider_instance(provider)
             .with_tool(GateTool {
                 parallel: self.parallel,
+                failure: self.failure,
                 ran: Arc::clone(&ran),
             })
             .with_post_hook(RecordsFinalInput(Arc::clone(&post_inputs)))
             .with_hook(RecordingHook(Arc::clone(&hook_events)));
         if let Some(hook) = self.pre_hook {
             builder = builder.with_pre_hook(hook);
+        }
+        if let Some(hook) = self.execution_hook {
+            builder = builder.with_execution_hook(hook);
         }
         if let Some(authorizer) = self.authorizer {
             builder = builder.with_tool_authorizer(authorizer);
@@ -556,9 +602,69 @@ async fn a_current_denial_beats_a_remembered_allow_after_rewrite() {
         assert_eq!(
             result_text(&outcome.tool_result),
             (
-                "Tool execution denied: authorizer said no".to_string(),
+                "Tool execution denied: pre-execution hook rewrote this call; the rewritten call \
+                 then failed: authorizer said no"
+                    .to_string(),
                 true
             )
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_mixed_rewrite_keeps_its_attribution_when_the_authorizer_denies() {
+    for_both_lanes(|parallel| async move {
+        let outcome = Case::new(parallel)
+            .execution_hook(MixedRewrite {
+                name: "workspace-policy",
+                input_json: REWRITTEN,
+                attribution: "normalized command",
+            })
+            .authorizer(false)
+            .run()
+            .await;
+
+        assert_eq!(outcome.authorized.len(), 1, "parallel={parallel}");
+        assert!(outcome.ran.is_empty(), "parallel={parallel}");
+        assert_eq!(
+            result_text(&outcome.tool_result),
+            (
+                "Tool execution denied: mixed execution hooks (execution hook \
+                 'workspace-policy': normalized command) rewrote this call; the rewritten call \
+                 then failed: authorizer said no"
+                    .to_string(),
+                true,
+            ),
+            "parallel={parallel}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_rewritten_non_policy_execution_error_names_the_rewriter_without_changing_authority() {
+    for_both_lanes(|parallel| async move {
+        let outcome = Case::new(parallel)
+            .execution_hook(MixedRewrite {
+                name: "normalizer",
+                input_json: REWRITTEN,
+                attribution: "normalized command",
+            })
+            .failure("tool-specific failure")
+            .run()
+            .await;
+
+        assert_eq!(outcome.ran, vec![rewritten()], "parallel={parallel}");
+        assert_eq!(
+            result_text(&outcome.tool_result),
+            (
+                "mixed execution hooks (execution hook 'normalizer': normalized command) rewrote \
+                 this call; the rewritten call then failed: tool-specific failure"
+                    .to_string(),
+                true,
+            ),
+            "parallel={parallel}"
         );
     })
     .await;
@@ -667,7 +773,9 @@ async fn an_exclusive_files_call_stays_serial_when_a_hook_rewrites_it_to_a_read(
     assert_eq!(
         result_text(&result),
         (
-            "Tool execution denied: authorizer said no".to_string(),
+            "Tool execution denied: pre-execution hook rewrote this call; the rewritten call then \
+             failed: authorizer said no"
+                .to_string(),
             true
         )
     );
@@ -823,6 +931,7 @@ async fn the_models_own_schema_error_is_still_answered_to_the_model() {
             .with_provider_instance(provider)
             .with_tool(GateTool {
                 parallel,
+                failure: None,
                 ran: Arc::clone(&ran),
             })
             .with_pre_hook(Observe(Arc::new(Mutex::new(Vec::new()))))
