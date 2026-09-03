@@ -714,6 +714,147 @@ fn a_rules_mutation_waits_for_an_independent_stores_sidecar_lock() {
     writer_thread.join().expect("join writer");
 }
 
+#[test]
+fn clones_share_rule_cache_updates_without_reparsing() {
+    let store = FileRuntimeStore::new(temp_root("rules-clone-cache"));
+    store
+        .upsert_rule(
+            &rules_context(),
+            &rule("shell", true, PermissionRuleScope::Session),
+        )
+        .expect("seed cached rules");
+    let clone = store.clone();
+    let misses_after_write = store.rules_cache_misses();
+
+    assert_eq!(
+        clone
+            .load_applicable_rules(&rules_context())
+            .expect("clone loads rules")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.rules_cache_misses(),
+        misses_after_write,
+        "a clone reads the write-through cache"
+    );
+
+    clone
+        .upsert_rule(
+            &rules_context(),
+            &rule("read", false, PermissionRuleScope::Session),
+        )
+        .expect("clone updates rules");
+    let misses_after_clone_write = store.rules_cache_misses();
+    assert_eq!(
+        store
+            .load_applicable_rules(&rules_context())
+            .expect("original loads clone update")
+            .len(),
+        2
+    );
+    assert_eq!(
+        store.rules_cache_misses(),
+        misses_after_clone_write,
+        "a clone mutation refreshes the cache shared by the original"
+    );
+}
+
+#[test]
+fn unchanged_rule_reads_reuse_cache_and_independent_writes_invalidate_it() {
+    let root = temp_root("rules-independent-cache");
+    let writer = FileRuntimeStore::new(&root);
+    writer
+        .upsert_rule(
+            &rules_context(),
+            &rule("short", true, PermissionRuleScope::Session),
+        )
+        .expect("seed rules");
+    let reader = FileRuntimeStore::new(&root);
+
+    assert_eq!(
+        reader
+            .load_applicable_rules(&rules_context())
+            .expect("first load")
+            .len(),
+        1
+    );
+    assert_eq!(reader.rules_cache_misses(), 1);
+    assert_eq!(
+        reader
+            .load_applicable_rules(&rules_context())
+            .expect("cached load")
+            .len(),
+        1
+    );
+    assert_eq!(
+        reader.rules_cache_misses(),
+        1,
+        "an unchanged identity avoids a second whole-file read and parse"
+    );
+
+    writer
+        .upsert_rule(
+            &rules_context(),
+            &rule(
+                "a-much-longer-tool-name-that-changes-the-file-length",
+                false,
+                PermissionRuleScope::Session,
+            ),
+        )
+        .expect("independent store updates rules");
+    assert_eq!(
+        reader
+            .load_applicable_rules(&rules_context())
+            .expect("load independent update")
+            .len(),
+        2
+    );
+    assert_eq!(
+        reader.rules_cache_misses(),
+        2,
+        "a replacement by an independent store invalidates the cache"
+    );
+}
+
+#[test]
+fn a_mutation_reloads_disk_instead_of_extending_its_stale_cache() {
+    let root = temp_root("rules-mutation-cache");
+    let first = FileRuntimeStore::new(&root);
+    let second = FileRuntimeStore::new(&root);
+    first
+        .upsert_rule(
+            &rules_context(),
+            &rule("first", true, PermissionRuleScope::Session),
+        )
+        .expect("write first rule");
+    second
+        .load_applicable_rules(&rules_context())
+        .expect("prime second store cache");
+
+    first
+        .upsert_rule(
+            &rules_context(),
+            &rule("external-to-cache", false, PermissionRuleScope::Session),
+        )
+        .expect("write through first store");
+    second
+        .upsert_rule(
+            &rules_context(),
+            &rule("second", true, PermissionRuleScope::Session),
+        )
+        .expect("extend the authoritative disk snapshot");
+
+    assert_eq!(
+        FileRuntimeStore::new(&root)
+            .load_applicable_rules(&rules_context())
+            .expect("load final rules")
+            .len(),
+        3,
+        "a mutation must not overwrite an independent update with cached state"
+    );
+}
+
 const RULES_PROCESS_ROOT_ENV: &str = "MENTRA_TEST_RULES_PROCESS_ROOT";
 const RULES_PROCESS_WRITER_ENV: &str = "MENTRA_TEST_RULES_PROCESS_WRITER";
 
@@ -745,6 +886,13 @@ fn concurrent_process_rule_mutations_preserve_every_row() {
 
     let root = temp_root("rules-process-lock");
     std::fs::create_dir_all(&root).expect("create process-test root");
+    let reader = FileRuntimeStore::new(&root);
+    assert!(
+        reader
+            .load_applicable_rules(&rules_context())
+            .expect("prime missing-file cache")
+            .is_empty()
+    );
     let executable = std::env::current_exe().expect("locate unit-test executable");
     let spawn_writer = |writer: &str| {
         Command::new(&executable)
@@ -763,13 +911,18 @@ fn concurrent_process_rule_mutations_preserve_every_row() {
     wait_for_child(first);
     wait_for_child(second);
 
-    let stored = FileRuntimeStore::new(&root)
+    let stored = reader
         .load_applicable_rules(&rules_context())
         .expect("load all child rules");
     assert_eq!(
         stored.len(),
         64,
         "each successful cross-process update must remain in rules.json"
+    );
+    assert_eq!(
+        reader.rules_cache_misses(),
+        2,
+        "the reader invalidates its missing-file cache after child-process writes"
     );
 }
 

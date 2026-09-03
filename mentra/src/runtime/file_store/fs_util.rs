@@ -153,8 +153,19 @@ fn drop_truncated_tail(file: &mut File) -> std::io::Result<()> {
 
 /// Reads a file that may not exist yet; `Ok(None)` when it does not.
 pub(super) fn read_optional(path: &Path) -> Result<Option<String>, RuntimeError> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(Some(contents)),
+    let Some(mut file) = open_optional(path)? else {
+        return Ok(None);
+    };
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|error| store_error(&format!("read '{}'", path.display()), error))?;
+    Ok(Some(contents))
+}
+
+/// Opens a file that may not exist yet; `Ok(None)` when it does not.
+pub(super) fn open_optional(path: &Path) -> Result<Option<File>, RuntimeError> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(store_error(&format!("read '{}'", path.display()), error)),
     }

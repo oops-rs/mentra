@@ -108,8 +108,9 @@ pub struct FileRuntimeStore {
     /// Per-agent index of which transcript entries the on-disk log already
     /// holds, so a save appends only what is new or changed.
     transcript_logs: Arc<Mutex<HashMap<String, Arc<Mutex<TranscriptLogIndex>>>>>,
-    /// Serializes read-modify-write cycles on `rules.json`.
-    rules_lock: Arc<Mutex<()>>,
+    /// Serializes clone-local rule access and carries the parsed-file cache.
+    /// Cross-process mutations additionally hold `rules.lock`.
+    rules_state: Arc<Mutex<rules::RulesState>>,
     /// The OS file locks this store currently holds as leases; dropping an
     /// entry (or the whole store, or the process) releases the lock.
     held_leases: Arc<Mutex<HashMap<String, leases::HeldLease>>>,
@@ -125,7 +126,7 @@ impl FileRuntimeStore {
             root: root.into(),
             volatile: VolatileRuntimeStore::new(),
             transcript_logs: Arc::new(Mutex::new(HashMap::new())),
-            rules_lock: Arc::new(Mutex::new(())),
+            rules_state: Arc::new(Mutex::new(rules::RulesState::default())),
             held_leases: Arc::new(Mutex::new(HashMap::new())),
             runs_lock: Arc::new(Mutex::new(())),
         }
