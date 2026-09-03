@@ -15,6 +15,32 @@ use super::store_error;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Opens a stable sidecar file suitable for an advisory lock.
+///
+/// Lock files are never unlinked: replacing or removing one while another
+/// process waits on its inode can let two callers hold locks on different
+/// files for the same logical resource.
+pub(super) fn open_lock_file(path: &Path) -> Result<File, RuntimeError> {
+    let parent = parent_dir(path)?;
+    fs::create_dir_all(parent)
+        .map_err(|error| store_error(&format!("create '{}'", parent.display()), error))?;
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|error| store_error(&format!("open '{}'", path.display()), error))
+}
+
+/// Opens `path` and holds its exclusive advisory lock until the returned
+/// handle is dropped.
+pub(super) fn lock_exclusive(path: &Path) -> Result<File, RuntimeError> {
+    let file = open_lock_file(path)?;
+    fs2::FileExt::lock_exclusive(&file)
+        .map_err(|error| store_error(&format!("lock '{}'", path.display()), error))?;
+    Ok(file)
+}
+
 /// Replaces `path` atomically: write a temp file beside it, fsync, rename
 /// over the target, fsync the parent directory. A reader never observes a
 /// partial file, and a crash leaves at most an ignored temp file behind.

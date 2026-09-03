@@ -1,4 +1,10 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::{Child, Command},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::{
     ContentBlock, Message,
@@ -560,6 +566,31 @@ fn rule(tool_name: &str, allow: bool, scope: PermissionRuleScope) -> RememberedR
     }
 }
 
+fn rules_context() -> PermissionRuleContext {
+    PermissionRuleContext {
+        session_id: "session-1".to_owned(),
+        project_id: Some("project-1".to_owned()),
+    }
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_for_child(child: Child) {
+    let output = child.wait_with_output().expect("wait for child test");
+    assert!(
+        output.status.success(),
+        "child test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[test]
 fn permission_rules_round_trip_across_scopes_and_reopen() {
     let root = temp_root("rules");
@@ -645,6 +676,100 @@ fn permission_point_operations_survive_file_store_reopen() {
             PermissionRuleScope::Project,
             PermissionRuleScope::Global,
         ]
+    );
+}
+
+#[test]
+fn a_rules_mutation_waits_for_an_independent_stores_sidecar_lock() {
+    let root = temp_root("rules-independent-lock");
+    let lock_holder = FileRuntimeStore::new(&root);
+    let writer = FileRuntimeStore::new(&root);
+    let file_guard = super::fs_util::lock_exclusive(&lock_holder.rules_lock_path())
+        .expect("hold the rules sidecar lock");
+    let (done_tx, done_rx) = mpsc::channel();
+
+    let writer_thread = thread::spawn(move || {
+        done_tx
+            .send(writer.upsert_rule(
+                &rules_context(),
+                &rule("shell", true, PermissionRuleScope::Session),
+            ))
+            .expect("report writer result");
+    });
+
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the independent store wrote without waiting for the sidecar lock"
+    );
+    assert!(
+        !lock_holder.rules_path().exists(),
+        "the rules replacement must not happen while another holder owns the lock"
+    );
+
+    drop(file_guard);
+    done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("writer finishes after lock release")
+        .expect("write rules");
+    writer_thread.join().expect("join writer");
+}
+
+const RULES_PROCESS_ROOT_ENV: &str = "MENTRA_TEST_RULES_PROCESS_ROOT";
+const RULES_PROCESS_WRITER_ENV: &str = "MENTRA_TEST_RULES_PROCESS_WRITER";
+
+#[test]
+fn concurrent_process_rule_mutations_preserve_every_row() {
+    if let (Some(root), Ok(writer)) = (
+        std::env::var_os(RULES_PROCESS_ROOT_ENV),
+        std::env::var(RULES_PROCESS_WRITER_ENV),
+    ) {
+        let root = PathBuf::from(root);
+        std::fs::write(root.join(format!("{writer}.ready")), b"ready")
+            .expect("announce child writer");
+        wait_for_path(&root.join("start"));
+        let store = FileRuntimeStore::new(&root);
+        for index in 0..32 {
+            store
+                .upsert_rule(
+                    &rules_context(),
+                    &rule(
+                        &format!("{writer}-{index}"),
+                        true,
+                        PermissionRuleScope::Session,
+                    ),
+                )
+                .expect("child upserts rule");
+        }
+        return;
+    }
+
+    let root = temp_root("rules-process-lock");
+    std::fs::create_dir_all(&root).expect("create process-test root");
+    let executable = std::env::current_exe().expect("locate unit-test executable");
+    let spawn_writer = |writer: &str| {
+        Command::new(&executable)
+            .arg("concurrent_process_rule_mutations_preserve_every_row")
+            .arg("--nocapture")
+            .env(RULES_PROCESS_ROOT_ENV, &root)
+            .env(RULES_PROCESS_WRITER_ENV, writer)
+            .spawn()
+            .expect("spawn child writer")
+    };
+    let first = spawn_writer("first");
+    let second = spawn_writer("second");
+    wait_for_path(&root.join("first.ready"));
+    wait_for_path(&root.join("second.ready"));
+    std::fs::write(root.join("start"), b"start").expect("release child writers");
+    wait_for_child(first);
+    wait_for_child(second);
+
+    let stored = FileRuntimeStore::new(&root)
+        .load_applicable_rules(&rules_context())
+        .expect("load all child rules");
+    assert_eq!(
+        stored.len(),
+        64,
+        "each successful cross-process update must remain in rules.json"
     );
 }
 

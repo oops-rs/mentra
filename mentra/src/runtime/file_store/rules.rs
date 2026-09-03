@@ -84,10 +84,10 @@ impl PermissionRuleStore for FileRuntimeStore {
         rule: &RememberedRule,
     ) -> Result<(), RuntimeError> {
         context.validate_scope(rule.scope)?;
-        let _guard = lock_unpoisoned(&self.rules_lock);
-        let mut stored = self.read_rules()?;
-        upsert(&mut stored, context, rule);
-        self.write_rules(stored)
+        self.mutate_rules(|stored| {
+            upsert(stored, context, rule);
+            ((), true)
+        })
     }
 
     fn load_applicable_rules(
@@ -108,15 +108,12 @@ impl PermissionRuleStore for FileRuntimeStore {
         address: &PermissionRuleAddress,
     ) -> Result<bool, RuntimeError> {
         context.validate_scope(address.scope)?;
-        let _guard = lock_unpoisoned(&self.rules_lock);
-        let mut stored = self.read_rules()?;
-        let before = stored.len();
-        stored.retain(|entry| !at_address(entry, context, address));
-        let removed = before != stored.len();
-        if removed {
-            self.write_rules(stored)?;
-        }
-        Ok(removed)
+        self.mutate_rules(|stored| {
+            let before = stored.len();
+            stored.retain(|entry| !at_address(entry, context, address));
+            let removed = before != stored.len();
+            (removed, removed)
+        })
     }
 
     fn clear_scope(
@@ -125,15 +122,12 @@ impl PermissionRuleStore for FileRuntimeStore {
         scope: PermissionRuleScope,
     ) -> Result<usize, RuntimeError> {
         context.validate_scope(scope)?;
-        let _guard = lock_unpoisoned(&self.rules_lock);
-        let mut stored = self.read_rules()?;
-        let before = stored.len();
-        stored.retain(|entry| !in_namespace(entry, context, scope));
-        let removed = before - stored.len();
-        if removed != 0 {
-            self.write_rules(stored)?;
-        }
-        Ok(removed)
+        self.mutate_rules(|stored| {
+            let before = stored.len();
+            stored.retain(|entry| !in_namespace(entry, context, scope));
+            let removed = before - stored.len();
+            (removed, removed != 0)
+        })
     }
 
     fn save_rules(
@@ -146,13 +140,13 @@ impl PermissionRuleStore for FileRuntimeStore {
         for rule in rules {
             context.validate_scope(rule.scope)?;
         }
-        let _guard = lock_unpoisoned(&self.rules_lock);
-        let mut stored = self.read_rules()?;
-        stored.retain(|entry| !in_namespace(entry, &context, PermissionRuleScope::Session));
-        for rule in rules {
-            upsert(&mut stored, &context, rule);
-        }
-        self.write_rules(stored)
+        self.mutate_rules(|stored| {
+            stored.retain(|entry| !in_namespace(entry, &context, PermissionRuleScope::Session));
+            for rule in rules {
+                upsert(stored, &context, rule);
+            }
+            ((), true)
+        })
     }
 
     fn load_rules(
@@ -164,14 +158,32 @@ impl PermissionRuleStore for FileRuntimeStore {
     }
 
     fn clear_rules(&self, session_id: &str) -> Result<(), RuntimeError> {
-        let _guard = lock_unpoisoned(&self.rules_lock);
-        let mut stored = self.read_rules()?;
-        stored.retain(|entry| entry.session_id != session_id);
-        self.write_rules(stored)
+        self.mutate_rules(|stored| {
+            stored.retain(|entry| entry.session_id != session_id);
+            ((), true)
+        })
     }
 }
 
 impl FileRuntimeStore {
+    /// Runs one read-modify-write while holding both clone-local exclusion and
+    /// the stable cross-process sidecar lock. The disk read deliberately
+    /// happens after both locks are held; atomic replacement alone cannot
+    /// prevent two writers from deriving replacements from the same snapshot.
+    fn mutate_rules<T>(
+        &self,
+        mutation: impl FnOnce(&mut Vec<StoredRule>) -> (T, bool),
+    ) -> Result<T, RuntimeError> {
+        let _process_guard = lock_unpoisoned(&self.rules_lock);
+        let _file_guard = fs_util::lock_exclusive(&self.rules_lock_path())?;
+        let mut stored = self.read_rules()?;
+        let (result, changed) = mutation(&mut stored);
+        if changed {
+            self.write_rules(stored)?;
+        }
+        Ok(result)
+    }
+
     fn read_rules(&self) -> Result<Vec<StoredRule>, RuntimeError> {
         let Some(contents) = fs_util::read_optional(&self.rules_path())? else {
             return Ok(Vec::new());

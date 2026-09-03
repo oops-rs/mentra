@@ -12,6 +12,7 @@
 //!     transcript.jsonl  one transcript entry per line               (append-only)
 //!     leaf              the active entry id                         (atomic replace)
 //!   rules.json          permission rules, all scopes                (atomic replace)
+//!   rules.lock          stable advisory lock for rules mutations
 //!   runs.jsonl          run lifecycle events                        (append-only)
 //! ```
 //!
@@ -36,10 +37,13 @@
 //!
 //! Same stance as the SQLite store's documented one: one writer per agent,
 //! which mentra's runtime already holds. The file store adds no cross-process
-//! locking beyond its atomic writes — two processes (or two independently
-//! constructed stores) writing the same agent directory concurrently are
-//! outside the contract. Within one process, clones share state and writes
-//! are serialized per agent.
+//! locking beyond its atomic writes for per-agent state — two processes (or
+//! two independently constructed stores) writing the same agent directory
+//! concurrently are outside the contract. `rules.json` is the exception:
+//! every mutation holds the stable `rules.lock` sidecar across its disk read,
+//! update, and atomic replace, so independently constructed stores and
+//! processes cannot lose one another's permission-rule updates. Within one
+//! process, clones share state and writes are serialized per agent.
 //!
 //! ## What this store deliberately does not persist
 //!
@@ -148,6 +152,10 @@ impl FileRuntimeStore {
 
     pub(crate) fn rules_path(&self) -> PathBuf {
         self.root.join("rules.json")
+    }
+
+    pub(crate) fn rules_lock_path(&self) -> PathBuf {
+        self.root.join("rules.lock")
     }
 
     pub(crate) fn runs_path(&self) -> PathBuf {
