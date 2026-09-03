@@ -581,14 +581,22 @@ fn wait_for_path(path: &Path) {
     }
 }
 
-fn wait_for_child(child: Child) {
-    let output = child.wait_with_output().expect("wait for child test");
-    assert!(
-        output.status.success(),
-        "child test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+fn wait_for_child(mut child: Child) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match child.try_wait().expect("poll child test") {
+            Some(status) => {
+                assert!(status.success(), "child test failed with {status}");
+                return;
+            }
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("child test did not finish within 30 seconds");
+            }
+        }
+    }
 }
 
 #[test]
@@ -712,6 +720,60 @@ fn a_rules_mutation_waits_for_an_independent_stores_sidecar_lock() {
         .expect("writer finishes after lock release")
         .expect("write rules");
     writer_thread.join().expect("join writer");
+}
+
+const RULES_BLOCKED_PROCESS_ROOT_ENV: &str = "MENTRA_TEST_RULES_BLOCKED_PROCESS_ROOT";
+
+#[test]
+fn a_process_rule_mutation_waits_for_the_sidecar_lock() {
+    if let Some(root) = std::env::var_os(RULES_BLOCKED_PROCESS_ROOT_ENV) {
+        let root = PathBuf::from(root);
+        let store = FileRuntimeStore::new(&root);
+        std::fs::write(root.join("child-ready"), b"ready")
+            .expect("announce immediately before mutation");
+        store
+            .upsert_rule(
+                &rules_context(),
+                &rule("child", true, PermissionRuleScope::Session),
+            )
+            .expect("child writes rule after lock release");
+        std::fs::write(root.join("child-done"), b"done").expect("announce child completion");
+        return;
+    }
+
+    let root = temp_root("rules-process-blocking");
+    let store = FileRuntimeStore::new(&root);
+    let file_guard = super::fs_util::lock_exclusive(&store.rules_lock_path())
+        .expect("parent holds the rules sidecar lock");
+    let executable = std::env::current_exe().expect("locate unit-test executable");
+    let mut child = Command::new(executable)
+        .arg("a_process_rule_mutation_waits_for_the_sidecar_lock")
+        .arg("--nocapture")
+        .env(RULES_BLOCKED_PROCESS_ROOT_ENV, &root)
+        .spawn()
+        .expect("spawn blocked child writer");
+
+    wait_for_path(&root.join("child-ready"));
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().expect("poll blocked child").is_none(),
+        "child mutation completed while the parent process held rules.lock"
+    );
+    assert!(
+        !root.join("child-done").exists() && !store.rules_path().exists(),
+        "the child must not commit its mutation before lock release"
+    );
+
+    drop(file_guard);
+    wait_for_child(child);
+    assert!(root.join("child-done").exists());
+    assert_eq!(
+        store
+            .load_applicable_rules(&rules_context())
+            .expect("load child rule")
+            .len(),
+        1
+    );
 }
 
 #[test]
