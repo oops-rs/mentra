@@ -328,6 +328,9 @@ impl Agent {
         mut state: LoadedAgentState,
         provider: Arc<dyn Provider>,
     ) -> Result<Self, RuntimeError> {
+        let runtime = runtime.rebind_persisted_runtime_identifier(Arc::<str>::from(
+            state.record.runtime_identifier.as_str(),
+        ));
         let mut memory = AgentMemory::new(state.record.id.clone(), runtime.store(), state.memory);
         let recovery = memory.recover()?;
         if recovery.interrupted {

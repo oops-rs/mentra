@@ -1316,6 +1316,10 @@ impl Runtime {
     }
 
     /// Resumes a persisted agent with live, non-persisted session scope.
+    ///
+    /// The agent keeps its stored runtime identifier so later snapshots remain
+    /// visible to the same [`list_persisted_agents`](Self::list_persisted_agents)
+    /// query that found it before the resume.
     pub fn resume_session_with_options(
         &self,
         agent_id: &str,
