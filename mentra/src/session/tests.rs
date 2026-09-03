@@ -2882,15 +2882,19 @@ async fn a_session_reports_the_reasoning_it_was_opened_with() {
 }
 
 #[tokio::test]
-async fn sessions_can_be_listed_per_workspace_on_one_runtime() {
-    // The runtime identifier used to be fixed when the runtime was built, so
-    // every session on one runtime carried the same tag and a per-workspace
-    // listing could not tell them apart.
-    use crate::runtime::SessionOptions;
+async fn sessions_keep_their_workspace_listing_after_both_resume_paths() {
+    // A shared runtime can mint one session per workspace. Both resume entry
+    // points must retain those stored tags when their next turns are saved.
+    use crate::runtime::{SessionOptions, SessionResumeOptions};
 
-    let mock = MockRuntime::builder().text("hello").build().unwrap();
+    let mock = MockRuntime::builder()
+        .runtime_identifier("shared-runtime")
+        .text("resumed a")
+        .text("resumed b")
+        .build()
+        .unwrap();
 
-    let _first = mock
+    let first = mock
         .runtime()
         .create_session_with_options(
             "session-in-a",
@@ -2901,7 +2905,7 @@ async fn sessions_can_be_listed_per_workspace_on_one_runtime() {
             },
         )
         .unwrap();
-    let _second = mock
+    let second = mock
         .runtime()
         .create_session_with_options(
             "session-in-b",
@@ -2912,6 +2916,8 @@ async fn sessions_can_be_listed_per_workspace_on_one_runtime() {
             },
         )
         .unwrap();
+    let first_id = first.agent_id().to_string();
+    let second_id = second.agent_id().to_string();
 
     let in_a = mock.runtime().list_persisted_agents("workspace-a").unwrap();
     let in_b = mock.runtime().list_persisted_agents("workspace-b").unwrap();
@@ -2927,6 +2933,56 @@ async fn sessions_can_be_listed_per_workspace_on_one_runtime() {
             .map(|agent| agent.name.as_str())
             .collect::<Vec<_>>(),
         vec!["session-in-b"]
+    );
+    drop(first);
+    drop(second);
+
+    let mut resumed_a = mock.runtime().resume_session(&first_id).unwrap();
+    resumed_a
+        .append_turn(vec![ContentBlock::text("continue a")])
+        .await
+        .unwrap();
+    drop(resumed_a);
+
+    let mut resumed_b = mock
+        .runtime()
+        .resume_session_with_options(
+            &second_id,
+            SessionResumeOptions {
+                project_id: Some("current-project".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    resumed_b
+        .append_turn(vec![ContentBlock::text("continue b")])
+        .await
+        .unwrap();
+    drop(resumed_b);
+
+    assert_eq!(
+        mock.runtime()
+            .list_persisted_agents("workspace-a")
+            .unwrap()
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first_id.as_str()]
+    );
+    assert_eq!(
+        mock.runtime()
+            .list_persisted_agents("workspace-b")
+            .unwrap()
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second_id.as_str()]
+    );
+    assert!(
+        mock.runtime()
+            .list_persisted_agents("shared-runtime")
+            .unwrap()
+            .is_empty()
     );
 }
 
