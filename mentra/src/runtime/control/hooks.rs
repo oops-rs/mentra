@@ -424,7 +424,7 @@ impl<T: PreExecutionHook + ?Sized> PreExecutionHook for Arc<T> {
 /// the hook may still finish. The guard does not keep its runtime alive.
 #[must_use = "dropping the guard immediately unregisters the pre-execution hook"]
 pub struct PreExecutionHookRegistration {
-    inner: LiveHookRegistration<dyn PreExecutionHook>,
+    inner: LiveHookRegistration<Arc<dyn PreExecutionHook>>,
 }
 
 impl fmt::Debug for PreExecutionHookRegistration {
@@ -446,6 +446,41 @@ impl PreExecutionHookRegistration {
     /// Unregisters this exact hook now.
     pub fn unregister(mut self) -> bool {
         self.inner.unregister()
+    }
+}
+
+/// Keeps one caller-keyed pre-execution hook registered while any holder lives.
+///
+/// Cloning this guard, or registering the same key with the same audience and
+/// [`Arc`] allocation again, creates another holder without another chain
+/// entry. The last holder to be dropped removes the exact entry it represents.
+/// Shared keys are local to the pre-execution chain; post and mixed hooks have
+/// independent key namespaces.
+#[derive(Clone)]
+#[must_use = "dropping the last holder unregisters the shared pre-execution hook"]
+pub struct SharedPreExecutionHookRegistration {
+    inner: Arc<SharedLiveHookRegistration<Arc<dyn PreExecutionHook>>>,
+}
+
+impl fmt::Debug for SharedPreExecutionHookRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedPreExecutionHookRegistration")
+            .field("key", &self.inner.key)
+            .field("audience", &self.inner.audience)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SharedPreExecutionHookRegistration {
+    /// Returns the caller-supplied identity key for this shared entry.
+    pub fn key(&self) -> &str {
+        &self.inner.key
+    }
+
+    /// Returns the audience this hook is scoped to, or `None` when it is global.
+    pub fn audience(&self) -> Option<&ToolAudience> {
+        self.inner.audience.as_ref()
     }
 }
 
@@ -480,7 +515,7 @@ impl PreExecutionHookSnapshot {
 #[derive(Clone)]
 pub struct PreExecutionHooks {
     hooks: Vec<Arc<dyn PreExecutionHook>>,
-    live: Arc<RwLock<LiveHookRegistry<dyn PreExecutionHook>>>,
+    live: Arc<RwLock<LiveHookRegistry<Arc<dyn PreExecutionHook>>>>,
 }
 
 impl Default for PreExecutionHooks {
@@ -525,6 +560,18 @@ impl PreExecutionHooks {
         }
     }
 
+    pub(crate) fn register_live_shared(
+        &self,
+        key: String,
+        audience: Option<ToolAudience>,
+        hook: Arc<dyn PreExecutionHook>,
+    ) -> Result<SharedPreExecutionHookRegistration, SharedHookRegistrationConflict> {
+        let id = next_execution_hook_registration_id();
+        let inner =
+            LiveHookRegistry::register_shared(&self.live, id, key, audience, hook, Arc::ptr_eq)?;
+        Ok(SharedPreExecutionHookRegistration { inner })
+    }
+
     pub(crate) fn snapshot(&self, audience: Option<&ToolAudience>) -> PreExecutionHookSnapshot {
         let live = self
             .live
@@ -532,7 +579,7 @@ impl PreExecutionHooks {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut hooks = Vec::with_capacity(self.hooks.len() + live.entries.len());
         hooks.extend(self.hooks.iter().cloned());
-        hooks.extend(live.matching(audience));
+        hooks.extend(live.matching(audience).cloned());
         PreExecutionHookSnapshot { hooks }
     }
 
@@ -589,59 +636,152 @@ pub fn is_transient_runtime_error(error: &RuntimeError) -> bool {
     error.category() == crate::error::ErrorCategory::Retryable
 }
 
-struct LiveHookEntry<T: ?Sized> {
+pub(super) struct LiveHookEntry<T> {
     id: u64,
     audience: Option<ToolAudience>,
-    hook: Arc<T>,
+    value: T,
+    shared: Option<SharedHookEntry<T>>,
 }
 
-struct LiveHookRegistry<T: ?Sized> {
+struct SharedHookEntry<T> {
+    key: String,
+    registration: Weak<SharedLiveHookRegistration<T>>,
+}
+
+pub(super) struct LiveHookRegistry<T> {
     entries: Vec<LiveHookEntry<T>>,
 }
 
-impl<T: ?Sized> LiveHookRegistry<T> {
-    fn new() -> Self {
+impl<T> LiveHookRegistry<T> {
+    pub(super) fn new() -> Self {
         Self {
             entries: Vec::new(),
         }
     }
 
-    fn insert(&mut self, id: u64, audience: Option<ToolAudience>, hook: Arc<T>) {
-        self.entries.push(LiveHookEntry { id, audience, hook });
+    pub(super) fn insert(&mut self, id: u64, audience: Option<ToolAudience>, value: T) {
+        self.entries.push(LiveHookEntry {
+            id,
+            audience,
+            value,
+            shared: None,
+        });
     }
 
-    fn matching<'a>(
+    pub(super) fn register_shared<F>(
+        registry: &Arc<RwLock<Self>>,
+        id: u64,
+        key: String,
+        audience: Option<ToolAudience>,
+        value: T,
+        same_value: F,
+    ) -> Result<Arc<SharedLiveHookRegistration<T>>, SharedHookRegistrationConflict>
+    where
+        F: Fn(&T, &T) -> bool,
+    {
+        let mut value = Some(value);
+        let mut stale_entry = None;
+        let mut existing_registration = None;
+        let mut conflict = false;
+        let mut inserted_registration = None;
+
+        {
+            let mut registry_guard = registry
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let matching_index = registry_guard.entries.iter().position(|entry| {
+                entry
+                    .shared
+                    .as_ref()
+                    .is_some_and(|shared| shared.key == key)
+            });
+
+            if let Some(index) = matching_index {
+                let live_registration = registry_guard.entries[index]
+                    .shared
+                    .as_ref()
+                    .and_then(|shared| shared.registration.upgrade());
+                if let Some(registration) = live_registration {
+                    let entry = &registry_guard.entries[index];
+                    if entry.audience == audience
+                        && same_value(&entry.value, value.as_ref().expect("shared value"))
+                    {
+                        existing_registration = Some(registration);
+                    } else {
+                        conflict = true;
+                    }
+                } else {
+                    stale_entry = Some(registry_guard.entries.remove(index));
+                }
+            }
+
+            if !conflict && existing_registration.is_none() {
+                let registration = Arc::new(SharedLiveHookRegistration {
+                    registry: Arc::downgrade(registry),
+                    id,
+                    key: key.clone(),
+                    audience: audience.clone(),
+                });
+                registry_guard.entries.push(LiveHookEntry {
+                    id,
+                    audience,
+                    value: value.take().expect("shared value inserted once"),
+                    shared: Some(SharedHookEntry {
+                        key: key.clone(),
+                        registration: Arc::downgrade(&registration),
+                    }),
+                });
+                inserted_registration = Some(registration);
+            }
+        }
+
+        // Hook captures may register another hook from Drop, so neither a
+        // replaced stale entry nor a rejected duplicate is destroyed while
+        // the registry is locked.
+        drop(stale_entry);
+        drop(value);
+
+        if conflict {
+            Err(SharedHookRegistrationConflict { key })
+        } else {
+            Ok(existing_registration
+                .or(inserted_registration)
+                .expect("shared registration outcome"))
+        }
+    }
+
+    pub(super) fn matching<'a>(
         &'a self,
         audience: Option<&'a ToolAudience>,
-    ) -> impl Iterator<Item = Arc<T>> + 'a {
+    ) -> impl Iterator<Item = &'a T> + 'a {
         self.entries
             .iter()
             .filter(move |entry| match &entry.audience {
                 None => true,
                 Some(expected) => audience == Some(expected),
             })
-            .map(|entry| Arc::clone(&entry.hook))
+            .map(|entry| &entry.value)
     }
 
-    fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    fn detach(&mut self, id: u64) -> Option<Arc<T>> {
+    pub(super) fn detach(&mut self, id: u64) -> Option<LiveHookEntry<T>> {
         let index = self.entries.iter().position(|entry| entry.id == id)?;
-        Some(self.entries.remove(index).hook)
+        Some(self.entries.remove(index))
     }
 }
 
-struct LiveHookRegistration<T: ?Sized> {
-    registry: Weak<RwLock<LiveHookRegistry<T>>>,
+pub(super) struct LiveHookRegistration<T> {
+    pub(super) registry: Weak<RwLock<LiveHookRegistry<T>>>,
     id: u64,
-    audience: Option<ToolAudience>,
-    active: bool,
+    pub(super) audience: Option<ToolAudience>,
+    pub(super) active: bool,
 }
 
-impl<T: ?Sized> LiveHookRegistration<T> {
-    fn new(
+impl<T> LiveHookRegistration<T> {
+    pub(super) fn new(
         registry: Weak<RwLock<LiveHookRegistry<T>>>,
         id: u64,
         audience: Option<ToolAudience>,
@@ -654,7 +794,7 @@ impl<T: ?Sized> LiveHookRegistration<T> {
         }
     }
 
-    fn unregister(&mut self) -> bool {
+    pub(super) fn unregister(&mut self) -> bool {
         if !self.active {
             return false;
         }
@@ -662,23 +802,74 @@ impl<T: ?Sized> LiveHookRegistration<T> {
         let Some(registry) = self.registry.upgrade() else {
             return false;
         };
-        let detached_hook = {
+        let detached_entry = {
             let mut registry = registry
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry.detach(self.id)
         };
-        let removed = detached_hook.is_some();
-        drop(detached_hook);
+        let removed = detached_entry.is_some();
+        drop(detached_entry);
         removed
     }
 }
 
-impl<T: ?Sized> Drop for LiveHookRegistration<T> {
+impl<T> Drop for LiveHookRegistration<T> {
     fn drop(&mut self) {
         self.unregister();
     }
 }
+
+pub(super) struct SharedLiveHookRegistration<T> {
+    registry: Weak<RwLock<LiveHookRegistry<T>>>,
+    id: u64,
+    pub(super) key: String,
+    pub(super) audience: Option<ToolAudience>,
+}
+
+impl<T> Drop for SharedLiveHookRegistration<T> {
+    fn drop(&mut self) {
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        let detached_entry = {
+            let mut registry = registry
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.detach(self.id)
+        };
+        drop(detached_entry);
+    }
+}
+
+/// A caller reused an active shared-hook key with a different registration.
+///
+/// Reusing a key succeeds only when the audience and exact [`Arc`] hook (or
+/// ordered mixed-hook batch) are unchanged. Key namespaces are independent for
+/// pre-execution, post-execution, and mixed execution hooks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedHookRegistrationConflict {
+    key: String,
+}
+
+impl SharedHookRegistrationConflict {
+    /// Returns the caller-supplied key that conflicted.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+impl fmt::Display for SharedHookRegistrationConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "shared hook key '{}' is already registered with a different hook or audience",
+            self.key
+        )
+    }
+}
+
+impl std::error::Error for SharedHookRegistrationConflict {}
 
 // ---------------------------------------------------------------------------
 // Post-execution hook types
@@ -768,7 +959,7 @@ impl<T: PostExecutionHook + ?Sized> PostExecutionHook for Arc<T> {
 /// the hook may still finish. The guard does not keep its runtime alive.
 #[must_use = "dropping the guard immediately unregisters the post-execution hook"]
 pub struct PostExecutionHookRegistration {
-    inner: LiveHookRegistration<dyn PostExecutionHook>,
+    inner: LiveHookRegistration<Arc<dyn PostExecutionHook>>,
 }
 
 impl fmt::Debug for PostExecutionHookRegistration {
@@ -790,6 +981,39 @@ impl PostExecutionHookRegistration {
     /// Unregisters this exact hook now.
     pub fn unregister(mut self) -> bool {
         self.inner.unregister()
+    }
+}
+
+/// Keeps one caller-keyed post-execution hook registered while any holder lives.
+///
+/// The same key, audience, and [`Arc`] allocation share one chain entry. The
+/// last holder to be dropped removes that entry. Keys are local to the
+/// post-execution chain.
+#[derive(Clone)]
+#[must_use = "dropping the last holder unregisters the shared post-execution hook"]
+pub struct SharedPostExecutionHookRegistration {
+    inner: Arc<SharedLiveHookRegistration<Arc<dyn PostExecutionHook>>>,
+}
+
+impl fmt::Debug for SharedPostExecutionHookRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedPostExecutionHookRegistration")
+            .field("key", &self.inner.key)
+            .field("audience", &self.inner.audience)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SharedPostExecutionHookRegistration {
+    /// Returns the caller-supplied identity key for this shared entry.
+    pub fn key(&self) -> &str {
+        &self.inner.key
+    }
+
+    /// Returns the audience this hook is scoped to, or `None` when it is global.
+    pub fn audience(&self) -> Option<&ToolAudience> {
+        self.inner.audience.as_ref()
     }
 }
 
@@ -827,7 +1051,7 @@ impl PostExecutionHookSnapshot {
 #[derive(Clone)]
 pub struct PostExecutionHooks {
     hooks: Vec<Arc<dyn PostExecutionHook>>,
-    live: Arc<RwLock<LiveHookRegistry<dyn PostExecutionHook>>>,
+    live: Arc<RwLock<LiveHookRegistry<Arc<dyn PostExecutionHook>>>>,
 }
 
 impl Default for PostExecutionHooks {
@@ -872,6 +1096,18 @@ impl PostExecutionHooks {
         }
     }
 
+    pub(crate) fn register_live_shared(
+        &self,
+        key: String,
+        audience: Option<ToolAudience>,
+        hook: Arc<dyn PostExecutionHook>,
+    ) -> Result<SharedPostExecutionHookRegistration, SharedHookRegistrationConflict> {
+        let id = next_execution_hook_registration_id();
+        let inner =
+            LiveHookRegistry::register_shared(&self.live, id, key, audience, hook, Arc::ptr_eq)?;
+        Ok(SharedPostExecutionHookRegistration { inner })
+    }
+
     pub(crate) fn snapshot(&self, audience: Option<&ToolAudience>) -> PostExecutionHookSnapshot {
         let live = self
             .live
@@ -879,7 +1115,7 @@ impl PostExecutionHooks {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut hooks = Vec::with_capacity(self.hooks.len() + live.entries.len());
         hooks.extend(self.hooks.iter().cloned());
-        hooks.extend(live.matching(audience));
+        hooks.extend(live.matching(audience).cloned());
         PostExecutionHookSnapshot { hooks }
     }
 
@@ -1329,7 +1565,7 @@ mod live_registration_tests {
     use std::{
         panic::AssertUnwindSafe,
         sync::{
-            Arc, Mutex,
+            Arc, Barrier, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
         },
@@ -1585,6 +1821,156 @@ mod live_registration_tests {
         assert!(recorded(&log).is_empty());
     }
 
+    #[tokio::test]
+    async fn shared_pre_hook_runs_once_until_the_last_holder_is_dropped() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hooks = PreExecutionHooks::new();
+        let hook: Arc<dyn PreExecutionHook> = Arc::new(Records {
+            label: "shared",
+            log: Arc::clone(&log),
+        });
+
+        let first = hooks
+            .register_live_shared("workspace".to_string(), None, Arc::clone(&hook))
+            .expect("first holder");
+        let second = hooks
+            .register_live_shared("workspace".to_string(), None, Arc::clone(&hook))
+            .expect("second holder");
+        let cloned = first.clone();
+
+        hooks
+            .snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("one shared hook");
+        assert_eq!(recorded(&log), ["shared"]);
+
+        drop(second);
+        drop(first);
+        clear(&log);
+        hooks
+            .snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("cloned holder keeps hook live");
+        assert_eq!(recorded(&log), ["shared"]);
+
+        drop(cloned);
+        assert!(hooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_shared_registrations_publish_one_chain_entry() {
+        const HOLDERS: usize = 8;
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hooks = PreExecutionHooks::new();
+        let hook: Arc<dyn PreExecutionHook> = Arc::new(Records {
+            label: "shared",
+            log: Arc::clone(&log),
+        });
+        let barrier = Arc::new(Barrier::new(HOLDERS));
+        let registrars = (0..HOLDERS)
+            .map(|_| {
+                let hooks = hooks.clone();
+                let hook = Arc::clone(&hook);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    hooks
+                        .register_live_shared("workspace".to_string(), None, hook)
+                        .expect("concurrent holder")
+                })
+            })
+            .collect::<Vec<_>>();
+        let holders = registrars
+            .into_iter()
+            .map(|registrar| registrar.join().expect("registrar exits"))
+            .collect::<Vec<_>>();
+
+        hooks
+            .snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("one shared hook");
+        assert_eq!(recorded(&log), ["shared"]);
+
+        drop(holders);
+        assert!(hooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shared_hook_key_rejects_a_different_hook_or_audience() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hooks = PreExecutionHooks::new();
+        let hook: Arc<dyn PreExecutionHook> = Arc::new(Records {
+            label: "original",
+            log: Arc::clone(&log),
+        });
+        let guard = hooks
+            .register_live_shared("workspace".to_string(), None, Arc::clone(&hook))
+            .expect("original registration");
+
+        let other_hook: Arc<dyn PreExecutionHook> = Arc::new(Records {
+            label: "conflict",
+            log: Arc::clone(&log),
+        });
+        let hook_conflict = hooks
+            .register_live_shared("workspace".to_string(), None, other_hook)
+            .expect_err("same key with another allocation must conflict");
+        assert_eq!(hook_conflict.key(), "workspace");
+
+        let audience_conflict = hooks
+            .register_live_shared(
+                "workspace".to_string(),
+                Some(ToolAudience::new("alpha")),
+                hook,
+            )
+            .expect_err("same key with another audience must conflict");
+        assert_eq!(audience_conflict.key(), "workspace");
+
+        hooks
+            .snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("original remains registered");
+        assert_eq!(recorded(&log), ["original"]);
+        drop(guard);
+        assert!(hooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pre_and_post_shared_key_namespaces_are_independent() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let pre = PreExecutionHooks::new();
+        let post = PostExecutionHooks::new();
+        let pre_hook: Arc<dyn PreExecutionHook> = Arc::new(Records {
+            label: "pre",
+            log: Arc::clone(&log),
+        });
+        let post_hook: Arc<dyn PostExecutionHook> = Arc::new(Records {
+            label: "post",
+            log: Arc::clone(&log),
+        });
+
+        let _pre_holder = pre
+            .register_live_shared("workspace".to_string(), None, pre_hook)
+            .expect("pre key");
+        let _post_holder = post
+            .register_live_shared("workspace".to_string(), None, post_hook)
+            .expect("same key is independent in post chain");
+
+        pre.snapshot(None)
+            .run(&pre_context())
+            .await
+            .expect("pre hook");
+        post.snapshot(None)
+            .run(&post_context())
+            .await
+            .expect("post hook");
+        assert_eq!(recorded(&log), ["pre", "post"]);
+    }
+
     struct BlockingPostHook {
         entered: Arc<Notify>,
         release: Arc<Notify>,
@@ -1703,6 +2089,94 @@ mod live_registration_tests {
         dropper.join().expect("dropper exits");
         assert!(dropped.load(Ordering::SeqCst));
         assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn rejected_shared_capture_is_destroyed_after_the_registry_unlocks() {
+        let hooks = PreExecutionHooks::new();
+        let original: Arc<dyn PreExecutionHook> = Arc::new(Allows);
+        let guard = hooks
+            .register_live_shared("workspace".to_string(), None, original)
+            .expect("original shared hook");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let conflicting: Arc<dyn PreExecutionHook> = Arc::new(ReentrantDrop {
+            hooks: hooks.clone(),
+            dropped: Arc::clone(&dropped),
+        });
+        let (done_tx, done_rx) = mpsc::channel();
+        let registration_hooks = hooks.clone();
+        let registrar = thread::spawn(move || {
+            let conflict = registration_hooks
+                .register_live_shared("workspace".to_string(), None, conflicting)
+                .expect_err("different allocation conflicts");
+            done_tx.send(conflict).expect("report conflict");
+        });
+
+        let conflict = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("rejected capture Drop must not deadlock");
+        registrar.join().expect("registrar exits");
+        assert_eq!(conflict.key(), "workspace");
+        assert!(dropped.load(Ordering::SeqCst));
+        drop(guard);
+        assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn stale_shared_key_is_replaced_and_cannot_remove_the_new_generation() {
+        let registry: Arc<RwLock<LiveHookRegistry<Arc<dyn PreExecutionHook>>>> =
+            Arc::new(RwLock::new(LiveHookRegistry::new()));
+        let stale_registration = {
+            let registration = Arc::new(SharedLiveHookRegistration {
+                registry: Weak::new(),
+                id: 41,
+                key: "workspace".to_string(),
+                audience: None,
+            });
+            Arc::downgrade(&registration)
+        };
+        registry
+            .write()
+            .expect("registry")
+            .entries
+            .push(LiveHookEntry {
+                id: 41,
+                audience: None,
+                value: Arc::new(Allows),
+                shared: Some(SharedHookEntry {
+                    key: "workspace".to_string(),
+                    registration: stale_registration,
+                }),
+            });
+
+        let fresh_hook: Arc<dyn PreExecutionHook> = Arc::new(Allows);
+        let fresh = LiveHookRegistry::register_shared(
+            &registry,
+            42,
+            "workspace".to_string(),
+            None,
+            Arc::clone(&fresh_hook),
+            Arc::ptr_eq,
+        )
+        .expect("dead holder metadata is replaced");
+        {
+            let registry = registry.read().expect("registry");
+            assert_eq!(registry.entries.len(), 1);
+            assert_eq!(registry.entries[0].id, 42);
+            assert!(Arc::ptr_eq(&registry.entries[0].value, &fresh_hook));
+        }
+
+        let stale_generation = Arc::new(SharedLiveHookRegistration {
+            registry: Arc::downgrade(&registry),
+            id: 41,
+            key: "workspace".to_string(),
+            audience: None,
+        });
+        drop(stale_generation);
+        assert_eq!(registry.read().expect("registry").entries.len(), 1);
+
+        drop(fresh);
+        assert!(registry.read().expect("registry").is_empty());
     }
 
     #[test]
