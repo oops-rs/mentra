@@ -187,6 +187,11 @@ struct EndTurnTool;
 
 struct SubagentSummaryTool;
 
+struct PublicNamedTool {
+    name: &'static str,
+    description: &'static str,
+}
+
 struct PublicExecutionHook;
 
 struct PublicMixedHook(&'static str);
@@ -254,6 +259,18 @@ impl ToolDefinition for AlphaTool {
             .build()
     }
 }
+
+#[async_trait]
+impl ToolDefinition for PublicNamedTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder(self.name)
+            .description(self.description)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for PublicNamedTool {}
 
 #[async_trait]
 impl ToolExecutor for AlphaTool {
@@ -412,6 +429,90 @@ async fn runtime_exposes_registered_tool_descriptors() {
         Some(AlphaTool.descriptor())
     );
     assert_eq!(runtime.tool_descriptor("missing_tool"), None);
+}
+
+#[test]
+fn runtime_reads_effective_audience_tool_descriptors_in_name_order() {
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    runtime.register_tool(PublicNamedTool {
+        name: "z_global",
+        description: "global z",
+    });
+    runtime.register_tool(PublicNamedTool {
+        name: "b_global",
+        description: "global b",
+    });
+    let alpha = ToolAudience::new("workspace-a");
+    let beta = ToolAudience::new("workspace-b");
+    let alpha_guard = runtime
+        .try_register_tool_for_audience(
+            alpha.clone(),
+            PublicNamedTool {
+                name: "a_scoped",
+                description: "alpha",
+            },
+        )
+        .expect("register alpha tool");
+    let beta_guard = runtime
+        .try_register_tool_for_audience(
+            beta.clone(),
+            PublicNamedTool {
+                name: "a_scoped",
+                description: "beta",
+            },
+        )
+        .expect("register beta tool");
+
+    let descriptors = runtime.tools_for_audience(Some(&alpha));
+    assert_eq!(
+        descriptors
+            .iter()
+            .map(|descriptor| descriptor.provider.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a_scoped", "b_global", "z_global"]
+    );
+    assert_eq!(
+        descriptors[0].provider.description.as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(
+        runtime.tools_for_audience(Some(&beta))[0]
+            .provider
+            .description
+            .as_deref(),
+        Some("beta")
+    );
+    assert_eq!(runtime.tools_for_audience(None), runtime.tools());
+    assert!(
+        runtime
+            .tools_for_audience(None)
+            .iter()
+            .all(|descriptor| descriptor.provider.name != "a_scoped")
+    );
+
+    drop(alpha_guard);
+    assert_eq!(
+        runtime
+            .tools_for_audience(Some(&alpha))
+            .into_iter()
+            .map(|descriptor| descriptor.provider.name)
+            .collect::<Vec<_>>(),
+        ["b_global", "z_global"]
+    );
+    assert_eq!(
+        runtime.tools_for_audience(Some(&beta))[0]
+            .provider
+            .description
+            .as_deref(),
+        Some("beta")
+    );
+    drop(beta_guard);
 }
 
 #[test]

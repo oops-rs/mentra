@@ -226,18 +226,23 @@ impl Runtime {
 
     /// Returns descriptors for registered tools in a deterministic order.
     pub fn tools(&self) -> Vec<crate::tool::RuntimeToolDescriptor> {
-        let tool_names = self
-            .handle
-            .tools()
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect::<Vec<_>>();
-        let mut tools = tool_names
-            .into_iter()
-            .filter_map(|name| self.handle.get_tool_descriptor(&name))
-            .collect::<Vec<_>>();
-        tools.sort_by(|left, right| left.provider.name.cmp(&right.provider.name));
-        tools
+        self.tools_for_audience(None)
+    }
+
+    /// Returns the name-ordered tool descriptors visible to `audience`.
+    ///
+    /// `Some(audience)` resolves the matching audience namespace before the
+    /// runtime-global fallback. `None` returns only runtime-global tools and is
+    /// identical to [`tools`](Self::tools).
+    ///
+    /// No agent identity is supplied, so exact-agent registrations are
+    /// intentionally excluded. The returned descriptor snapshot is cloned
+    /// under one registry read lock and grants no authority to execute a tool.
+    pub fn tools_for_audience(
+        &self,
+        audience: Option<&crate::tool::ToolAudience>,
+    ) -> Vec<crate::tool::RuntimeToolDescriptor> {
+        self.handle.visible_tool_descriptors_for_audience(audience)
     }
 
     /// Returns the descriptor for a registered tool by name.

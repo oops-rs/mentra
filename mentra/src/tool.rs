@@ -16,7 +16,7 @@ pub(crate) mod schema;
 mod truncation;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fmt,
     sync::{
         Arc, RwLock, Weak,
@@ -410,24 +410,83 @@ impl ToolRegistry {
         self.tools.get(name).map(|tool| tool.descriptor.clone())
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_tool(&self, name: &str) -> Option<ResolvedTool> {
-        self.tools.get(name).map(|tool| ResolvedTool {
-            registration: ToolRegistration {
-                generation: tool.generation,
-                descriptor: tool.descriptor.clone(),
-            },
-            handler: Arc::clone(&tool.handler),
-        })
+        self.tools.get(name).map(Self::resolved_tool)
     }
 
-    pub(crate) fn registrations(&self) -> Vec<ToolRegistration> {
-        self.tools
-            .values()
-            .map(|tool| ToolRegistration {
-                generation: tool.generation,
-                descriptor: tool.descriptor.clone(),
+    /// Selects one registration from the canonical exact-agent → audience →
+    /// global ladder. Roster snapshots and call resolution both use this path.
+    fn visible_tool(
+        &self,
+        agent_id: Option<&str>,
+        audience: Option<&ToolAudience>,
+        name: &str,
+    ) -> Option<&RegisteredTool> {
+        agent_id
+            .and_then(|agent_id| self.agent_tools.get(agent_id))
+            .and_then(|tools| tools.get(name))
+            .or_else(|| {
+                audience
+                    .and_then(|audience| self.audience_tools.get(audience))
+                    .and_then(|tools| tools.get(name))
             })
+            .or_else(|| self.tools.get(name))
+    }
+
+    /// Clones the effective registration roster from this registry snapshot.
+    pub(crate) fn visible_registrations(
+        &self,
+        agent_id: Option<&str>,
+        audience: Option<&ToolAudience>,
+    ) -> Vec<ToolRegistration> {
+        let mut names = self
+            .tools
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if let Some(audience_tools) = audience.and_then(|key| self.audience_tools.get(key)) {
+            names.extend(audience_tools.keys().map(String::as_str));
+        }
+        if let Some(agent_tools) = agent_id.and_then(|key| self.agent_tools.get(key)) {
+            names.extend(agent_tools.keys().map(String::as_str));
+        }
+
+        names
+            .into_iter()
+            .filter_map(|name| self.visible_tool(agent_id, audience, name))
+            .map(Self::tool_registration)
             .collect()
+    }
+
+    pub(crate) fn resolve_for_scope(
+        &self,
+        name: &str,
+        agent_id: Option<&str>,
+        audience: Option<&ToolAudience>,
+    ) -> ToolResolution {
+        if let Some(tool) = self.visible_tool(agent_id, audience, name) {
+            return ToolResolution::Visible(Box::new(Self::resolved_tool(tool)));
+        }
+        if self.any_agent_contains(name) || self.any_audience_contains(name) {
+            ToolResolution::Hidden
+        } else {
+            ToolResolution::Missing
+        }
+    }
+
+    fn tool_registration(tool: &RegisteredTool) -> ToolRegistration {
+        ToolRegistration {
+            generation: tool.generation,
+            descriptor: tool.descriptor.clone(),
+        }
+    }
+
+    fn resolved_tool(tool: &RegisteredTool) -> ResolvedTool {
+        ResolvedTool {
+            registration: Self::tool_registration(tool),
+            handler: Arc::clone(&tool.handler),
+        }
     }
 
     #[cfg(test)]
@@ -620,29 +679,12 @@ impl ToolRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_agent_tool(&self, agent_id: &str, name: &str) -> Option<ResolvedTool> {
         self.agent_tools
             .get(agent_id)?
             .get(name)
-            .map(|tool| ResolvedTool {
-                registration: ToolRegistration {
-                    generation: tool.generation,
-                    descriptor: tool.descriptor.clone(),
-                },
-                handler: Arc::clone(&tool.handler),
-            })
-    }
-
-    pub(crate) fn agent_registrations(&self, agent_id: &str) -> Vec<ToolRegistration> {
-        self.agent_tools
-            .get(agent_id)
-            .into_iter()
-            .flat_map(HashMap::values)
-            .map(|tool| ToolRegistration {
-                generation: tool.generation,
-                descriptor: tool.descriptor.clone(),
-            })
-            .collect()
+            .map(Self::resolved_tool)
     }
 
     pub(crate) fn any_agent_contains(&self, name: &str) -> bool {
@@ -670,6 +712,7 @@ impl ToolRegistry {
         Some(removed.handler)
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_audience_tool(
         &self,
         audience: &ToolAudience,
@@ -678,25 +721,7 @@ impl ToolRegistry {
         self.audience_tools
             .get(audience)?
             .get(name)
-            .map(|tool| ResolvedTool {
-                registration: ToolRegistration {
-                    generation: tool.generation,
-                    descriptor: tool.descriptor.clone(),
-                },
-                handler: Arc::clone(&tool.handler),
-            })
-    }
-
-    pub(crate) fn audience_registrations(&self, audience: &ToolAudience) -> Vec<ToolRegistration> {
-        self.audience_tools
-            .get(audience)
-            .into_iter()
-            .flat_map(HashMap::values)
-            .map(|tool| ToolRegistration {
-                generation: tool.generation,
-                descriptor: tool.descriptor.clone(),
-            })
-            .collect()
+            .map(Self::resolved_tool)
     }
 
     pub(crate) fn any_audience_contains(&self, name: &str) -> bool {

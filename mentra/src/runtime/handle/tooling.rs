@@ -168,30 +168,25 @@ impl RuntimeHandle {
         &self,
         agent_id: &str,
     ) -> Vec<crate::tool::ToolRegistration> {
-        let registry = self
-            .tooling
+        self.tooling
             .tool_registry
             .read()
-            .expect("tool registry poisoned");
-        let mut selected = HashMap::new();
-        for registration in registry.agent_registrations(agent_id) {
-            selected.insert(registration.name().to_string(), registration);
-        }
-        if let Some(audience) = self.tool_audience() {
-            for registration in registry.audience_registrations(audience) {
-                selected
-                    .entry(registration.name().to_string())
-                    .or_insert(registration);
-            }
-        }
-        for registration in registry.registrations() {
-            selected
-                .entry(registration.name().to_string())
-                .or_insert(registration);
-        }
-        let mut registrations = selected.into_values().collect::<Vec<_>>();
-        registrations.sort_by(|left, right| left.name().cmp(right.name()));
-        registrations
+            .expect("tool registry poisoned")
+            .visible_registrations(Some(agent_id), self.tool_audience())
+    }
+
+    pub(crate) fn visible_tool_descriptors_for_audience(
+        &self,
+        audience: Option<&crate::tool::ToolAudience>,
+    ) -> Vec<crate::tool::RuntimeToolDescriptor> {
+        self.tooling
+            .tool_registry
+            .read()
+            .expect("tool registry poisoned")
+            .visible_registrations(None, audience)
+            .into_iter()
+            .map(|registration| registration.descriptor().clone())
+            .collect()
     }
 
     pub(crate) fn resolve_tool_for_agent(
@@ -199,27 +194,11 @@ impl RuntimeHandle {
         name: &str,
         agent_id: &str,
     ) -> crate::tool::ToolResolution {
-        let registry = self
-            .tooling
+        self.tooling
             .tool_registry
             .read()
-            .expect("tool registry poisoned");
-        if let Some(tool) = registry.resolve_agent_tool(agent_id, name) {
-            return crate::tool::ToolResolution::Visible(Box::new(tool));
-        }
-        if let Some(audience) = self.tool_audience()
-            && let Some(tool) = registry.resolve_audience_tool(audience, name)
-        {
-            return crate::tool::ToolResolution::Visible(Box::new(tool));
-        }
-        if let Some(global) = registry.resolve_tool(name) {
-            return crate::tool::ToolResolution::Visible(Box::new(global));
-        }
-        if registry.any_agent_contains(name) || registry.any_audience_contains(name) {
-            crate::tool::ToolResolution::Hidden
-        } else {
-            crate::tool::ToolResolution::Missing
-        }
+            .expect("tool registry poisoned")
+            .resolve_for_scope(name, Some(agent_id), self.tool_audience())
     }
 
     /// Commits already-loaded skill roots and enables the `load_skill` tool.
@@ -284,6 +263,7 @@ impl RuntimeHandle {
         self.skill_registry().infos()
     }
 
+    #[cfg(test)]
     pub fn tools(&self) -> Arc<[crate::tool::ProviderToolSpec]> {
         self.tooling
             .tool_registry
@@ -545,6 +525,91 @@ mod tests {
     }
 
     #[test]
+    fn shared_resolution_snapshot_preserves_exact_audience_global_ladder() {
+        fn description(
+            registrations: Vec<crate::tool::ToolRegistration>,
+            name: &str,
+        ) -> Option<String> {
+            registrations
+                .into_iter()
+                .find(|registration| registration.name() == name)
+                .and_then(|registration| registration.descriptor().provider.description.clone())
+        }
+
+        let runtime = RuntimeHandle::new(false);
+        runtime.register_tool(NamedTool {
+            name: "layered",
+            description: "global",
+        });
+        let alpha = crate::tool::ToolAudience::new("alpha");
+        let beta = crate::tool::ToolAudience::new("beta");
+        for (audience, label) in [(&alpha, "alpha"), (&beta, "beta")] {
+            let prepared = ToolRegistry::prepare_tool(NamedTool {
+                name: "layered",
+                description: label,
+            });
+            let displaced = runtime
+                .tooling
+                .tool_registry
+                .write()
+                .expect("tool registry poisoned")
+                .insert_audience_prepared(audience, prepared)
+                .into_parts()
+                .1;
+            assert!(displaced.is_empty());
+        }
+        let alpha_runtime = runtime.with_tool_audience(Some(alpha.clone()));
+        let exact = alpha_runtime.register_agent_tool(
+            "owner",
+            NamedTool {
+                name: "layered",
+                description: "exact",
+            },
+        );
+
+        assert_eq!(
+            description(alpha_runtime.visible_tool_registrations("owner"), "layered").as_deref(),
+            Some("exact")
+        );
+        assert_eq!(
+            description(alpha_runtime.visible_tool_registrations("other"), "layered").as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            description(runtime.visible_tool_registrations("other"), "layered").as_deref(),
+            Some("global")
+        );
+        assert_eq!(
+            runtime
+                .visible_tool_descriptors_for_audience(Some(&alpha))
+                .into_iter()
+                .find(|descriptor| descriptor.provider.name == "layered")
+                .and_then(|descriptor| descriptor.provider.description)
+                .as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            runtime
+                .visible_tool_descriptors_for_audience(Some(&beta))
+                .into_iter()
+                .find(|descriptor| descriptor.provider.name == "layered")
+                .and_then(|descriptor| descriptor.provider.description)
+                .as_deref(),
+            Some("beta")
+        );
+        assert_eq!(
+            runtime
+                .visible_tool_descriptors_for_audience(None)
+                .into_iter()
+                .find(|descriptor| descriptor.provider.name == "layered")
+                .and_then(|descriptor| descriptor.provider.description)
+                .as_deref(),
+            Some("global")
+        );
+        assert!(exact.unregister());
+    }
+
+    #[test]
     fn audience_registration_enforces_scope_collision_matrix_and_global_compatibility() {
         let runtime = RuntimeHandle::new(false);
         let alpha = crate::tool::ToolAudience::new("alpha");
@@ -679,6 +744,15 @@ mod tests {
             old_guard.descriptor().provider.description.as_deref(),
             Some("descriptor call 1")
         );
+        assert_eq!(
+            runtime.visible_tool_descriptors_for_audience(Some(&audience)),
+            vec![old_guard.descriptor().clone()]
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "reading must clone the registered descriptor rather than reevaluate it"
+        );
 
         let detached_handler = runtime
             .tooling
@@ -703,6 +777,11 @@ mod tests {
         );
         assert!(new_guard.unregister());
         assert!(audience_description(&runtime, &audience, "counted_audience").is_none());
+        assert!(
+            runtime
+                .visible_tool_descriptors_for_audience(Some(&audience))
+                .is_empty()
+        );
     }
 
     #[test]
