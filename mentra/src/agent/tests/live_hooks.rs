@@ -158,6 +158,99 @@ async fn existing_agent_and_session_observe_scoped_hooks_until_guard_drop() {
     assert_eq!(post_calls.load(Ordering::SeqCst), 2);
 }
 
+#[tokio::test]
+async fn shared_hook_holders_execute_one_entry_and_release_on_the_last_drop() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "both-live", "live_hook_tool", r#"{}"#),
+            text_stream(&model.id, "both live done"),
+            tool_use_stream(&model.id, "one-live", "live_hook_tool", r#"{}"#),
+            text_stream(&model.id, "one live done"),
+            tool_use_stream(&model.id, "none-live", "live_hook_tool", r#"{}"#),
+            text_stream(&model.id, "none live done"),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .with_tool(StaticTool::success("live_hook_tool", "raw"))
+        .build()
+        .expect("build runtime");
+    let audience = ToolAudience::new("shared-workspace");
+    let mut agent = runtime
+        .spawn_with_config_for_audience(
+            "shared-agent",
+            model,
+            AgentConfig::default(),
+            audience.clone(),
+        )
+        .expect("spawn shared agent");
+
+    let pre_calls = Arc::new(AtomicUsize::new(0));
+    let pre_hook: Arc<dyn PreExecutionHook> = Arc::new(CountingPreHook(Arc::clone(&pre_calls)));
+    let pre_first = runtime
+        .register_pre_hook_shared_for_audience(
+            "workspace-pre",
+            audience.clone(),
+            Arc::clone(&pre_hook),
+        )
+        .expect("first pre holder");
+    let pre_second = runtime
+        .register_pre_hook_shared_for_audience(
+            "workspace-pre",
+            audience.clone(),
+            Arc::clone(&pre_hook),
+        )
+        .expect("second pre holder");
+
+    let post_calls = Arc::new(AtomicUsize::new(0));
+    let post_hook: Arc<dyn PostExecutionHook> = Arc::new(SuffixPostHook {
+        suffix: "-shared",
+        calls: Arc::clone(&post_calls),
+    });
+    let post_first = runtime
+        .register_post_hook_shared_for_audience(
+            "workspace-post",
+            audience.clone(),
+            Arc::clone(&post_hook),
+        )
+        .expect("first post holder");
+    let post_second = runtime
+        .register_post_hook_shared_for_audience("workspace-post", audience, Arc::clone(&post_hook))
+        .expect("second post holder");
+
+    agent
+        .send(vec![ContentBlock::text("both live")])
+        .await
+        .expect("both-live turn");
+    assert_eq!(result_for(agent.history(), "both-live"), "raw-shared");
+    assert_eq!(pre_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(post_calls.load(Ordering::SeqCst), 1);
+
+    drop(pre_first);
+    drop(post_first);
+    agent
+        .send(vec![ContentBlock::text("one live")])
+        .await
+        .expect("one-live turn");
+    assert_eq!(result_for(agent.history(), "one-live"), "raw-shared");
+    assert_eq!(pre_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(post_calls.load(Ordering::SeqCst), 2);
+
+    drop(pre_second);
+    drop(post_second);
+    agent
+        .send(vec![ContentBlock::text("none live")])
+        .await
+        .expect("none-live turn");
+    assert_eq!(result_for(agent.history(), "none-live"), "raw");
+    assert_eq!(pre_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(post_calls.load(Ordering::SeqCst), 2);
+}
+
 struct OrderHook {
     label: &'static str,
     log: Arc<Mutex<Vec<(String, &'static str)>>>,

@@ -1,7 +1,7 @@
 use std::{
     fmt,
     sync::{
-        Arc, RwLock, Weak,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -13,6 +13,10 @@ use crate::{
     tool::{ToolAudience, ToolResultContent},
 };
 
+use super::hooks::{
+    LiveHookRegistration, LiveHookRegistry, SharedHookRegistrationConflict,
+    SharedLiveHookRegistration,
+};
 use super::{PostExecutionContext, PreExecutionContext};
 
 static NEXT_EXECUTION_HOOK_BATCH_ID: AtomicU64 = AtomicU64::new(1);
@@ -66,6 +70,9 @@ pub trait ExecutionHookParticipant: Send + Sync {
     }
 }
 
+type ExecutionHookBatch = Vec<Arc<dyn ExecutionHookParticipant>>;
+type LiveExecutionHookRegistry = LiveHookRegistry<ExecutionHookBatch>;
+
 #[async_trait]
 impl<T: ExecutionHookParticipant + ?Sized> ExecutionHookParticipant for Box<T> {
     fn name(&self) -> &str {
@@ -96,24 +103,6 @@ impl<T: ExecutionHookParticipant + ?Sized> ExecutionHookParticipant for Arc<T> {
     }
 }
 
-struct LiveBatch {
-    id: u64,
-    audience: Option<ToolAudience>,
-    participants: Vec<Arc<dyn ExecutionHookParticipant>>,
-}
-
-#[derive(Default)]
-struct LiveRegistry {
-    batches: Vec<LiveBatch>,
-}
-
-impl LiveRegistry {
-    fn detach(&mut self, id: u64) -> Option<Vec<Arc<dyn ExecutionHookParticipant>>> {
-        let index = self.batches.iter().position(|batch| batch.id == id)?;
-        Some(self.batches.remove(index).participants)
-    }
-}
-
 /// Keeps one atomic live batch of mixed execution hooks registered.
 ///
 /// Dropping the guard removes the exact batch. A tool call that already holds
@@ -121,63 +110,60 @@ impl LiveRegistry {
 /// keep its runtime alive.
 #[must_use = "dropping the guard immediately unregisters the mixed execution hooks"]
 pub struct ExecutionHookRegistration {
-    registry: Weak<RwLock<LiveRegistry>>,
-    id: u64,
-    audience: Option<ToolAudience>,
-    active: bool,
+    inner: LiveHookRegistration<ExecutionHookBatch>,
 }
 
 impl fmt::Debug for ExecutionHookRegistration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExecutionHookRegistration")
-            .field("audience", &self.audience)
-            .field("active", &self.active)
+            .field("audience", &self.inner.audience)
+            .field("active", &self.inner.active)
             .finish_non_exhaustive()
     }
 }
 
 impl ExecutionHookRegistration {
-    fn new(registry: Weak<RwLock<LiveRegistry>>, id: u64, audience: Option<ToolAudience>) -> Self {
-        Self {
-            registry,
-            id,
-            audience,
-            active: true,
-        }
-    }
-
     pub fn audience(&self) -> Option<&ToolAudience> {
-        self.audience.as_ref()
+        self.inner.audience.as_ref()
     }
 
     pub fn unregister(mut self) -> bool {
-        self.unregister_inner()
-    }
-
-    fn unregister_inner(&mut self) -> bool {
-        if !self.active {
-            return false;
-        }
-        self.active = false;
-        let Some(registry) = self.registry.upgrade() else {
-            return false;
-        };
-        let detached = {
-            let mut registry = registry
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.detach(self.id)
-        };
-        let removed = detached.is_some();
-        drop(detached);
-        removed
+        self.inner.unregister()
     }
 }
 
-impl Drop for ExecutionHookRegistration {
-    fn drop(&mut self) {
-        self.unregister_inner();
+/// Keeps one caller-keyed mixed-hook batch registered while any holder lives.
+///
+/// Re-registering the same key shares one batch only when its audience and
+/// ordered [`Arc`] participant identities are unchanged. Clones and repeated
+/// successful registrations are holders; the last drop removes the batch.
+/// Keys are local to the mixed execution-hook chain.
+#[derive(Clone)]
+#[must_use = "dropping the last holder unregisters the shared mixed execution hooks"]
+pub struct SharedExecutionHookRegistration {
+    inner: Arc<SharedLiveHookRegistration<ExecutionHookBatch>>,
+}
+
+impl fmt::Debug for SharedExecutionHookRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedExecutionHookRegistration")
+            .field("key", &self.inner.key)
+            .field("audience", &self.inner.audience)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SharedExecutionHookRegistration {
+    /// Returns the caller-supplied identity key for this shared batch.
+    pub fn key(&self) -> &str {
+        &self.inner.key
+    }
+
+    /// Returns the audience this batch is scoped to, or `None` when it is global.
+    pub fn audience(&self) -> Option<&ToolAudience> {
+        self.inner.audience.as_ref()
     }
 }
 
@@ -186,10 +172,19 @@ impl Drop for ExecutionHookRegistration {
 /// Unlike legacy post hooks, both seams walk this chain forward. Builder-time
 /// participants are always before live batches; matching global and audience
 /// batches retain their one insertion order.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ExecutionHooks {
     permanent: Vec<Arc<dyn ExecutionHookParticipant>>,
-    live: Arc<RwLock<LiveRegistry>>,
+    live: Arc<RwLock<LiveExecutionHookRegistry>>,
+}
+
+impl Default for ExecutionHooks {
+    fn default() -> Self {
+        Self {
+            permanent: Vec::new(),
+            live: Arc::new(RwLock::new(LiveHookRegistry::new())),
+        }
+    }
 }
 
 impl ExecutionHooks {
@@ -219,22 +214,11 @@ impl ExecutionHooks {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut participants = Vec::with_capacity(
-            self.permanent.len()
-                + registry
-                    .batches
-                    .iter()
-                    .map(|batch| batch.participants.len())
-                    .sum::<usize>(),
+            self.permanent.len() + registry.matching(audience).map(Vec::len).sum::<usize>(),
         );
         participants.extend(self.permanent.iter().cloned());
-        for batch in &registry.batches {
-            if batch
-                .audience
-                .as_ref()
-                .is_none_or(|expected| audience == Some(expected))
-            {
-                participants.extend(batch.participants.iter().cloned());
-            }
+        for batch in registry.matching(audience) {
+            participants.extend(batch.iter().cloned());
         }
         ExecutionHookSnapshot { participants }
     }
@@ -242,20 +226,41 @@ impl ExecutionHooks {
     pub(crate) fn register_live(
         &self,
         audience: Option<ToolAudience>,
-        participants: Vec<Arc<dyn ExecutionHookParticipant>>,
+        participants: ExecutionHookBatch,
     ) -> ExecutionHookRegistration {
         let id = next_batch_id();
         let guard_audience = audience.clone();
         self.live
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .batches
-            .push(LiveBatch {
-                id,
-                audience,
-                participants,
-            });
-        ExecutionHookRegistration::new(Arc::downgrade(&self.live), id, guard_audience)
+            .insert(id, audience, participants);
+        ExecutionHookRegistration {
+            inner: LiveHookRegistration::new(Arc::downgrade(&self.live), id, guard_audience),
+        }
+    }
+
+    pub(crate) fn register_live_shared(
+        &self,
+        key: String,
+        audience: Option<ToolAudience>,
+        participants: ExecutionHookBatch,
+    ) -> Result<SharedExecutionHookRegistration, SharedHookRegistrationConflict> {
+        let id = next_batch_id();
+        let inner = LiveHookRegistry::register_shared(
+            &self.live,
+            id,
+            key,
+            audience,
+            participants,
+            |left, right| {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| Arc::ptr_eq(left, right))
+            },
+        )?;
+        Ok(SharedExecutionHookRegistration { inner })
     }
 }
 
@@ -545,6 +550,93 @@ mod tests {
         assert!(hooks.snapshot(Some(&audience)).is_empty());
     }
 
+    #[tokio::test]
+    async fn shared_mixed_batch_has_one_entry_and_lives_until_its_last_holder() {
+        let hooks = ExecutionHooks::new();
+        let before = Arc::new(AtomicUsize::new(0));
+        let after = Arc::new(AtomicUsize::new(0));
+        let participant: Arc<dyn ExecutionHookParticipant> = Arc::new(Counts {
+            name: "shared",
+            before: Arc::clone(&before),
+            after: Arc::clone(&after),
+        });
+        let audience = ToolAudience::new("alpha");
+
+        let first = hooks
+            .register_live_shared(
+                "workspace".to_string(),
+                Some(audience.clone()),
+                vec![Arc::clone(&participant)],
+            )
+            .expect("first holder");
+        let second = hooks
+            .register_live_shared(
+                "workspace".to_string(),
+                Some(audience.clone()),
+                vec![Arc::clone(&participant)],
+            )
+            .expect("second holder");
+        let cloned = second.clone();
+
+        let snapshot = hooks.snapshot(Some(&audience));
+        snapshot.before(&pre()).await.expect("before");
+        snapshot.after(&post(false)).await.expect("after");
+        assert_eq!(before.load(Ordering::SeqCst), 1);
+        assert_eq!(after.load(Ordering::SeqCst), 1);
+
+        drop(first);
+        drop(second);
+        assert!(!hooks.snapshot(Some(&audience)).is_empty());
+        drop(cloned);
+        assert!(hooks.snapshot(Some(&audience)).is_empty());
+    }
+
+    #[test]
+    fn shared_mixed_key_rejects_different_batch_order_and_audience() {
+        let hooks = ExecutionHooks::new();
+        let before = Arc::new(AtomicUsize::new(0));
+        let after = Arc::new(AtomicUsize::new(0));
+        let left: Arc<dyn ExecutionHookParticipant> = Arc::new(Counts {
+            name: "left",
+            before: Arc::clone(&before),
+            after: Arc::clone(&after),
+        });
+        let right: Arc<dyn ExecutionHookParticipant> = Arc::new(Counts {
+            name: "right",
+            before,
+            after,
+        });
+        let audience = ToolAudience::new("alpha");
+        let guard = hooks
+            .register_live_shared(
+                "workspace".to_string(),
+                Some(audience.clone()),
+                vec![Arc::clone(&left), Arc::clone(&right)],
+            )
+            .expect("original batch");
+
+        let order_conflict = hooks
+            .register_live_shared(
+                "workspace".to_string(),
+                Some(audience),
+                vec![Arc::clone(&right), Arc::clone(&left)],
+            )
+            .expect_err("ordered identity must not silently change");
+        assert_eq!(order_conflict.key(), "workspace");
+
+        let audience_conflict = hooks
+            .register_live_shared(
+                "workspace".to_string(),
+                Some(ToolAudience::new("beta")),
+                vec![left, right],
+            )
+            .expect_err("audience is part of registration identity");
+        assert_eq!(audience_conflict.key(), "workspace");
+
+        drop(guard);
+        assert!(hooks.snapshot(Some(&ToolAudience::new("alpha"))).is_empty());
+    }
+
     struct Denies {
         name: &'static str,
         after: bool,
@@ -726,7 +818,7 @@ mod tests {
             after: Arc::new(AtomicUsize::new(0)),
         });
         let guard = hooks.register_live(None, vec![participant]);
-        let registry = guard.registry.upgrade().expect("registry");
+        let registry = guard.inner.registry.upgrade().expect("registry");
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
             let _locked = registry.write().expect("healthy registry");
             panic!("poison registry");

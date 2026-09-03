@@ -38,8 +38,10 @@ pub use control::{
     LocalRuntimeExecutor, PostExecutionContext, PostExecutionHook, PostExecutionHookRegistration,
     PostExecutionHooks, PreExecutionContext, PreExecutionHook, PreExecutionHookRegistration,
     PreExecutionHooks, ProviderRetry, ResultDecision, RunOptions, RuntimeExecutor, RuntimeHook,
-    RuntimeHookEvent, RuntimeHooks, RuntimePolicy, ShellValidationMode,
-    is_transient_provider_error, is_transient_runtime_error, normalize_policy_root,
+    RuntimeHookEvent, RuntimeHooks, RuntimePolicy, SharedExecutionHookRegistration,
+    SharedHookRegistrationConflict, SharedPostExecutionHookRegistration,
+    SharedPreExecutionHookRegistration, ShellValidationMode, is_transient_provider_error,
+    is_transient_runtime_error, normalize_policy_root,
 };
 pub use error::{ErrorCategory, RuntimeError};
 pub use file_store::FileRuntimeStore;
@@ -288,6 +290,38 @@ impl Runtime {
         self.handle.pre_hooks().register_live(Some(audience), hook)
     }
 
+    /// Shares one runtime-global pre-execution hook under a caller-supplied key.
+    ///
+    /// Reusing `key` with the same [`Arc`] allocation returns another holder of
+    /// the existing chain entry. Reusing it with another hook or audience
+    /// returns [`SharedHookRegistrationConflict`]. The entry remains until its
+    /// last holder (including guard clones) is dropped. Ordinary
+    /// [`register_pre_hook`](Self::register_pre_hook) calls remain independent.
+    pub fn register_pre_hook_shared(
+        &self,
+        key: impl Into<String>,
+        hook: Arc<dyn PreExecutionHook>,
+    ) -> Result<SharedPreExecutionHookRegistration, SharedHookRegistrationConflict> {
+        self.handle
+            .pre_hooks()
+            .register_live_shared(key.into(), None, hook)
+    }
+
+    /// Shares one audience-scoped pre-execution hook under a caller key.
+    ///
+    /// The audience and exact [`Arc`] allocation are part of the registration
+    /// identity. The key namespace belongs only to the pre-execution chain.
+    pub fn register_pre_hook_shared_for_audience(
+        &self,
+        key: impl Into<String>,
+        audience: crate::tool::ToolAudience,
+        hook: Arc<dyn PreExecutionHook>,
+    ) -> Result<SharedPreExecutionHookRegistration, SharedHookRegistrationConflict> {
+        self.handle
+            .pre_hooks()
+            .register_live_shared(key.into(), Some(audience), hook)
+    }
+
     /// Registers a live post-execution hook for every agent on this runtime.
     ///
     /// Builder-time hooks are permanent and outermost. Live hooks join one
@@ -319,6 +353,33 @@ impl Runtime {
         self.handle.post_hooks().register_live(Some(audience), hook)
     }
 
+    /// Shares one runtime-global post-execution hook under a caller-supplied key.
+    ///
+    /// The same key and exact [`Arc`] allocation produce holder-counted guards
+    /// for one chain entry. A different hook or audience conflicts. The key
+    /// namespace is independent from the pre-execution and mixed chains.
+    pub fn register_post_hook_shared(
+        &self,
+        key: impl Into<String>,
+        hook: Arc<dyn PostExecutionHook>,
+    ) -> Result<SharedPostExecutionHookRegistration, SharedHookRegistrationConflict> {
+        self.handle
+            .post_hooks()
+            .register_live_shared(key.into(), None, hook)
+    }
+
+    /// Shares one audience-scoped post-execution hook under a caller key.
+    pub fn register_post_hook_shared_for_audience(
+        &self,
+        key: impl Into<String>,
+        audience: crate::tool::ToolAudience,
+        hook: Arc<dyn PostExecutionHook>,
+    ) -> Result<SharedPostExecutionHookRegistration, SharedHookRegistrationConflict> {
+        self.handle
+            .post_hooks()
+            .register_live_shared(key.into(), Some(audience), hook)
+    }
+
     /// Registers one live runtime-global participant in the ordered mixed chain.
     pub fn register_execution_hook<H>(&self, participant: H) -> ExecutionHookRegistration
     where
@@ -335,6 +396,36 @@ impl Runtime {
         self.handle
             .execution_hooks()
             .register_live(None, participants.into_iter().collect())
+    }
+
+    /// Shares one runtime-global mixed-hook participant under a caller key.
+    pub fn register_execution_hook_shared(
+        &self,
+        key: impl Into<String>,
+        participant: Arc<dyn ExecutionHookParticipant>,
+    ) -> Result<SharedExecutionHookRegistration, SharedHookRegistrationConflict> {
+        self.register_execution_hooks_shared(key, [participant])
+    }
+
+    /// Shares one ordered runtime-global mixed-hook batch under a caller key.
+    ///
+    /// Reusing `key` shares the existing chain entry only when the ordered list
+    /// contains the exact same [`Arc`] allocations. Length or order changes are
+    /// conflicts. Independent non-shared batches keep their existing additive
+    /// composition.
+    pub fn register_execution_hooks_shared<I>(
+        &self,
+        key: impl Into<String>,
+        participants: I,
+    ) -> Result<SharedExecutionHookRegistration, SharedHookRegistrationConflict>
+    where
+        I: IntoIterator<Item = Arc<dyn ExecutionHookParticipant>>,
+    {
+        self.handle.execution_hooks().register_live_shared(
+            key.into(),
+            None,
+            participants.into_iter().collect(),
+        )
     }
 
     /// Registers one live participant for an exact [`crate::tool::ToolAudience`].
@@ -369,6 +460,36 @@ impl Runtime {
         self.handle
             .execution_hooks()
             .register_live(Some(audience), participants.into_iter().collect())
+    }
+
+    /// Shares one mixed-hook participant for an exact audience under a caller key.
+    pub fn register_execution_hook_shared_for_audience(
+        &self,
+        key: impl Into<String>,
+        audience: crate::tool::ToolAudience,
+        participant: Arc<dyn ExecutionHookParticipant>,
+    ) -> Result<SharedExecutionHookRegistration, SharedHookRegistrationConflict> {
+        self.register_execution_hooks_shared_for_audience(key, audience, [participant])
+    }
+
+    /// Shares one ordered mixed-hook batch for an exact audience under a caller key.
+    ///
+    /// The audience and ordered [`Arc`] identities are part of the registration
+    /// identity. The last holder drop removes the complete batch atomically.
+    pub fn register_execution_hooks_shared_for_audience<I>(
+        &self,
+        key: impl Into<String>,
+        audience: crate::tool::ToolAudience,
+        participants: I,
+    ) -> Result<SharedExecutionHookRegistration, SharedHookRegistrationConflict>
+    where
+        I: IntoIterator<Item = Arc<dyn ExecutionHookParticipant>>,
+    {
+        self.handle.execution_hooks().register_live_shared(
+            key.into(),
+            Some(audience),
+            participants.into_iter().collect(),
+        )
     }
 
     /// Registers a skills directory and enables the builtin `load_skill` tool.

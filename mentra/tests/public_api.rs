@@ -25,7 +25,9 @@ use mentra::{
         ExecutionHookRegistration, HookDecision, PostExecutionContext, PostExecutionHook,
         PostExecutionHookRegistration, PreExecutionContext, PreExecutionHook,
         PreExecutionHookRegistration, ResultDecision, RuntimeExecutor, RuntimePolicy,
-        SessionOptions, VolatileRuntimeStore,
+        SessionOptions, SharedExecutionHookRegistration, SharedHookRegistrationConflict,
+        SharedPostExecutionHookRegistration, SharedPreExecutionHookRegistration,
+        VolatileRuntimeStore,
     },
     tool::{
         ExecutableTool, ParallelToolContext, ToolAuthorizationDecision, ToolAuthorizationPreview,
@@ -591,6 +593,77 @@ fn runtime_publicly_registers_atomic_mixed_hook_batches() {
     assert!(!global_batch.unregister());
     assert!(!audience_single.unregister());
     assert!(!audience_batch.unregister());
+}
+
+#[test]
+fn runtime_publicly_registers_caller_keyed_shared_hook_holders() {
+    let model = ModelInfo::new("mock-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(model.provider.clone(), vec![model]);
+    let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let audience = ToolAudience::new("shared-workspace");
+
+    let pre_hook: Arc<dyn PreExecutionHook> = Arc::new(PublicExecutionHook);
+    let pre: SharedPreExecutionHookRegistration = runtime
+        .register_pre_hook_shared("same-key", Arc::clone(&pre_hook))
+        .expect("shared pre hook");
+    let audience_pre: SharedPreExecutionHookRegistration = runtime
+        .register_pre_hook_shared_for_audience(
+            "audience-key",
+            audience.clone(),
+            Arc::clone(&pre_hook),
+        )
+        .expect("audience shared pre hook");
+
+    let post_hook: Arc<dyn PostExecutionHook> = Arc::new(PublicExecutionHook);
+    let post: SharedPostExecutionHookRegistration = runtime
+        .register_post_hook_shared("same-key", Arc::clone(&post_hook))
+        .expect("shared post hook uses an independent key namespace");
+    let audience_post: SharedPostExecutionHookRegistration = runtime
+        .register_post_hook_shared_for_audience(
+            "audience-key",
+            audience.clone(),
+            Arc::clone(&post_hook),
+        )
+        .expect("audience shared post hook");
+
+    let mixed_hook: Arc<dyn ExecutionHookParticipant> = Arc::new(PublicMixedHook("shared-mixed"));
+    let mixed: SharedExecutionHookRegistration = runtime
+        .register_execution_hook_shared("same-key", Arc::clone(&mixed_hook))
+        .expect("shared mixed hook uses an independent key namespace");
+    let audience_mixed: SharedExecutionHookRegistration = runtime
+        .register_execution_hooks_shared_for_audience(
+            "audience-key",
+            audience.clone(),
+            [Arc::clone(&mixed_hook)],
+        )
+        .expect("audience shared mixed batch");
+
+    assert_eq!(pre.key(), "same-key");
+    assert_eq!(pre.audience(), None);
+    assert_eq!(audience_pre.audience(), Some(&audience));
+    assert_eq!(post.key(), "same-key");
+    assert_eq!(audience_post.audience(), Some(&audience));
+    assert_eq!(mixed.key(), "same-key");
+    assert_eq!(audience_mixed.audience(), Some(&audience));
+
+    let conflict: SharedHookRegistrationConflict = runtime
+        .register_pre_hook_shared("same-key", Arc::new(PublicExecutionHook))
+        .expect_err("another hook allocation conflicts");
+    assert_eq!(conflict.key(), "same-key");
+
+    drop(runtime);
+    drop((
+        pre,
+        audience_pre,
+        post,
+        audience_post,
+        mixed,
+        audience_mixed,
+    ));
 }
 
 #[tokio::test]
