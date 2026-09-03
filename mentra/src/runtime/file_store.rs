@@ -12,6 +12,7 @@
 //!     transcript.jsonl  one transcript entry per line               (append-only)
 //!     leaf              the active entry id                         (atomic replace)
 //!   rules.json          permission rules, all scopes                (atomic replace)
+//!   rules.lock          stable advisory lock for rules mutations
 //!   runs.jsonl          run lifecycle events                        (append-only)
 //! ```
 //!
@@ -36,10 +37,13 @@
 //!
 //! Same stance as the SQLite store's documented one: one writer per agent,
 //! which mentra's runtime already holds. The file store adds no cross-process
-//! locking beyond its atomic writes — two processes (or two independently
-//! constructed stores) writing the same agent directory concurrently are
-//! outside the contract. Within one process, clones share state and writes
-//! are serialized per agent.
+//! locking beyond its atomic writes for per-agent state — two processes (or
+//! two independently constructed stores) writing the same agent directory
+//! concurrently are outside the contract. `rules.json` is the exception:
+//! every mutation holds the stable `rules.lock` sidecar across its disk read,
+//! update, and atomic replace, so independently constructed stores and
+//! processes cannot lose one another's permission-rule updates. Within one
+//! process, clones share state and writes are serialized per agent.
 //!
 //! ## What this store deliberately does not persist
 //!
@@ -104,8 +108,9 @@ pub struct FileRuntimeStore {
     /// Per-agent index of which transcript entries the on-disk log already
     /// holds, so a save appends only what is new or changed.
     transcript_logs: Arc<Mutex<HashMap<String, Arc<Mutex<TranscriptLogIndex>>>>>,
-    /// Serializes read-modify-write cycles on `rules.json`.
-    rules_lock: Arc<Mutex<()>>,
+    /// Serializes clone-local rule access and carries the parsed-file cache.
+    /// Cross-process mutations additionally hold `rules.lock`.
+    rules_state: Arc<Mutex<rules::RulesState>>,
     /// The OS file locks this store currently holds as leases; dropping an
     /// entry (or the whole store, or the process) releases the lock.
     held_leases: Arc<Mutex<HashMap<String, leases::HeldLease>>>,
@@ -121,7 +126,7 @@ impl FileRuntimeStore {
             root: root.into(),
             volatile: VolatileRuntimeStore::new(),
             transcript_logs: Arc::new(Mutex::new(HashMap::new())),
-            rules_lock: Arc::new(Mutex::new(())),
+            rules_state: Arc::new(Mutex::new(rules::RulesState::default())),
             held_leases: Arc::new(Mutex::new(HashMap::new())),
             runs_lock: Arc::new(Mutex::new(())),
         }
@@ -148,6 +153,10 @@ impl FileRuntimeStore {
 
     pub(crate) fn rules_path(&self) -> PathBuf {
         self.root.join("rules.json")
+    }
+
+    pub(crate) fn rules_lock_path(&self) -> PathBuf {
+        self.root.join("rules.lock")
     }
 
     pub(crate) fn runs_path(&self) -> PathBuf {

@@ -1,4 +1,10 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::{Child, Command},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::{
     ContentBlock, Message,
@@ -560,6 +566,39 @@ fn rule(tool_name: &str, allow: bool, scope: PermissionRuleScope) -> RememberedR
     }
 }
 
+fn rules_context() -> PermissionRuleContext {
+    PermissionRuleContext {
+        session_id: "session-1".to_owned(),
+        project_id: Some("project-1".to_owned()),
+    }
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_for_child(mut child: Child) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match child.try_wait().expect("poll child test") {
+            Some(status) => {
+                assert!(status.success(), "child test failed with {status}");
+                return;
+            }
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("child test did not finish within 30 seconds");
+            }
+        }
+    }
+}
+
 #[test]
 fn permission_rules_round_trip_across_scopes_and_reopen() {
     let root = temp_root("rules");
@@ -645,6 +684,325 @@ fn permission_point_operations_survive_file_store_reopen() {
             PermissionRuleScope::Project,
             PermissionRuleScope::Global,
         ]
+    );
+}
+
+#[test]
+fn a_rules_mutation_waits_for_an_independent_stores_sidecar_lock() {
+    let root = temp_root("rules-independent-lock");
+    let lock_holder = FileRuntimeStore::new(&root);
+    let writer = FileRuntimeStore::new(&root);
+    let file_guard = super::fs_util::lock_exclusive(&lock_holder.rules_lock_path())
+        .expect("hold the rules sidecar lock");
+    let (done_tx, done_rx) = mpsc::channel();
+
+    let writer_thread = thread::spawn(move || {
+        done_tx
+            .send(writer.upsert_rule(
+                &rules_context(),
+                &rule("shell", true, PermissionRuleScope::Session),
+            ))
+            .expect("report writer result");
+    });
+
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the independent store wrote without waiting for the sidecar lock"
+    );
+    assert!(
+        !lock_holder.rules_path().exists(),
+        "the rules replacement must not happen while another holder owns the lock"
+    );
+
+    drop(file_guard);
+    done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("writer finishes after lock release")
+        .expect("write rules");
+    writer_thread.join().expect("join writer");
+}
+
+const RULES_BLOCKED_PROCESS_ROOT_ENV: &str = "MENTRA_TEST_RULES_BLOCKED_PROCESS_ROOT";
+
+#[test]
+fn a_process_rule_mutation_waits_for_the_sidecar_lock() {
+    if let Some(root) = std::env::var_os(RULES_BLOCKED_PROCESS_ROOT_ENV) {
+        let root = PathBuf::from(root);
+        let store = FileRuntimeStore::new(&root);
+        std::fs::write(root.join("child-ready"), b"ready")
+            .expect("announce immediately before mutation");
+        store
+            .upsert_rule(
+                &rules_context(),
+                &rule("child", true, PermissionRuleScope::Session),
+            )
+            .expect("child writes rule after lock release");
+        std::fs::write(root.join("child-done"), b"done").expect("announce child completion");
+        return;
+    }
+
+    let root = temp_root("rules-process-blocking");
+    let store = FileRuntimeStore::new(&root);
+    let file_guard = super::fs_util::lock_exclusive(&store.rules_lock_path())
+        .expect("parent holds the rules sidecar lock");
+    let executable = std::env::current_exe().expect("locate unit-test executable");
+    let mut child = Command::new(executable)
+        .arg("a_process_rule_mutation_waits_for_the_sidecar_lock")
+        .arg("--nocapture")
+        .env(RULES_BLOCKED_PROCESS_ROOT_ENV, &root)
+        .spawn()
+        .expect("spawn blocked child writer");
+
+    wait_for_path(&root.join("child-ready"));
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().expect("poll blocked child").is_none(),
+        "child mutation completed while the parent process held rules.lock"
+    );
+    assert!(
+        !root.join("child-done").exists() && !store.rules_path().exists(),
+        "the child must not commit its mutation before lock release"
+    );
+
+    drop(file_guard);
+    wait_for_child(child);
+    assert!(root.join("child-done").exists());
+    assert_eq!(
+        store
+            .load_applicable_rules(&rules_context())
+            .expect("load child rule")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn clones_share_rule_cache_and_mutation_invalidation() {
+    let store = FileRuntimeStore::new(temp_root("rules-clone-cache"));
+    store
+        .upsert_rule(
+            &rules_context(),
+            &rule("shell", true, PermissionRuleScope::Session),
+        )
+        .expect("seed cached rules");
+    let clone = store.clone();
+    let misses_after_write = store.rules_cache_misses();
+
+    assert_eq!(
+        clone
+            .load_applicable_rules(&rules_context())
+            .expect("clone loads rules")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.rules_cache_misses(),
+        misses_after_write + 1,
+        "a changed mutation invalidates the cache shared by its clones"
+    );
+    let misses_after_first_load = store.rules_cache_misses();
+    assert_eq!(
+        store
+            .load_applicable_rules(&rules_context())
+            .expect("original reuses clone load")
+            .len(),
+        1
+    );
+    assert_eq!(store.rules_cache_misses(), misses_after_first_load);
+
+    clone
+        .upsert_rule(
+            &rules_context(),
+            &rule("read", false, PermissionRuleScope::Session),
+        )
+        .expect("clone updates rules");
+    let misses_after_clone_write = store.rules_cache_misses();
+    assert_eq!(
+        store
+            .load_applicable_rules(&rules_context())
+            .expect("original loads clone update")
+            .len(),
+        2
+    );
+    assert_eq!(
+        store.rules_cache_misses(),
+        misses_after_clone_write + 1,
+        "a clone mutation invalidates the cache shared by the original"
+    );
+    let misses_after_reload = store.rules_cache_misses();
+    assert_eq!(
+        clone
+            .load_applicable_rules(&rules_context())
+            .expect("clone reuses original reload")
+            .len(),
+        2
+    );
+    assert_eq!(store.rules_cache_misses(), misses_after_reload);
+}
+
+#[test]
+fn unchanged_rule_reads_reuse_cache_and_independent_writes_invalidate_it() {
+    let root = temp_root("rules-independent-cache");
+    let writer = FileRuntimeStore::new(&root);
+    writer
+        .upsert_rule(
+            &rules_context(),
+            &rule("short", true, PermissionRuleScope::Session),
+        )
+        .expect("seed rules");
+    let reader = FileRuntimeStore::new(&root);
+
+    assert_eq!(
+        reader
+            .load_applicable_rules(&rules_context())
+            .expect("first load")
+            .len(),
+        1
+    );
+    assert_eq!(reader.rules_cache_misses(), 1);
+    assert_eq!(
+        reader
+            .load_applicable_rules(&rules_context())
+            .expect("cached load")
+            .len(),
+        1
+    );
+    assert_eq!(
+        reader.rules_cache_misses(),
+        1,
+        "an unchanged identity avoids a second whole-file read and parse"
+    );
+
+    writer
+        .upsert_rule(
+            &rules_context(),
+            &rule(
+                "a-much-longer-tool-name-that-changes-the-file-length",
+                false,
+                PermissionRuleScope::Session,
+            ),
+        )
+        .expect("independent store updates rules");
+    assert_eq!(
+        reader
+            .load_applicable_rules(&rules_context())
+            .expect("load independent update")
+            .len(),
+        2
+    );
+    assert_eq!(
+        reader.rules_cache_misses(),
+        2,
+        "a replacement by an independent store invalidates the cache"
+    );
+}
+
+#[test]
+fn a_mutation_reloads_disk_instead_of_extending_its_stale_cache() {
+    let root = temp_root("rules-mutation-cache");
+    let first = FileRuntimeStore::new(&root);
+    let second = FileRuntimeStore::new(&root);
+    first
+        .upsert_rule(
+            &rules_context(),
+            &rule("first", true, PermissionRuleScope::Session),
+        )
+        .expect("write first rule");
+    second
+        .load_applicable_rules(&rules_context())
+        .expect("prime second store cache");
+
+    first
+        .upsert_rule(
+            &rules_context(),
+            &rule("external-to-cache", false, PermissionRuleScope::Session),
+        )
+        .expect("write through first store");
+    second
+        .upsert_rule(
+            &rules_context(),
+            &rule("second", true, PermissionRuleScope::Session),
+        )
+        .expect("extend the authoritative disk snapshot");
+
+    assert_eq!(
+        FileRuntimeStore::new(&root)
+            .load_applicable_rules(&rules_context())
+            .expect("load final rules")
+            .len(),
+        3,
+        "a mutation must not overwrite an independent update with cached state"
+    );
+}
+
+const RULES_PROCESS_ROOT_ENV: &str = "MENTRA_TEST_RULES_PROCESS_ROOT";
+const RULES_PROCESS_WRITER_ENV: &str = "MENTRA_TEST_RULES_PROCESS_WRITER";
+
+#[test]
+fn concurrent_process_rule_mutations_preserve_every_row() {
+    if let (Some(root), Ok(writer)) = (
+        std::env::var_os(RULES_PROCESS_ROOT_ENV),
+        std::env::var(RULES_PROCESS_WRITER_ENV),
+    ) {
+        let root = PathBuf::from(root);
+        std::fs::write(root.join(format!("{writer}.ready")), b"ready")
+            .expect("announce child writer");
+        wait_for_path(&root.join("start"));
+        let store = FileRuntimeStore::new(&root);
+        for index in 0..32 {
+            store
+                .upsert_rule(
+                    &rules_context(),
+                    &rule(
+                        &format!("{writer}-{index}"),
+                        true,
+                        PermissionRuleScope::Session,
+                    ),
+                )
+                .expect("child upserts rule");
+        }
+        return;
+    }
+
+    let root = temp_root("rules-process-lock");
+    std::fs::create_dir_all(&root).expect("create process-test root");
+    let reader = FileRuntimeStore::new(&root);
+    assert!(
+        reader
+            .load_applicable_rules(&rules_context())
+            .expect("prime missing-file cache")
+            .is_empty()
+    );
+    let executable = std::env::current_exe().expect("locate unit-test executable");
+    let spawn_writer = |writer: &str| {
+        Command::new(&executable)
+            .arg("concurrent_process_rule_mutations_preserve_every_row")
+            .arg("--nocapture")
+            .env(RULES_PROCESS_ROOT_ENV, &root)
+            .env(RULES_PROCESS_WRITER_ENV, writer)
+            .spawn()
+            .expect("spawn child writer")
+    };
+    let first = spawn_writer("first");
+    let second = spawn_writer("second");
+    wait_for_path(&root.join("first.ready"));
+    wait_for_path(&root.join("second.ready"));
+    std::fs::write(root.join("start"), b"start").expect("release child writers");
+    wait_for_child(first);
+    wait_for_child(second);
+
+    let stored = reader
+        .load_applicable_rules(&rules_context())
+        .expect("load all child rules");
+    assert_eq!(
+        stored.len(),
+        64,
+        "each successful cross-process update must remain in rules.json"
+    );
+    assert_eq!(
+        reader.rules_cache_misses(),
+        2,
+        "the reader invalidates its missing-file cache after child-process writes"
     );
 }
 

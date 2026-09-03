@@ -13,7 +13,7 @@
 //! the "same" lease on different inodes; an empty leftover file per key is
 //! the cheap price of never entering it.
 
-use std::{fs::File, fs::OpenOptions, time::Duration};
+use std::{fs::File, time::Duration};
 
 use fs2::FileExt as _;
 
@@ -37,18 +37,10 @@ impl LeaseStore for FileRuntimeStore {
             return Ok(false);
         }
 
-        let dir = self.leases_dir();
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| store_error(&format!("create '{}'", dir.display()), error))?;
-        let path = dir.join(format!("{}.lock", fs_util::encode_component(key)));
-        // truncate(false): the file's only job is to exist and be lockable;
-        // its (empty) contents are never rewritten.
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(|error| store_error(&format!("open '{}'", path.display()), error))?;
+        let path = self
+            .leases_dir()
+            .join(format!("{}.lock", fs_util::encode_component(key)));
+        let file = fs_util::open_lock_file(&path)?;
 
         match file.try_lock_exclusive() {
             Ok(()) => {

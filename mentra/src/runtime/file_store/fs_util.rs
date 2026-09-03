@@ -15,6 +15,32 @@ use super::store_error;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Opens a stable sidecar file suitable for an advisory lock.
+///
+/// Lock files are never unlinked: replacing or removing one while another
+/// process waits on its inode can let two callers hold locks on different
+/// files for the same logical resource.
+pub(super) fn open_lock_file(path: &Path) -> Result<File, RuntimeError> {
+    let parent = parent_dir(path)?;
+    fs::create_dir_all(parent)
+        .map_err(|error| store_error(&format!("create '{}'", parent.display()), error))?;
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|error| store_error(&format!("open '{}'", path.display()), error))
+}
+
+/// Opens `path` and holds its exclusive advisory lock until the returned
+/// handle is dropped.
+pub(super) fn lock_exclusive(path: &Path) -> Result<File, RuntimeError> {
+    let file = open_lock_file(path)?;
+    fs2::FileExt::lock_exclusive(&file)
+        .map_err(|error| store_error(&format!("lock '{}'", path.display()), error))?;
+    Ok(file)
+}
+
 /// Replaces `path` atomically: write a temp file beside it, fsync, rename
 /// over the target, fsync the parent directory. A reader never observes a
 /// partial file, and a crash leaves at most an ignored temp file behind.
@@ -127,8 +153,19 @@ fn drop_truncated_tail(file: &mut File) -> std::io::Result<()> {
 
 /// Reads a file that may not exist yet; `Ok(None)` when it does not.
 pub(super) fn read_optional(path: &Path) -> Result<Option<String>, RuntimeError> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(Some(contents)),
+    let Some(mut file) = open_optional(path)? else {
+        return Ok(None);
+    };
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|error| store_error(&format!("read '{}'", path.display()), error))?;
+    Ok(Some(contents))
+}
+
+/// Opens a file that may not exist yet; `Ok(None)` when it does not.
+pub(super) fn open_optional(path: &Path) -> Result<Option<File>, RuntimeError> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(store_error(&format!("read '{}'", path.display()), error)),
     }
