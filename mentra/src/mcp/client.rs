@@ -86,8 +86,12 @@ type PendingMap = HashMap<u64, oneshot::Sender<Result<JsonValue, McpClientError>
 
 /// A running MCP stdio client connected to one server process.
 pub struct McpStdioClient {
-    stdin: Mutex<ChildStdin>,
+    // Struct fields drop in declaration order. Keep the supervised child
+    // first: Windows `taskkill /T` needs the direct process to still exist in
+    // order to find its descendants, so stdin must not signal EOF before the
+    // process tree is terminated.
     child: Arc<Mutex<BoundedChild>>,
+    stdin: Mutex<ChildStdin>,
     next_id: AtomicU64,
     pending: Arc<Mutex<PendingMap>>,
     server_info: Option<McpServerInfo>,
@@ -203,8 +207,8 @@ impl McpStdioClient {
         });
 
         let mut client = Self {
-            stdin: Mutex::new(stdin),
             child,
+            stdin: Mutex::new(stdin),
             next_id: AtomicU64::new(1),
             pending,
             server_info: None,
@@ -415,18 +419,18 @@ impl McpStdioClient {
         self.child.lock().await.drains_stderr()
     }
 
-    /// Shut down the MCP server process gracefully.
+    /// Shut down the MCP server process and its descendants.
     pub async fn shutdown(&self) {
-        // Best-effort: drop stdin to signal the child.
-        let mut stdin = self.stdin.lock().await;
-        drop(stdin.shutdown().await);
-        drop(stdin);
-
-        // Closing stdin lets a cooperative server finish; terminating the
-        // supervised child also handles a server (or descendant) that ignores
-        // EOF. The process wrapper kills the whole session/tree.
+        // Terminate while stdin still keeps the direct server alive. On
+        // Windows, `taskkill /T` cannot find descendants through a parent that
+        // has already observed EOF and exited.
         let mut child = self.child.lock().await;
         drop(child.terminate().await);
+        drop(child);
+
+        // Best-effort: close the now-unused protocol input as well.
+        let mut stdin = self.stdin.lock().await;
+        drop(stdin.shutdown().await);
     }
 }
 
