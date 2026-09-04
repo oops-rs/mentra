@@ -171,15 +171,14 @@ async fn stdio_server_receives_only_the_baseline_and_explicit_environment() {
     );
 }
 
-#[tokio::test]
-async fn dropping_a_stdio_client_kills_its_descendants() {
+async fn stdio_client_with_descendant() -> Option<(McpStdioClient, u32)> {
     let Some(python) = python() else {
         eprintln!("skipping: no Python interpreter available");
-        return;
+        return None;
     };
 
     let source = r#"
-import json, subprocess, sys, time
+import json, os, subprocess, sys, time
 
 descendant = subprocess.Popen(
     [sys.executable, "-c", "import time; time.sleep(60)"],
@@ -194,7 +193,7 @@ def send(payload):
 def read():
     line = sys.stdin.readline()
     if not line:
-        raise SystemExit(0)
+        os._exit(0)
     return json.loads(line)
 
 request = read()
@@ -220,14 +219,36 @@ read()
         .parse()
         .expect("the descendant pid is numeric");
 
-    drop(client);
+    Some((client, pid))
+}
 
+async fn assert_process_dies(pid: u32, action: &str) {
     let dead = wait_until_process_is_dead(pid).await;
     if !dead {
-        // Keep the RED run from leaving the fixture behind on old production.
+        // Keep a RED run from leaving the fixture behind on old production.
         kill_process(pid);
     }
-    assert!(dead, "MCP server descendant {pid} survived client drop");
+    assert!(dead, "MCP server descendant {pid} survived {action}");
+}
+
+#[tokio::test]
+async fn dropping_a_stdio_client_kills_its_descendants() {
+    let Some((client, pid)) = stdio_client_with_descendant().await else {
+        return;
+    };
+
+    drop(client);
+    assert_process_dies(pid, "client drop").await;
+}
+
+#[tokio::test]
+async fn shutting_down_a_stdio_client_kills_its_descendants() {
+    let Some((client, pid)) = stdio_client_with_descendant().await else {
+        return;
+    };
+
+    client.shutdown().await;
+    assert_process_dies(pid, "client shutdown").await;
 }
 
 #[cfg(unix)]
