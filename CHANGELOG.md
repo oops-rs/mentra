@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.27.0
 
 ### Windows policy paths and MCP teardown are deterministic
 
