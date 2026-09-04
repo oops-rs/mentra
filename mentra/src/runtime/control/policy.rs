@@ -452,8 +452,8 @@ fn path_is_allowed(path: &Path, default_root: &Path, extra_roots: &[PathBuf]) ->
 /// Returns the best-effort normalized path spelling used for policy-root
 /// comparisons.
 ///
-/// Absolute paths have lexical `.` and `..` components folded, existing
-/// symlink components resolved, and any non-existent suffix preserved. If
+/// Absolute paths have lexical `.` and `..` components folded, their deepest
+/// existing prefix canonicalized, and any non-existent suffix preserved. If
 /// that process fails, this falls back to [`fs::canonicalize`] and finally to
 /// the input path unchanged. A relative or otherwise unresolvable path may
 /// therefore remain relative or unresolved.
@@ -516,45 +516,52 @@ fn normalize_absolute_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn resolve_existing_components(path: &Path) -> Result<PathBuf, String> {
-    let mut resolved = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
-            Component::RootDir => resolved.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => unreachable!("paths are normalized before resolution"),
-            Component::Normal(segment) => {
-                resolved.push(segment);
-                match fs::symlink_metadata(&resolved) {
-                    Ok(metadata) if metadata.file_type().is_symlink() => {
-                        resolved = fs::canonicalize(&resolved).map_err(|error| {
-                            format!(
-                                "Failed to resolve symlink '{}': {error}",
-                                resolved.display()
-                            )
-                        })?;
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
+    let mut existing_prefix = path.to_path_buf();
+    let mut missing_suffix = Vec::new();
+
+    loop {
+        match fs::canonicalize(&existing_prefix) {
+            Ok(mut resolved) => {
+                for component in missing_suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::symlink_metadata(&existing_prefix) {
+                    Ok(_) => {
                         return Err(format!(
-                            "Failed to inspect '{}': {error}",
-                            resolved.display()
+                            "Failed to resolve existing path '{}': {error}",
+                            existing_prefix.display()
+                        ));
+                    }
+                    Err(metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(metadata_error) => {
+                        return Err(format!(
+                            "Failed to inspect '{}': {metadata_error}",
+                            existing_prefix.display()
                         ));
                     }
                 }
+
+                let component = existing_prefix.file_name().ok_or_else(|| {
+                    format!(
+                        "Path '{}' has no existing prefix to resolve",
+                        path.display()
+                    )
+                })?;
+                missing_suffix.push(component.to_os_string());
+                existing_prefix.pop();
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to resolve existing path '{}': {error}",
+                    existing_prefix.display()
+                ));
             }
         }
     }
-
-    if !resolved.is_absolute() {
-        return Err(format!(
-            "Path '{}' must resolve to an absolute path",
-            path.display()
-        ));
-    }
-
-    Ok(resolved)
 }
 
 #[cfg(test)]

@@ -79,6 +79,21 @@ fn public_policy_root_normalizer_preserves_a_missing_tail() {
     );
 }
 
+#[test]
+fn public_policy_root_normalizer_matches_the_filesystem_canonical_spelling() {
+    let directory = TestDirectory::new("canonical-spelling");
+    let missing_tail = Path::new("not-created").join("file.txt");
+    let ordinary = directory.path().join(&missing_tail);
+    let canonical = fs::canonicalize(directory.path())
+        .expect("canonicalize test directory")
+        .join(missing_tail);
+
+    assert_eq!(
+        normalize_policy_root(&ordinary),
+        normalize_policy_root(&canonical)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn public_policy_root_normalizer_resolves_an_existing_symlink_prefix() {
