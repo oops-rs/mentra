@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Windows policy paths and MCP teardown are deterministic
+
+- Policy-root comparison now canonicalizes the deepest existing prefix before
+  restoring a missing target suffix. Ordinary drive paths and Windows verbatim
+  paths therefore resolve to one identity, so a configured denied write root
+  cannot be bypassed merely because the file tool canonicalized its workspace.
+- MCP stdio clients terminate their supervised process tree before closing
+  stdin, both during ordinary drop and explicit shutdown. This keeps the
+  direct Windows process available while the existing `taskkill /T /F`
+  supervision finds and terminates its descendants.
+
 ### File-backed permission rules stay current across processes
 
 - `FileRuntimeStore` serializes every `rules.json` read-modify-replace with a
