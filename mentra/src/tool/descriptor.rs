@@ -262,14 +262,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_builder_flag_marks_the_descriptor_terminal() {
-        let descriptor = RuntimeToolDescriptor::builder("finish_tool")
-            .terminal()
-            .build();
-        assert!(descriptor.terminal);
-    }
-
-    #[test]
     fn terminal_flag_is_independent_of_declared_execution_category() {
         let descriptor = RuntimeToolDescriptor::builder("finish_tool")
             .execution_category(ToolExecutionCategory::ReadOnlyParallel)

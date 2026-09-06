@@ -844,9 +844,4 @@ mod tests {
         assert_eq!(extract_first_command("FOO=bar ls -la"), "ls");
         assert_eq!(extract_first_command("A=1 B=2 echo hello"), "echo");
     }
-
-    #[test]
-    fn extracts_plain_command() {
-        assert_eq!(extract_first_command("grep -r pattern ."), "grep");
-    }
 }

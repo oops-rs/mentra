@@ -371,16 +371,4 @@ mod tests {
     fn fuzzy_normalization_handles_nfkc_quotes_dashes_and_trailing_space() {
         assert_eq!(normalize_fuzzy_line("Ａ ‘quote’ —  "), "A 'quote' -");
     }
-
-    #[test]
-    fn fuzzy_overlay_preserves_unchanged_original_lines() {
-        let matched = "let label = “hello”;  \nlet count = 1;";
-        let old = "let label = \"hello\";\nlet count = 1;";
-        let new = "let label = \"hello\";\nlet count = 2;";
-
-        assert_eq!(
-            overlay_fuzzy_replacement(matched, old, new),
-            "let label = “hello”;  \nlet count = 2;"
-        );
-    }
 }

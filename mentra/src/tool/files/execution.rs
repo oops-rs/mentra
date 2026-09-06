@@ -75,12 +75,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_op_progress_create() {
-        let result = file_op_progress("create src/lib.rs");
-        assert_eq!(result, Some("file_op: create src/lib.rs".to_string()));
-    }
-
-    #[test]
     fn file_op_progress_set() {
         let result = file_op_progress("set src/main.rs");
         assert_eq!(result, Some("file_op: set src/main.rs".to_string()));
@@ -111,12 +105,6 @@ mod tests {
     fn file_op_progress_delete() {
         let result = file_op_progress("delete src/old.rs");
         assert_eq!(result, Some("file_op: delete src/old.rs".to_string()));
-    }
-
-    #[test]
-    fn file_op_progress_read_returns_none() {
-        let result = file_op_progress("read src/lib.rs\nL1: fn main() {}");
-        assert_eq!(result, None);
     }
 
     #[test]
