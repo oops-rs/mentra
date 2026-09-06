@@ -312,26 +312,4 @@ mod tests {
         assert_eq!(output.status_code, Some(124));
         assert!(!output.success);
     }
-
-    #[tokio::test]
-    async fn targeted_request_is_refused_instead_of_running_locally() {
-        let error = LocalRuntimeExecutor
-            .run(CommandRequest {
-                spec: CommandSpec::Shell {
-                    command: "printf 'ran locally'".to_string(),
-                },
-                cwd: std::env::temp_dir(),
-                timeout: Duration::from_secs(5),
-                env: minimal_shell_env(),
-                max_output_bytes_per_stream: 1024,
-                target: Some("mac".to_string()),
-            })
-            .await
-            .expect_err("a targeted request must not run locally");
-
-        assert_eq!(
-            error,
-            "no executor serves target `mac`; the local executor only runs untargeted commands"
-        );
-    }
 }

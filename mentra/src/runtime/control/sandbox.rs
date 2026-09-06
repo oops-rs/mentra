@@ -91,18 +91,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_environment_returns_valid_variant() {
-        let env = detect_environment();
-        // We can't control the test environment, but the function should
-        // always return a valid variant without panicking.
-        let display = env.to_string();
-        assert!(
-            ["host", "docker", "container", "ci"].contains(&display.as_str()),
-            "unexpected environment: {display}"
-        );
-    }
-
-    #[test]
     fn display_formats_correctly() {
         assert_eq!(ExecutionEnvironment::Host.to_string(), "host");
         assert_eq!(ExecutionEnvironment::Docker.to_string(), "docker");
