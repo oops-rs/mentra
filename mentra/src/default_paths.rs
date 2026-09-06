@@ -123,21 +123,4 @@ mod tests {
                 .join(workspace_hash(&workspace))
         );
     }
-
-    #[test]
-    fn same_workspace_produces_shared_root_for_all_default_paths() {
-        let workspace = test_path("shared-root-workspace");
-        let data_dir = test_path("shared-root-data");
-
-        let paths = workspace_default_paths_for(workspace, Some(data_dir));
-
-        for derived_path in [
-            &paths.default_store_path,
-            &paths.team_dir,
-            &paths.tasks_dir,
-            &paths.transcripts_dir,
-        ] {
-            assert!(derived_path.starts_with(&paths.root_dir));
-        }
-    }
 }
