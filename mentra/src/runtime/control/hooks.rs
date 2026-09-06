@@ -1369,6 +1369,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn all_allow_hooks_allows() {
+        let hooks = PreExecutionHooks::new()
+            .with_hook(AllowHook)
+            .with_hook(AllowHook);
+        let result = hooks.run(&make_context("files")).await.unwrap();
+        assert_eq!(result, HookDecision::Allow);
+    }
+
+    #[tokio::test]
     async fn first_deny_wins() {
         let hooks = PreExecutionHooks::new()
             .with_hook(AllowHook)
