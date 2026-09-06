@@ -6,6 +6,7 @@
 mod lossless_observer;
 mod memory_events;
 mod permission_store;
+mod runtime_identifier;
 mod terminal_output;
 mod tool_authorizer;
 

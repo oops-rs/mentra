@@ -529,6 +529,7 @@ fn resume_audience_is_explicit_ephemeral_and_never_persisted() {
                 project_id: None,
                 policy: None,
                 tool_audience: Some(current.clone()),
+                runtime_identifier: None,
             },
         )
         .expect("audience session resume");

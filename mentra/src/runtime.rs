@@ -145,7 +145,7 @@ pub struct SessionOptions {
     pub runtime_identifier: Option<std::sync::Arc<str>>,
 }
 
-/// Ephemeral scope applied while resuming a persisted agent as a session.
+/// Live scope and optional store tagging applied while resuming a session.
 #[derive(Debug, Clone, Default)]
 pub struct SessionResumeOptions {
     /// Project scope used by resumed session permission rules.
@@ -159,6 +159,13 @@ pub struct SessionResumeOptions {
     pub policy: Option<RuntimePolicy>,
     /// Ephemeral tool audience for this live resume and its descendants.
     pub tool_audience: Option<crate::tool::ToolAudience>,
+    /// Overrides the runtime identifier used by future persisted snapshots.
+    ///
+    /// `None` preserves the agent's stored identifier. `Some` rehomes the
+    /// resumed agent under this identifier when it next persists, including
+    /// during interrupted-run recovery. Other stored agents and the shared
+    /// runtime's own identifier are unaffected.
+    pub runtime_identifier: Option<Arc<str>>,
 }
 
 impl Runtime {
@@ -1309,17 +1316,18 @@ impl Runtime {
             agent_id,
             SessionResumeOptions {
                 project_id,
-                policy: None,
-                tool_audience: None,
+                ..Default::default()
             },
         )
     }
 
-    /// Resumes a persisted agent with live, non-persisted session scope.
+    /// Resumes a persisted agent with current session scope and store tagging.
     ///
-    /// The agent keeps its stored runtime identifier so later snapshots remain
-    /// visible to the same [`list_persisted_agents`](Self::list_persisted_agents)
-    /// query that found it before the resume.
+    /// By default the agent keeps its stored runtime identifier so later
+    /// snapshots remain visible to the same
+    /// [`list_persisted_agents`](Self::list_persisted_agents) query. Set
+    /// [`SessionResumeOptions::runtime_identifier`] to change that tag on the
+    /// next persist.
     pub fn resume_session_with_options(
         &self,
         agent_id: &str,
@@ -1329,12 +1337,13 @@ impl Runtime {
             project_id,
             policy,
             tool_audience,
+            runtime_identifier,
         } = options;
         let session_id = SessionId::new();
         let (event_tx, _) = broadcast::channel(512);
         let pending_permissions = PendingPermissionStore::new();
         let session_handle = self.session_scoped_handle(&event_tx, policy, None, tool_audience);
-        let Some(state) = self.handle.store().load_agent(agent_id)? else {
+        let Some(mut state) = self.handle.store().load_agent(agent_id)? else {
             return Err(RuntimeError::Store(format!(
                 "No persisted agent with id '{agent_id}'"
             )));
@@ -1347,6 +1356,9 @@ impl Runtime {
             .ok_or_else(|| {
                 RuntimeError::ProviderNotFound(Some(state.record.provider_id.clone()))
             })?;
+        if let Some(identifier) = runtime_identifier {
+            state.record.runtime_identifier = identifier.to_string();
+        }
         let agent = Agent::from_loaded(session_handle, state, provider)?;
         let metadata = SessionMetadata::new(session_id.clone(), agent.name(), agent.model());
         let session = Session::new_with_parts(

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Resumed sessions can opt into a different runtime namespace
+
+- `SessionResumeOptions::runtime_identifier` lets a host rehome a legacy or
+  renamed-workspace session on its next persist. `None` keeps the stored tag;
+  `Some(id)` replaces it for that resumed session without retagging other
+  agents or changing the shared runtime's identifier
+  ([#59](https://github.com/oops-rs/mentra/issues/59)).
+- **Source-breaking:** exhaustive `SessionResumeOptions` struct literals must
+  add `runtime_identifier: None` or use `..Default::default()`.
+
 ## 0.27.0
 
 ### Windows policy paths and MCP teardown are deterministic
