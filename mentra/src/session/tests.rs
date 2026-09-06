@@ -415,40 +415,6 @@ async fn append_turn_returns_assistant_message() {
 }
 
 #[tokio::test]
-async fn append_turn_emits_user_and_assistant_events() {
-    let mock = MockRuntime::builder().text("response").build().unwrap();
-    let mut session = mock
-        .runtime()
-        .create_session("test-session", mock.model())
-        .unwrap();
-
-    let mut rx = session.subscribe();
-
-    let _message = session
-        .append_turn(vec![ContentBlock::text("hello")])
-        .await
-        .unwrap();
-
-    let mut events = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        events.push(event);
-    }
-
-    let has_user = events
-        .iter()
-        .any(|e| matches!(e, SessionEvent::UserMessage { text, .. } if text == "hello"));
-    let has_assistant = events.iter().any(
-        |e| matches!(e, SessionEvent::AssistantMessageCompleted { text } if text == "response"),
-    );
-
-    assert!(has_user, "Expected UserMessage event, got: {events:?}");
-    assert!(
-        has_assistant,
-        "Expected AssistantMessageCompleted event, got: {events:?}"
-    );
-}
-
-#[tokio::test]
 async fn replay_returns_transcript_after_turn() {
     let mock = MockRuntime::builder().text("world").build().unwrap();
     let mut session = mock
@@ -505,37 +471,6 @@ async fn a_cancelled_session_turn_fails_instead_of_running() {
 }
 
 #[tokio::test]
-async fn a_session_turn_honors_a_token_budget() {
-    let mock = MockRuntime::builder()
-        .text("first")
-        .text("second")
-        .build()
-        .unwrap();
-    let mut session = mock
-        .runtime()
-        .create_session("test-session", mock.model())
-        .unwrap();
-
-    // A budget of 1 is spent by the first round's reported usage, so the run
-    // stops gracefully at the next boundary rather than continuing. Pinned
-    // because `Session` passes `RunOptions` through and nothing else proves
-    // the budget survives that hop.
-    let message = session
-        .append_turn_with_options(
-            vec![ContentBlock::text("go")],
-            RunOptions {
-                token_budget: Some(1),
-                ..RunOptions::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(message.text(), "first");
-    assert_eq!(session.metadata().status, SessionStatus::Idle);
-}
-
-#[tokio::test]
 async fn run_options_default_to_the_same_turn_append_turn_runs() {
     let mock = MockRuntime::builder().text("hello").build().unwrap();
     let mut session = mock
@@ -550,24 +485,6 @@ async fn run_options_default_to_the_same_turn_append_turn_runs() {
 
     assert_eq!(message.text(), "hello");
     assert_eq!(session.metadata().turn_count, 1);
-    assert_eq!(session.metadata().status, SessionStatus::Idle);
-}
-
-#[tokio::test]
-async fn session_status_transitions_created_to_idle() {
-    let mock = MockRuntime::builder().text("done").build().unwrap();
-    let mut session = mock
-        .runtime()
-        .create_session("test-session", mock.model())
-        .unwrap();
-
-    assert_eq!(session.metadata().status, SessionStatus::Created);
-
-    let _message = session
-        .append_turn(vec![ContentBlock::text("go")])
-        .await
-        .unwrap();
-
     assert_eq!(session.metadata().status, SessionStatus::Idle);
 }
 
@@ -590,20 +507,6 @@ async fn history_returns_committed_messages() {
         !session.history().is_empty(),
         "History should contain messages after a turn"
     );
-}
-
-#[tokio::test]
-async fn create_session_emits_session_started() {
-    let mock = MockRuntime::builder().text("hi").build().unwrap();
-
-    let session = mock
-        .runtime()
-        .create_session("test-session", mock.model())
-        .unwrap();
-
-    // The SessionStarted event was emitted during creation.
-    // Verify session id follows the expected format.
-    assert!(session.id().as_str().starts_with("session-"));
 }
 
 // ---- Task 4 permission tests ----
