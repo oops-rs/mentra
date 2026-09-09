@@ -13,13 +13,13 @@ use crate::CompactionRequest;
 use crate::CompactionResponse;
 use crate::CredentialSource;
 use crate::ModelInfo;
+use crate::Provider;
 use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
 use crate::ProviderEventStream;
 use crate::ProviderSession;
 use crate::ProviderSessionScope;
-use crate::RegisteredProvider;
 use crate::Request;
 use crate::StaticCredentialSource;
 use crate::WireApi;
@@ -158,7 +158,7 @@ where
 }
 
 #[async_trait]
-impl<C> RegisteredProvider for AnthropicProvider<C>
+impl<C> Provider for AnthropicProvider<C>
 where
     C: CredentialSource + 'static,
 {

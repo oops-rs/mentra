@@ -10,13 +10,13 @@ use crate::CompactionRequest;
 use crate::CompactionResponse;
 use crate::CredentialSource;
 use crate::ModelInfo;
+use crate::Provider;
 use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
 use crate::ProviderEventStream;
 use crate::ProviderSession;
 use crate::ProviderSessionScope;
-use crate::RegisteredProvider;
 use crate::Request;
 use crate::StaticCredentialSource;
 use crate::WireApi;
@@ -175,7 +175,7 @@ where
 }
 
 #[async_trait]
-impl<C> RegisteredProvider for GeminiProvider<C>
+impl<C> Provider for GeminiProvider<C>
 where
     C: CredentialSource + 'static,
 {
@@ -248,7 +248,7 @@ fn normalize_model_name(model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RegisteredProvider;
+    use crate::Provider;
 
     #[test]
     fn definition_advertises_history_compaction_support() {

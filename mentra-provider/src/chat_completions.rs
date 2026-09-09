@@ -18,6 +18,7 @@ pub(crate) mod sse;
 use crate::AuthScheme;
 use crate::CredentialSource;
 use crate::ModelInfo;
+use crate::Provider;
 use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
@@ -25,7 +26,6 @@ use crate::ProviderEventStream;
 use crate::ProviderId;
 use crate::ProviderSession;
 use crate::ProviderSessionScope;
-use crate::RegisteredProvider;
 use crate::Request;
 use crate::StaticCredentialSource;
 use crate::WireApi;
@@ -163,7 +163,7 @@ where
 }
 
 #[async_trait]
-impl<C> RegisteredProvider for ChatCompletionsProvider<C>
+impl<C> Provider for ChatCompletionsProvider<C>
 where
     C: CredentialSource + 'static,
 {

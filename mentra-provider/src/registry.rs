@@ -168,8 +168,6 @@ impl Provider for ProviderSessionScope {
     }
 }
 
-pub use Provider as RegisteredProvider;
-
 #[derive(Default)]
 pub struct ProviderRegistry {
     default_provider: Option<ProviderId>,

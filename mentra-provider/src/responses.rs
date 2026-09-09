@@ -17,11 +17,11 @@ use crate::AuthScheme;
 use crate::BuiltinProvider;
 use crate::CredentialSource;
 use crate::ModelInfo;
+use crate::Provider;
 use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
 use crate::ProviderSessionScope;
-use crate::RegisteredProvider;
 use crate::StaticCredentialSource;
 use crate::WireApi;
 use crate::embedding::EmbeddingModelInfo;
@@ -224,7 +224,7 @@ fn build_definition(
 }
 
 #[async_trait]
-impl<C> RegisteredProvider for ResponsesProvider<C>
+impl<C> Provider for ResponsesProvider<C>
 where
     C: CredentialSource + 'static,
 {

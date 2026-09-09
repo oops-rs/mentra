@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Removed the `RegisteredProvider` alias
+
+- **Breaking:** `mentra_provider::RegisteredProvider` is removed. It was a bare
+  `pub use Provider as RegisteredProvider;` with no callers outside the crate's
+  own provider impls; use `Provider`.
+
 ### Folded `ModelCatalog` and `ProviderSessionFactory` into `Provider`
 
 - **Breaking:** the `ModelCatalog` and `ProviderSessionFactory` traits are
