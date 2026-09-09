@@ -54,12 +54,6 @@ impl OpenAIOAuthCredentialSource {
         Self::from_store(client, persistent_token_store(kind))
     }
 
-    pub fn from_default_persistent_store(
-        client: OpenAIOAuthClient,
-    ) -> Result<Self, OpenAIOAuthError> {
-        Self::from_persistent_store(client, PersistentTokenStoreKind::Auto)
-    }
-
     pub async fn from_store_or_authorize<F>(
         client: OpenAIOAuthClient,
         store: Arc<dyn TokenStore>,
@@ -92,21 +86,6 @@ impl OpenAIOAuthCredentialSource {
         Self::from_store_or_authorize(
             client,
             persistent_token_store(kind),
-            on_pending_authorization,
-        )
-        .await
-    }
-
-    pub async fn from_default_persistent_store_or_authorize<F>(
-        client: OpenAIOAuthClient,
-        on_pending_authorization: F,
-    ) -> Result<Self, OpenAIOAuthError>
-    where
-        F: FnOnce(&PendingAuthorization),
-    {
-        Self::from_persistent_store_or_authorize(
-            client,
-            PersistentTokenStoreKind::Auto,
             on_pending_authorization,
         )
         .await

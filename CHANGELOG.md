@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Removed two unused OAuth credential-source constructors
+
+- **Breaking (feature `openai-oauth`):**
+  `OpenAIOAuthCredentialSource::from_default_persistent_store` and
+  `::from_default_persistent_store_or_authorize` are removed. Both were
+  one-line defaults with no callers; pass `PersistentTokenStoreKind::Auto` to
+  `from_persistent_store` / `from_persistent_store_or_authorize` for the
+  identical behavior.
+
 ### Removed the test-only `MemoryTokenStore`
 
 - **Breaking (feature `openai-oauth`):** `mentra::auth::openai::MemoryTokenStore`
