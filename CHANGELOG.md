@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Removed the duplicate `provider::model` re-export module
+
+- **Breaking:** `mentra::provider::model` is removed. Every item it re-exported
+  is already re-exported one level up at `mentra::provider::*` (and at
+  `mentra::provider_core::*`); import from there instead.
+
 ### Builtin providers are constructor functions, not forwarding types
 
 - **Breaking:** the seven forwarding wrapper types in `mentra::provider` are

@@ -56,41 +56,6 @@ pub use mentra_provider::WireApi;
 pub use mentra_provider::collect_response_from_stream;
 pub use mentra_provider::provider_event_stream_from_response;
 
-pub mod model {
-    pub use mentra_provider::AnthropicRequestOptions;
-    pub use mentra_provider::ContentBlock;
-    pub use mentra_provider::ContentBlockDelta;
-    pub use mentra_provider::ContentBlockStart;
-    pub use mentra_provider::ImageSource;
-    pub use mentra_provider::MemorySummarizeOutput;
-    pub use mentra_provider::MemorySummarizeRequest;
-    pub use mentra_provider::MemorySummarizeResponse;
-    pub use mentra_provider::Message;
-    pub use mentra_provider::ModelInfo;
-    pub use mentra_provider::OpenAIRequestOptions;
-    pub use mentra_provider::ProviderError;
-    pub use mentra_provider::ProviderEvent;
-    pub use mentra_provider::ProviderEventStream;
-    pub use mentra_provider::ProviderId;
-    pub use mentra_provider::ProviderRequestOptions;
-    pub use mentra_provider::RawMemory;
-    pub use mentra_provider::RawMemoryMetadata;
-    pub use mentra_provider::ReasoningEffort;
-    pub use mentra_provider::ReasoningFormat;
-    pub use mentra_provider::ReasoningOptions;
-    pub use mentra_provider::ReasoningProvenance;
-    pub use mentra_provider::Request;
-    pub use mentra_provider::Response;
-    pub use mentra_provider::ResponsesStateMode;
-    pub use mentra_provider::ResponsesTransport;
-    pub use mentra_provider::Role;
-    pub use mentra_provider::TokenUsage;
-    pub use mentra_provider::ToolChoice;
-    pub use mentra_provider::ToolSearchMode;
-    pub use mentra_provider::collect_response_from_stream;
-    pub use mentra_provider::provider_event_stream_from_response;
-}
-
 /// Transport-neutral interface implemented by model providers.
 #[async_trait]
 pub trait Provider: Send + Sync {
