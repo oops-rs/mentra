@@ -128,11 +128,6 @@ impl TeamMessage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TeamDispatch {
-    pub teammate: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) enum TeamRequestDirection {
     Inbound,

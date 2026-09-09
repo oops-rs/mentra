@@ -57,9 +57,9 @@ pub(super) fn execute_team_send(agent: &mut Agent, call: ToolCall) -> ContentBlo
     };
 
     match agent.send_team_message(&input.to, input.content) {
-        Ok(dispatch) => ContentBlock::ToolResult {
+        Ok(teammate) => ContentBlock::ToolResult {
             tool_use_id: call.id,
-            content: format!("Sent message to '{}'", dispatch.teammate).into(),
+            content: format!("Sent message to '{teammate}'").into(),
             is_error: false,
         },
         Err(error) => ContentBlock::ToolResult {
@@ -100,16 +100,12 @@ pub(super) fn execute_team_broadcast(agent: &mut Agent, call: ToolCall) -> Conte
     };
 
     match agent.broadcast_team_message(input.content) {
-        Ok(dispatches) => ContentBlock::ToolResult {
+        Ok(recipients) => ContentBlock::ToolResult {
             tool_use_id: call.id,
             content: format!(
                 "Broadcast message sent to {} recipient(s): {}",
-                dispatches.len(),
-                dispatches
-                    .into_iter()
-                    .map(|dispatch| dispatch.teammate)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                recipients.len(),
+                recipients.join(", ")
             )
             .into(),
             is_error: false,

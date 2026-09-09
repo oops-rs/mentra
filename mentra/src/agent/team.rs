@@ -7,8 +7,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::error::RuntimeError;
 use crate::runtime::task::TaskIntrinsicTool;
 use crate::team::{
-    TEAMMATE_MAX_ROUNDS, TeamDispatch, TeamIntrinsicTool, TeamMemberStatus, TeamMemberSummary,
-    TeamMessage, TeamProtocolRequestSummary, build_teammate_system_prompt,
+    TEAMMATE_MAX_ROUNDS, TeamIntrinsicTool, TeamMemberStatus, TeamMemberSummary, TeamMessage,
+    TeamProtocolRequestSummary, build_teammate_system_prompt,
 };
 
 use super::{Agent, AgentSpawnOptions, TeammateIdentity};
@@ -117,7 +117,7 @@ impl Agent {
         &self,
         to: &str,
         content: impl Into<String>,
-    ) -> Result<TeamDispatch, RuntimeError> {
+    ) -> Result<String, RuntimeError> {
         self.runtime.send_team_message(
             self.config.team.team_dir.as_path(),
             &self.name,
@@ -129,7 +129,7 @@ impl Agent {
     pub fn broadcast_team_message(
         &self,
         content: impl Into<String>,
-    ) -> Result<Vec<TeamDispatch>, RuntimeError> {
+    ) -> Result<Vec<String>, RuntimeError> {
         self.runtime.broadcast_team_message(
             self.config.team.team_dir.as_path(),
             &self.name,

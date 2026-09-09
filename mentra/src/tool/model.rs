@@ -14,7 +14,7 @@ use crate::agent::{
     SpawnedAgentSummary,
 };
 use crate::runtime::{RuntimeError, TaskIntrinsicTool, TaskItem};
-use crate::team::{TeamDispatch, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary};
+use crate::team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary};
 use crate::tool::ToolAuthorizationPreview;
 
 use super::descriptor::RuntimeToolDescriptor;
@@ -424,14 +424,14 @@ impl ToolContext<'_> {
         &self,
         to: &str,
         content: impl Into<String>,
-    ) -> Result<TeamDispatch, RuntimeError> {
+    ) -> Result<String, RuntimeError> {
         self.agent.send_team_message(to, content)
     }
 
     pub fn broadcast_team_message(
         &self,
         content: impl Into<String>,
-    ) -> Result<Vec<TeamDispatch>, RuntimeError> {
+    ) -> Result<Vec<String>, RuntimeError> {
         self.agent.broadcast_team_message(content)
     }
 

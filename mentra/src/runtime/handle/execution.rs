@@ -183,7 +183,7 @@ impl RuntimeHandle {
         sender: &str,
         to: &str,
         content: String,
-    ) -> Result<TeamDispatch, RuntimeError> {
+    ) -> Result<String, RuntimeError> {
         self.collaboration
             .team
             .send_message(team_dir, sender, to, content)
@@ -194,7 +194,7 @@ impl RuntimeHandle {
         team_dir: &Path,
         sender: &str,
         content: String,
-    ) -> Result<Vec<TeamDispatch>, RuntimeError> {
+    ) -> Result<Vec<String>, RuntimeError> {
         self.collaboration
             .team
             .broadcast_message(team_dir, sender, content)

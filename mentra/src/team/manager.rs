@@ -9,9 +9,8 @@ use std::{
 };
 
 use super::{
-    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamObserverSink,
-    TeamProtocolRequestSummary, TeamProtocolStatus, TeamRegistration, TeamRequestFilter,
-    TeammateActorHandle,
+    TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamObserverSink, TeamProtocolRequestSummary,
+    TeamProtocolStatus, TeamRegistration, TeamRequestFilter, TeammateActorHandle,
 };
 use crate::runtime::RuntimeStore;
 
@@ -219,7 +218,7 @@ impl TeamManager {
         sender: &str,
         to: &str,
         content: String,
-    ) -> Result<TeamDispatch, RuntimeError> {
+    ) -> Result<String, RuntimeError> {
         let (wake_tx, notification) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
             let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
@@ -249,9 +248,7 @@ impl TeamManager {
         }
         self.publish_inbox_notification(notification);
 
-        Ok(TeamDispatch {
-            teammate: to.to_string(),
-        })
+        Ok(to.to_string())
     }
 
     pub(crate) fn broadcast_message(
@@ -259,7 +256,7 @@ impl TeamManager {
         team_dir: &Path,
         sender: &str,
         content: String,
-    ) -> Result<Vec<TeamDispatch>, RuntimeError> {
+    ) -> Result<Vec<String>, RuntimeError> {
         let (recipients, wake_txs, notifications) = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");
             let team = ensure_team_state(&self.inner.store, &mut state, team_dir)?;
@@ -301,10 +298,7 @@ impl TeamManager {
             self.publish_inbox_notification(notification);
         }
 
-        Ok(recipients
-            .into_iter()
-            .map(|teammate| TeamDispatch { teammate })
-            .collect())
+        Ok(recipients)
     }
 
     pub(crate) fn read_inbox(

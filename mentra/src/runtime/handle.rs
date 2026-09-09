@@ -30,8 +30,8 @@ use crate::{
         task::{self, TaskAccess},
     },
     team::{
-        TeamDispatch, TeamManager, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary,
-        TeamRequestFilter, TeammateHost,
+        TeamManager, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary, TeamRequestFilter,
+        TeammateHost,
     },
     tool::{ExecutableTool, ToolAudience, ToolAuthorizer, ToolRegistry},
 };

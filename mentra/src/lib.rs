@@ -77,8 +77,8 @@ pub use session::{
     SessionStatus, SubagentHandle,
 };
 pub use team::{
-    TeamDispatch, TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind,
-    TeamProtocolRequestSummary, TeamProtocolStatus,
+    TeamMemberStatus, TeamMemberSummary, TeamMessage, TeamMessageKind, TeamProtocolRequestSummary,
+    TeamProtocolStatus,
 };
 pub use tool::{AudienceToolRegistration, FileToolProfile, PreparedTool, ToolAudience};
 pub use transcript::{
