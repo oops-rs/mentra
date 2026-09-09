@@ -11,7 +11,6 @@ use super::{
     recovery::RecoveryOutcome,
     snapshot::AgentSnapshotMemoryView,
     state::{AgentMemoryState, PendingTurnState, RunMemoryState},
-    store::AgentMemoryStore,
 };
 
 #[derive(Debug, Clone)]
@@ -215,7 +214,7 @@ impl AgentMemory {
 
     fn persist(&mut self) -> Result<(), RuntimeError> {
         self.state.revision = self.state.revision.saturating_add(1);
-        self.store.save_memory(&self.agent_id, &self.state)
+        self.store.save_agent_memory(&self.agent_id, &self.state)
     }
 }
 

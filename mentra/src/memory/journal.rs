@@ -2,7 +2,6 @@ mod ops;
 mod recovery;
 mod snapshot;
 mod state;
-mod store;
 #[cfg(test)]
 mod tests;
 
