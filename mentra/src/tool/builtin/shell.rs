@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 
 use crate::tool::{
     ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory, ToolAuthorizationPreview,
-    ToolCapability, ToolDefinition, ToolDurability, ToolExecutionCategory, ToolExecutor,
-    ToolResult, ToolSideEffectLevel, context::RuntimeContext,
+    ToolCapability, ToolContext, ToolDefinition, ToolDurability, ToolExecutionCategory,
+    ToolExecutor, ToolResult, ToolSideEffectLevel,
 };
 
 pub struct ShellTool;
@@ -159,7 +159,7 @@ fn shell_authorization_preview(
     })
 }
 
-fn emit_output_progress<C: RuntimeContext>(ctx: &C, output: &crate::runtime::CommandOutput) {
+fn emit_output_progress(ctx: &ToolContext<'_>, output: &crate::runtime::CommandOutput) {
     if !output.stdout.is_empty() {
         for line in output.stdout.lines() {
             ctx.emit_progress(format!("stdout: {line}"));
@@ -172,10 +172,7 @@ fn emit_output_progress<C: RuntimeContext>(ctx: &C, output: &crate::runtime::Com
     }
 }
 
-async fn execute_shell_command<C>(ctx: &C, input: Value) -> ToolResult
-where
-    C: RuntimeContext + Sync,
-{
+async fn execute_shell_command(ctx: &ToolContext<'_>, input: Value) -> ToolResult {
     let ShellCommandInput {
         command,
         working_directory,
@@ -215,10 +212,7 @@ where
     }
 }
 
-async fn execute_background_command<C>(ctx: &C, input: Value) -> ToolResult
-where
-    C: RuntimeContext + Sync,
-{
+async fn execute_background_command(ctx: &ToolContext<'_>, input: Value) -> ToolResult {
     let ShellCommandInput {
         command,
         working_directory,
@@ -251,7 +245,7 @@ impl ToolExecutor for ShellTool {
         shell_authorization_preview(ctx, input, false, self.descriptor())
     }
 
-    async fn execute_mut(&self, ctx: crate::tool::ToolContext<'_>, input: Value) -> ToolResult {
+    async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         execute_shell_command(&ctx, input).await
     }
 }
@@ -272,7 +266,7 @@ impl ToolExecutor for BackgroundRunTool {
         shell_authorization_preview(ctx, input, true, self.descriptor())
     }
 
-    async fn execute_mut(&self, ctx: crate::tool::ToolContext<'_>, input: Value) -> ToolResult {
+    async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         execute_background_command(&ctx, input).await
     }
 }

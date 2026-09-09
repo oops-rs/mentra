@@ -3,7 +3,6 @@ mod authorization;
 pub mod bash_validation;
 mod builtin;
 mod coding;
-mod context;
 mod descriptor;
 mod files;
 mod forwarding;
