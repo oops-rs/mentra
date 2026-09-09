@@ -448,7 +448,7 @@ async fn disposable_subagents_inherit_the_session_policy() {
                     task_id,
                     status: TaskLifecycleStatus::Finished,
                     ..
-                } if task_id == subagent.task_id => break,
+                } if task_id == subagent.agent_id => break,
                 _ => continue,
             }
         }

@@ -12,6 +12,12 @@
 - **Source-breaking:** exhaustive `SessionResumeOptions` struct literals must
   add `runtime_identifier: None` or use `..Default::default()`.
 
+### Removed duplicate `SubagentHandle::task_id`
+
+- **Source-breaking:** `SubagentHandle::task_id` is removed. It always held the
+  same value as `agent_id`, which is the identifier reported as the `task_id`
+  of the subagent's `SessionEvent::TaskUpdated` events.
+
 ### Removed unused `CancellationFlag` alias
 
 - **Source-breaking:** the `mentra::runtime::CancellationFlag` type alias is

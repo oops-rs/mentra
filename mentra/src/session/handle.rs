@@ -34,9 +34,10 @@ pub type SessionEventReceiver = broadcast::Receiver<SessionEvent>;
 /// Handle returned from `Session::spawn_subagent` for tracking spawned work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentHandle {
-    /// Unique identifier for the spawned task.
-    pub task_id: String,
     /// The subagent's internal agent identifier.
+    ///
+    /// It is also the `task_id` carried by [`SessionEvent::TaskUpdated`] for
+    /// this subagent, so it is the key for correlating those events.
     pub agent_id: String,
 }
 
@@ -878,7 +879,6 @@ impl Session {
         });
 
         let handle = SubagentHandle {
-            task_id: agent_id.clone(),
             agent_id: agent_id.clone(),
         };
 
