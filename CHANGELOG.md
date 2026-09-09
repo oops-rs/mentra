@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### MCP clients share one dispatch mechanism
+
+- `McpBridgedTool::new` is no longer generic over the transport; it takes
+  `Arc<dyn McpToolClient>`. Call sites passing a concrete `Arc<McpStdioClient>`
+  or `Arc<McpSseClient>` are unaffected, because the `Arc` coerces at the
+  argument position.
+- The sealed `McpToolClient` trait gains a `shutdown` method, replacing the
+  manager's private transport enum. The trait is sealed, so no out-of-crate
+  implementor exists to update.
+
 ### Resumed sessions can opt into a different runtime namespace
 
 - `SessionResumeOptions::runtime_identifier` lets a host rehome a legacy or

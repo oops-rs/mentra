@@ -22,9 +22,10 @@ use super::streamable_http::client::McpStreamableHttpClient;
 /// flattens them to a message rather than forcing a shared error enum on the
 /// public clients.
 ///
-/// This is a sealed trait: it is public only so that
-/// [`McpBridgedTool::new`] can be generic over the transport, and it is not
-/// implementable outside this crate.
+/// This is the transport-independent surface that [`McpBridgedTool`] and
+/// [`McpManager`](super::manager::McpManager) both hold their clients behind.
+/// It is a sealed trait: public only because those types expose it in their
+/// signatures, and not implementable outside this crate.
 #[async_trait]
 pub trait McpToolClient: sealed::Sealed + Send + Sync {
     /// Calls one tool, rendering any transport failure as a message.
@@ -33,6 +34,9 @@ pub trait McpToolClient: sealed::Sealed + Send + Sync {
         tool_name: &str,
         arguments: Option<Value>,
     ) -> Result<McpToolCallResult, String>;
+
+    /// Closes the connection.
+    async fn shutdown(&self);
 }
 
 mod sealed {
@@ -58,6 +62,10 @@ impl McpToolClient for McpStdioClient {
             .await
             .map_err(|error| error.to_string())
     }
+
+    async fn shutdown(&self) {
+        McpStdioClient::shutdown(self).await
+    }
 }
 
 #[async_trait]
@@ -71,6 +79,10 @@ impl McpToolClient for McpSseClient {
             .await
             .map_err(|error| error.to_string())
     }
+
+    async fn shutdown(&self) {
+        McpSseClient::shutdown(self).await
+    }
 }
 
 #[async_trait]
@@ -83,6 +95,10 @@ impl McpToolClient for McpStreamableHttpClient {
         McpStreamableHttpClient::call_tool(self, tool_name, arguments)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    async fn shutdown(&self) {
+        McpStreamableHttpClient::shutdown(self).await
     }
 }
 
@@ -185,16 +201,10 @@ pub struct McpBridgedTool {
 impl McpBridgedTool {
     /// Wraps one tool from a connected MCP server.
     ///
-    /// The client is generic over the transport, so this accepts an
-    /// `Arc<McpStdioClient>` and an `Arc<McpSseClient>` alike.
-    pub fn new<C>(server_name: String, tool_def: McpToolDefinition, client: Arc<C>) -> Self
-    where
-        C: McpToolClient + 'static,
-    {
-        Self::from_client(server_name, tool_def, client)
-    }
-
-    fn from_client(
+    /// An `Arc<McpStdioClient>` and an `Arc<McpSseClient>` alike coerce to the
+    /// trait object at the call site, so existing callers pass their concrete
+    /// client unchanged.
+    pub fn new(
         server_name: String,
         tool_def: McpToolDefinition,
         client: Arc<dyn McpToolClient>,
@@ -204,15 +214,6 @@ impl McpBridgedTool {
             tool_def,
             client,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_for_test(
-        server_name: String,
-        tool_def: McpToolDefinition,
-        client: Arc<dyn McpToolClient>,
-    ) -> Self {
-        Self::from_client(server_name, tool_def, client)
     }
 
     fn full_name(&self) -> String {

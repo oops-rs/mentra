@@ -38,6 +38,8 @@ impl McpToolClient for SuccessfulMcpClient {
             is_error: false,
         })
     }
+
+    async fn shutdown(&self) {}
 }
 
 struct MatchingCustomTool {
@@ -137,7 +139,7 @@ async fn bridged_output_is_truncated_before_the_next_provider_request() {
         .text("done")
         .build()
         .expect("build mock runtime");
-    mock.runtime().register_tool(McpBridgedTool::new_for_test(
+    mock.runtime().register_tool(McpBridgedTool::new(
         "fake".to_string(),
         McpToolDefinition {
             name: "large_output".to_string(),

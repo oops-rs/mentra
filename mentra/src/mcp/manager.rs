@@ -41,74 +41,13 @@ pub struct McpServerSummary {
     pub error: Option<String>,
 }
 
-/// A connected client, whichever transport it speaks.
-///
-/// The manager needs more than [`McpToolClient`] provides — it reports server
-/// versions and shuts connections down — so the transports are held in an enum
-/// rather than behind that trait.
-enum TransportClient {
-    Stdio(Arc<McpStdioClient>),
-    Sse(Arc<McpSseClient>),
-    StreamableHttp(Arc<McpStreamableHttpClient>),
-}
-
-impl TransportClient {
-    /// The server version reported by the `initialize` handshake.
-    fn server_version(&self) -> Option<String> {
-        match self {
-            Self::Stdio(client) => client.server_info().map(|info| info.version.clone()),
-            Self::Sse(client) => client.server_info().map(|info| info.version.clone()),
-            Self::StreamableHttp(client) => client.server_info().map(|info| info.version.clone()),
-        }
-    }
-
-    /// Closes the connection.
-    async fn shutdown(&self) {
-        match self {
-            Self::Stdio(client) => client.shutdown().await,
-            Self::Sse(client) => client.shutdown().await,
-            Self::StreamableHttp(client) => client.shutdown().await,
-        }
-    }
-
-    /// Calls a tool, flattening the transport's error to a message.
-    async fn call_tool(
-        &self,
-        tool_name: &str,
-        arguments: Option<serde_json::Value>,
-    ) -> Result<super::protocol::McpToolCallResult, String> {
-        match self {
-            Self::Stdio(client) => McpToolClient::call_tool(&**client, tool_name, arguments).await,
-            Self::Sse(client) => McpToolClient::call_tool(&**client, tool_name, arguments).await,
-            Self::StreamableHttp(client) => {
-                McpToolClient::call_tool(&**client, tool_name, arguments).await
-            }
-        }
-    }
-
-    /// Bridges every advertised tool into a runtime tool.
-    fn bridge(&self, server_name: &str, tools: &[McpToolDefinition]) -> Vec<McpBridgedTool> {
-        tools
-            .iter()
-            .map(|tool| match self {
-                Self::Stdio(client) => {
-                    McpBridgedTool::new(server_name.to_string(), tool.clone(), client.clone())
-                }
-                Self::Sse(client) => {
-                    McpBridgedTool::new(server_name.to_string(), tool.clone(), client.clone())
-                }
-                Self::StreamableHttp(client) => {
-                    McpBridgedTool::new(server_name.to_string(), tool.clone(), client.clone())
-                }
-            })
-            .collect()
-    }
-}
-
 /// Tracks a connected MCP server.
 struct ConnectedServer {
-    client: TransportClient,
+    client: Arc<dyn McpToolClient>,
     tools: Vec<McpToolDefinition>,
+    /// Version reported by the `initialize` handshake, snapshotted at connect
+    /// time; the client never revises it afterwards.
+    server_version: Option<String>,
 }
 
 /// Manages the lifecycle of multiple MCP server processes.
@@ -146,9 +85,10 @@ impl McpManager {
         })?;
 
         let tools = client.tools().to_vec();
-        let client = TransportClient::Stdio(Arc::new(client));
+        let server_version = client.server_info().map(|info| info.version.clone());
+        let client: Arc<dyn McpToolClient> = Arc::new(client);
 
-        Ok(self.register(config.name.clone(), client, tools))
+        Ok(self.register(config.name.clone(), client, tools, server_version))
     }
 
     /// Connect to an MCP server over the legacy HTTP+SSE transport and discover
@@ -170,9 +110,10 @@ impl McpManager {
         })?;
 
         let tools = client.tools().to_vec();
-        let client = TransportClient::Sse(Arc::new(client));
+        let server_version = client.server_info().map(|info| info.version.clone());
+        let client: Arc<dyn McpToolClient> = Arc::new(client);
 
-        Ok(self.register(config.name.clone(), client, tools))
+        Ok(self.register(config.name.clone(), client, tools, server_version))
     }
 
     /// Connect to an MCP server over the Streamable HTTP transport and discover
@@ -198,21 +139,33 @@ impl McpManager {
             })?;
 
         let tools = client.tools().to_vec();
-        let client = TransportClient::StreamableHttp(Arc::new(client));
+        let server_version = client.server_info().map(|info| info.version.clone());
+        let client: Arc<dyn McpToolClient> = Arc::new(client);
 
-        Ok(self.register(config.name.clone(), client, tools))
+        Ok(self.register(config.name.clone(), client, tools, server_version))
     }
 
     /// Records a connected server and bridges its tools.
     fn register(
         &mut self,
         name: String,
-        client: TransportClient,
+        client: Arc<dyn McpToolClient>,
         tools: Vec<McpToolDefinition>,
+        server_version: Option<String>,
     ) -> Vec<McpBridgedTool> {
-        let bridged = client.bridge(&name, &tools);
+        let bridged: Vec<McpBridgedTool> = tools
+            .iter()
+            .map(|tool| McpBridgedTool::new(name.clone(), tool.clone(), client.clone()))
+            .collect();
         self.errors.remove(&name);
-        self.servers.insert(name, ConnectedServer { client, tools });
+        self.servers.insert(
+            name,
+            ConnectedServer {
+                client,
+                tools,
+                server_version,
+            },
+        );
         bridged
     }
 
@@ -239,7 +192,7 @@ impl McpManager {
             .map(|(name, server)| McpServerSummary {
                 name: name.clone(),
                 status: McpServerStatus::Connected,
-                server_version: server.client.server_version(),
+                server_version: server.server_version.clone(),
                 tool_count: server.tools.len(),
                 error: None,
             })
