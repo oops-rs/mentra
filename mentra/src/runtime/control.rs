@@ -23,4 +23,4 @@ pub use hooks::{
 };
 pub(crate) use policy::ShellValidation;
 pub use policy::{RuntimePolicy, ShellValidationMode, normalize_policy_root};
-pub use run::{CancellationFlag, CancellationToken, EarlyEnd, ProviderRetry, RunOptions};
+pub use run::{CancellationToken, EarlyEnd, ProviderRetry, RunOptions};

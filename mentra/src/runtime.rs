@@ -32,8 +32,8 @@ use mentra_provider::{BuiltinProvider, ModelInfo, ModelSelector, ProviderDescrip
 pub use builder::RuntimeBuilder;
 pub use control::sandbox::{ExecutionEnvironment, detect_environment};
 pub use control::{
-    AfterDecision, AuditHook, AuditLogHook, BeforeDecision, CancellationFlag, CancellationToken,
-    CommandOutput, CommandRequest, CommandSpec, EarlyEnd, ExecOutput, ExecutionHookParticipant,
+    AfterDecision, AuditHook, AuditLogHook, BeforeDecision, CancellationToken, CommandOutput,
+    CommandRequest, CommandSpec, EarlyEnd, ExecOutput, ExecutionHookParticipant,
     ExecutionHookRegistration, ExecutionHookSnapshot, ExecutionHooks, HookDecision,
     LocalRuntimeExecutor, PostExecutionContext, PostExecutionHook, PostExecutionHookRegistration,
     PostExecutionHooks, PreExecutionContext, PreExecutionHook, PreExecutionHookRegistration,

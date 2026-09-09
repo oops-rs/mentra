@@ -163,8 +163,6 @@ impl std::fmt::Debug for CancellationToken {
     }
 }
 
-pub type CancellationFlag = CancellationToken;
-
 impl CancellationToken {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);

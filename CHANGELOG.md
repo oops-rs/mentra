@@ -12,6 +12,11 @@
 - **Source-breaking:** exhaustive `SessionResumeOptions` struct literals must
   add `runtime_identifier: None` or use `..Default::default()`.
 
+### Removed unused `CancellationFlag` alias
+
+- **Source-breaking:** the `mentra::runtime::CancellationFlag` type alias is
+  removed; use `mentra::runtime::CancellationToken`, which it aliased.
+
 ### Removed unused compaction type aliases
 
 - **Source-breaking:** the `mentra::agent` aliases `ContextCompactionConfig`,
