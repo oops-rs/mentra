@@ -66,6 +66,16 @@
 - `Provider` is now implemented for `Arc<dyn Provider>`, so the results go
   straight into `RuntimeBuilder::with_provider_instance` and
   `Runtime::register_provider_instance` as before.
+- **Behavior change (Anthropic, Gemini):** the removed `AnthropicProvider` and
+  `GeminiProvider` wrappers did not forward `compact`, so provider-native
+  history compaction always failed with `UnsupportedCapability` and the
+  compaction engine silently fell back to local summarization even though both
+  providers advertise `supports_history_compaction`. Without the wrappers the
+  `compact` call now reaches the real provider, so runtimes built with
+  `with_anthropic` / `with_gemini` compact remotely under
+  `CompactionMode::PreferRemote` and report `CompactionExecutionMode::Remote`
+  where they previously reported `Local`. Set `CompactionMode::LocalOnly` (the default) to keep
+  the old behavior.
 
 ### Agent state no longer carries an empty `compaction` key
 
