@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### A failed Responses stream is retryable when the failure is the provider's
+
+- `response.failed` and stream `error` events used to map to
+  `ProviderError::MalformedStream` unconditionally, which the runtime treats as
+  terminal: no in-stream retry, no model fallback. That is right for a request
+  the caller must fix (`invalid_prompt`, a bad parameter) and wrong for a
+  failure that is the provider's own. An event whose error `code` is
+  `server_error`, `rate_limit_exceeded`, `overloaded`, `timeout`, or
+  `upstream_error` — or one with no code whose message reports a transport
+  failure (a relay's "Upstream websocket read failed … Connection reset")
+  — now maps to `ProviderError::Retryable`. Every other failed response
+  still surfaces as `MalformedStream`.
+- `ResponsesErrorBody` now reads the event's `code` alongside `message`.
+- The stream-level `error` event is now actually recognised: its enum variant
+  lacked `#[serde(rename = "error")]`, so a `"type": "error"` frame fell
+  through to `Unknown` and the stream went quiet instead of failing. Both the
+  API's flat `code`/`message` shape and a wrapped `error` object are read.
+
 ## 0.28.0 / mentra-provider 0.9.0
 
 ### Removed the `RegisteredProvider` alias

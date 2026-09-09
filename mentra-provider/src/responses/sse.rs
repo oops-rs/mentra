@@ -414,21 +414,27 @@ pub(crate) fn parse_json_event(
             events.push(ProviderEvent::MessageStopped);
             Ok(events)
         }
-        ResponsesStreamEvent::ResponseFailed { response } => {
-            Err(ProviderError::MalformedStream(format!(
-                "responses response failed{}",
-                response
-                    .error_message()
-                    .map(|message| format!(": {message}"))
-                    .unwrap_or_default()
-            )))
-        }
-        ResponsesStreamEvent::Error { message, error } => Err(ProviderError::MalformedStream(
-            error
-                .and_then(|error| error.message)
-                .or(message)
-                .unwrap_or_else(|| "responses stream error".to_string()),
+        ResponsesStreamEvent::ResponseFailed { response } => Err(failed_response_error(
+            response.error_code(),
+            response
+                .error_message()
+                .map(|message| format!("responses response failed: {message}"))
+                .unwrap_or_else(|| "responses response failed".to_string()),
         )),
+        ResponsesStreamEvent::Error {
+            code,
+            message,
+            error,
+        } => {
+            let code = error.as_ref().and_then(|error| error.code.clone()).or(code);
+            Err(failed_response_error(
+                code.as_deref(),
+                error
+                    .and_then(|error| error.message)
+                    .or(message)
+                    .unwrap_or_else(|| "responses stream error".to_string()),
+            ))
+        }
         ResponsesStreamEvent::Unknown => Ok(Vec::new()),
     }
 }
@@ -511,7 +517,15 @@ enum ResponsesStreamEvent {
     ResponseIncomplete { response: ResponsesResponseEnvelope },
     #[serde(rename = "response.failed")]
     ResponseFailed { response: ResponsesResponseEnvelope },
+    /// The stream-level `error` event. The Responses API puts `code` and
+    /// `message` at the top level; a relay may wrap them in an `error`
+    /// object instead, so both shapes are read. Without the rename this
+    /// variant never matched a `"type": "error"` frame at all — the event
+    /// fell through to `Unknown` and the stream just went quiet.
+    #[serde(rename = "error")]
     Error {
+        #[serde(default)]
+        code: Option<String>,
         #[serde(default)]
         message: Option<String>,
         #[serde(default)]
@@ -560,6 +574,10 @@ impl ResponsesResponseEnvelope {
         self.error.as_ref().and_then(|error| error.message.clone())
     }
 
+    fn error_code(&self) -> Option<&str> {
+        self.error.as_ref().and_then(|error| error.code.as_deref())
+    }
+
     fn usage(&self) -> Option<TokenUsage> {
         self.usage.as_ref().and_then(ResponsesUsage::to_token_usage)
     }
@@ -574,7 +592,67 @@ struct ResponsesIncompleteDetails {
 #[derive(Deserialize)]
 struct ResponsesErrorBody {
     #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
     message: Option<String>,
+}
+
+/// Error codes a `response.failed` / stream `error` event carries when the
+/// failure is the provider's own — the request was fine and the same one
+/// can succeed on a retry.
+const RETRYABLE_FAILURE_CODES: &[&str] = &[
+    "server_error",
+    "rate_limit_exceeded",
+    "overloaded",
+    "overloaded_error",
+    "timeout",
+    "upstream_error",
+];
+
+/// What a relay says when the failure was between it and the upstream model
+/// rather than in the request: it reports its own transport error as a
+/// failed response, usually with a message and no code at all. A request
+/// that died this way did not fail on its merits and is worth retrying.
+const TRANSPORT_FAILURE_SIGNATURES: &[&str] = &[
+    "websocket",
+    "connection reset",
+    "connection closed",
+    "read failed",
+    "timed out",
+    "temporarily unavailable",
+    "try again",
+];
+
+/// Classify a failed response or stream error event.
+///
+/// The Responses API ends a response it could not produce with
+/// `response.failed` and, for stream-level trouble, an `error` event. Both
+/// used to map to [`ProviderError::MalformedStream`], which the runtime
+/// treats as terminal — correct for a request the caller must fix (a
+/// rejected prompt, an invalid parameter), wrong for a failure that is the
+/// provider's own: a `server_error`, a rate limit, or a relay's upstream
+/// transport dying mid-stream. Those are [`ProviderError::Retryable`], so the
+/// in-stream retry and a caller's model fallback get their chance instead of
+/// the whole run giving up on a connection blip.
+fn failed_response_error(code: Option<&str>, message: String) -> ProviderError {
+    let retryable_code = code.is_some_and(|code| {
+        RETRYABLE_FAILURE_CODES
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(code))
+    });
+    let lowered = message.to_ascii_lowercase();
+    let transport_failure = code.is_none()
+        && TRANSPORT_FAILURE_SIGNATURES
+            .iter()
+            .any(|signature| lowered.contains(signature));
+    if retryable_code || transport_failure {
+        ProviderError::Retryable {
+            message,
+            delay: None,
+        }
+    } else {
+        ProviderError::MalformedStream(message)
+    }
 }
 
 #[derive(Deserialize)]
@@ -1339,6 +1417,71 @@ mod tests {
         assert!(
             matches!(&error, ProviderError::MalformedStream(message) if message.contains("upstream exploded")),
             "unexpected error: {error}"
+        );
+    }
+
+    /// A `response.failed` whose error is the provider's own fault — a
+    /// `server_error` code, or a transport failure a relay reports in the
+    /// message with no code at all (an upstream websocket reset mid-stream)
+    /// — is retryable: the same request does not fail identically again.
+    #[test]
+    fn a_failed_response_with_a_server_side_error_is_retryable() {
+        let mut state = StreamState::default();
+        let coded = parse_frame(
+            br#"data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"The server had an error"}}}"#,
+            &mut state,
+        )
+        .expect_err("a failed response is an error");
+        assert!(
+            matches!(&coded, ProviderError::Retryable { message, delay: None } if message.contains("The server had an error")),
+            "unexpected error: {coded}"
+        );
+
+        let reset = parse_frame(
+            br#"data: {"type":"response.failed","response":{"error":{"message":"Upstream websocket read failed before response.completed: WebSocket protocol error: Connection reset without closing handshake"}}}"#,
+            &mut state,
+        )
+        .expect_err("a failed response is an error");
+        assert!(
+            matches!(&reset, ProviderError::Retryable { message, .. } if message.contains("Connection reset")),
+            "unexpected error: {reset}"
+        );
+
+        let limited = parse_frame(
+            br#"data: {"type":"error","error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
+            &mut state,
+        )
+        .expect_err("a stream error event is an error");
+        assert!(
+            matches!(&limited, ProviderError::Retryable { message, .. } if message.contains("slow down")),
+            "unexpected error: {limited}"
+        );
+
+        // The Responses API's own shape: code and message at the top level.
+        let flat = parse_frame(
+            br#"data: {"type":"error","code":"server_error","message":"internal","param":null,"sequence_number":9}"#,
+            &mut state,
+        )
+        .expect_err("a stream error event is an error");
+        assert!(
+            matches!(&flat, ProviderError::Retryable { message, .. } if message == "internal"),
+            "unexpected error: {flat}"
+        );
+    }
+
+    /// A failure the caller must fix keeps failing identically, so it stays
+    /// terminal exactly as before.
+    #[test]
+    fn a_failed_response_with_a_request_error_stays_terminal() {
+        let mut state = StreamState::default();
+        let rejected = parse_frame(
+            br#"data: {"type":"response.failed","response":{"error":{"code":"invalid_prompt","message":"prompt rejected"}}}"#,
+            &mut state,
+        )
+        .expect_err("a failed response is an error");
+        assert!(
+            matches!(&rejected, ProviderError::MalformedStream(message) if message.contains("prompt rejected")),
+            "unexpected error: {rejected}"
         );
     }
 
