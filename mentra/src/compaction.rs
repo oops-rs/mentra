@@ -848,7 +848,10 @@ pub(crate) async fn cleanup_old_transcripts(dir: &Path, keep: usize) -> Result<(
     Ok(())
 }
 
-fn truncate_to_char_boundary(input: &str, max_chars: usize) -> &str {
+/// Truncate to at most `max_chars` characters without splitting one.
+///
+/// Shared with the memory engine's search-preview helper.
+pub(crate) fn truncate_to_char_boundary(input: &str, max_chars: usize) -> &str {
     if input.chars().count() <= max_chars {
         return input;
     }

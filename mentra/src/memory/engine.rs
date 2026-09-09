@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Message,
+    compaction::truncate_to_char_boundary,
     provider::ContentBlock,
     runtime::{RuntimeError, RuntimeHookEvent, RuntimeHooks, RuntimeStore, TaskItem},
 };
@@ -503,18 +504,6 @@ fn kind_label(kind: MemoryRecordKind) -> &'static str {
 
 fn preview_text(text: &str, limit: usize) -> String {
     truncate_to_char_boundary(text.trim(), limit).to_string()
-}
-
-fn truncate_to_char_boundary(input: &str, max_chars: usize) -> &str {
-    if input.chars().count() <= max_chars {
-        return input;
-    }
-
-    let mut end = input.len();
-    for (index, _) in input.char_indices().take(max_chars + 1) {
-        end = index;
-    }
-    &input[..end]
 }
 
 fn now_secs() -> i64 {
