@@ -12,6 +12,13 @@
 - **Source-breaking:** exhaustive `SessionResumeOptions` struct literals must
   add `runtime_identifier: None` or use `..Default::default()`.
 
+### Removed unused compaction type aliases
+
+- **Source-breaking:** the `mentra::agent` aliases `ContextCompactionConfig`,
+  `ContextCompactionTrigger` and `ContextCompactionDetails` are removed; use
+  `CompactionConfig`, `CompactionTrigger` and `CompactionDetails`. The persisted
+  `context_compaction` field name keeps working through its serde alias.
+
 ## 0.27.0
 
 ### Windows policy paths and MCP teardown are deterministic

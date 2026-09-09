@@ -44,15 +44,14 @@ use crate::{
 pub(crate) use team::parse_task_input;
 
 pub use config::{
-    AgentConfig, AutoCompactTrigger, CompactionConfig, ContextCompactionConfig, MemoryConfig,
-    ProjectedToolResultBudget, TaskConfig, TeamAutonomyConfig, TeamConfig, ToolProfile,
-    ToolResultPagingConfig, WorkspaceConfig,
+    AgentConfig, AutoCompactTrigger, CompactionConfig, MemoryConfig, ProjectedToolResultBudget,
+    TaskConfig, TeamAutonomyConfig, TeamConfig, ToolProfile, ToolResultPagingConfig,
+    WorkspaceConfig,
 };
 pub use events::{
-    AgentEvent, AgentSnapshot, AgentStatus, CompactionDetails, CompactionTrigger,
-    ContextCompactionDetails, ContextCompactionTrigger, ElidedToolResult, PendingToolUseSummary,
-    RequestToolResultElision, RequestToolResultElisionPolicy, SpawnedAgentStatus,
-    SpawnedAgentSummary, ToolResultContentKind, ToolResultElisionAction,
+    AgentEvent, AgentSnapshot, AgentStatus, CompactionDetails, CompactionTrigger, ElidedToolResult,
+    PendingToolUseSummary, RequestToolResultElision, RequestToolResultElisionPolicy,
+    SpawnedAgentStatus, SpawnedAgentSummary, ToolResultContentKind, ToolResultElisionAction,
 };
 pub use pending::PendingAssistantTurn;
 pub use round_strategy::{

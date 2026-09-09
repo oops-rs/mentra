@@ -66,9 +66,6 @@ pub struct CompactionDetails {
     pub summary_preview: String,
 }
 
-pub type ContextCompactionTrigger = CompactionTrigger;
-pub type ContextCompactionDetails = CompactionDetails;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultContentKind {

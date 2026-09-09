@@ -286,8 +286,6 @@ fn window_share(window: usize, percent: u8) -> usize {
     window.saturating_mul(percent.min(100) as usize) / 100
 }
 
-pub type ContextCompactionConfig = CompactionConfig;
-
 /// Bounds how much of an oversized tool result enters the model's view.
 ///
 /// A result at or below `threshold_bytes` is inserted byte-identically to a
@@ -768,7 +766,7 @@ mod tests {
             "task": TaskConfig::default(),
             "workspace": WorkspaceConfig::default(),
             "memory": MemoryConfig::default(),
-            "context_compaction": ContextCompactionConfig::default()
+            "context_compaction": CompactionConfig::default()
         }))
         .expect("deserialize config without tool profile");
 
@@ -800,7 +798,7 @@ mod tests {
             "task": TaskConfig::default(),
             "workspace": WorkspaceConfig::default(),
             "memory": MemoryConfig::default(),
-            "context_compaction": ContextCompactionConfig::default()
+            "context_compaction": CompactionConfig::default()
         }))
         .expect("deserialize config without tool search mode");
 
@@ -843,7 +841,7 @@ mod tests {
             "task": TaskConfig::default(),
             "workspace": WorkspaceConfig::default(),
             "memory": MemoryConfig::default(),
-            "context_compaction": ContextCompactionConfig::default()
+            "context_compaction": CompactionConfig::default()
         }))
         .expect("deserialize config persisted before paging existed");
 
@@ -884,7 +882,7 @@ mod tests {
             "task": TaskConfig::default(),
             "workspace": WorkspaceConfig::default(),
             "memory": MemoryConfig::default(),
-            "context_compaction": ContextCompactionConfig::default()
+            "context_compaction": CompactionConfig::default()
         }))
         .expect("deserialize config with reasoning options");
 
