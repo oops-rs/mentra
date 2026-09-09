@@ -335,7 +335,6 @@ impl TeamManager {
         &self,
         team_dir: &Path,
         agent_name: &str,
-        _messages: Vec<TeamMessage>,
     ) -> Result<(), RuntimeError> {
         let notification = {
             let mut state = self.inner.state.lock().expect("team manager poisoned");

@@ -212,11 +212,10 @@ impl RuntimeHandle {
         &self,
         team_dir: &Path,
         agent_name: &str,
-        messages: Vec<TeamMessage>,
     ) -> Result<(), RuntimeError> {
         self.collaboration
             .team
-            .requeue_messages(team_dir, agent_name, messages)
+            .requeue_messages(team_dir, agent_name)
     }
 
     pub fn acknowledge_team_messages(

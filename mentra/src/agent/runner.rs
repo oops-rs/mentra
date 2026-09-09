@@ -795,12 +795,9 @@ impl Agent {
     }
 
     pub(super) fn requeue_inflight_team_messages(&mut self) -> Result<(), RuntimeError> {
-        let messages = std::mem::take(&mut self.inflight_team_messages);
-        self.runtime.requeue_team_messages(
-            self.config.team.team_dir.as_path(),
-            &self.name,
-            messages,
-        )
+        self.inflight_team_messages.clear();
+        self.runtime
+            .requeue_team_messages(self.config.team.team_dir.as_path(), &self.name)
     }
 
     pub(super) fn inject_background_notifications(&mut self) -> Result<(), RuntimeError> {
