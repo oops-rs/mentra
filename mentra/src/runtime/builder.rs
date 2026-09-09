@@ -505,16 +505,10 @@ impl RuntimeBuilder {
         api_key: Option<String>,
     ) -> Self {
         let provider = match api_key {
-            Some(api_key) => crate::provider::openai_compatible::OpenAiCompatibleProvider::new(
-                id, base_url, api_key,
-            ),
-            None => {
-                crate::provider::openai_compatible::OpenAiCompatibleProvider::without_credentials(
-                    id, base_url,
-                )
-            }
+            Some(api_key) => crate::provider::openai_compatible::new(id, base_url, api_key),
+            None => crate::provider::openai_compatible::without_credentials(id, base_url),
         };
-        self.provider_registry.register_provider_instance(provider);
+        self.provider_registry.register_shared_provider(provider);
         self
     }
 

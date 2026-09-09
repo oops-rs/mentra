@@ -8,7 +8,7 @@ use mentra::{
         OpenAIOAuthClient, OpenAIOAuthCredentialSource, PersistentTokenStoreKind,
         selected_store_kind,
     },
-    provider::openai::OpenAIProvider,
+    provider::openai,
 };
 
 #[tokio::main]
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     let runtime = Runtime::builder()
-        .with_provider_instance(OpenAIProvider::with_credential_source(credential_source))
+        .with_provider_instance(openai::with_credential_source(credential_source))
         .build()?;
 
     let model = pick_model(&runtime).await?;

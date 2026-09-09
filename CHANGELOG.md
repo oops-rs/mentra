@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Builtin providers are constructor functions, not forwarding types
+
+- **Breaking:** the seven forwarding wrapper types in `mentra::provider` are
+  removed: `openai::OpenAIProvider`, `openrouter::OpenRouterProvider`,
+  `anthropic::AnthropicProvider`, `gemini::GeminiProvider`,
+  `openai_compatible::OpenAiCompatibleProvider`, `ollama::OllamaProvider` and
+  `lmstudio::LmStudioProvider`. Each held a single `Arc<dyn Provider>` and
+  forwarded every trait method to it verbatim.
+- Free functions returning `Arc<dyn Provider>` replace them, with the same
+  arguments and the same resulting descriptor and capabilities:
+  `openai::provider`, `openai::with_credential_source`,
+  `openai::with_shared_credential_source`, `openrouter::provider`,
+  `anthropic::provider`, `gemini::provider`, `openai_compatible::new`,
+  `openai_compatible::without_credentials`, `ollama::provider`,
+  `ollama::with_base_url`, `lmstudio::provider`, `lmstudio::with_base_url`.
+- `Provider` is now implemented for `Arc<dyn Provider>`, so the results go
+  straight into `RuntimeBuilder::with_provider_instance` and
+  `Runtime::register_provider_instance` as before.
+
 ### Agent state no longer carries an empty `compaction` key
 
 - The always-empty `CompactionState` placeholder is gone from

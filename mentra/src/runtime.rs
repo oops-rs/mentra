@@ -947,11 +947,9 @@ impl Runtime {
         self.provider_registry
             .write()
             .expect("provider registry poisoned")
-            .register_provider_instance(
-                crate::provider::openai_compatible::OpenAiCompatibleProvider::new(
-                    id, base_url, api_key,
-                ),
-            );
+            .register_shared_provider(crate::provider::openai_compatible::new(
+                id, base_url, api_key,
+            ));
     }
 
     /// Registers an OpenAI-compatible endpoint that wants no credentials, such
@@ -964,11 +962,9 @@ impl Runtime {
         self.provider_registry
             .write()
             .expect("provider registry poisoned")
-            .register_provider_instance(
-                crate::provider::openai_compatible::OpenAiCompatibleProvider::without_credentials(
-                    id, base_url,
-                ),
-            );
+            .register_shared_provider(crate::provider::openai_compatible::without_credentials(
+                id, base_url,
+            ));
     }
 
     /// Registers a custom runtime provider implementation.

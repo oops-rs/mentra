@@ -214,6 +214,50 @@ impl Provider for ProviderSessionScope {
     }
 }
 
+/// Forwards to the provider behind the pointer, so an `Arc<dyn Provider>` —
+/// what the builtin provider constructors hand back — can be passed straight to
+/// the generic `P: Provider` entry points.
+#[async_trait]
+impl Provider for Arc<dyn Provider> {
+    fn descriptor(&self) -> ProviderDescriptor {
+        (**self).descriptor()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        (**self).capabilities()
+    }
+
+    fn fresh_session_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        (**self).fresh_session_scope()
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        (**self).list_models().await
+    }
+
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        (**self).stream(request).await
+    }
+
+    async fn send(&self, request: Request<'_>) -> Result<Response, ProviderError> {
+        (**self).send(request).await
+    }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        (**self).compact(request).await
+    }
+
+    async fn summarize_memories(
+        &self,
+        request: MemorySummarizeRequest<'_>,
+    ) -> Result<MemorySummarizeResponse, ProviderError> {
+        (**self).summarize_memories(request).await
+    }
+}
+
 #[derive(Default)]
 pub struct ProviderRegistry {
     default_provider: Option<ProviderId>,
@@ -239,16 +283,12 @@ impl ProviderRegistry {
     ) -> Result<(), String> {
         let api_key = api_key.into();
         let provider: Arc<dyn Provider> = match id {
-            BuiltinProvider::Anthropic => {
-                Arc::new(anthropic::AnthropicProvider::new(api_key.clone()))
-            }
-            BuiltinProvider::Gemini => Arc::new(gemini::GeminiProvider::new(api_key.clone())),
-            BuiltinProvider::OpenAI => Arc::new(openai::OpenAIProvider::new(api_key.clone())),
-            BuiltinProvider::OpenRouter => {
-                Arc::new(openrouter::OpenRouterProvider::new(api_key.clone()))
-            }
-            BuiltinProvider::Ollama => Arc::new(ollama::OllamaProvider::new()),
-            BuiltinProvider::LmStudio => Arc::new(lmstudio::LmStudioProvider::new()),
+            BuiltinProvider::Anthropic => anthropic::provider(api_key.clone()),
+            BuiltinProvider::Gemini => gemini::provider(api_key.clone()),
+            BuiltinProvider::OpenAI => openai::provider(api_key.clone()),
+            BuiltinProvider::OpenRouter => openrouter::provider(api_key.clone()),
+            BuiltinProvider::Ollama => ollama::provider(),
+            BuiltinProvider::LmStudio => lmstudio::provider(),
         };
 
         let provider_id: ProviderId = id.into();
@@ -312,12 +352,24 @@ impl ProviderRegistry {
         self.providers.insert(id, shared_provider(provider));
     }
 
+    /// Registers an already-shared provider, avoiding a second `Arc` around the
+    /// one the builtin constructors return.
+    pub(crate) fn register_shared_provider(&mut self, provider: Arc<dyn Provider>) {
+        let id = provider.descriptor().id;
+
+        if self.default_provider.is_none() {
+            self.default_provider = Some(id.clone());
+        }
+
+        self.providers.insert(id, provider);
+    }
+
     pub(crate) fn register_ollama(&mut self) {
-        self.register_provider_instance(ollama::OllamaProvider::new());
+        self.register_shared_provider(ollama::provider());
     }
 
     pub(crate) fn register_lmstudio(&mut self) {
-        self.register_provider_instance(lmstudio::LmStudioProvider::new());
+        self.register_shared_provider(lmstudio::provider());
     }
 
     pub(crate) fn get_provider(&self, id: Option<&ProviderId>) -> Option<Arc<dyn Provider>> {
@@ -556,17 +608,8 @@ pub mod openai {
 
     use async_trait::async_trait;
 
-    use super::CompactionRequest;
-    use super::CompactionResponse;
     use super::Provider;
-    use super::ProviderCapabilities;
-    use super::ProviderDescriptor;
-    use super::ProviderError;
-    use super::ProviderEventStream;
-    use super::Request;
     use super::shared_provider;
-
-    use crate::provider::model::ModelInfo;
 
     /// Supplies OpenAI API credentials on demand.
     #[async_trait]
@@ -574,66 +617,25 @@ pub mod openai {
         async fn api_key(&self) -> Result<String, String>;
     }
 
-    #[derive(Clone)]
-    pub struct OpenAIProvider {
-        inner: Arc<dyn Provider>,
+    /// Builds the OpenAI provider from a static API key.
+    pub fn provider(api_key: impl Into<String>) -> Arc<dyn Provider> {
+        shared_provider(mentra_provider::responses::openai(api_key))
     }
 
-    impl OpenAIProvider {
-        pub fn new(api_key: impl Into<String>) -> Self {
-            Self {
-                inner: shared_provider(mentra_provider::responses::openai(api_key)),
-            }
-        }
-
-        pub fn with_credential_source(source: impl OpenAICredentialSource + 'static) -> Self {
-            Self::with_shared_credential_source(Arc::new(source))
-        }
-
-        pub fn with_shared_credential_source(source: Arc<dyn OpenAICredentialSource>) -> Self {
-            let provider = mentra_provider::responses::openai_with_credential_source(
-                OpenAICredentialAdapter { source },
-            );
-            Self {
-                inner: shared_provider(provider),
-            }
-        }
+    /// Builds the OpenAI provider from a credential source resolved per request.
+    pub fn with_credential_source(
+        source: impl OpenAICredentialSource + 'static,
+    ) -> Arc<dyn Provider> {
+        with_shared_credential_source(Arc::new(source))
     }
 
-    #[async_trait]
-    impl Provider for OpenAIProvider {
-        fn descriptor(&self) -> ProviderDescriptor {
-            self.inner.descriptor()
-        }
-
-        fn capabilities(&self) -> ProviderCapabilities {
-            self.inner.capabilities()
-        }
-
-        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
-            self.inner.fresh_session_scope()
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-            self.inner.list_models().await
-        }
-
-        async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-            self.inner.stream(request).await
-        }
-        async fn compact(
-            &self,
-            request: CompactionRequest<'_>,
-        ) -> Result<CompactionResponse, ProviderError> {
-            self.inner.compact(request).await
-        }
-
-        async fn summarize_memories(
-            &self,
-            request: super::MemorySummarizeRequest<'_>,
-        ) -> Result<super::MemorySummarizeResponse, ProviderError> {
-            self.inner.summarize_memories(request).await
-        }
+    /// Builds the OpenAI provider from an already-shared credential source.
+    pub fn with_shared_credential_source(
+        source: Arc<dyn OpenAICredentialSource>,
+    ) -> Arc<dyn Provider> {
+        shared_provider(mentra_provider::responses::openai_with_credential_source(
+            OpenAICredentialAdapter { source },
+        ))
     }
 
     #[derive(Clone)]
@@ -664,180 +666,36 @@ pub mod openai {
 pub mod openrouter {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-
-    use super::CompactionRequest;
-    use super::CompactionResponse;
     use super::Provider;
-    use super::ProviderCapabilities;
-    use super::ProviderDescriptor;
-    use super::ProviderError;
-    use super::ProviderEventStream;
-    use super::Request;
     use super::shared_provider;
-    use crate::provider::model::ModelInfo;
 
-    #[derive(Clone)]
-    pub struct OpenRouterProvider {
-        inner: Arc<dyn Provider>,
-    }
-
-    impl OpenRouterProvider {
-        pub fn new(api_key: impl Into<String>) -> Self {
-            Self {
-                inner: shared_provider(mentra_provider::responses::openrouter(api_key)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Provider for OpenRouterProvider {
-        fn descriptor(&self) -> ProviderDescriptor {
-            self.inner.descriptor()
-        }
-
-        fn capabilities(&self) -> ProviderCapabilities {
-            self.inner.capabilities()
-        }
-
-        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
-            self.inner.fresh_session_scope()
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-            self.inner.list_models().await
-        }
-
-        async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-            self.inner.stream(request).await
-        }
-        async fn compact(
-            &self,
-            request: CompactionRequest<'_>,
-        ) -> Result<CompactionResponse, ProviderError> {
-            self.inner.compact(request).await
-        }
-
-        async fn summarize_memories(
-            &self,
-            request: super::MemorySummarizeRequest<'_>,
-        ) -> Result<super::MemorySummarizeResponse, ProviderError> {
-            self.inner.summarize_memories(request).await
-        }
+    /// Builds the OpenRouter provider from a static API key.
+    pub fn provider(api_key: impl Into<String>) -> Arc<dyn Provider> {
+        shared_provider(mentra_provider::responses::openrouter(api_key))
     }
 }
 
 pub mod anthropic {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-
     use super::Provider;
-    use super::ProviderDescriptor;
-    use super::ProviderError;
-    use super::ProviderEventStream;
-    use super::Request;
     use super::shared_provider;
-    use crate::provider::model::ModelInfo;
 
-    #[derive(Clone)]
-    pub struct AnthropicProvider {
-        inner: Arc<dyn Provider>,
-    }
-
-    impl AnthropicProvider {
-        pub fn new(api_key: impl Into<String>) -> Self {
-            Self {
-                inner: shared_provider(mentra_provider::anthropic::AnthropicProvider::new(api_key)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Provider for AnthropicProvider {
-        fn descriptor(&self) -> ProviderDescriptor {
-            self.inner.descriptor()
-        }
-
-        fn capabilities(&self) -> super::ProviderCapabilities {
-            self.inner.capabilities()
-        }
-
-        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
-            self.inner.fresh_session_scope()
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-            self.inner.list_models().await
-        }
-
-        async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-            self.inner.stream(request).await
-        }
-
-        async fn summarize_memories(
-            &self,
-            request: super::MemorySummarizeRequest<'_>,
-        ) -> Result<super::MemorySummarizeResponse, ProviderError> {
-            self.inner.summarize_memories(request).await
-        }
+    /// Builds the Anthropic provider from a static API key.
+    pub fn provider(api_key: impl Into<String>) -> Arc<dyn Provider> {
+        shared_provider(mentra_provider::anthropic::AnthropicProvider::new(api_key))
     }
 }
 
 pub mod gemini {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-
     use super::Provider;
-    use super::ProviderDescriptor;
-    use super::ProviderError;
-    use super::ProviderEventStream;
-    use super::Request;
     use super::shared_provider;
-    use crate::provider::model::ModelInfo;
 
-    #[derive(Clone)]
-    pub struct GeminiProvider {
-        inner: Arc<dyn Provider>,
-    }
-
-    impl GeminiProvider {
-        pub fn new(api_key: impl Into<String>) -> Self {
-            Self {
-                inner: shared_provider(mentra_provider::gemini::GeminiProvider::new(api_key)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Provider for GeminiProvider {
-        fn descriptor(&self) -> ProviderDescriptor {
-            self.inner.descriptor()
-        }
-
-        fn capabilities(&self) -> super::ProviderCapabilities {
-            self.inner.capabilities()
-        }
-
-        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
-            self.inner.fresh_session_scope()
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-            self.inner.list_models().await
-        }
-
-        async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-            self.inner.stream(request).await
-        }
-
-        async fn summarize_memories(
-            &self,
-            request: super::MemorySummarizeRequest<'_>,
-        ) -> Result<super::MemorySummarizeResponse, ProviderError> {
-            self.inner.summarize_memories(request).await
-        }
+    /// Builds the Gemini provider from a static API key.
+    pub fn provider(api_key: impl Into<String>) -> Arc<dyn Provider> {
+        shared_provider(mentra_provider::gemini::GeminiProvider::new(api_key))
     }
 }
 
@@ -850,259 +708,103 @@ pub mod gemini {
 pub mod openai_compatible {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-
-    use super::MemorySummarizeRequest;
-    use super::MemorySummarizeResponse;
     use super::Provider;
-    use super::ProviderCapabilities;
-    use super::ProviderDescriptor;
-    use super::ProviderError;
-    use super::ProviderEventStream;
-    use super::Request;
-    use crate::provider::model::ModelInfo;
 
-    /// A provider for one OpenAI-compatible endpoint.
+    const DESCRIPTION: &str = "OpenAI-compatible chat/completions provider";
+
+    /// Builds a provider for one OpenAI-compatible endpoint that authenticates
+    /// with a bearer token.
+    ///
+    /// `id` is the name the runtime will know this provider by, and can be
+    /// anything not already registered.
     ///
     /// ```rust,no_run
-    /// use mentra::provider::openai_compatible::OpenAiCompatibleProvider;
+    /// use mentra::provider::openai_compatible;
     ///
-    /// let deepseek = OpenAiCompatibleProvider::new(
+    /// let deepseek = openai_compatible::new(
     ///     "deepseek",
     ///     "https://api.deepseek.com/",
     ///     std::env::var("DEEPSEEK_API_KEY").unwrap(),
     /// );
     /// ```
-    #[derive(Clone)]
-    pub struct OpenAiCompatibleProvider {
-        inner: Arc<dyn Provider>,
+    pub fn new(
+        id: impl Into<mentra_provider::ProviderId>,
+        base_url: impl AsRef<str>,
+        api_key: impl Into<String>,
+    ) -> Arc<dyn Provider> {
+        let id = id.into();
+        let display_name = id.as_str().to_string();
+        super::chat_completions_provider(
+            id,
+            &display_name,
+            DESCRIPTION,
+            base_url.as_ref(),
+            Some(api_key.into()),
+        )
     }
 
-    impl OpenAiCompatibleProvider {
-        /// Registers an endpoint that authenticates with a bearer token.
-        ///
-        /// `id` is the name the runtime will know this provider by, and can be
-        /// anything not already registered.
-        pub fn new(
-            id: impl Into<mentra_provider::ProviderId>,
-            base_url: impl AsRef<str>,
-            api_key: impl Into<String>,
-        ) -> Self {
-            let id = id.into();
-            let display_name = id.as_str().to_string();
-            Self {
-                inner: super::chat_completions_provider(
-                    id,
-                    &display_name,
-                    "OpenAI-compatible chat/completions provider",
-                    base_url.as_ref(),
-                    Some(api_key.into()),
-                ),
-            }
-        }
-
-        /// Registers an endpoint that wants no credentials — a local vLLM or
-        /// llama.cpp server, say.
-        pub fn without_credentials(
-            id: impl Into<mentra_provider::ProviderId>,
-            base_url: impl AsRef<str>,
-        ) -> Self {
-            let id = id.into();
-            let display_name = id.as_str().to_string();
-            Self {
-                inner: super::chat_completions_provider(
-                    id,
-                    &display_name,
-                    "OpenAI-compatible chat/completions provider",
-                    base_url.as_ref(),
-                    None,
-                ),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Provider for OpenAiCompatibleProvider {
-        fn descriptor(&self) -> ProviderDescriptor {
-            self.inner.descriptor()
-        }
-
-        fn capabilities(&self) -> ProviderCapabilities {
-            self.inner.capabilities()
-        }
-
-        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
-            self.inner.fresh_session_scope()
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-            self.inner.list_models().await
-        }
-
-        async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-            self.inner.stream(request).await
-        }
-
-        async fn summarize_memories(
-            &self,
-            request: MemorySummarizeRequest<'_>,
-        ) -> Result<MemorySummarizeResponse, ProviderError> {
-            self.inner.summarize_memories(request).await
-        }
+    /// Builds a provider for an endpoint that wants no credentials — a local
+    /// vLLM or llama.cpp server, say.
+    pub fn without_credentials(
+        id: impl Into<mentra_provider::ProviderId>,
+        base_url: impl AsRef<str>,
+    ) -> Arc<dyn Provider> {
+        let id = id.into();
+        let display_name = id.as_str().to_string();
+        super::chat_completions_provider(id, &display_name, DESCRIPTION, base_url.as_ref(), None)
     }
 }
 
 pub mod ollama {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-
     use super::BuiltinProvider;
     use super::Provider;
-    use super::ProviderDescriptor;
-    use super::ProviderError;
-    use super::ProviderEventStream;
-    use super::Request;
-    use crate::provider::model::ModelInfo;
 
     const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/";
 
-    #[derive(Clone)]
-    pub struct OllamaProvider {
-        inner: Arc<dyn Provider>,
+    /// Builds the Ollama provider against the default local base URL.
+    pub fn provider() -> Arc<dyn Provider> {
+        with_base_url(DEFAULT_BASE_URL)
     }
 
-    impl OllamaProvider {
-        pub fn new() -> Self {
-            Self::with_base_url(DEFAULT_BASE_URL)
-        }
-
-        pub fn with_base_url(base_url: impl AsRef<str>) -> Self {
-            Self {
-                // Ollama serves `v1/chat/completions` and has never served
-                // `v1/responses`.
-                inner: super::chat_completions_provider(
-                    BuiltinProvider::Ollama,
-                    "Ollama",
-                    "Ollama OpenAI-compatible chat/completions provider",
-                    base_url.as_ref(),
-                    None,
-                ),
-            }
-        }
-    }
-
-    impl Default for OllamaProvider {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    #[async_trait]
-    impl Provider for OllamaProvider {
-        fn descriptor(&self) -> ProviderDescriptor {
-            self.inner.descriptor()
-        }
-
-        fn capabilities(&self) -> super::ProviderCapabilities {
-            self.inner.capabilities()
-        }
-
-        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
-            self.inner.fresh_session_scope()
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-            self.inner.list_models().await
-        }
-
-        async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-            self.inner.stream(request).await
-        }
-
-        async fn summarize_memories(
-            &self,
-            request: super::MemorySummarizeRequest<'_>,
-        ) -> Result<super::MemorySummarizeResponse, ProviderError> {
-            self.inner.summarize_memories(request).await
-        }
+    /// Builds the Ollama provider against a specific base URL.
+    pub fn with_base_url(base_url: impl AsRef<str>) -> Arc<dyn Provider> {
+        // Ollama serves `v1/chat/completions` and has never served
+        // `v1/responses`.
+        super::chat_completions_provider(
+            BuiltinProvider::Ollama,
+            "Ollama",
+            "Ollama OpenAI-compatible chat/completions provider",
+            base_url.as_ref(),
+            None,
+        )
     }
 }
 
 pub mod lmstudio {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-
     use super::BuiltinProvider;
     use super::Provider;
-    use super::ProviderDescriptor;
-    use super::ProviderError;
-    use super::ProviderEventStream;
-    use super::Request;
-    use crate::provider::model::ModelInfo;
 
     const DEFAULT_BASE_URL: &str = "http://127.0.0.1:1234/";
 
-    #[derive(Clone)]
-    pub struct LmStudioProvider {
-        inner: Arc<dyn Provider>,
+    /// Builds the LM Studio provider against the default local base URL.
+    pub fn provider() -> Arc<dyn Provider> {
+        with_base_url(DEFAULT_BASE_URL)
     }
 
-    impl LmStudioProvider {
-        pub fn new() -> Self {
-            Self::with_base_url(DEFAULT_BASE_URL)
-        }
-
-        pub fn with_base_url(base_url: impl AsRef<str>) -> Self {
-            Self {
-                // LM Studio's OpenAI-compatible surface is
-                // `v1/chat/completions`; only recent builds serve
-                // `v1/responses` at all.
-                inner: super::chat_completions_provider(
-                    BuiltinProvider::LmStudio,
-                    "LM Studio",
-                    "LM Studio OpenAI-compatible chat/completions provider",
-                    base_url.as_ref(),
-                    None,
-                ),
-            }
-        }
-    }
-
-    impl Default for LmStudioProvider {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    #[async_trait]
-    impl Provider for LmStudioProvider {
-        fn descriptor(&self) -> ProviderDescriptor {
-            self.inner.descriptor()
-        }
-
-        fn capabilities(&self) -> super::ProviderCapabilities {
-            self.inner.capabilities()
-        }
-
-        fn fresh_session_scope(&self) -> Result<super::ProviderSessionScope, ProviderError> {
-            self.inner.fresh_session_scope()
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-            self.inner.list_models().await
-        }
-
-        async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-            self.inner.stream(request).await
-        }
-
-        async fn summarize_memories(
-            &self,
-            request: super::MemorySummarizeRequest<'_>,
-        ) -> Result<super::MemorySummarizeResponse, ProviderError> {
-            self.inner.summarize_memories(request).await
-        }
+    /// Builds the LM Studio provider against a specific base URL.
+    pub fn with_base_url(base_url: impl AsRef<str>) -> Arc<dyn Provider> {
+        // LM Studio's OpenAI-compatible surface is `v1/chat/completions`; only
+        // recent builds serve `v1/responses` at all.
+        super::chat_completions_provider(
+            BuiltinProvider::LmStudio,
+            "LM Studio",
+            "LM Studio OpenAI-compatible chat/completions provider",
+            base_url.as_ref(),
+            None,
+        )
     }
 }
