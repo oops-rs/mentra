@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.28.0 / mentra-provider 0.9.0
 
 ### Removed the `RegisteredProvider` alias
 
