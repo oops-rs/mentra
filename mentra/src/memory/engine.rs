@@ -42,13 +42,6 @@ pub struct MemoryCursor {
     pub last_ingested_revision: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct SearchRequest {
-    pub agent_id: String,
-    pub query: String,
-    pub limit: usize,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchRequest {
     pub agent_id: String,
@@ -56,17 +49,6 @@ pub struct MemorySearchRequest {
     pub limit: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub char_budget: Option<usize>,
-}
-
-impl From<SearchRequest> for MemorySearchRequest {
-    fn from(value: SearchRequest) -> Self {
-        Self {
-            agent_id: value.agent_id,
-            query: value.query,
-            limit: value.limit,
-            char_budget: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,9 +126,8 @@ impl MemoryEngine {
 
     pub async fn search(
         &self,
-        request: impl Into<MemorySearchRequest>,
+        request: MemorySearchRequest,
     ) -> Result<Vec<MemoryHit>, RuntimeError> {
-        let request = request.into();
         let _ = self.hooks.emit_runtime(
             self.store.as_ref(),
             &RuntimeHookEvent::MemorySearchStarted {

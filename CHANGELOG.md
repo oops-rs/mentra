@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Removed the unused `SearchRequest` conversion struct
+
+- **Breaking:** `mentra::memory::SearchRequest` is removed. Nothing
+  constructed it; every caller builds a `MemorySearchRequest` directly.
+- `MemoryEngine::search` now takes `MemorySearchRequest` by value instead of
+  `impl Into<MemorySearchRequest>`.
+
 ### Removed the never-read `MemorySearchRequest::mode` knob
 
 - **Breaking:** `mentra::memory::MemorySearchMode` and the

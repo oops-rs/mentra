@@ -10,7 +10,7 @@ pub(crate) use compaction::{
 };
 pub use engine::{
     IngestOutcome, IngestRequest, MemoryCursor, MemoryEngine, MemoryHit, MemoryRecord,
-    MemoryRecordKind, MemorySearchRequest, MemoryStore, SearchRequest,
+    MemoryRecordKind, MemorySearchRequest, MemoryStore,
 };
 pub(crate) use engine::{build_search_query, recalled_memory_message};
 #[cfg(feature = "store-sqlite")]
