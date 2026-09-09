@@ -8,7 +8,6 @@ pub struct AgentMemoryState {
     pub transcript: AgentTranscript,
     pub pending_turn: Option<PendingTurnState>,
     pub resumable_user_message: Option<Message>,
-    pub compaction: CompactionState,
     pub revision: u64,
     pub run: Option<RunMemoryState>,
 }
@@ -18,9 +17,6 @@ pub struct PendingTurnState {
     pub current_text: String,
     pub pending_tool_uses: Vec<PendingToolUseSummary>,
 }
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CompactionState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunMemoryState {

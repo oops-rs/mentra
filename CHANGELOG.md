@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Agent state no longer carries an empty `compaction` key
+
+- The always-empty `CompactionState` placeholder is gone from
+  `AgentMemoryState` and from the `state.json` / SQLite state payload. Agent
+  state written by older versions still loads; state written now cannot be
+  read by an older build.
+
 ### Removed the unused `SearchRequest` conversion struct
 
 - **Breaking:** `mentra::memory::SearchRequest` is removed. Nothing

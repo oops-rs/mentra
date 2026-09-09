@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Message,
-    memory::journal::{AgentMemoryState, CompactionState, PendingTurnState, RunMemoryState},
+    memory::journal::{AgentMemoryState, PendingTurnState, RunMemoryState},
     session::PermissionRuleScope,
     transcript::{AgentTranscript, EntryId, TranscriptItem},
 };
@@ -49,8 +49,6 @@ struct StateFile {
     pending_turn: Option<PendingTurnState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resumable_user_message: Option<Message>,
-    #[serde(default)]
-    compaction: CompactionState,
     transcript: TranscriptShape,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run: Option<RunFile>,
@@ -332,7 +330,6 @@ fn decompose_memory(memory: &AgentMemoryState) -> StateFile {
         revision: memory.revision,
         pending_turn: memory.pending_turn.clone(),
         resumable_user_message: memory.resumable_user_message.clone(),
-        compaction: memory.compaction.clone(),
         transcript: shape_of(&memory.transcript),
         run: memory.run.as_ref().map(|run| RunFile {
             run_id: run.run_id.clone(),
@@ -350,7 +347,6 @@ fn compose_memory(
         transcript: transcript_from(&state.transcript, entries)?,
         pending_turn: state.pending_turn,
         resumable_user_message: state.resumable_user_message,
-        compaction: state.compaction,
         revision: state.revision,
         run: state
             .run
