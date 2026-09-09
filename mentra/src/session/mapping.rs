@@ -6,7 +6,6 @@ use crate::{
     background::{BackgroundTaskStatus, BackgroundTaskSummary},
     session::event::{EventSeq, SessionEvent, TaskKind, TaskLifecycleStatus, ToolMutability},
     team::{TeamMemberStatus, TeamMemberSummary},
-    tool::{ToolExecutionCategory, ToolSideEffectLevel},
 };
 
 /// Remembers the tool name of each in-flight call.
@@ -300,40 +299,6 @@ fn map_teammate_updated(teammate: &TeamMemberSummary) -> Vec<SessionEvent> {
         title: teammate.name.clone(),
         detail,
     }]
-}
-
-/// Collapses a classification into the read-only/mutating split.
-///
-/// Nothing calls this: [`SessionEvent::ToolQueued`] reports
-/// [`ToolMutability::Unknown`] instead, and does so on purpose.
-///
-/// Two facts stand in the way of wiring it. The first is that the classifying
-/// data is not here. `ToolUseReady` is derived while the provider stream is
-/// decoded, from a content block carrying an id, a name and input JSON;
-/// neither it nor the forwarder that maps it holds a tool registry, so
-/// reaching a descriptor's side effect level means threading a lookup into the
-/// per-event path.
-///
-/// The second is that the answer would not be worth the wiring. This function
-/// reads `Process` and `External` as the same `Mutating`, which cannot say
-/// whether a call wrote a local file or opened a socket — the distinction a
-/// host most needs. That distinction is available, typed, on
-/// [`SessionEvent::PermissionRequested`]'s
-/// [`classification`](crate::tool::ToolClassification): a call worth deciding
-/// about is a call that was asked about.
-///
-/// Kept because the mapping it encodes is the right one if `ToolQueued` ever
-/// does learn what it queued.
-#[allow(dead_code)]
-pub(crate) fn classify_mutability(
-    side_effect_level: ToolSideEffectLevel,
-    execution_category: ToolExecutionCategory,
-) -> ToolMutability {
-    match (side_effect_level, execution_category) {
-        (ToolSideEffectLevel::None, _) => ToolMutability::ReadOnly,
-        (_, ToolExecutionCategory::ReadOnlyParallel) => ToolMutability::ReadOnly,
-        _ => ToolMutability::Mutating,
-    }
 }
 
 pub(crate) fn derive_tool_summary(tool_name: &str, input_json: &str) -> String {
@@ -643,53 +608,6 @@ mod tests {
         let mapped = map_agent_event(&event, &mut seq, &mut ToolNameIndex::default());
         assert!(mapped.is_empty());
         assert_eq!(seq, 0);
-    }
-
-    // --- classify_mutability tests ---
-
-    #[test]
-    fn classify_mutability_no_side_effects_is_read_only() {
-        let result = classify_mutability(
-            ToolSideEffectLevel::None,
-            ToolExecutionCategory::ExclusiveLocalMutation,
-        );
-        assert_eq!(result, ToolMutability::ReadOnly);
-    }
-
-    #[test]
-    fn classify_mutability_read_only_parallel_is_read_only() {
-        let result = classify_mutability(
-            ToolSideEffectLevel::Process,
-            ToolExecutionCategory::ReadOnlyParallel,
-        );
-        assert_eq!(result, ToolMutability::ReadOnly);
-    }
-
-    #[test]
-    fn classify_mutability_side_effects_exclusive_is_mutating() {
-        let result = classify_mutability(
-            ToolSideEffectLevel::LocalState,
-            ToolExecutionCategory::ExclusiveLocalMutation,
-        );
-        assert_eq!(result, ToolMutability::Mutating);
-    }
-
-    #[test]
-    fn classify_mutability_external_delegation_is_mutating() {
-        let result = classify_mutability(
-            ToolSideEffectLevel::External,
-            ToolExecutionCategory::Delegation,
-        );
-        assert_eq!(result, ToolMutability::Mutating);
-    }
-
-    #[test]
-    fn classify_mutability_none_with_read_only_parallel_is_read_only() {
-        let result = classify_mutability(
-            ToolSideEffectLevel::None,
-            ToolExecutionCategory::ReadOnlyParallel,
-        );
-        assert_eq!(result, ToolMutability::ReadOnly);
     }
 
     // --- derive_tool_summary tests ---
