@@ -258,20 +258,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// Creates a new session wrapping the given agent.
-    #[allow(dead_code)]
-    pub(crate) fn new(id: SessionId, metadata: SessionMetadata, agent: Agent) -> Self {
-        let (event_tx, _) = broadcast::channel(512);
-        Self::new_with_parts(
-            id,
-            metadata,
-            agent,
-            event_tx,
-            PendingPermissionStore::new(),
-            None,
-        )
-    }
-
     pub(crate) fn new_with_parts(
         id: SessionId,
         metadata: SessionMetadata,
