@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Removed the test-only `MemoryTokenStore`
+
+- **Breaking (feature `openai-oauth`):** `mentra::auth::openai::MemoryTokenStore`
+  is removed. Nothing in the crate constructed it outside its own unit test; the
+  in-memory store now lives in that test module. The `TokenStore` trait stays
+  public, so an in-memory store is a few lines to write.
+
 ### Removed the duplicate `provider::model` re-export module
 
 - **Breaking:** `mentra::provider::model` is removed. Every item it re-exported

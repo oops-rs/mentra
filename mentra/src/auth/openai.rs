@@ -8,6 +8,6 @@ pub use client::{
 };
 pub use credential::OpenAIOAuthCredentialSource;
 pub use store::{
-    FileTokenStore, KeychainTokenStore, MemoryTokenStore, PersistentTokenStoreKind, TokenStore,
+    FileTokenStore, KeychainTokenStore, PersistentTokenStoreKind, TokenStore,
     persistent_token_store, selected_store_kind,
 };

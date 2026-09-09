@@ -2,7 +2,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 #[cfg(target_os = "macos")]
@@ -37,37 +37,6 @@ impl PersistentTokenStoreKind {
             Self::File => "file",
             Self::Keychain => "keychain",
         }
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct MemoryTokenStore {
-    state: Arc<Mutex<Option<OpenAITokenSet>>>,
-}
-
-impl MemoryTokenStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl TokenStore for MemoryTokenStore {
-    fn load(&self) -> Result<Option<OpenAITokenSet>, OpenAIOAuthError> {
-        Ok(self
-            .state
-            .lock()
-            .expect("memory token store poisoned")
-            .clone())
-    }
-
-    fn save(&self, tokens: &OpenAITokenSet) -> Result<(), OpenAIOAuthError> {
-        *self.state.lock().expect("memory token store poisoned") = Some(tokens.clone());
-        Ok(())
-    }
-
-    fn clear(&self) -> Result<(), OpenAIOAuthError> {
-        *self.state.lock().expect("memory token store poisoned") = None;
-        Ok(())
     }
 }
 
@@ -310,9 +279,42 @@ fn command_error(output: std::process::Output, command: &'static str) -> OpenAIO
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use time::{Duration, OffsetDateTime};
 
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct MemoryTokenStore {
+        state: Arc<Mutex<Option<OpenAITokenSet>>>,
+    }
+
+    impl MemoryTokenStore {
+        fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl TokenStore for MemoryTokenStore {
+        fn load(&self) -> Result<Option<OpenAITokenSet>, OpenAIOAuthError> {
+            Ok(self
+                .state
+                .lock()
+                .expect("memory token store poisoned")
+                .clone())
+        }
+
+        fn save(&self, tokens: &OpenAITokenSet) -> Result<(), OpenAIOAuthError> {
+            *self.state.lock().expect("memory token store poisoned") = Some(tokens.clone());
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<(), OpenAIOAuthError> {
+            *self.state.lock().expect("memory token store poisoned") = None;
+            Ok(())
+        }
+    }
 
     #[test]
     fn memory_store_round_trips_tokens() {
