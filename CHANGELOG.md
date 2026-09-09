@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Removed unreachable `McpServerStatus` variants
+
+- **Breaking:** `McpServerStatus::Disconnected` and `::Connecting` are removed
+  from the `mentra::McpServerStatus` re-export. Nothing ever constructed them:
+  `list_servers` reports `Connected` for a live server and `Error` for a name
+  that only failed to connect, and a disconnected server is dropped from the
+  listing rather than reported. Out-of-repo `match` arms on those variants must
+  be deleted.
+
 ### MCP clients share one dispatch mechanism
 
 - `McpBridgedTool::new` is no longer generic over the transport; it takes

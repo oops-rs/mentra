@@ -12,10 +12,14 @@ use super::streamable_http::client::{McpStreamableHttpClient, McpStreamableHttpE
 use super::streamable_http::config::McpStreamableHttpServerConfig;
 
 /// Status of an MCP server connection.
+///
+/// These are the two states [`McpManager::list_servers`] distinguishes: a live
+/// entry in `servers` reports `Connected`, and a name present only in `errors`
+/// reports `Error`. A server that is not connected is absent from the listing
+/// entirely, and connecting is synchronous within the `connect*` methods, so no
+/// intermediate state is ever observable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpServerStatus {
-    Disconnected,
-    Connecting,
     Connected,
     Error,
 }
@@ -23,8 +27,6 @@ pub enum McpServerStatus {
 impl std::fmt::Display for McpServerStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Disconnected => write!(f, "disconnected"),
-            Self::Connecting => write!(f, "connecting"),
             Self::Connected => write!(f, "connected"),
             Self::Error => write!(f, "error"),
         }
