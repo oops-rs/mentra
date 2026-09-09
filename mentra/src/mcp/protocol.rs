@@ -21,16 +21,16 @@ pub enum JsonRpcId {
 
 /// Outbound JSON-RPC 2.0 request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcRequest<T = JsonValue> {
+pub struct JsonRpcRequest {
     pub jsonrpc: String,
     pub id: JsonRpcId,
     pub method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub params: Option<T>,
+    pub params: Option<JsonValue>,
 }
 
-impl<T> JsonRpcRequest<T> {
-    pub fn new(id: u64, method: impl Into<String>, params: Option<T>) -> Self {
+impl JsonRpcRequest {
+    pub fn new(id: u64, method: impl Into<String>, params: Option<JsonValue>) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id: JsonRpcId::Number(id),
@@ -57,11 +57,11 @@ impl std::fmt::Display for JsonRpcError {
 
 /// Inbound JSON-RPC 2.0 response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcResponse<T = JsonValue> {
+pub struct JsonRpcResponse {
     pub jsonrpc: String,
     pub id: JsonRpcId,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<T>,
+    pub result: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 }
