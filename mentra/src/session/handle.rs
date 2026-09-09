@@ -19,9 +19,8 @@ use crate::{
         },
         mapping::{ToolNameIndex, map_agent_event},
         permission::{
-            ClaimedPendingPermission, PendingPermissionEntry, PendingPermissionStore,
-            PermissionDecision, PermissionRuleAddress, RememberedRule, RuleKey, RuleStore,
-            SessionToolAuthorizer,
+            PendingPermission, PendingPermissionEntry, PendingPermissionStore, PermissionDecision,
+            PermissionRuleAddress, RememberedRule, RuleKey, RuleStore, SessionToolAuthorizer,
         },
         types::{SessionId, SessionMetadata, SessionStatus},
     },
@@ -168,7 +167,7 @@ impl SessionPermissionHandle {
                 "no pending permission with request_id '{request_id}'"
             ))
         })?;
-        let ClaimedPendingPermission {
+        let PendingPermission {
             generation,
             lifecycle,
             entry,
@@ -207,7 +206,7 @@ impl SessionPermissionHandle {
             if let Err(error) = self.remember_rule(rule) {
                 let restored = self.pending_permissions.restore(
                     request_id.to_owned(),
-                    ClaimedPendingPermission {
+                    PendingPermission {
                         generation,
                         lifecycle: lifecycle.clone(),
                         entry,

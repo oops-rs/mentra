@@ -339,7 +339,7 @@ impl RuleStore {
 /// Thread-safe store for pending permission requests that can be resolved later.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PendingPermissionStore {
-    inner: Arc<Mutex<HashMap<String, StoredPendingPermission>>>,
+    inner: Arc<Mutex<HashMap<String, PendingPermission>>>,
     next_generation: Arc<AtomicU64>,
 }
 
@@ -377,7 +377,7 @@ impl PendingPermissionStore {
         entry: PendingPermissionEntry,
     ) -> PendingPermissionWaitGuard {
         let lifecycle = Arc::new(Mutex::new(true));
-        let stored = StoredPendingPermission {
+        let stored = PendingPermission {
             generation,
             lifecycle: lifecycle.clone(),
             entry,
@@ -397,19 +397,17 @@ impl PendingPermissionStore {
         }
     }
 
-    pub(crate) fn claim(&self, request_id: &str) -> Option<ClaimedPendingPermission> {
+    pub(crate) fn claim(&self, request_id: &str) -> Option<PendingPermission> {
         let mut pending = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        pending
-            .remove(request_id)
-            .map(ClaimedPendingPermission::from)
+        pending.remove(request_id)
     }
 
-    pub(crate) fn restore(&self, request_id: String, claim: ClaimedPendingPermission) -> bool {
+    pub(crate) fn restore(&self, request_id: String, claim: PendingPermission) -> bool {
         let mut pending = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if pending.contains_key(&request_id) {
             return false;
         }
-        pending.insert(request_id, claim.into());
+        pending.insert(request_id, claim);
         true
     }
 
@@ -430,37 +428,14 @@ impl PendingPermissionStore {
     }
 }
 
+/// One in-flight permission request. "Stored" and "claimed" is only whether
+/// it is currently in [`PendingPermissionStore`]'s map or held by the
+/// resolver that took it out.
 #[derive(Debug)]
-struct StoredPendingPermission {
-    generation: u64,
-    lifecycle: Arc<Mutex<bool>>,
-    entry: PendingPermissionEntry,
-}
-
-pub(crate) struct ClaimedPendingPermission {
+pub(crate) struct PendingPermission {
     pub(crate) generation: u64,
     pub(crate) lifecycle: Arc<Mutex<bool>>,
     pub(crate) entry: PendingPermissionEntry,
-}
-
-impl From<StoredPendingPermission> for ClaimedPendingPermission {
-    fn from(stored: StoredPendingPermission) -> Self {
-        Self {
-            generation: stored.generation,
-            lifecycle: stored.lifecycle,
-            entry: stored.entry,
-        }
-    }
-}
-
-impl From<ClaimedPendingPermission> for StoredPendingPermission {
-    fn from(claim: ClaimedPendingPermission) -> Self {
-        Self {
-            generation: claim.generation,
-            lifecycle: claim.lifecycle,
-            entry: claim.entry,
-        }
-    }
 }
 
 pub(crate) struct PendingPermissionWaitGuard {
