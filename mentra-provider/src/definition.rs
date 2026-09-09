@@ -134,28 +134,6 @@ impl Display for WireApi {
     }
 }
 
-/// Retry configuration for provider transport calls.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetryPolicy {
-    pub max_attempts: u64,
-    pub base_delay: Duration,
-    pub retry_429: bool,
-    pub retry_5xx: bool,
-    pub retry_transport: bool,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 5,
-            base_delay: Duration::from_millis(200),
-            retry_429: false,
-            retry_5xx: true,
-            retry_transport: true,
-        }
-    }
-}
-
 /// Serializable provider definition used by runtime and adapter layers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDefinition {
@@ -171,8 +149,6 @@ pub struct ProviderDefinition {
     pub query_params: Option<HashMap<String, String>>,
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
-    #[serde(default)]
-    pub retry: RetryPolicy,
     /// How long a stream may go without producing anything before it is
     /// treated as failed.
     ///
@@ -222,7 +198,6 @@ impl ProviderDefinition {
             base_url: None,
             query_params: None,
             headers: None,
-            retry: RetryPolicy::default(),
             stream_idle_timeout: default_stream_idle_timeout(),
             websocket_connect_timeout: default_websocket_connect_timeout(),
         }

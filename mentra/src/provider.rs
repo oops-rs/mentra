@@ -47,7 +47,6 @@ pub use mentra_provider::Response;
 pub use mentra_provider::ResponsesRequestOptions;
 pub use mentra_provider::ResponsesStateMode;
 pub use mentra_provider::ResponsesTransport;
-pub use mentra_provider::RetryPolicy;
 pub use mentra_provider::Role;
 pub use mentra_provider::TokenUsage;
 pub use mentra_provider::ToolChoice;
@@ -441,7 +440,6 @@ fn openai_compatible_embedding_provider(
 ) -> mentra_provider::responses::ResponsesProvider<NoCredentialsSource> {
     use mentra_provider::AuthScheme;
     use mentra_provider::ProviderCapabilities;
-    use mentra_provider::RetryPolicy;
     use mentra_provider::WireApi;
     use std::collections::HashMap;
 
@@ -468,7 +466,6 @@ fn openai_compatible_embedding_provider(
     };
     definition.base_url = Some(base_url.to_string());
     definition.headers = Some(HashMap::new());
-    definition.retry = RetryPolicy::default();
     mentra_provider::responses::ResponsesProvider::new(definition, NoCredentialsSource)
 }
 

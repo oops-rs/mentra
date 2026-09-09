@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Removed the unread `RetryPolicy` provider config
+
+- **Breaking:** `mentra::RetryPolicy` / `mentra_provider::RetryPolicy` and the
+  `ProviderDefinition::retry` field are removed. No code in the workspace ever
+  read the policy; per-run retry behavior is configured with
+  `RunOptions::provider_retry` (`mentra::runtime::ProviderRetry`) and is
+  unchanged. Serialized `ProviderDefinition` JSON carrying a `retry` key still
+  deserializes (the key is ignored).
+
 ### Removed two unused OAuth credential-source constructors
 
 - **Breaking (feature `openai-oauth`):**

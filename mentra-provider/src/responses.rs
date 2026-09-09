@@ -24,7 +24,6 @@ use crate::ProviderError;
 use crate::ProviderSessionFactory;
 use crate::ProviderSessionScope;
 use crate::RegisteredProvider;
-use crate::RetryPolicy;
 use crate::StaticCredentialSource;
 use crate::WireApi;
 use crate::embedding::EmbeddingModelInfo;
@@ -223,7 +222,6 @@ fn build_definition(
     };
     definition.base_url = Some(base_url.to_string());
     definition.headers = Some(HashMap::new());
-    definition.retry = RetryPolicy::default();
     definition
 }
 

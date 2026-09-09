@@ -22,7 +22,6 @@ pub use definition::ProviderCapabilities;
 pub use definition::ProviderDefinition;
 pub use definition::ProviderDescriptor;
 pub use definition::ProviderId;
-pub use definition::RetryPolicy;
 pub use definition::WireApi;
 pub use embedding::EmbeddingData;
 pub use embedding::EmbeddingModelInfo;
