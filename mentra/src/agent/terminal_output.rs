@@ -187,49 +187,17 @@ impl Agent {
         options: RunOptions,
         spec: TerminalOutputSpec,
     ) -> Result<FinalOutput<T>, RuntimeError> {
-        let tool_name = unique_tool_name(&spec.tool_name);
-        let keeps_tools = spec.keeps_tools;
-        let terminal_tool = TerminalOutputTool {
-            name: tool_name.clone(),
-            description: spec.description,
-            schema: spec.schema,
-            agent_id: self.id.clone(),
-            validator: None,
-            accepted_call_id: None,
-        };
-        let registration = self.runtime.register_agent_tool(&self.id, terminal_tool);
-        *self
-            .terminal_tool_gate
-            .lock()
-            .expect("terminal tool gate poisoned") = Some(TerminalToolGate {
-            registration: registration.registration().clone(),
-            keeps_tools,
-        });
-        let _guard = TerminalToolGuard {
-            registration,
-            gate: Arc::clone(&self.terminal_tool_gate),
-        };
-
-        let run_result = self.run(content, options).await;
-        let terminal_result = self.terminal_result(&tool_name);
-
-        match (run_result, terminal_result) {
-            (Ok(_), Some((details, message)))
-            | (Err(RuntimeError::EmptyAssistantResponse), Some((details, message))) => {
-                let value = serde_json::from_value(details).map_err(|error| {
-                    RuntimeError::MalformedProviderEvent(format!(
-                        "terminal output did not match the requested type: {error}"
-                    ))
-                })?;
-                Ok(FinalOutput { value, message })
-            }
-            (Ok(_) | Err(RuntimeError::EmptyAssistantResponse), None) => {
-                Err(RuntimeError::MalformedProviderEvent(
-                    "run completed without invoking the expected terminal tool".to_string(),
-                ))
-            }
-            (Err(error), _) => Err(error),
-        }
+        self.run_to_terminal_tool(
+            content,
+            options,
+            unique_tool_name(&spec.tool_name),
+            spec.description,
+            spec.schema,
+            spec.keeps_tools,
+            None,
+            "run completed without invoking the expected terminal tool",
+        )
+        .await
     }
 
     /// Runs to a reserved output whose candidate is validated before the
@@ -256,14 +224,47 @@ impl Agent {
             schema,
             keeps_tools,
         } = reservation;
-        let accepted_call_id = Arc::new(Mutex::new(None));
+        self.run_to_terminal_tool(
+            content,
+            options,
+            tool_name,
+            description,
+            schema,
+            keeps_tools,
+            Some(Arc::new(validator) as Arc<TerminalOutputValidator>),
+            "run completed without an accepted terminal output",
+        )
+        .await
+    }
+
+    /// Shared body of [`run_to_output`](Self::run_to_output) and
+    /// [`run_to_reserved_output`](Self::run_to_reserved_output).
+    ///
+    /// A validator implies host acceptance, so the terminal call has to be the
+    /// exact one the validator accepted; without one, any call of the generated
+    /// tool present in the transcript answers the run.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_to_terminal_tool<T: DeserializeOwned>(
+        &mut self,
+        content: impl Into<Vec<ContentBlock>>,
+        options: RunOptions,
+        tool_name: String,
+        description: String,
+        schema: Value,
+        keeps_tools: bool,
+        validator: Option<Arc<TerminalOutputValidator>>,
+        missing_output_error: &str,
+    ) -> Result<FinalOutput<T>, RuntimeError> {
+        let accepted_call_id = validator
+            .is_some()
+            .then(|| Arc::new(Mutex::new(None::<String>)));
         let terminal_tool = TerminalOutputTool {
             name: tool_name.clone(),
             description,
             schema,
             agent_id: self.id.clone(),
-            validator: Some(Arc::new(validator)),
-            accepted_call_id: Some(Arc::clone(&accepted_call_id)),
+            validator,
+            accepted_call_id: accepted_call_id.clone(),
         };
         let registration = self.runtime.register_agent_tool(&self.id, terminal_tool);
         *self
@@ -279,13 +280,14 @@ impl Agent {
         };
 
         let run_result = self.run(content, options).await;
-        let accepted = accepted_call_id
-            .lock()
-            .expect("accepted terminal call poisoned")
-            .clone();
-        let terminal_result = accepted
-            .as_deref()
-            .and_then(|call_id| self.terminal_result_for_call(&tool_name, call_id));
+        let terminal_result = match &accepted_call_id {
+            None => self.terminal_result(&tool_name, None),
+            Some(cell) => cell
+                .lock()
+                .expect("accepted terminal call poisoned")
+                .clone()
+                .and_then(|call_id| self.terminal_result(&tool_name, Some(&call_id))),
+        };
 
         match (run_result, terminal_result) {
             (Ok(_), Some((details, message)))
@@ -297,16 +299,21 @@ impl Agent {
                 })?;
                 Ok(FinalOutput { value, message })
             }
-            (Ok(_) | Err(RuntimeError::EmptyAssistantResponse), None) => {
-                Err(RuntimeError::MalformedProviderEvent(
-                    "run completed without an accepted terminal output".to_string(),
-                ))
-            }
+            (Ok(_) | Err(RuntimeError::EmptyAssistantResponse), None) => Err(
+                RuntimeError::MalformedProviderEvent(missing_output_error.to_string()),
+            ),
             (Err(error), _) => Err(error),
         }
     }
 
-    fn terminal_result(&self, tool_name: &str) -> Option<(Value, Message)> {
+    /// The committed detail of a terminal call of `tool_name` in the last
+    /// transcript item, narrowed to `accepted_call_id` when the host accepted
+    /// one specific call.
+    fn terminal_result(
+        &self,
+        tool_name: &str,
+        accepted_call_id: Option<&str>,
+    ) -> Option<(Value, Message)> {
         // Generated names include a per-call timestamp and counter, so scanning
         // the whole transcript remains stale-safe even if auto-compaction
         // replaced earlier items and changed every numeric index during the run.
@@ -317,7 +324,12 @@ impl Agent {
             .filter(|message| message.role == Role::Assistant)
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {
-                ContentBlock::ToolUse { id, name, .. } if name == tool_name => Some(id.clone()),
+                ContentBlock::ToolUse { id, name, .. }
+                    if name == tool_name
+                        && accepted_call_id.is_none_or(|accepted| id == accepted) =>
+                {
+                    Some(id.clone())
+                }
                 _ => None,
             })
             .collect::<HashSet<_>>();
@@ -336,36 +348,6 @@ impl Agent {
             }
         }
         None
-    }
-
-    fn terminal_result_for_call(
-        &self,
-        tool_name: &str,
-        accepted_call_id: &str,
-    ) -> Option<(Value, Message)> {
-        let items = self.transcript().items();
-        let was_expected_call = items
-            .iter()
-            .filter_map(|item| item.message.as_ref())
-            .filter(|message| message.role == Role::Assistant)
-            .flat_map(|message| message.content.iter())
-            .any(|block| {
-                matches!(block, ContentBlock::ToolUse { id, name, .. }
-                    if id == accepted_call_id && name == tool_name)
-            });
-        if !was_expected_call {
-            return None;
-        }
-        let last = items.last()?;
-        let message = last.message.clone()?;
-        let has_result = message.content.iter().any(|block| {
-            matches!(block, ContentBlock::ToolResult { tool_use_id, .. }
-                if tool_use_id == accepted_call_id)
-        });
-        has_result
-            .then(|| last.detail(accepted_call_id).cloned())
-            .flatten()
-            .map(|details| (details, message))
     }
 }
 
