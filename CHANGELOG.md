@@ -12,6 +12,12 @@
 - **Source-breaking:** exhaustive `SessionResumeOptions` struct literals must
   add `runtime_identifier: None` or use `..Default::default()`.
 
+### Removed unused `PermissionRequest` type
+
+- **Source-breaking:** the public `mentra::PermissionRequest` struct is removed.
+  Nothing produced or consumed it; the live path is the
+  `SessionEvent::PermissionRequested` variant and its inline fields.
+
 ### Removed duplicate `SubagentHandle::task_id`
 
 - **Source-breaking:** `SubagentHandle::task_id` is removed. It always held the

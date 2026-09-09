@@ -24,18 +24,6 @@ use crate::{
     },
 };
 
-/// A pending permission request awaiting a UI decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionRequest {
-    pub request_id: String,
-    pub tool_call_id: String,
-    pub tool_name: String,
-    pub description: String,
-    /// JSON-encoded preview data. Stored as `String` because
-    /// `serde_json::Value` does not implement `Eq`.
-    pub preview: String,
-}
-
 /// What a refusal says when the deciding layer offered no reason of its own.
 const DENIED_BY_SESSION_APPROVER: &str = "denied by session approver";
 

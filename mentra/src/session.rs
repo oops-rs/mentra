@@ -13,7 +13,6 @@ pub use event::{
 };
 pub use handle::{Session, SessionEventReceiver, SessionPermissionHandle, SubagentHandle};
 pub use permission::{
-    PermissionDecision, PermissionRequest, PermissionRuleAddress, RememberedRule, RuleKey,
-    RuleStore,
+    PermissionDecision, PermissionRuleAddress, RememberedRule, RuleKey, RuleStore,
 };
 pub use types::{SessionId, SessionMetadata, SessionStatus};
