@@ -9,14 +9,12 @@ use crate::BuiltinProvider;
 use crate::CompactionRequest;
 use crate::CompactionResponse;
 use crate::CredentialSource;
-use crate::ModelCatalog;
 use crate::ModelInfo;
 use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
 use crate::ProviderEventStream;
 use crate::ProviderSession;
-use crate::ProviderSessionFactory;
 use crate::ProviderSessionScope;
 use crate::RegisteredProvider;
 use crate::Request;
@@ -121,67 +119,6 @@ where
 }
 
 #[async_trait]
-impl<C> ModelCatalog for GeminiProvider<C>
-where
-    C: CredentialSource + 'static,
-{
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let mut models = Vec::new();
-        let mut page_token = None::<String>;
-
-        loop {
-            let credentials = self.credential_source.credentials().await?;
-            let mut request = self
-                .client
-                .get(
-                    self.definition
-                        .request_url_with_auth_for_path("v1beta/models", &credentials)?,
-                )
-                .headers(self.definition.build_headers(&credentials)?)
-                .query(&[("pageSize", "1000")]);
-
-            if let Some(token) = page_token.as_deref() {
-                request = request.query(&[("pageToken", token)]);
-            }
-
-            let response = request.send().await.map_err(ProviderError::Transport)?;
-            if !response.status().is_success() {
-                return Err(ProviderError::from_http_response(response).await);
-            }
-
-            let page = response
-                .json::<model::GeminiModelsPage>()
-                .await
-                .map_err(ProviderError::Decode)?;
-
-            models.extend(
-                page.models
-                    .into_iter()
-                    .filter(|model| model.supports_generate_content())
-                    .map(ModelInfo::from),
-            );
-
-            page_token = page.next_page_token;
-            if page_token.is_none() {
-                break;
-            }
-        }
-
-        Ok(models)
-    }
-}
-
-#[async_trait]
-impl<C> ProviderSessionFactory for GeminiProvider<C>
-where
-    C: CredentialSource + 'static,
-{
-    async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
-        Ok(Box::new((*self).clone()))
-    }
-}
-
-#[async_trait]
 impl<C> ProviderSession for GeminiProvider<C>
 where
     C: CredentialSource + 'static,
@@ -242,6 +179,55 @@ impl<C> RegisteredProvider for GeminiProvider<C>
 where
     C: CredentialSource + 'static,
 {
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        let mut models = Vec::new();
+        let mut page_token = None::<String>;
+
+        loop {
+            let credentials = self.credential_source.credentials().await?;
+            let mut request = self
+                .client
+                .get(
+                    self.definition
+                        .request_url_with_auth_for_path("v1beta/models", &credentials)?,
+                )
+                .headers(self.definition.build_headers(&credentials)?)
+                .query(&[("pageSize", "1000")]);
+
+            if let Some(token) = page_token.as_deref() {
+                request = request.query(&[("pageToken", token)]);
+            }
+
+            let response = request.send().await.map_err(ProviderError::Transport)?;
+            if !response.status().is_success() {
+                return Err(ProviderError::from_http_response(response).await);
+            }
+
+            let page = response
+                .json::<model::GeminiModelsPage>()
+                .await
+                .map_err(ProviderError::Decode)?;
+
+            models.extend(
+                page.models
+                    .into_iter()
+                    .filter(|model| model.supports_generate_content())
+                    .map(ModelInfo::from),
+            );
+
+            page_token = page.next_page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+
+        Ok(models)
+    }
+
+    async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
+        Ok(Box::new((*self).clone()))
+    }
+
     fn definition(&self) -> ProviderDefinition {
         self.definition.clone()
     }

@@ -16,18 +16,6 @@ use crate::response::Response;
 use crate::response::collect_response_from_stream;
 use crate::stream::ProviderEventStream;
 
-/// Lists models available from a provider.
-#[async_trait]
-pub trait ModelCatalog: Send + Sync {
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
-}
-
-/// Creates a provider session on demand.
-#[async_trait]
-pub trait ProviderSessionFactory: Send + Sync {
-    async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError>;
-}
-
 /// Transport-neutral session used to stream model responses.
 #[async_trait]
 pub trait ProviderSession: Send + Sync {
@@ -58,7 +46,11 @@ pub trait ProviderSession: Send + Sync {
 
 /// Transport-neutral provider registration interface.
 #[async_trait]
-pub trait Provider: ModelCatalog + ProviderSessionFactory {
+pub trait Provider: Send + Sync {
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
+
+    async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError>;
+
     fn definition(&self) -> ProviderDefinition;
 
     fn descriptor(&self) -> ProviderDescriptor {
@@ -132,21 +124,15 @@ impl ProviderSessionScope {
 }
 
 #[async_trait]
-impl ModelCatalog for ProviderSessionScope {
+impl Provider for ProviderSessionScope {
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         self.inner.list_models().await
     }
-}
 
-#[async_trait]
-impl ProviderSessionFactory for ProviderSessionScope {
     async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
         self.inner.create_session().await
     }
-}
 
-#[async_trait]
-impl Provider for ProviderSessionScope {
     fn definition(&self) -> ProviderDefinition {
         self.inner.definition()
     }
@@ -257,42 +243,30 @@ mod tests {
     }
 
     #[async_trait]
-    impl ModelCatalog for TestProvider {
+    impl Provider for TestProvider {
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
             Ok(self.models.clone())
         }
-    }
 
-    #[async_trait]
-    impl ProviderSessionFactory for TestProvider {
         async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
             Ok(Box::new(TestSession))
         }
-    }
 
-    #[async_trait]
-    impl Provider for TestProvider {
         fn definition(&self) -> ProviderDefinition {
             self.definition.clone()
         }
     }
 
     #[async_trait]
-    impl ModelCatalog for RefreshableProvider {
+    impl Provider for RefreshableProvider {
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
             Ok(self.models.clone())
         }
-    }
 
-    #[async_trait]
-    impl ProviderSessionFactory for RefreshableProvider {
         async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
             Ok(Box::new(TestSession))
         }
-    }
 
-    #[async_trait]
-    impl Provider for RefreshableProvider {
         fn definition(&self) -> ProviderDefinition {
             self.definition.clone()
         }

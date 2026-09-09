@@ -16,12 +16,10 @@ use async_trait::async_trait;
 use crate::AuthScheme;
 use crate::BuiltinProvider;
 use crate::CredentialSource;
-use crate::ModelCatalog;
 use crate::ModelInfo;
 use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
-use crate::ProviderSessionFactory;
 use crate::ProviderSessionScope;
 use crate::RegisteredProvider;
 use crate::StaticCredentialSource;
@@ -226,7 +224,7 @@ fn build_definition(
 }
 
 #[async_trait]
-impl<C> ModelCatalog for ResponsesProvider<C>
+impl<C> RegisteredProvider for ResponsesProvider<C>
 where
     C: CredentialSource + 'static,
 {
@@ -253,23 +251,11 @@ where
 
         Ok(models.into_model_info(self.definition.descriptor.id.clone()))
     }
-}
 
-#[async_trait]
-impl<C> ProviderSessionFactory for ResponsesProvider<C>
-where
-    C: CredentialSource + 'static,
-{
     async fn create_session(&self) -> Result<Box<dyn crate::ProviderSession>, ProviderError> {
         Ok(Box::new(self.session()))
     }
-}
 
-#[async_trait]
-impl<C> RegisteredProvider for ResponsesProvider<C>
-where
-    C: CredentialSource + 'static,
-{
     fn definition(&self) -> ProviderDefinition {
         self.definition.clone()
     }

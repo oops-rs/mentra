@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Folded `ModelCatalog` and `ProviderSessionFactory` into `Provider`
+
+- **Breaking:** the `ModelCatalog` and `ProviderSessionFactory` traits are
+  removed; `list_models` and `create_session` are now required methods on
+  `Provider` itself. Every implementor in the workspace already implemented all
+  three traits on the same type, and neither trait was ever used as a `dyn` type
+  or a generic bound. External implementors merge their two impl blocks into
+  their `Provider` impl.
+
 ### Removed the unread `RetryPolicy` provider config
 
 - **Breaking:** `mentra::RetryPolicy` / `mentra_provider::RetryPolicy` and the

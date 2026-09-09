@@ -17,7 +17,6 @@ pub(crate) mod sse;
 
 use crate::AuthScheme;
 use crate::CredentialSource;
-use crate::ModelCatalog;
 use crate::ModelInfo;
 use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
@@ -25,7 +24,6 @@ use crate::ProviderError;
 use crate::ProviderEventStream;
 use crate::ProviderId;
 use crate::ProviderSession;
-use crate::ProviderSessionFactory;
 use crate::ProviderSessionScope;
 use crate::RegisteredProvider;
 use crate::Request;
@@ -152,7 +150,20 @@ where
 }
 
 #[async_trait]
-impl<C> ModelCatalog for ChatCompletionsProvider<C>
+impl<C> ProviderSession for ChatCompletionsProvider<C>
+where
+    C: CredentialSource + 'static,
+{
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let requested_model = request.model.to_string();
+        let provider = self.definition.provider_id().clone();
+        let response = self.send_completion(request, true).await?;
+        Ok(sse::spawn_event_stream(response, provider, requested_model))
+    }
+}
+
+#[async_trait]
+impl<C> RegisteredProvider for ChatCompletionsProvider<C>
 where
     C: CredentialSource + 'static,
 {
@@ -191,36 +202,11 @@ where
             })
             .collect())
     }
-}
 
-#[async_trait]
-impl<C> ProviderSessionFactory for ChatCompletionsProvider<C>
-where
-    C: CredentialSource + 'static,
-{
     async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
         Ok(Box::new((*self).clone()))
     }
-}
 
-#[async_trait]
-impl<C> ProviderSession for ChatCompletionsProvider<C>
-where
-    C: CredentialSource + 'static,
-{
-    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-        let requested_model = request.model.to_string();
-        let provider = self.definition.provider_id().clone();
-        let response = self.send_completion(request, true).await?;
-        Ok(sse::spawn_event_stream(response, provider, requested_model))
-    }
-}
-
-#[async_trait]
-impl<C> RegisteredProvider for ChatCompletionsProvider<C>
-where
-    C: CredentialSource + 'static,
-{
     fn definition(&self) -> ProviderDefinition {
         self.definition.clone()
     }

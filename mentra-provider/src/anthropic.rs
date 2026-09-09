@@ -12,14 +12,12 @@ use crate::BuiltinProvider;
 use crate::CompactionRequest;
 use crate::CompactionResponse;
 use crate::CredentialSource;
-use crate::ModelCatalog;
 use crate::ModelInfo;
 use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
 use crate::ProviderEventStream;
 use crate::ProviderSession;
-use crate::ProviderSessionFactory;
 use crate::ProviderSessionScope;
 use crate::RegisteredProvider;
 use crate::Request;
@@ -129,7 +127,38 @@ where
 }
 
 #[async_trait]
-impl<C> ModelCatalog for AnthropicProvider<C>
+impl<C> ProviderSession for AnthropicProvider<C>
+where
+    C: CredentialSource + 'static,
+{
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let requested_model = request.model.to_string();
+        let provider = self.definition.provider_id().clone();
+        let response = self.send_message(request, true).await?;
+        Ok(sse::spawn_event_stream(response, provider, requested_model))
+    }
+
+    async fn compact(
+        &self,
+        request: CompactionRequest<'_>,
+    ) -> Result<CompactionResponse, ProviderError> {
+        let request = request.into_model_request()?;
+        let response = ProviderSession::send(self, request).await?;
+        Ok(response.into_compaction_response())
+    }
+
+    async fn summarize_memories(
+        &self,
+        request: crate::MemorySummarizeRequest<'_>,
+    ) -> Result<crate::MemorySummarizeResponse, ProviderError> {
+        let request = request.into_model_request()?;
+        let response = ProviderSession::send(self, request).await?;
+        response.into_memory_summarize_response()
+    }
+}
+
+#[async_trait]
+impl<C> RegisteredProvider for AnthropicProvider<C>
 where
     C: CredentialSource + 'static,
 {
@@ -172,54 +201,11 @@ where
 
         Ok(models)
     }
-}
 
-#[async_trait]
-impl<C> ProviderSessionFactory for AnthropicProvider<C>
-where
-    C: CredentialSource + 'static,
-{
     async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
         Ok(Box::new((*self).clone()))
     }
-}
 
-#[async_trait]
-impl<C> ProviderSession for AnthropicProvider<C>
-where
-    C: CredentialSource + 'static,
-{
-    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-        let requested_model = request.model.to_string();
-        let provider = self.definition.provider_id().clone();
-        let response = self.send_message(request, true).await?;
-        Ok(sse::spawn_event_stream(response, provider, requested_model))
-    }
-
-    async fn compact(
-        &self,
-        request: CompactionRequest<'_>,
-    ) -> Result<CompactionResponse, ProviderError> {
-        let request = request.into_model_request()?;
-        let response = ProviderSession::send(self, request).await?;
-        Ok(response.into_compaction_response())
-    }
-
-    async fn summarize_memories(
-        &self,
-        request: crate::MemorySummarizeRequest<'_>,
-    ) -> Result<crate::MemorySummarizeResponse, ProviderError> {
-        let request = request.into_model_request()?;
-        let response = ProviderSession::send(self, request).await?;
-        response.into_memory_summarize_response()
-    }
-}
-
-#[async_trait]
-impl<C> RegisteredProvider for AnthropicProvider<C>
-where
-    C: CredentialSource + 'static,
-{
     fn definition(&self) -> ProviderDefinition {
         self.definition.clone()
     }
