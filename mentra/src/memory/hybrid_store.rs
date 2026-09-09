@@ -393,7 +393,7 @@ fn fts_query(query: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{MemorySearchMode, MemoryStore};
+    use crate::memory::MemoryStore;
 
     #[test]
     fn pinned_manual_facts_outrank_episodes() {
@@ -435,7 +435,6 @@ mod tests {
                 query: "shared alpha".to_string(),
                 limit: 2,
                 char_budget: None,
-                mode: MemorySearchMode::Tool,
             })
             .expect("search");
         assert_eq!(records[0].record_id, "fact:1");
@@ -526,7 +525,6 @@ mod tests {
                 query: "shared alpha".to_string(),
                 limit: 5,
                 char_budget: None,
-                mode: MemorySearchMode::Automatic,
             })
             .expect("explicit search");
         assert_eq!(compat.len(), explicit.len());

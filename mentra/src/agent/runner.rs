@@ -6,7 +6,7 @@ use crate::{
     compaction::CompactionBounds,
     error::RuntimeError,
     memory::journal::PendingTurnState,
-    memory::{MemorySearchMode, MemorySearchRequest, build_search_query, recalled_memory_message},
+    memory::{MemorySearchRequest, build_search_query, recalled_memory_message},
     provider::Request,
     runtime::{EarlyEnd, RunOptions, RuntimeHookEvent, control::is_transient_provider_error},
     team::format_inbox,
@@ -672,7 +672,6 @@ impl<'a> TurnRunner<'a> {
             query,
             limit: self.agent.config().memory.auto_recall_limit,
             char_budget: Some(self.agent.config().memory.auto_recall_char_budget),
-            mode: MemorySearchMode::Automatic,
         });
         let hits = match tokio::time::timeout(MEMORY_SEARCH_TIMEOUT, search).await {
             Ok(Ok(hits)) => hits,

@@ -3,7 +3,7 @@ use serde_json::json;
 use crate::{
     ContentBlock,
     agent::{Agent, AgentEvent, SpawnedAgentStatus},
-    memory::{MemorySearchMode, MemorySearchRequest},
+    memory::MemorySearchRequest,
     runtime::RunOptions,
     tool::{
         ParallelToolContext, ToolCall, ToolContext, ToolResult,
@@ -175,7 +175,6 @@ async fn execute_memory_search(ctx: ParallelToolContext, input: serde_json::Valu
             query: query.to_string(),
             limit,
             char_budget: None,
-            mode: MemorySearchMode::Tool,
         })
         .await
     {

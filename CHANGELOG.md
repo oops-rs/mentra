@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Removed the never-read `MemorySearchRequest::mode` knob
+
+- **Breaking:** `mentra::memory::MemorySearchMode` and the
+  `MemorySearchRequest::mode` field are removed. No `MemoryStore`
+  implementation ever branched on the value, so search results are unchanged.
+
 ### Removed unreachable `McpServerStatus` variants
 
 - **Breaking:** `McpServerStatus::Disconnected` and `::Connecting` are removed

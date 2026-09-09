@@ -49,14 +49,6 @@ pub struct SearchRequest {
     pub limit: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MemorySearchMode {
-    #[default]
-    Automatic,
-    Tool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchRequest {
     pub agent_id: String,
@@ -64,8 +56,6 @@ pub struct MemorySearchRequest {
     pub limit: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub char_budget: Option<usize>,
-    #[serde(default)]
-    pub mode: MemorySearchMode,
 }
 
 impl From<SearchRequest> for MemorySearchRequest {
@@ -75,7 +65,6 @@ impl From<SearchRequest> for MemorySearchRequest {
             query: value.query,
             limit: value.limit,
             char_budget: None,
-            mode: MemorySearchMode::Automatic,
         }
     }
 }
@@ -123,7 +112,6 @@ pub trait MemoryStore: Send + Sync {
             query: query.to_string(),
             limit,
             char_budget: None,
-            mode: MemorySearchMode::Automatic,
         })
     }
     fn delete_records(&self, record_ids: &[String]) -> Result<(), RuntimeError>;

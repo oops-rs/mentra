@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use mentra::{
     ContentBlock,
-    memory::{MemoryRecord, MemoryRecordKind, MemorySearchMode, MemorySearchRequest, MemoryStore},
+    memory::{MemoryRecord, MemoryRecordKind, MemorySearchRequest, MemoryStore},
     runtime::SqliteRuntimeStore,
     test::{MockRuntimeBuilder, MockTurn},
 };
@@ -165,7 +165,6 @@ fn bench_memory_scaling_1000_records(c: &mut Criterion) {
                 query: "agent discussed topic session".to_string(),
                 limit: 20,
                 char_budget: None,
-                mode: MemorySearchMode::Automatic,
             };
             let _hits = store
                 .search_records_with_options(&request)
