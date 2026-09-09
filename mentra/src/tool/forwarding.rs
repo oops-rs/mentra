@@ -4,7 +4,7 @@
 //! takes `impl ExecutableTool` by value, so without these a host could not
 //! register a tool it chose at runtime (`Box<dyn ExecutableTool>`) or hand one
 //! shared instance to more than one runtime (`Arc<T>`) — the pointer itself was
-//! not a tool. The alternative was every host hand-writing the same eight
+//! not a tool. The alternative was every host hand-writing the same seven
 //! forwarding methods next to a security-relevant one: forgetting
 //! [`ToolExecutor::authorization_preview`] leaves a tool presenting to the
 //! approver as something other than what it is, because the trait default
@@ -26,7 +26,7 @@ use serde_json::Value;
 
 use super::{
     ParallelToolContext, RuntimeToolDescriptor, ToolAuthorizationPreview, ToolContext,
-    ToolDefinition, ToolExecutionCategory, ToolExecutionMode, ToolExecutor, ToolOutput, ToolResult,
+    ToolDefinition, ToolExecutionCategory, ToolExecutor, ToolOutput, ToolResult,
 };
 
 /// Forwards to the tool inside.
@@ -66,10 +66,6 @@ impl<T: ToolExecutor + ?Sized> ToolExecutor for Box<T> {
 
     fn execution_category(&self, input: &Value) -> ToolExecutionCategory {
         (**self).execution_category(input)
-    }
-
-    fn execution_mode(&self, input: &Value) -> ToolExecutionMode {
-        (**self).execution_mode(input)
     }
 
     async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
@@ -117,10 +113,6 @@ impl<T: ToolExecutor + ?Sized> ToolExecutor for Arc<T> {
         (**self).execution_category(input)
     }
 
-    fn execution_mode(&self, input: &Value) -> ToolExecutionMode {
-        (**self).execution_mode(input)
-    }
-
     async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
         (**self).execute(ctx, input).await
     }
@@ -159,8 +151,8 @@ mod tests {
         tool::{
             ExecutableTool, ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory,
             ToolAuthorizationPreview, ToolCapability, ToolContext, ToolDefinition, ToolDurability,
-            ToolExecutionCategory, ToolExecutionMode, ToolExecutor, ToolOutput, ToolResult,
-            ToolResultContent, ToolSideEffectLevel,
+            ToolExecutionCategory, ToolExecutor, ToolOutput, ToolResult, ToolResultContent,
+            ToolSideEffectLevel,
         },
     };
 
@@ -213,13 +205,6 @@ mod tests {
 
         fn execution_category(&self, _input: &Value) -> ToolExecutionCategory {
             ToolExecutionCategory::BackgroundJob
-        }
-
-        fn execution_mode(&self, _input: &Value) -> ToolExecutionMode {
-            // `BackgroundJob.into()` is `Exclusive`, so `Parallel` here is
-            // unreachable by the default even when `execution_category`
-            // forwards correctly.
-            ToolExecutionMode::Parallel
         }
 
         async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
@@ -287,7 +272,7 @@ mod tests {
         }
     }
 
-    /// Asserts all eight methods of the two sub-traits, observed through
+    /// Asserts all seven methods of the two sub-traits, observed through
     /// `tool`, answer what `ProbeTool` answers — never what the trait default
     /// would have answered in its place.
     async fn assert_every_method_forwards<T>(tool: &T, agent: &mut Agent)
@@ -324,16 +309,13 @@ mod tests {
             ToolExecutionCategory::BackgroundJob
         );
 
-        // 4. ToolExecutor::execution_mode
-        assert_eq!(tool.execution_mode(&input), ToolExecutionMode::Parallel);
-
-        // 5. ToolExecutor::execute
+        // 4. ToolExecutor::execute
         assert_eq!(
             tool.execute(parallel_context(agent), input.clone()).await,
             Ok("probe::execute".to_string())
         );
 
-        // 6. ToolExecutor::execute_output
+        // 5. ToolExecutor::execute_output
         let output = tool
             .execute_output(parallel_context(agent), input.clone())
             .await
@@ -345,14 +327,14 @@ mod tests {
         assert_eq!(output.details, Some(json!({ "lane": "parallel" })));
         assert!(!output.terminate);
 
-        // 7. ToolExecutor::execute_mut — `&self` despite the name.
+        // 6. ToolExecutor::execute_mut — `&self` despite the name.
         assert_eq!(
             tool.execute_mut(exclusive_context(agent), input.clone())
                 .await,
             Ok("probe::execute_mut".to_string())
         );
 
-        // 8. ToolExecutor::execute_mut_output
+        // 7. ToolExecutor::execute_mut_output
         let output = tool
             .execute_mut_output(exclusive_context(agent), input.clone())
             .await

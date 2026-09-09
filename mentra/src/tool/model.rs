@@ -17,7 +17,7 @@ use crate::runtime::{RuntimeError, TaskIntrinsicTool, TaskItem};
 use crate::team::{TeamDispatch, TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary};
 use crate::tool::ToolAuthorizationPreview;
 
-use super::descriptor::{RuntimeToolDescriptor, ToolExecutionMode};
+use super::descriptor::RuntimeToolDescriptor;
 
 #[allow(unused_imports)]
 pub use mentra_provider::ToolLoadingPolicy;
@@ -775,10 +775,6 @@ pub trait ToolExecutor: ToolDefinition + Send + Sync {
 
     fn execution_category(&self, _input: &Value) -> super::descriptor::ToolExecutionCategory {
         self.descriptor().execution_category
-    }
-
-    fn execution_mode(&self, input: &Value) -> ToolExecutionMode {
-        self.execution_category(input).into()
     }
 
     async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {

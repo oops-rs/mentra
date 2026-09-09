@@ -30,8 +30,7 @@ pub use authorization::{
 };
 pub use descriptor::{
     ProviderToolSpec, RuntimeToolDescriptor, RuntimeToolDescriptorBuilder, ToolApprovalCategory,
-    ToolCapability, ToolDurability, ToolExecutionCategory, ToolExecutionMode, ToolLoadingPolicy,
-    ToolSideEffectLevel,
+    ToolCapability, ToolDurability, ToolExecutionCategory, ToolLoadingPolicy, ToolSideEffectLevel,
 };
 pub use mentra_provider::ToolResultContent;
 pub use model::{

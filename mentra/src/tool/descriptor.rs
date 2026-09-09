@@ -60,24 +60,6 @@ impl ToolExecutionCategory {
     }
 }
 
-/// Backward-compatible parallel/exclusive view of execution semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ToolExecutionMode {
-    #[default]
-    Exclusive,
-    Parallel,
-}
-
-impl From<ToolExecutionCategory> for ToolExecutionMode {
-    fn from(value: ToolExecutionCategory) -> Self {
-        if value.allows_parallel() {
-            Self::Parallel
-        } else {
-            Self::Exclusive
-        }
-    }
-}
-
 /// Coarse authorization grouping for runtime policy and review systems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ToolApprovalCategory {
