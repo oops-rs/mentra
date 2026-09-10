@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### A ring of gateways behind one provider
+
+- `mentra_provider::gateway_ring::GatewayRing` is a `Provider` whose members
+  are providers. Every call goes to one *current* member; when that member
+  keeps failing the ring rotates to the next and finishes the same call there.
+  The runtime above sees one provider with one descriptor, and its own retry
+  loop is untouched: each retry lands on the ring, the ring counts it, and
+  the rotation happens inside the attempt that crosses the threshold.
+- Members are whole providers, not URLs, because two gateways rarely accept
+  the same key. Each keeps its own session state, so no Responses
+  continuation id crosses from one gateway to another. Members **must front
+  the same upstream provider serving the same model**: a rotation replays
+  the transcript, and one vendor's reasoning items replayed to another's
+  endpoint are refused.
+- `GatewayRingPolicy` says when to leave and whether to come back:
+  `failure_threshold` consecutive counted failures rotate (default 5), and a
+  `cooldown` (default a minute) drifts the ring back to the preferred member
+  once it has rested, on probation — one failed probe sends it straight back.
+  `GatewayRingPolicy::sticky()` never drifts back. A `4xx` other than a rate
+  limit or a timeout rotates at once: the wrong key or a rejected shape will
+  not improve by being asked again. A request's own fault — too long,
+  malformed, an unsupported capability — is returned as-is and moves nothing.
+- `GatewayRing::with_observer` reports every counted failure, rotation,
+  return, and recovery as a `GatewayRingEvent` for the host's logs.
+- `fresh_session_scope` mints fresh member scopes but shares the ring's
+  memory of who is answering: a gateway that is down is down for every
+  conversation.
+
 ### A failed Responses stream is retryable when the failure is the provider's
 
 - `response.failed` and stream `error` events used to map to
