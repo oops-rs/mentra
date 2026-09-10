@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.28.1 / mentra-provider 0.9.1
 
 ### A ring of gateways behind one provider
 
