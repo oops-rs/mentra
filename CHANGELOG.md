@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.28.2 / mentra-provider 0.9.2
 
 ### A refused `previous_response_id` no longer wedges the websocket transport
 
