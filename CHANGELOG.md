@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### A refused `previous_response_id` no longer wedges the websocket transport
+
+- In Hybrid state mode, HTTP+SSE already recovered when an endpoint refused
+  the `previous_response_id` a request chained from: it dropped the id and
+  resent once. The websocket transport did not. There the refusal arrives as
+  an `error` frame after the upgrade, so it surfaced as an item of the event
+  stream, and the refused id stayed the chain head, because only a response
+  that starts ever replaces it. Every later request chained from it and was
+  refused again ("Invalid previous_response_id.") until the process
+  restarted.
+- A Hybrid websocket request that chains an id now reads to the first item
+  that is not `ResponseHeaders` before `stream` returns, the way HTTP waits
+  for its status. If that item is a refusal the existing classifier
+  recognises, the id is dropped and the request is resent exactly once
+  without it. The transport had already closed the connection that carried
+  the refused request, so the resend dials a new one. Anything else is handed
+  back with every item already read put back in front, in order. The resend
+  carries the same `input`: the transcript is replayed in full whether or not
+  an id is attached.
+- Stateful mode stays strict on both transports: the refusal reaches the
+  caller and nothing is resent.
+- On both transports and in every state mode, a refused id is now forgotten
+  whether or not the request is resent, so the next request cannot repeat
+  the failure. A Stateful HTTP refusal used to leave it in place. Only the
+  refused id is dropped: if another response has already become the chain
+  head, that newer id stays.
+
 ## 0.28.1 / mentra-provider 0.9.1
 
 ### A ring of gateways behind one provider

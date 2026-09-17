@@ -69,7 +69,7 @@ async fn late_old_scope_completion_cannot_seed_the_fresh_scope() {
     let old_session = provider.session();
     let fresh_session = provider.fresh_session_scope().session();
     let (tx_event, rx_event) = mpsc::unbounded_channel();
-    let mut forwarded = old_session.track_response_state(rx_event);
+    let mut forwarded = old_session.track_response_state(rx_event, None);
 
     tx_event
         .send(Ok(ProviderEvent::MessageStarted {
