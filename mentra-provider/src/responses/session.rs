@@ -150,6 +150,21 @@ impl ResponsesSessionState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
+
+    /// Drops `rejected` as the chain head once the endpoint has refused it.
+    ///
+    /// Only the refused id is known to be dead. If a later response already
+    /// replaced it (another request on this scope finished in between), that
+    /// newer id stays.
+    fn forget_rejected_response_id(&self, rejected: &str) {
+        let mut latest = self
+            .latest_response_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if latest.as_deref() == Some(rejected) {
+            *latest = None;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -488,6 +503,7 @@ where
                     request,
                     &credentials,
                     &session,
+                    state_mode,
                     reasoning_provenance,
                 )
                 .await
@@ -510,33 +526,36 @@ where
 
         if !response.status().is_success() {
             let error = ProviderError::from_http_response(response).await;
-            if state_mode == crate::ResponsesStateMode::Hybrid
-                && request.previous_response_id().is_some()
-                && let Some(rejection) = previous_response_state_rejection(&error)
-            {
-                if rejection == PreviousResponseStateRejection::ParameterUnsupported {
-                    self.endpoint_capabilities
-                        .mark_http_previous_response_id_unsupported(
-                            reasoning_provenance.model.clone(),
-                        );
-                }
-                self.state.clear_latest_response_id();
-                request.clear_previous_response_id();
-                let response = self
-                    .send_http_responses_request(&request, compression, credentials, session)
-                    .await?;
-                if !response.status().is_success() {
-                    return Err(ProviderError::from_http_response(response).await);
-                }
-                return Ok(
-                    self.track_response_state(spawn_event_stream_with_provenance(
-                        response,
-                        reasoning_provenance.provider,
-                        reasoning_provenance.model,
-                    )),
-                );
+            let Some((rejected, rejection)) = request
+                .previous_response_id()
+                .zip(previous_response_state_rejection(&error))
+            else {
+                return Err(error);
+            };
+            // Dead for every later request, whether or not this one is resent.
+            self.state.forget_rejected_response_id(rejected);
+            if state_mode != crate::ResponsesStateMode::Hybrid {
+                return Err(error);
             }
-            return Err(error);
+            if rejection == PreviousResponseStateRejection::ParameterUnsupported {
+                self.endpoint_capabilities
+                    .mark_http_previous_response_id_unsupported(reasoning_provenance.model.clone());
+            }
+            request.clear_previous_response_id();
+            let response = self
+                .send_http_responses_request(&request, compression, credentials, session)
+                .await?;
+            if !response.status().is_success() {
+                return Err(ProviderError::from_http_response(response).await);
+            }
+            return Ok(self.track_response_state(
+                spawn_event_stream_with_provenance(
+                    response,
+                    reasoning_provenance.provider,
+                    reasoning_provenance.model,
+                ),
+                None,
+            ));
         }
 
         if let Some(turn_state) = response
@@ -547,21 +566,23 @@ where
             self.state.set_turn_state(turn_state);
         }
 
-        Ok(
-            self.track_response_state(spawn_event_stream_with_provenance(
+        Ok(self.track_response_state(
+            spawn_event_stream_with_provenance(
                 response,
                 reasoning_provenance.provider,
                 reasoning_provenance.model,
-            )),
-        )
+            ),
+            request.previous_response_id().map(str::to_string),
+        ))
     }
 
     #[cfg(feature = "responses-websocket")]
     async fn stream_websocket_response(
         &self,
-        request: ResponsesRequest,
+        mut request: ResponsesRequest,
         credentials: &ProviderCredentials,
         session: &SessionRequestOptions,
+        state_mode: crate::ResponsesStateMode,
         reasoning_provenance: ReasoningProvenance,
     ) -> Result<ProviderEventStream, ProviderError> {
         if !self.websockets_enabled() {
@@ -570,6 +591,59 @@ where
             ));
         }
 
+        let chained_from = request.previous_response_id().map(str::to_string);
+        let stream = self
+            .send_websocket_request(&request, credentials, session, reasoning_provenance.clone())
+            .await?;
+        let chained_from = match chained_from {
+            Some(chained_from) if state_mode == crate::ResponsesStateMode::Hybrid => chained_from,
+            // Nothing to recover, or Stateful, which stays strict: a refusal
+            // reaches the caller, and the tracker forgets the refused id on
+            // its way past.
+            chained_from => return Ok(self.track_response_state(stream, chained_from)),
+        };
+
+        // Over HTTP a refusal is the response's own status, known before any
+        // stream exists. Here the transport hands back a stream as soon as the
+        // frame is queued, and a refusal arrives as an item of it: the gateway's
+        // `error` frame, mapped to `ProviderError::Http` and preceded only by
+        // `ResponseHeaders`. So Hybrid waits for the first item that is not
+        // headers before deciding, as HTTP waits for the status line.
+        match websocket_response_start(stream).await {
+            WebsocketResponseStart::Started(stream) => {
+                Ok(self.track_response_state(stream, Some(chained_from)))
+            }
+            WebsocketResponseStart::PreviousResponseRejected => {
+                // `ParameterUnsupported` is not recorded: that cache only ever
+                // skips HTTP+SSE probes (see `stream_response`).
+                self.state.forget_rejected_response_id(&chained_from);
+                request.clear_previous_response_id();
+                // No redial is forced here. The transport already dropped the
+                // socket that carried the refused request
+                // (`ResponsesWebsocketConnection::stream_request_with_provenance`
+                // takes the stream out on any error before reporting it), so
+                // this send dials a new one. Reusing a surviving connection
+                // would be just as correct: the resend carries no
+                // `previous_response_id` and the full replayed `input`, so it
+                // depends on nothing the old connection held.
+                let stream = self
+                    .send_websocket_request(&request, credentials, session, reasoning_provenance)
+                    .await?;
+                Ok(self.track_response_state(stream, None))
+            }
+        }
+    }
+
+    /// Sends one `response.create` frame, dialing first when the session holds
+    /// no open connection.
+    #[cfg(feature = "responses-websocket")]
+    async fn send_websocket_request(
+        &self,
+        request: &ResponsesRequest,
+        credentials: &ProviderCredentials,
+        session: &SessionRequestOptions,
+        reasoning_provenance: ReasoningProvenance,
+    ) -> Result<ProviderEventStream, ProviderError> {
         if self.websocket_connection_is_closed().await {
             let headers = self.build_websocket_headers_for_session(credentials, Some(session))?;
             let url = self
@@ -591,13 +665,11 @@ where
         }
 
         let response = serde_json::to_value(request).map_err(ProviderError::Serialize)?;
-        let stream = self
-            .stream_websocket_request_with_provenance(
-                response_create_frame(response),
-                reasoning_provenance,
-            )
-            .await?;
-        Ok(self.track_response_state(stream))
+        self.stream_websocket_request_with_provenance(
+            response_create_frame(response),
+            reasoning_provenance,
+        )
+        .await
     }
 
     /// The same entry point when the transport was not compiled in.
@@ -613,6 +685,7 @@ where
         _request: ResponsesRequest,
         _credentials: &ProviderCredentials,
         _session: &SessionRequestOptions,
+        _state_mode: crate::ResponsesStateMode,
         _reasoning_provenance: ReasoningProvenance,
     ) -> Result<ProviderEventStream, ProviderError> {
         Err(ProviderError::UnsupportedCapability(
@@ -667,14 +740,34 @@ where
         }
     }
 
-    fn track_response_state(&self, mut stream: ProviderEventStream) -> ProviderEventStream {
+    /// Forwards `stream`, recording each response it starts as the chain head.
+    ///
+    /// `chained_from` is the `previous_response_id` the request carried. If the
+    /// stream reports that the endpoint refused it, the id is forgotten before
+    /// the refusal is forwarded, so the caller's next request cannot chain from
+    /// it again.
+    fn track_response_state(
+        &self,
+        mut stream: ProviderEventStream,
+        chained_from: Option<String>,
+    ) -> ProviderEventStream {
         let (tx, rx) = mpsc::unbounded_channel();
         let state = Arc::clone(&self.state);
 
         tokio::spawn(async move {
             while let Some(event) = stream.recv().await {
-                if let Ok(ProviderEvent::MessageStarted { id, .. }) = &event {
-                    state.set_latest_response_id(id.clone());
+                match &event {
+                    Ok(ProviderEvent::MessageStarted { id, .. }) => {
+                        state.set_latest_response_id(id.clone());
+                    }
+                    Err(error) => {
+                        if let Some(rejected) = chained_from.as_deref()
+                            && previous_response_state_rejection(error).is_some()
+                        {
+                            state.forget_rejected_response_id(rejected);
+                        }
+                    }
+                    Ok(_) => {}
                 }
 
                 if tx.send(event).is_err() {
@@ -811,6 +904,51 @@ fn previous_response_state_rejection(
     .then_some(PreviousResponseStateRejection::ReferenceUnavailable)
 }
 
+/// How a websocket request that chained a `previous_response_id` began.
+#[cfg(feature = "responses-websocket")]
+enum WebsocketResponseStart {
+    /// The endpoint refused the chained id before any response began. What
+    /// the refused attempt emitted is dropped, as HTTP drops a refused
+    /// response: none of it belongs to the answer the caller will get.
+    PreviousResponseRejected,
+    /// Anything else, with every item already read put back in front, in order.
+    Started(ProviderEventStream),
+}
+
+/// Reads past the leading `ResponseHeaders` to the first item that decides
+/// whether the request was refused for its `previous_response_id`.
+#[cfg(feature = "responses-websocket")]
+async fn websocket_response_start(mut stream: ProviderEventStream) -> WebsocketResponseStart {
+    let mut read = Vec::new();
+    loop {
+        match stream.recv().await {
+            Some(Ok(headers @ ProviderEvent::ResponseHeaders(_))) => read.push(Ok(headers)),
+            Some(Err(error)) if previous_response_state_rejection(&error).is_some() => {
+                return WebsocketResponseStart::PreviousResponseRejected;
+            }
+            Some(decided) => {
+                read.push(decided);
+                break;
+            }
+            None => break,
+        }
+    }
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    for item in read {
+        // `rx` is still in hand, so the channel cannot be closed yet.
+        let _ = tx.send(item);
+    }
+    tokio::spawn(async move {
+        while let Some(item) = stream.recv().await {
+            if tx.send(item).is_err() {
+                break;
+            }
+        }
+    });
+    WebsocketResponseStart::Started(rx)
+}
+
 #[async_trait::async_trait]
 impl<C> ProviderSession for ResponsesSession<C>
 where
@@ -841,6 +979,9 @@ where
 
 #[cfg(test)]
 mod scope_tests;
+
+#[cfg(all(test, feature = "responses-websocket"))]
+mod websocket_recovery_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1704,6 +1845,80 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             session.latest_response_id().as_deref(),
             Some("resp_fresh_2")
         );
+    }
+
+    #[tokio::test]
+    async fn stateful_http_rejection_is_returned_but_forgets_the_rejected_id() {
+        let (base_url, handle) = spawn_hybrid_fallback_server(
+            r#"{"error":{"message":"previous_response_id not found"}}"#,
+            1,
+        );
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+        session.state.set_latest_response_id("resp_stale");
+
+        let mut request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+        request.provider_request_options.responses.state_mode = crate::ResponsesStateMode::Stateful;
+
+        let error = session
+            .stream_response(request.clone())
+            .await
+            .expect_err("stateful mode must surface the refusal");
+        assert!(
+            matches!(error, ProviderError::Http { status, .. } if status == reqwest::StatusCode::BAD_REQUEST),
+            "{error:?}"
+        );
+        assert_eq!(session.latest_response_id(), None);
+
+        consume_stream(
+            session
+                .stream_response(request)
+                .await
+                .expect("the next request should not repeat the refused id"),
+        )
+        .await;
+
+        let captured = handle.join().expect("server should capture requests");
+        let first_payload: serde_json::Value =
+            serde_json::from_str(request_body(&captured[0])).expect("first body should be json");
+        let second_payload: serde_json::Value =
+            serde_json::from_str(request_body(&captured[1])).expect("second body should be json");
+        assert_eq!(first_payload["previous_response_id"], "resp_stale");
+        assert!(second_payload.get("previous_response_id").is_none());
+        assert_eq!(
+            session.latest_response_id().as_deref(),
+            Some("resp_fresh_1")
+        );
+    }
+
+    #[test]
+    fn forgetting_a_rejected_response_id_keeps_a_newer_chain_head() {
+        let state = ResponsesSessionState::default();
+        state.set_latest_response_id("resp_newer");
+
+        state.forget_rejected_response_id("resp_refused");
+        assert_eq!(state.latest_response_id().as_deref(), Some("resp_newer"));
+
+        state.forget_rejected_response_id("resp_newer");
+        assert_eq!(state.latest_response_id(), None);
     }
 
     #[test]
