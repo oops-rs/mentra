@@ -175,8 +175,9 @@ impl SseParser {
                 self.data.push('\n');
                 self.check_bounds()?;
             }
-            // `id` and `retry` belong to reconnection, which this transport
-            // does not implement; every other field is undefined and ignored.
+            // `id` and `retry` belong to resuming a stream where it left off,
+            // which this transport does not do — a lost stream is replaced by
+            // a new session; every other field is undefined and ignored.
             _ => {}
         }
 
