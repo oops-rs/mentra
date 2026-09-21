@@ -1326,7 +1326,9 @@ async fn cancelling_a_tool_call_future_removes_its_pending_waiter() {
     );
 
     assert!(
-        super::lock_pending(&client.pending).waiters.is_empty(),
+        super::lock_pending(&client.session.lock().await.pending)
+            .waiters
+            .is_empty(),
         "cancelling the future must remove its pending correlation entry"
     );
     assert_eq!(
@@ -1473,7 +1475,7 @@ async fn a_request_made_after_shutdown_fails_immediately() {
         .call_tool("search", None)
         .await
         .expect_err("a shut-down client accepts no work");
-    assert!(matches!(error, McpSseError::StreamClosed), "got {error:?}");
+    assert!(matches!(error, McpSseError::Shutdown), "got {error:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1578,4 +1580,303 @@ async fn a_refused_endpoint_leaves_no_reader_consuming_the_stream() {
         server.posts().is_empty(),
         "a refused endpoint must not produce any request"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Dialing again after the stream is lost
+// ---------------------------------------------------------------------------
+
+/// A successful `tools/call` result carrying one text block.
+fn text_result(id: u64, text: &str) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {"content": [{"type": "text", "text": text}], "isError": false}
+    })
+}
+
+/// Waits until the client has noticed that its stream ended.
+///
+/// The reader observes the end on its own task, so a call made straight after
+/// the fixture closes the stream could still be registered on the old session.
+async fn wait_until_stream_is_lost(client: &McpSseClient) {
+    for _ in 0..500 {
+        if client.stream_is_lost().await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the client never noticed that the stream ended");
+}
+
+fn stream_opens(server: &SseTestServer) -> usize {
+    server
+        .requests()
+        .into_iter()
+        .filter(|request| request.method == "GET")
+        .count()
+}
+
+fn posted_tool_calls(server: &SseTestServer) -> Vec<crate::mcp::testing::CapturedRequest> {
+    server
+        .posts()
+        .into_iter()
+        .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_made_after_the_stream_ended_dials_a_new_session() {
+    let server = SseTestServer::start();
+    let client = connect(&server, config(&server)).await;
+
+    server.close_stream();
+    wait_until_stream_is_lost(&client).await;
+
+    let calling = tokio::spawn(async move {
+        (
+            client.call_tool("search", Some(json!({"q": "logs"}))).await,
+            client,
+        )
+    });
+
+    server.wait_for_streams(2);
+    server.send_endpoint("/messages/?session_id=def");
+    // The new session is initialized before anything is asked of it.
+    server.wait_for_posts(4);
+    server.send_message(&initialize_result(3));
+    server.wait_for_posts(6);
+    server.send_message(&text_result(4, "found it again"));
+
+    let (result, client) = calling.await.expect("no panic");
+    let result = result.expect("a call that was never sent is sent on a new session");
+    assert_eq!(result.content[0].text.as_deref(), Some("found it again"));
+
+    let posts = server.posts();
+    let methods: Vec<_> = posts[3..]
+        .iter()
+        .map(|request| request.rpc_method().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        methods,
+        ["initialize", "notifications/initialized", "tools/call"],
+        "the roster was bridged at connect time and is not listed again"
+    );
+    for request in &posts[3..] {
+        assert_eq!(
+            request.target, "/messages/?session_id=def",
+            "everything after the redial goes to the endpoint the new stream named"
+        );
+    }
+    assert_eq!(
+        client.tools().len(),
+        1,
+        "the advertised roster is unchanged"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_lost_with_the_stream_is_not_resent_on_the_new_session() {
+    let server = SseTestServer::start();
+    let client = std::sync::Arc::new(connect(&server, config(&server)).await);
+
+    let lost = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move { client.call_tool("charge_card", Some(json!({"n": 1}))).await })
+    };
+    server.wait_for_posts(4);
+    server.abort_stream();
+    let error = lost.await.expect("no panic").expect_err("the call is lost");
+    assert!(
+        matches!(error, McpSseError::RequestIndeterminate { .. }),
+        "got {error:?}"
+    );
+
+    let next = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move { client.call_tool("search", Some(json!({"n": 2}))).await })
+    };
+    server.wait_for_streams(2);
+    server.send_endpoint("/messages/?session_id=def");
+    server.wait_for_posts(5);
+    server.send_message(&initialize_result(4));
+    server.wait_for_posts(7);
+    server.send_message(&text_result(5, "fresh"));
+    next.await
+        .expect("no panic")
+        .expect("the next call gets a new session");
+
+    let calls = posted_tool_calls(&server);
+    let names: Vec<_> = calls
+        .iter()
+        .map(|request| {
+            let body: serde_json::Value = serde_json::from_str(&request.body).expect("JSON");
+            body["params"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["charge_card", "search"],
+        "the lost call may have executed and is never sent a second time"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shut_down_client_never_dials_again() {
+    let server = SseTestServer::start();
+    let client = connect(&server, config(&server)).await;
+    client.shutdown().await;
+
+    for _ in 0..2 {
+        let error = client
+            .call_tool("search", None)
+            .await
+            .expect_err("a shut-down client accepts no work");
+        assert!(matches!(error, McpSseError::Shutdown), "got {error:?}");
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(stream_opens(&server), 1, "shutdown is final");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_redial_fails_that_call_and_the_next_call_tries_again() {
+    let server = SseTestServer::start();
+    let client = std::sync::Arc::new(connect(&server, config(&server)).await);
+
+    server.close_stream();
+    wait_until_stream_is_lost(&client).await;
+
+    let first = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move { client.call_tool("search", None).await })
+    };
+    server.wait_for_streams(2);
+    // The second stream ends before it names an endpoint.
+    server.close_stream();
+    let error = first
+        .await
+        .expect("no panic")
+        .expect_err("the redial failed");
+    assert!(matches!(error, McpSseError::StreamClosed), "got {error:?}");
+    assert!(
+        posted_tool_calls(&server).is_empty(),
+        "nothing is sent without a session to send it on"
+    );
+
+    let second = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move { client.call_tool("search", None).await })
+    };
+    server.wait_for_streams(3);
+    server.send_endpoint("/messages/?session_id=ghi");
+    server.wait_for_posts(4);
+    // The failed redial never got as far as a request, so it used no id.
+    server.send_message(&initialize_result(3));
+    server.wait_for_posts(6);
+    server.send_message(&text_result(4, "third time"));
+    second
+        .await
+        .expect("no panic")
+        .expect("a later call dials again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn calls_that_find_the_stream_lost_together_share_one_new_session() {
+    let server = SseTestServer::start();
+    let client = std::sync::Arc::new(connect(&server, config(&server)).await);
+
+    server.close_stream();
+    wait_until_stream_is_lost(&client).await;
+
+    let calls: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|q| {
+            let client = std::sync::Arc::clone(&client);
+            tokio::spawn(async move { client.call_tool("search", Some(json!({"q": q}))).await })
+        })
+        .collect();
+
+    server.wait_for_streams(2);
+    server.send_endpoint("/messages/?session_id=def");
+    server.wait_for_posts(4);
+    server.send_message(&initialize_result(3));
+    // The notification, then both calls.
+    server.wait_for_posts(7);
+    for request in posted_tool_calls(&server) {
+        let id = request.rpc_id().expect("a call carries an id");
+        server.send_message(&text_result(id, "ok"));
+    }
+
+    for call in calls {
+        call.await.expect("no panic").expect("both calls succeed");
+    }
+    assert_eq!(stream_opens(&server), 2, "one redial serves both callers");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_stream_is_retired_and_the_next_call_dials_again() {
+    let server = SseTestServer::start();
+    let mut config = config(&server);
+    config.limits = McpSseLimits {
+        stream_idle_timeout: std::time::Duration::from_millis(150),
+        ..McpSseLimits::default()
+    };
+    // A server that sends no heartbeat, left alone for longer than the idle
+    // timeout: the reference TypeScript SDK's SSE transport behaves this way.
+    let client = connect(&server, config).await;
+    wait_until_stream_is_lost(&client).await;
+    // The client hung up; this only lets the fixture's stream thread notice.
+    server.abort_stream();
+
+    let calling = tokio::spawn(async move { (client.call_tool("search", None).await, client) });
+    server.wait_for_streams(2);
+    server.send_endpoint("/messages/?session_id=def");
+    server.wait_for_posts(4);
+    server.send_message(&initialize_result(3));
+    server.wait_for_posts(6);
+    server.send_message(&text_result(4, "still here"));
+
+    let (result, _client) = calling.await.expect("no panic");
+    assert_eq!(
+        result
+            .expect("silence costs a redial, not the server")
+            .content[0]
+            .text
+            .as_deref(),
+        Some("still here")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_gets_the_whole_idle_timeout_however_long_the_stream_was_silent_before_it() {
+    let server = SseTestServer::start();
+    let mut config = config(&server);
+    config.limits = McpSseLimits {
+        stream_idle_timeout: std::time::Duration::from_millis(600),
+        ..McpSseLimits::default()
+    };
+    let client = connect(&server, config).await;
+
+    // Most of the idle timeout passes in silence, then a call arrives whose
+    // answer takes longer than what was left of it.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let calling = tokio::spawn(async move { (client.call_tool("search", None).await, client) });
+    server.wait_for_posts(4);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    server.send_message(&text_result(3, "slow but fine"));
+
+    let (result, _client) = calling.await.expect("no panic");
+    assert_eq!(
+        result
+            .expect("silence before the call is not silence in answer to it")
+            .content[0]
+            .text
+            .as_deref(),
+        Some("slow but fine")
+    );
+    assert_eq!(stream_opens(&server), 1);
 }

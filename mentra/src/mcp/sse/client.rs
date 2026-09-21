@@ -32,20 +32,44 @@
 //!
 //! The stream carries every response, so losing it ends the session. This
 //! client fails closed: when the stream ends, every pending request resolves
-//! with an error rather than hanging. It never reconnects and never re-sends a
-//! `tools/call`, because an MCP tool may have side effects and a transparent
-//! retry would execute it twice with no caller involvement.
+//! with an error rather than hanging. It never re-sends a `tools/call`,
+//! because an MCP tool may have side effects and a transparent retry would
+//! execute it twice with no caller involvement.
 //!
 //! A `tools/call` whose `POST` may have reached the server but whose response
 //! never arrived is reported as [`McpSseError::RequestIndeterminate`] rather
 //! than as a plain failure, so a caller can tell "may have run" apart from
 //! "definitely did not".
+//!
+//! # Dialing again
+//!
+//! Losing the session does not lose the server. A `tools/call` that finds the
+//! session already ended has, by construction, not been sent: so the client
+//! opens a new stream, repeats `initialize`, and sends the call there — once,
+//! for the first time. That is a different act from the retry refused above,
+//! and the line between them is whether the request was registered on a
+//! session before that session ended. Registered: it is reported as
+//! indeterminate and never sent again. Not registered: it has nowhere to have
+//! run.
+//!
+//! This matters because a session ends for reasons that say nothing about the
+//! server. The reference TypeScript SDK's SSE transport sends no heartbeat, so
+//! against it [`McpSseLimits::stream_idle_timeout`] retires the stream after
+//! every quiet spell, and a host that connects once at startup would otherwise
+//! lose the server's tools for the life of the process.
+//!
+//! The redial is lazy — nothing is dialed until a call needs it — and
+//! serialized, so callers that find the stream lost together share one new
+//! session. It does not list tools again: the roster a host bridged at connect
+//! time is the one it keeps, and a tool the server no longer has answers with
+//! a JSON-RPC error. A redial that fails fails the call that asked for it, and
+//! the next call tries again. [`McpSseClient::shutdown`] is final.
 
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -55,6 +79,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use url::Url;
 
 use super::config::{McpSseConfigError, McpSseLimits, McpSseServerConfig};
@@ -174,6 +199,9 @@ struct Pending {
 struct PendingWaiter {
     reply: oneshot::Sender<PendingReply>,
     method: String,
+    /// When the request was registered. Silence is only evidence of a dead
+    /// stream once something has gone unanswered for that long.
+    registered_at: Instant,
 }
 
 /// Removes one pending waiter if its request future is dropped.
@@ -204,17 +232,120 @@ impl Drop for PendingRegistration {
 /// what you want.
 pub struct McpSseClient {
     http: reqwest::Client,
-    /// The `POST` target named by the server, validated to the configured origin.
-    endpoint: Url,
     headers: HeaderMap,
     limits: McpSseLimits,
+    /// Shared by every session, so an id is never reused across a redial.
     next_id: AtomicU64,
-    pending: Arc<Mutex<Pending>>,
-    reader: JoinHandle<()>,
+    /// The session calls are sent on. Held across a redial, which is what
+    /// makes callers that find the stream lost together share one new session.
+    session: tokio::sync::Mutex<Arc<Session>>,
+    /// Set by [`shutdown`](Self::shutdown). A closed session is dialed again;
+    /// a shut-down client is not.
+    shut_down: AtomicBool,
     server_info: Option<McpServerInfo>,
     tools: Vec<McpToolDefinition>,
     server_name: String,
     stream_url: Url,
+}
+
+/// One SSE stream and the `POST` endpoint it named.
+///
+/// The two live and die together: the endpoint carries the server's session
+/// id, and the server forgets that id when the stream goes.
+struct Session {
+    /// The `POST` target named by the server, validated to the configured origin.
+    endpoint: Url,
+    pending: Arc<Mutex<Pending>>,
+    reader: JoinHandle<()>,
+}
+
+impl Session {
+    /// Opens the stream and waits for the `endpoint` event.
+    async fn open(
+        http: &reqwest::Client,
+        stream_url: &Url,
+        headers: &HeaderMap,
+        limits: &McpSseLimits,
+    ) -> Result<Self, McpSseError> {
+        let response = tokio::time::timeout(
+            limits.connect_timeout,
+            http.get(stream_url.clone())
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .headers(headers.clone())
+                .send(),
+        )
+        .await
+        .map_err(|_| McpSseError::Timeout(limits.connect_timeout))?
+        .map_err(transport_error)?;
+
+        check_stream_response(&response)?;
+
+        let pending: Arc<Mutex<Pending>> = Arc::new(Mutex::new(Pending::default()));
+        let (endpoint_tx, endpoint_rx) = oneshot::channel();
+
+        // Owned by a guard from the moment it exists, so every failure below
+        // — and a caller that stops waiting — aborts the task and releases
+        // the connection it holds.
+        let reader = AbortOnDrop(Some(tokio::spawn(read_stream(
+            response,
+            Arc::clone(&pending),
+            endpoint_tx,
+            limits.clone(),
+        ))));
+
+        // The endpoint event must arrive before anything can be sent. Bound the
+        // wait: a buffering proxy is a common cause of it never arriving.
+        let raw = match tokio::time::timeout(limits.connect_timeout, endpoint_rx).await {
+            Ok(Ok(outcome)) => outcome?,
+            Ok(Err(_)) => return Err(McpSseError::StreamClosed),
+            Err(_) => return Err(McpSseError::Timeout(limits.connect_timeout)),
+        };
+        let endpoint = resolve_endpoint(stream_url, &raw)?;
+
+        Ok(Self {
+            endpoint,
+            pending,
+            reader: reader.disarm(),
+        })
+    }
+
+    /// Whether the stream has ended, so nothing sent here could be answered.
+    fn is_closed(&self) -> bool {
+        lock_pending(&self.pending).closed
+    }
+
+    /// Ends the stream and fails every request still in flight.
+    fn close(&self) {
+        self.reader.abort();
+        let mut pending = lock_pending(&self.pending);
+        pending.closed = true;
+        drain_pending(&mut pending);
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Cancel the reader so the task and its connection do not outlive the
+        // session that owns them.
+        self.reader.abort();
+    }
+}
+
+/// Aborts a task unless it is handed on.
+struct AbortOnDrop(Option<JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn disarm(mut self) -> JoinHandle<()> {
+        self.0.take().expect("the handle is present until disarmed")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
 }
 
 impl McpSseClient {
@@ -224,75 +355,28 @@ impl McpSseClient {
         let headers = build_headers(config)?;
         let http = build_http_client(&config.limits)?;
 
-        let response = tokio::time::timeout(
-            config.limits.connect_timeout,
-            http.get(stream_url.clone())
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .headers(headers.clone())
-                .send(),
-        )
-        .await
-        .map_err(|_| McpSseError::Timeout(config.limits.connect_timeout))?
-        .map_err(transport_error)?;
-
-        check_stream_response(&response)?;
-
-        let pending: Arc<Mutex<Pending>> = Arc::new(Mutex::new(Pending::default()));
-        let (endpoint_tx, endpoint_rx) = oneshot::channel();
-
-        let reader = tokio::spawn(read_stream(
-            response,
-            Arc::clone(&pending),
-            endpoint_tx,
-            config.limits.clone(),
-        ));
-
-        // The endpoint event must arrive before anything can be sent. Bound the
-        // wait: a buffering proxy is a common cause of it never arriving.
-        //
-        // Every failure from here on must abort the reader before returning, or
-        // the task and the connection it holds outlive the failed connect.
-        let endpoint = match tokio::time::timeout(config.limits.connect_timeout, endpoint_rx).await
-        {
-            Ok(Ok(Ok(raw))) => match resolve_endpoint(&stream_url, &raw) {
-                Ok(endpoint) => endpoint,
-                Err(error) => {
-                    reader.abort();
-                    return Err(error.into());
-                }
-            },
-            Ok(Ok(Err(error))) => {
-                reader.abort();
-                return Err(error);
-            }
-            Ok(Err(_)) => {
-                reader.abort();
-                return Err(McpSseError::StreamClosed);
-            }
-            Err(_) => {
-                reader.abort();
-                return Err(McpSseError::Timeout(config.limits.connect_timeout));
-            }
-        };
+        let session = Session::open(&http, &stream_url, &headers, &config.limits).await?;
 
         let mut client = Self {
             http,
-            endpoint,
             headers,
             limits: config.limits.clone(),
             next_id: AtomicU64::new(1),
-            pending,
-            reader,
+            session: tokio::sync::Mutex::new(Arc::new(session)),
+            shut_down: AtomicBool::new(false),
             server_info: None,
             tools: Vec::new(),
             server_name: config.name.clone(),
             stream_url,
         };
 
-        // A failure here returns `client` by value, so its `Drop` aborts the
-        // reader; there is no separate cleanup path to keep in sync.
-        client.initialize().await?;
-        client.discover_tools().await?;
+        // A failure here returns `client` by value, and dropping it drops the
+        // session, which aborts the reader; there is no separate cleanup path
+        // to keep in sync.
+        let session = Arc::clone(&*client.session.lock().await);
+        let initialized = client.initialize(&session).await?;
+        client.server_info = Some(initialized.server_info);
+        client.tools = client.discover_tools(&session).await?;
 
         Ok(client)
     }
@@ -307,17 +391,21 @@ impl McpSseClient {
         &self.stream_url
     }
 
-    /// Server information returned by the `initialize` handshake.
+    /// Server information returned by the first `initialize` handshake.
     pub fn server_info(&self) -> Option<&McpServerInfo> {
         self.server_info.as_ref()
     }
 
-    /// The tools this server advertised.
+    /// The tools this server advertised when the client connected.
     pub fn tools(&self) -> &[McpToolDefinition] {
         &self.tools
     }
 
     /// Calls one tool on this server.
+    ///
+    /// If the session has already ended, a new one is dialed first — see the
+    /// module documentation for why that is not a retry. A call that was sent
+    /// is never sent again, whatever happens to it.
     pub async fn call_tool(
         &self,
         tool_name: &str,
@@ -327,21 +415,58 @@ impl McpSseClient {
             name: tool_name.to_string(),
             arguments,
         };
-        self.request("tools/call", Some(params), self.limits.call_tool_timeout)
+        let timeout = self.limits.call_tool_timeout;
+        // The redial has bounds of its own (`connect_timeout`, then
+        // `initialize_timeout`), so it is not charged to the tool's deadline.
+        let session = self.live_session().await?;
+        self.request(&session, "tools/call", Some(params), timeout)
             .await
     }
 
     /// Closes the stream and fails every request still in flight.
+    ///
+    /// Final: a client that was shut down does not dial again.
     pub async fn shutdown(&self) {
-        self.reader.abort();
-        let mut pending = lock_pending(&self.pending);
-        pending.closed = true;
-        drain_pending(&mut pending);
+        // Before taking the lock, so a redial in progress sees it when it
+        // finishes instead of installing a session nobody will close.
+        self.shut_down.store(true, Ordering::SeqCst);
+        self.session.lock().await.close();
+    }
+
+    /// The session to send a new request on, dialing one if the last ended.
+    async fn live_session(&self) -> Result<Arc<Session>, McpSseError> {
+        let mut current = self.session.lock().await;
+        if self.shut_down.load(Ordering::SeqCst) {
+            return Err(McpSseError::Shutdown);
+        }
+        if !current.is_closed() {
+            return Ok(Arc::clone(&current));
+        }
+
+        // Dropping this future — a caller that stopped waiting — drops the
+        // half-made session, and with it the reader and its connection.
+        let fresh = Arc::new(
+            Session::open(&self.http, &self.stream_url, &self.headers, &self.limits).await?,
+        );
+        self.initialize(&fresh).await?;
+
+        if self.shut_down.load(Ordering::SeqCst) {
+            return Err(McpSseError::Shutdown);
+        }
+        *current = Arc::clone(&fresh);
+        Ok(fresh)
+    }
+
+    /// Whether the current session has ended and the next call would dial.
+    #[cfg(test)]
+    pub(crate) async fn stream_is_lost(&self) -> bool {
+        self.session.lock().await.is_closed()
     }
 
     /// Sends a JSON-RPC request and waits for its correlated response.
     async fn request<P: serde::Serialize, R: DeserializeOwned>(
         &self,
+        session: &Session,
         method: &'static str,
         params: Option<P>,
         timeout: Duration,
@@ -359,8 +484,10 @@ impl McpSseClient {
             // Register before sending. The server answers the POST before it
             // processes the message, so the response can reach the stream
             // before the POST future resolves.
-            let mut pending = lock_pending(&self.pending);
+            let mut pending = lock_pending(&session.pending);
             if pending.closed {
+                // Nothing was sent. The session ended between being chosen
+                // and this registration; the caller's next request dials.
                 return Err(McpSseError::StreamClosed);
             }
             pending.waiters.insert(
@@ -368,10 +495,11 @@ impl McpSseClient {
                 PendingWaiter {
                     reply: reply_tx,
                     method: method.to_string(),
+                    registered_at: Instant::now(),
                 },
             );
             PendingRegistration {
-                pending: Arc::clone(&self.pending),
+                pending: Arc::clone(&session.pending),
                 id,
             }
         };
@@ -380,7 +508,7 @@ impl McpSseClient {
         // cannot evade `call_tool_timeout` by accepting the TCP connection and
         // withholding either the HTTP response head or its declared body.
         let operation = async {
-            self.post(&request)
+            self.post(session, &request)
                 .await
                 .map_err(|error| classify_post_failure(method, error))?;
 
@@ -401,18 +529,27 @@ impl McpSseClient {
     }
 
     /// Sends a JSON-RPC notification, which expects no response.
-    async fn notify(&self, method: &str, timeout: Duration) -> Result<(), McpSseError> {
+    async fn notify(
+        &self,
+        session: &Session,
+        method: &str,
+        timeout: Duration,
+    ) -> Result<(), McpSseError> {
         let notification = serde_json::json!({"jsonrpc": "2.0", "method": method});
-        tokio::time::timeout(timeout, self.post(&notification))
+        tokio::time::timeout(timeout, self.post(session, &notification))
             .await
             .map_err(|_| McpSseError::Timeout(timeout))?
     }
 
     /// `POST`s one JSON-RPC message to the validated endpoint.
-    async fn post<T: serde::Serialize>(&self, message: &T) -> Result<(), McpSseError> {
+    async fn post<T: serde::Serialize>(
+        &self,
+        session: &Session,
+        message: &T,
+    ) -> Result<(), McpSseError> {
         let response = self
             .http
-            .post(self.endpoint.clone())
+            .post(session.endpoint.clone())
             .headers(self.headers.clone())
             .json(message)
             .send()
@@ -440,7 +577,10 @@ impl McpSseClient {
     }
 
     /// Performs the `initialize` handshake and the follow-up notification.
-    async fn initialize(&mut self) -> Result<(), McpSseError> {
+    ///
+    /// Run on every session: the server keeps its initialized state per
+    /// session, and a redialed one starts without it.
+    async fn initialize(&self, session: &Session) -> Result<McpInitializeResult, McpSseError> {
         let params = McpInitializeParams {
             protocol_version: PROTOCOL_VERSION.to_string(),
             capabilities: serde_json::json!({}),
@@ -451,16 +591,28 @@ impl McpSseClient {
         };
 
         let result: McpInitializeResult = self
-            .request("initialize", Some(params), self.limits.initialize_timeout)
+            .request(
+                session,
+                "initialize",
+                Some(params),
+                self.limits.initialize_timeout,
+            )
             .await?;
-        self.server_info = Some(result.server_info);
 
-        self.notify("notifications/initialized", self.limits.initialize_timeout)
-            .await
+        self.notify(
+            session,
+            "notifications/initialized",
+            self.limits.initialize_timeout,
+        )
+        .await?;
+        Ok(result)
     }
 
     /// Walks the paginated `tools/list` cursor to the end.
-    async fn discover_tools(&mut self) -> Result<(), McpSseError> {
+    async fn discover_tools(
+        &self,
+        session: &Session,
+    ) -> Result<Vec<McpToolDefinition>, McpSseError> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
         let mut pages = 0_usize;
@@ -470,7 +622,12 @@ impl McpSseClient {
                 cursor: cursor.clone(),
             };
             let page: McpListToolsResult = self
-                .request("tools/list", Some(params), self.limits.list_tools_timeout)
+                .request(
+                    session,
+                    "tools/list",
+                    Some(params),
+                    self.limits.list_tools_timeout,
+                )
                 .await?;
             tools.extend(page.tools);
 
@@ -504,16 +661,7 @@ impl McpSseClient {
             }
         }
 
-        self.tools = tools;
-        Ok(())
-    }
-}
-
-impl Drop for McpSseClient {
-    fn drop(&mut self) {
-        // Cancel the reader so the task and its connection do not outlive the
-        // client that owns them.
-        self.reader.abort();
+        Ok(tools)
     }
 }
 
@@ -539,16 +687,39 @@ async fn read_stream(
     let mut body = response.bytes_stream();
     let mut endpoint_tx = Some(endpoint_tx);
 
-    loop {
-        let next = tokio::time::timeout(limits.stream_idle_timeout, body.next()).await;
+    // Silence is measured from the last bytes read, or from the newest
+    // unanswered request if that is later. A server that sends no heartbeat is
+    // silent whenever nobody is asking it anything, so a call that arrives
+    // late in a quiet spell would otherwise be failed — as indeterminate, no
+    // less — by a timer that started long before it existed.
+    let mut quiet_since = Instant::now();
 
-        let chunk = match next {
+    loop {
+        let next = tokio::time::timeout_at(quiet_since + limits.stream_idle_timeout, body.next());
+
+        let chunk = match next.await {
             Ok(Some(Ok(chunk))) => chunk,
             // Any stream error is terminal. reqwest's `is_body` does not
             // reliably identify body errors, so it is not consulted.
             Ok(Some(Err(_))) | Ok(None) => break,
-            Err(_) => break,
+            Err(_) => {
+                let mut pending = lock_pending(&pending);
+                let newest = pending.waiters.values().map(|w| w.registered_at).max();
+                match newest {
+                    Some(newest) if newest > quiet_since => {
+                        quiet_since = newest;
+                        continue;
+                    }
+                    // Closed under the lock that registration takes, so no
+                    // request can slip onto a stream already given up on.
+                    _ => {
+                        pending.closed = true;
+                        break;
+                    }
+                }
+            }
         };
+        quiet_since = Instant::now();
 
         let events = match parser.feed(&chunk) {
             Ok(events) => events,

@@ -25,8 +25,12 @@ pub const DEFAULT_CALL_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Default idle timeout between stream reads.
 ///
 /// Servers built on `sse-starlette` — which covers most Python MCP servers —
-/// emit a comment heartbeat every 15 seconds, so five minutes of silence means
-/// the stream is dead rather than quiet.
+/// emit a comment heartbeat every 15 seconds, so against them five minutes of
+/// silence means the stream is dead rather than quiet. The reference
+/// TypeScript SDK's SSE transport emits none, so against it this retires the
+/// stream after every quiet spell; that costs the next `tools/call` a redial
+/// and nothing else. Silence is counted from the last bytes read or the newest
+/// unanswered request, whichever is later.
 pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Default cap on the bytes buffered for a single SSE event.
 ///

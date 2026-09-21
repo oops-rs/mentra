@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.28.3
+
+### A lost MCP SSE stream no longer costs the server for the life of the process
+
+- The legacy HTTP+SSE client never reconnected, because a `tools/call` may
+  have side effects and must not be retried. That rule covered more than it
+  needed to. A call registered on a session that then ended may have run; it
+  is still reported as `RequestIndeterminate` and is never sent again. A call
+  that *finds* the session already ended was never sent at all, so the client
+  now opens a new stream, repeats `initialize`, and sends the call there for
+  the first time.
+- This matters because sessions end for reasons that say nothing about the
+  server. The reference TypeScript SDK's SSE transport sends no heartbeat, so
+  `stream_idle_timeout` (300 s by default) retired the stream after the first
+  quiet spell, and a host that connects once at startup then saw every later
+  call fail with `StreamClosed` until it restarted.
+- The redial is lazy and serialized: nothing is dialed until a call needs it,
+  and calls that find the stream lost together share one new session. It does
+  not list tools again, so the roster a host bridged at connect time stands. A
+  redial that fails fails the call that asked for it; the next call tries
+  again. JSON-RPC ids are not reused across sessions.
+- `McpSseClient::shutdown` is final: a shut-down client never dials again, and
+  a call made after it now fails with `McpSseError::Shutdown` rather than
+  `StreamClosed`.
+- Stream silence is counted from the last bytes read or the newest unanswered
+  request, whichever is later. A call arriving late in a quiet spell used to be
+  failed — as indeterminate — by an idle timer that had started before the
+  call existed.
+- mentra-provider is unchanged and stays at 0.9.2.
+
 ## 0.28.2 / mentra-provider 0.9.2
 
 ### A refused `previous_response_id` no longer wedges the websocket transport

@@ -63,7 +63,7 @@ pub(crate) enum StreamOpening {
 struct Shared {
     requests: Mutex<Vec<CapturedRequest>>,
     replies: Mutex<Vec<PostReply>>,
-    stream_opened: (Mutex<bool>, Condvar),
+    streams_opened: (Mutex<usize>, Condvar),
     posts_seen: (Mutex<usize>, Condvar),
     post_headers_sent: (Mutex<usize>, Condvar),
     stalled_posts_released: (Mutex<bool>, Condvar),
@@ -102,7 +102,7 @@ impl SseTestServer {
         let shared = Arc::new(Shared {
             requests: Mutex::new(Vec::new()),
             replies: Mutex::new(Vec::new()),
-            stream_opened: (Mutex::new(false), Condvar::new()),
+            streams_opened: (Mutex::new(0), Condvar::new()),
             posts_seen: (Mutex::new(0), Condvar::new()),
             post_headers_sent: (Mutex::new(0), Condvar::new()),
             stalled_posts_released: (Mutex::new(false), Condvar::new()),
@@ -154,14 +154,27 @@ impl SseTestServer {
 
     /// Blocks until the client has opened the SSE stream.
     pub(crate) fn wait_for_stream(&self) {
-        let (lock, condvar) = &self.shared.stream_opened;
-        let mut opened = lock.lock().expect("lock the stream flag");
-        while !*opened {
+        self.wait_for_streams(1);
+    }
+
+    /// Blocks until the client has opened the SSE stream `count` times.
+    ///
+    /// Stream commands are queued, and the fixture serves one stream at a
+    /// time, so an event sent after the previous stream ended reaches whichever
+    /// stream is opened next.
+    pub(crate) fn wait_for_streams(&self, count: usize) {
+        let (lock, condvar) = &self.shared.streams_opened;
+        let mut opened = lock.lock().expect("lock the stream counter");
+        while *opened < count {
             let (guard, timeout) = condvar
                 .wait_timeout(opened, Duration::from_secs(10))
                 .expect("wait for the stream");
             opened = guard;
-            assert!(!timeout.timed_out(), "the client never opened the stream");
+            assert!(
+                !timeout.timed_out(),
+                "the client opened {} of {count} expected streams",
+                *opened
+            );
         }
     }
 
@@ -325,8 +338,8 @@ fn serve_stream(
     }
 
     // Only signal readiness once the client can actually receive events.
-    let (lock, condvar) = &shared.stream_opened;
-    *lock.lock().expect("lock the stream flag") = true;
+    let (lock, condvar) = &shared.streams_opened;
+    *lock.lock().expect("lock the stream counter") += 1;
     condvar.notify_all();
 
     let commands = commands.lock().expect("lock the command channel");
