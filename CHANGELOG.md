@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.28.5 / mentra-provider 0.9.4
+
+### Every agent gets its own conversation on its provider
+
+- A registry hands out one `Arc<dyn Provider>` per provider, and a
+  `ResponsesProvider` hands every session it makes an `Arc` of the same state.
+  So `latest_response_id` and `turn_state` — both answers about one exchange —
+  were shared by every agent in the process. A host running a conversation per
+  chat had each chat reading and overwriting the others'. 0.28.4 stopped the
+  chain head from being *sent* by default; this stops it from being shared.
+- `Provider::fresh_conversation_scope` is the narrow half of
+  `fresh_session_scope`: it separates the state that describes an exchange and
+  keeps the state that describes the endpoint. `ResponsesSessionState` is now
+  two pieces so that is expressible — a connection half (cached websocket, the
+  decision to stop dialing one) behind an `Arc` that scopes share, and a
+  conversation half (chain head, turn state) that they do not.
+- Keeping the socket shared is deliberate. A host that mints an agent per turn
+  would otherwise pay a fresh handshake per turn, and a socket describes the
+  endpoint rather than the exchange. Requests on two conversation scopes still
+  serialize behind one connection; `fresh_session_scope` still separates that
+  too and its contract is unchanged.
+- `Agent::new` and `Agent::from_loaded` mint the scope, so every path that
+  builds an agent is covered — session, resume, spawn, subagent — as does
+  `set_model`, which replaces the provider outside both. A provider that does
+  not implement the method keeps the scope it was handed; minting is local and
+  synchronous, and the one defined refusal says the provider holds no
+  per-conversation state, which is true of every provider that does not chain.
+- A host that kept a clone of a registered provider to prewarm its connection
+  still prewarms the connection the run uses. What that clone no longer
+  observes is the run's response chain, because that is now the run's own.
+
+### A host can state the Responses state mode once, for the runtime
+
+- `RuntimeBuilder::with_responses_state_mode` sits beside
+  `with_responses_transport` and works the same way: a runtime-level choice
+  replaces what the request carried, and stating nothing leaves each agent's
+  own options to decide. It applies to the turn request and to compaction,
+  which is a provider request like any other.
+- Before it, a host that wanted `Hybrid` or `Stateful` had to state a complete
+  `ProviderRequestOptions` on an agent — restating reasoning and everything
+  else beside it to change one field.
+- `Runtime::responses_state_mode` reads it back, for the same reason the
+  transport's reader exists: a transport and a state mode otherwise reach only
+  the requests a runtime sends, leaving a host with no way to report its own
+  configuration.
+
 ## 0.28.4 / mentra-provider 0.9.3
 
 ### Responses requests no longer chain a `previous_response_id` by default
