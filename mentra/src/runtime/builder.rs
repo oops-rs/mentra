@@ -3,7 +3,7 @@ use std::{any::Any, path::Path, sync::Arc};
 use crate::{
     compaction::CompactionEngine,
     mcp::{McpManager, McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig},
-    provider::{Provider, ProviderRegistry, ResponsesTransport},
+    provider::{Provider, ProviderRegistry, ResponsesStateMode, ResponsesTransport},
     runtime::{
         ExecutionHookParticipant, RuntimeExecutor, RuntimeHandle, RuntimeHook, RuntimeHooks,
         RuntimePolicy, RuntimeStore, control::PreExecutionHook, error::RuntimeError,
@@ -422,6 +422,40 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Chooses how every Responses request this runtime makes treats
+    /// provider-side conversation state.
+    ///
+    /// The default is
+    /// [`ResponsesStateMode::ReplayOnly`](crate::provider::ResponsesStateMode):
+    /// this runtime sends the projected transcript on every request and elides
+    /// nothing a chain would repeat, so chaining could only add the same
+    /// context twice. Stating
+    /// [`Hybrid`](crate::provider::ResponsesStateMode::Hybrid) or
+    /// [`Stateful`](crate::provider::ResponsesStateMode::Stateful) here is how
+    /// a host says it wants that anyway — for an endpoint whose pricing or
+    /// routing rewards a chained id despite the repetition.
+    ///
+    /// Stated here rather than per agent, because a state mode is an answer
+    /// about the connection, like a transport. An agent's own
+    /// `provider_request_options` still decides when a runtime states nothing.
+    ///
+    /// ```rust,no_run
+    /// use mentra::{BuiltinProvider, Runtime};
+    /// use mentra::provider::ResponsesStateMode;
+    /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = Runtime::builder()
+    ///     .with_provider(BuiltinProvider::OpenAI, "sk-...")
+    ///     .with_responses_state_mode(ResponsesStateMode::Hybrid)
+    ///     .build()?;
+    /// # let _ = runtime;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_responses_state_mode(mut self, state_mode: ResponsesStateMode) -> Self {
+        self.provider_registry.set_responses_state_mode(state_mode);
+        self
+    }
+
     /// Registers the local Ollama provider using its default OpenAI-compatible endpoint.
     pub fn with_ollama(mut self) -> Self {
         self.provider_registry.register_ollama();
@@ -773,6 +807,33 @@ mod tests {
             minted.load(Ordering::SeqCst),
             2,
             "each session's agent must mint its own conversation scope"
+        );
+    }
+
+    /// A runtime states nothing about state mode by default, so an agent's
+    /// own options decide — and those default to `ReplayOnly`.
+    #[tokio::test]
+    async fn a_runtime_states_no_state_mode_until_asked() {
+        let runtime = RuntimeBuilder::new(false)
+            .with_store(VolatileRuntimeStore::new())
+            .with_provider_instance(StubProvider)
+            .build_async()
+            .await
+            .expect("builds");
+
+        assert_eq!(runtime.responses_state_mode(), None);
+
+        let chaining = RuntimeBuilder::new(false)
+            .with_store(VolatileRuntimeStore::new())
+            .with_provider_instance(StubProvider)
+            .with_responses_state_mode(ResponsesStateMode::Hybrid)
+            .build_async()
+            .await
+            .expect("builds");
+
+        assert_eq!(
+            chaining.responses_state_mode(),
+            Some(ResponsesStateMode::Hybrid)
         );
     }
 

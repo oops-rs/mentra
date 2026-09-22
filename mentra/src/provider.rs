@@ -264,6 +264,7 @@ pub struct ProviderRegistry {
     /// already hands to the handle at build time, instead of a field every
     /// `with_*` reconstructor would have to remember to carry.
     responses_transport: Option<ResponsesTransport>,
+    responses_state_mode: Option<ResponsesStateMode>,
 }
 
 impl ProviderRegistry {
@@ -409,6 +410,14 @@ impl ProviderRegistry {
     pub(crate) fn responses_transport(&self) -> Option<ResponsesTransport> {
         self.responses_transport
     }
+
+    pub(crate) fn set_responses_state_mode(&mut self, state_mode: ResponsesStateMode) {
+        self.responses_state_mode = Some(state_mode);
+    }
+
+    pub(crate) fn responses_state_mode(&self) -> Option<ResponsesStateMode> {
+        self.responses_state_mode
+    }
 }
 
 /// Settles which Responses transport a request goes out on, and refuses one the
@@ -449,6 +458,26 @@ pub(crate) fn conversation_scoped(provider: Arc<dyn Provider>) -> Arc<dyn Provid
     match provider.fresh_conversation_scope() {
         Ok(scope) => Arc::new(scope),
         Err(_) => provider,
+    }
+}
+
+/// Applies the runtime's state-mode choice, when it made one.
+///
+/// Same rule as [`select_responses_transport`]: a runtime-level choice is the
+/// connection-level answer and replaces whatever the request's own options
+/// carried, and with no runtime choice the request's own value stands — which
+/// is [`ResponsesStateMode::ReplayOnly`] unless an agent's
+/// `provider_request_options` said otherwise.
+///
+/// Unlike a transport, nothing here can be refused: every Responses endpoint
+/// accepts a request that chains nothing, and a `previous_response_id` the
+/// endpoint will not take is already recovered at the session.
+pub(crate) fn select_responses_state_mode(
+    chosen: Option<ResponsesStateMode>,
+    options: &mut ProviderRequestOptions,
+) {
+    if let Some(state_mode) = chosen {
+        options.responses.state_mode = state_mode;
     }
 }
 

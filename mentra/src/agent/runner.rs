@@ -381,6 +381,10 @@ impl<'a> TurnRunner<'a> {
             self.agent.runtime.responses_transport(),
             &mut provider_request_options,
         )?;
+        crate::provider::select_responses_state_mode(
+            self.agent.runtime.responses_state_mode(),
+            &mut provider_request_options,
+        );
         let request = Request {
             model: self.agent.model.as_str().into(),
             system: self.agent.effective_system_prompt(),
