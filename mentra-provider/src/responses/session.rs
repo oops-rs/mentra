@@ -1430,6 +1430,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_state_mode_sends_no_previous_response_id_even_with_a_chain_head() {
+        let sse_body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n"
+        );
+        let (base_url, handle) = spawn_single_response_server(sse_body);
+
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let session = ResponsesProvider::with_shared_credential_source(
+            definition,
+            Arc::new(StaticCredentialSource::new("test-key")),
+        )
+        .session();
+        // A scope that has already answered once. Under the old default this
+        // id was attached to whatever asked next — including a request from an
+        // unrelated conversation sharing the scope.
+        session
+            .state
+            .set_latest_response_id("resp_from_another_turn");
+
+        let request = Request {
+            model: Cow::Borrowed("gpt-5"),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        consume_stream(
+            session
+                .stream_response(request)
+                .await
+                .expect("stream response should succeed"),
+        )
+        .await;
+
+        let captured = handle.join().expect("server should capture the request");
+        let payload: serde_json::Value =
+            serde_json::from_str(request_body(&captured)).expect("request body should be json");
+        assert!(
+            payload.get("previous_response_id").is_none(),
+            "the default state mode must not chain: {payload}"
+        );
+        // The head is still tracked, so a caller that states Hybrid or
+        // Stateful on the same scope still has one to chain from.
+        assert_eq!(session.latest_response_id().as_deref(), Some("resp_1"));
+    }
+
+    #[tokio::test]
     async fn stream_response_captures_turn_state_from_http_response_headers() {
         let sse_body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"status\":\"completed\"}}\n\n";
         let (base_url, _handle) = spawn_single_response_server_with_headers(
@@ -1816,7 +1872,13 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
-            provider_request_options: ProviderRequestOptions::default(),
+            provider_request_options: ProviderRequestOptions {
+                responses: crate::ResponsesRequestOptions {
+                    state_mode: crate::ResponsesStateMode::Hybrid,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         };
 
         let stream = session
@@ -1990,7 +2052,13 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\"
             temperature: None,
             max_output_tokens: None,
             metadata: Cow::Owned(BTreeMap::new()),
-            provider_request_options: ProviderRequestOptions::default(),
+            provider_request_options: ProviderRequestOptions {
+                responses: crate::ResponsesRequestOptions {
+                    state_mode: crate::ResponsesStateMode::Hybrid,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         };
 
         let stream = session
