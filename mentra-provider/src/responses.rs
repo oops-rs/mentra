@@ -141,6 +141,34 @@ where
         }
     }
 
+    /// Returns the same configured provider with an independent *conversation*,
+    /// still sharing this one's transport.
+    ///
+    /// The narrower half of [`fresh_session_scope`](Self::fresh_session_scope).
+    /// Response chaining and turn affinity start empty, because both are
+    /// answers about one exchange and two conversations that share them ask
+    /// each other's questions. The cached websocket, the decision to stop
+    /// dialing one, the HTTP client and its pool, and endpoint capability
+    /// knowledge are all retained — they describe the endpoint, not the
+    /// exchange, and a caller that mints a scope per conversation would
+    /// otherwise pay a fresh handshake for each.
+    ///
+    /// Requests on the two scopes therefore still serialize behind one
+    /// socket's mutex. Reach for [`fresh_session_scope`](Self::fresh_session_scope)
+    /// when that matters more than the dial does.
+    pub fn fresh_conversation_scope(&self) -> Self {
+        Self {
+            definition: self.definition.clone(),
+            credential_source: Arc::clone(&self.credential_source),
+            client: self.client.clone(),
+            session_state: Arc::new(ResponsesSessionState::with_shared_connection(
+                &self.session_state,
+            )),
+            endpoint_capabilities: Arc::clone(&self.endpoint_capabilities),
+            hybrid_http_previous_response_id: self.hybrid_http_previous_response_id,
+        }
+    }
+
     pub fn session(&self) -> ResponsesSession<C> {
         ResponsesSession::new(
             self.definition.clone(),
@@ -263,6 +291,12 @@ where
     fn fresh_session_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
         Ok(ProviderSessionScope::new(
             ResponsesProvider::fresh_session_scope(self),
+        ))
+    }
+
+    fn fresh_conversation_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        Ok(ProviderSessionScope::new(
+            ResponsesProvider::fresh_conversation_scope(self),
         ))
     }
 }

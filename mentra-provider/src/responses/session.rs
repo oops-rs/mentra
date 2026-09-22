@@ -97,27 +97,78 @@ impl WebsocketSession {
     }
 }
 
-pub(crate) struct ResponsesSessionState {
+/// What belongs to the transport rather than to any one conversation.
+///
+/// The cached websocket and the decision to stop dialing one are properties of
+/// the endpoint this provider was configured for, so scopes that only need to
+/// stop sharing a conversation keep sharing this — see
+/// [`ResponsesProvider::fresh_conversation_scope`](super::ResponsesProvider::fresh_conversation_scope).
+pub(crate) struct ResponsesConnectionState {
     disable_websockets: AtomicBool,
     websocket_session: StdMutex<WebsocketSession>,
-    turn_state: SharedTurnState,
-    latest_response_id: StdMutex<Option<String>>,
 }
 
-impl Default for ResponsesSessionState {
+impl Default for ResponsesConnectionState {
     fn default() -> Self {
         Self {
             disable_websockets: AtomicBool::new(false),
             websocket_session: StdMutex::new(WebsocketSession::default()),
+        }
+    }
+}
+
+/// What belongs to one conversation: where its chain is, and which turn the
+/// endpoint last routed it to.
+///
+/// Both are answers about a particular exchange, so two conversations that
+/// share them ask each other's questions. Splitting this is the whole of
+/// [`ResponsesProvider::fresh_conversation_scope`](super::ResponsesProvider::fresh_conversation_scope).
+pub(crate) struct ResponsesConversationState {
+    turn_state: SharedTurnState,
+    latest_response_id: StdMutex<Option<String>>,
+}
+
+impl Default for ResponsesConversationState {
+    fn default() -> Self {
+        Self {
             turn_state: Arc::new(StdMutex::new(None)),
             latest_response_id: StdMutex::new(None),
         }
     }
 }
 
+pub(crate) struct ResponsesSessionState {
+    connection: Arc<ResponsesConnectionState>,
+    conversation: ResponsesConversationState,
+}
+
+impl Default for ResponsesSessionState {
+    fn default() -> Self {
+        Self {
+            connection: Arc::new(ResponsesConnectionState::default()),
+            conversation: ResponsesConversationState::default(),
+        }
+    }
+}
+
 impl ResponsesSessionState {
+    /// A new conversation over the connection `shared` already holds.
+    pub(crate) fn with_shared_connection(shared: &Self) -> Self {
+        Self {
+            connection: Arc::clone(&shared.connection),
+            conversation: ResponsesConversationState::default(),
+        }
+    }
+
+    /// Whether two states would dial, reuse and retire the same websocket.
+    #[cfg(test)]
+    pub(crate) fn shares_connection_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.connection, &other.connection)
+    }
+
     fn turn_state(&self) -> Option<String> {
-        self.turn_state
+        self.conversation
+            .turn_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -125,13 +176,15 @@ impl ResponsesSessionState {
 
     fn set_turn_state(&self, turn_state: impl Into<String>) {
         *self
+            .conversation
             .turn_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(turn_state.into());
     }
 
     fn latest_response_id(&self) -> Option<String> {
-        self.latest_response_id
+        self.conversation
+            .latest_response_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -139,6 +192,7 @@ impl ResponsesSessionState {
 
     fn set_latest_response_id(&self, response_id: impl Into<String>) {
         *self
+            .conversation
             .latest_response_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response_id.into());
@@ -146,6 +200,7 @@ impl ResponsesSessionState {
 
     fn clear_latest_response_id(&self) {
         *self
+            .conversation
             .latest_response_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
@@ -158,6 +213,7 @@ impl ResponsesSessionState {
     /// newer id stays.
     fn forget_rejected_response_id(&self, rejected: &str) {
         let mut latest = self
+            .conversation
             .latest_response_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -234,16 +290,24 @@ where
     }
 
     pub fn disable_websockets(&self) {
-        self.state.disable_websockets.store(true, Ordering::Relaxed);
+        self.state
+            .connection
+            .disable_websockets
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn websockets_enabled(&self) -> bool {
         self.definition.capabilities.supports_websockets
-            && !self.state.disable_websockets.load(Ordering::Relaxed)
+            && !self
+                .state
+                .connection
+                .disable_websockets
+                .load(Ordering::Relaxed)
     }
 
     pub fn set_connection_reused(&self, connection_reused: bool) {
         self.state
+            .connection
             .websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -252,6 +316,7 @@ where
 
     pub fn connection_reused(&self) -> bool {
         self.state
+            .connection
             .websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -313,6 +378,7 @@ where
     pub async fn websocket_connection_is_closed(&self) -> bool {
         let connection = self
             .state
+            .connection
             .websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -340,12 +406,13 @@ where
         let connection = ResponsesWebsocketConnection::connect(
             url,
             headers,
-            turn_state.or_else(|| Some(Arc::clone(&self.state.turn_state))),
+            turn_state.or_else(|| Some(Arc::clone(&self.state.conversation.turn_state))),
             self.stream_idle_timeout(),
             telemetry,
         )
         .await?;
         self.state
+            .connection
             .websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -361,6 +428,7 @@ where
         let (connection, connection_reused) = {
             let websocket_session = self
                 .state
+                .connection
                 .websocket_session
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -388,6 +456,7 @@ where
         let (connection, connection_reused) = {
             let websocket_session = self
                 .state
+                .connection
                 .websocket_session
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -409,6 +478,7 @@ where
     #[cfg(feature = "responses-websocket")]
     pub fn clear_websocket_connection(&self) {
         self.state
+            .connection
             .websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -652,12 +722,13 @@ where
             let connection = ResponsesWebsocketConnection::connect(
                 url,
                 headers,
-                Some(Arc::clone(&self.state.turn_state)),
+                Some(Arc::clone(&self.state.conversation.turn_state)),
                 self.stream_idle_timeout(),
                 None,
             )
             .await?;
             self.state
+                .connection
                 .websocket_session
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -780,12 +851,13 @@ where
     }
 
     pub fn take_turn_state(&self) -> SharedTurnState {
-        Arc::clone(&self.state.turn_state)
+        Arc::clone(&self.state.conversation.turn_state)
     }
 
     pub fn last_response_rx_ready(&self) -> bool {
         let mut session = self
             .state
+            .connection
             .websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -715,6 +715,67 @@ mod tests {
         assert_eq!(second.load(Ordering::SeqCst), 1);
     }
 
+    /// Counts the conversation scopes a provider is asked for, so an agent
+    /// built without one shows up as a count that did not move.
+    struct ScopeCounting(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl crate::provider::Provider for ScopeCounting {
+        fn descriptor(&self) -> crate::provider::ProviderDescriptor {
+            crate::provider::ProviderDescriptor::new(BuiltinProvider::OpenAI)
+        }
+
+        fn fresh_conversation_scope(
+            &self,
+        ) -> Result<crate::provider::ProviderSessionScope, crate::provider::ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::provider::ProviderSessionScope::new(ScopeCounting(
+                Arc::clone(&self.0),
+            )))
+        }
+
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<crate::ModelInfo>, crate::provider::ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn stream(
+            &self,
+            _request: crate::provider::Request<'_>,
+        ) -> Result<crate::provider::ProviderEventStream, crate::provider::ProviderError> {
+            unreachable!("no turn is run in these tests")
+        }
+    }
+
+    /// Two chats on one runtime must not read each other's response chain.
+    /// The registry hands out one `Arc` per provider, so this is the line
+    /// between "every chat shares a chain head" and "every chat owns one".
+    #[tokio::test]
+    async fn every_session_gets_its_own_conversation_scope() {
+        let minted = Arc::new(AtomicUsize::new(0));
+        let runtime = RuntimeBuilder::new(false)
+            .with_store(VolatileRuntimeStore::new())
+            .with_provider_instance(ScopeCounting(Arc::clone(&minted)))
+            .build_async()
+            .await
+            .expect("builds");
+
+        let model = crate::ModelInfo::new("gpt-5", BuiltinProvider::OpenAI);
+        let _first = runtime
+            .create_session("chat-a", model.clone())
+            .expect("first session");
+        let _second = runtime
+            .create_session("chat-b", model)
+            .expect("second session");
+
+        assert_eq!(
+            minted.load(Ordering::SeqCst),
+            2,
+            "each session's agent must mint its own conversation scope"
+        );
+    }
+
     #[test]
     fn build_refuses_to_discard_registered_mcp_servers() {
         let error = RuntimeBuilder::new(false)
