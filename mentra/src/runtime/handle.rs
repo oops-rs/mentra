@@ -175,6 +175,15 @@ impl RuntimeHandle {
             .responses_transport()
     }
 
+    /// The Responses state mode this runtime chose for every request it makes,
+    /// or `None` when it left the choice to each request's own options.
+    pub(crate) fn responses_state_mode(&self) -> Option<crate::provider::ResponsesStateMode> {
+        self.provider_registry
+            .read()
+            .expect("provider registry poisoned")
+            .responses_state_mode()
+    }
+
     pub(crate) fn memory_engine(&self) -> Arc<MemoryEngine> {
         self.persistence.memory.clone()
     }

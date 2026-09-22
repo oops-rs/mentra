@@ -895,6 +895,21 @@ impl Runtime {
             .responses_transport()
     }
 
+    /// The Responses state mode this runtime chose for every request it makes,
+    /// or `None` when it left the choice to each agent's own options — which
+    /// is `ReplayOnly` unless one set otherwise.
+    ///
+    /// The reader for
+    /// [`RuntimeBuilder::with_responses_state_mode`](crate::runtime::RuntimeBuilder::with_responses_state_mode),
+    /// and it exists for the same reason the transport's does: a host that
+    /// wants to report its own configuration otherwise has no way to ask.
+    pub fn responses_state_mode(&self) -> Option<crate::provider::ResponsesStateMode> {
+        self.provider_registry
+            .read()
+            .expect("provider registry poisoned")
+            .responses_state_mode()
+    }
+
     /// Registers a builtin provider from an API key.
     pub fn register_provider(
         &mut self,

@@ -74,6 +74,25 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    /// Returns the same configured provider with an independent conversation,
+    /// still sharing this one's transport.
+    ///
+    /// The narrower half of [`fresh_session_scope`](Self::fresh_session_scope),
+    /// under the same rules: synchronous, local, descriptor identity preserved.
+    /// What it separates is the state that answers questions about one
+    /// exchange — where its chain is, which turn it was routed to. What it
+    /// keeps is the state that describes the endpoint, including any cached
+    /// connection, so a caller minting one scope per conversation does not
+    /// also pay one handshake per conversation.
+    ///
+    /// Providers with nothing to separate report this capability as
+    /// unsupported, and a caller that sees that keeps the scope it has.
+    fn fresh_conversation_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "fresh_conversation_scope".to_string(),
+        ))
+    }
+
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
         self.create_session().await?.stream(request).await
     }
@@ -143,6 +162,10 @@ impl Provider for ProviderSessionScope {
 
     fn fresh_session_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
         self.inner.fresh_session_scope()
+    }
+
+    fn fresh_conversation_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        self.inner.fresh_conversation_scope()
     }
 
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {

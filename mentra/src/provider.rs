@@ -82,6 +82,25 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    /// Returns the same configured provider with an independent conversation,
+    /// still sharing this one's transport.
+    ///
+    /// The narrower half of [`fresh_session_scope`](Self::fresh_session_scope),
+    /// under the same rules. It separates what answers questions about one
+    /// exchange — where its response chain is, which turn the endpoint routed
+    /// it to — and keeps what describes the endpoint, including any cached
+    /// connection. The runtime mints one of these per agent, so two agents
+    /// never read each other's chain and still share one warm socket.
+    ///
+    /// Custom providers remain valid without implementing this method; they
+    /// report the capability as unsupported and the runtime keeps the scope it
+    /// already had.
+    fn fresh_conversation_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "fresh_conversation_scope".to_string(),
+        ))
+    }
+
     /// Lists models available from the provider.
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
 
@@ -151,6 +170,10 @@ impl Provider for ProviderSessionScope {
         self.inner.fresh_session_scope()
     }
 
+    fn fresh_conversation_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        self.inner.fresh_conversation_scope()
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         self.inner.list_models().await
     }
@@ -195,6 +218,10 @@ impl Provider for Arc<dyn Provider> {
         (**self).fresh_session_scope()
     }
 
+    fn fresh_conversation_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        (**self).fresh_conversation_scope()
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         (**self).list_models().await
     }
@@ -237,6 +264,7 @@ pub struct ProviderRegistry {
     /// already hands to the handle at build time, instead of a field every
     /// `with_*` reconstructor would have to remember to carry.
     responses_transport: Option<ResponsesTransport>,
+    responses_state_mode: Option<ResponsesStateMode>,
 }
 
 impl ProviderRegistry {
@@ -382,6 +410,14 @@ impl ProviderRegistry {
     pub(crate) fn responses_transport(&self) -> Option<ResponsesTransport> {
         self.responses_transport
     }
+
+    pub(crate) fn set_responses_state_mode(&mut self, state_mode: ResponsesStateMode) {
+        self.responses_state_mode = Some(state_mode);
+    }
+
+    pub(crate) fn responses_state_mode(&self) -> Option<ResponsesStateMode> {
+        self.responses_state_mode
+    }
 }
 
 /// Settles which Responses transport a request goes out on, and refuses one the
@@ -399,6 +435,52 @@ impl ProviderRegistry {
 /// different one returns a stream nobody asked for and hides a misconfigured
 /// runtime behind a working one — the same stance `stream_response` already
 /// takes when the transport is not compiled in.
+/// Gives one agent its own conversation on the provider it was handed.
+///
+/// Every agent owns a transcript, so every agent owns the state that answers
+/// questions about that transcript: where its response chain is, and which
+/// turn the endpoint routed it to. A registry hands out one `Arc` per
+/// provider, so without this two agents built from the same registry entry
+/// read and overwrite each other's — and a host that runs a conversation per
+/// chat has each chat chaining from whichever one answered last.
+///
+/// The transport is deliberately not split. A cached websocket describes the
+/// endpoint rather than the exchange, and an agent-per-turn host would
+/// otherwise pay a handshake per turn; [`Provider::fresh_session_scope`]
+/// remains the way to separate that too.
+///
+/// A provider that declines keeps the scope it was handed. Declining is not a
+/// failure to report: minting is defined as local and synchronous, so there is
+/// no transport error to surface, and the one defined refusal —
+/// `UnsupportedCapability` — says the provider holds no per-conversation state,
+/// which is true of every provider that does not chain.
+pub(crate) fn conversation_scoped(provider: Arc<dyn Provider>) -> Arc<dyn Provider> {
+    match provider.fresh_conversation_scope() {
+        Ok(scope) => Arc::new(scope),
+        Err(_) => provider,
+    }
+}
+
+/// Applies the runtime's state-mode choice, when it made one.
+///
+/// Same rule as [`select_responses_transport`]: a runtime-level choice is the
+/// connection-level answer and replaces whatever the request's own options
+/// carried, and with no runtime choice the request's own value stands — which
+/// is [`ResponsesStateMode::ReplayOnly`] unless an agent's
+/// `provider_request_options` said otherwise.
+///
+/// Unlike a transport, nothing here can be refused: every Responses endpoint
+/// accepts a request that chains nothing, and a `previous_response_id` the
+/// endpoint will not take is already recovered at the session.
+pub(crate) fn select_responses_state_mode(
+    chosen: Option<ResponsesStateMode>,
+    options: &mut ProviderRequestOptions,
+) {
+    if let Some(state_mode) = chosen {
+        options.responses.state_mode = state_mode;
+    }
+}
+
 pub(crate) fn select_responses_transport(
     provider: &dyn Provider,
     chosen: Option<ResponsesTransport>,
@@ -537,6 +619,13 @@ where
 
     fn fresh_session_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
         let scope = mentra_provider::Provider::fresh_session_scope(&self.inner)?;
+        Ok(ProviderSessionScope::new(SharedProviderProxy {
+            inner: scope,
+        }))
+    }
+
+    fn fresh_conversation_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+        let scope = mentra_provider::Provider::fresh_conversation_scope(&self.inner)?;
         Ok(ProviderSessionScope::new(SharedProviderProxy {
             inner: scope,
         }))
@@ -768,5 +857,90 @@ pub mod lmstudio {
             base_url.as_ref(),
             None,
         )
+    }
+}
+
+#[cfg(test)]
+mod conversation_scope_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+
+    use super::{
+        BuiltinProvider, ModelInfo, Provider, ProviderDescriptor, ProviderError,
+        ProviderEventStream, ProviderSessionScope, Request, conversation_scoped,
+    };
+
+    /// Mints a scope and counts how many it was asked for, so a call site that
+    /// stopped asking shows up as a count that never moves.
+    struct Minting(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Provider for Minting {
+        fn descriptor(&self) -> ProviderDescriptor {
+            ProviderDescriptor::new(BuiltinProvider::OpenAI)
+        }
+
+        fn fresh_conversation_scope(&self) -> Result<ProviderSessionScope, ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ProviderSessionScope::new(Minting(Arc::clone(&self.0))))
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn stream(
+            &self,
+            _request: Request<'_>,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            unreachable!("no turn is run in these tests")
+        }
+    }
+
+    /// The default: holds no per-conversation state and says so.
+    struct Declining;
+
+    #[async_trait]
+    impl Provider for Declining {
+        fn descriptor(&self) -> ProviderDescriptor {
+            ProviderDescriptor::new(BuiltinProvider::OpenAI)
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn stream(
+            &self,
+            _request: Request<'_>,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            unreachable!("no turn is run in these tests")
+        }
+    }
+
+    #[test]
+    fn a_provider_that_mints_gets_a_new_scope_each_time() {
+        let minted = Arc::new(AtomicUsize::new(0));
+        let shared: Arc<dyn Provider> = Arc::new(Minting(Arc::clone(&minted)));
+
+        let first = conversation_scoped(Arc::clone(&shared));
+        let second = conversation_scoped(Arc::clone(&shared));
+
+        assert_eq!(minted.load(Ordering::SeqCst), 2);
+        assert!(!Arc::ptr_eq(&first, &shared));
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn a_provider_that_declines_keeps_the_scope_it_was_handed() {
+        let shared: Arc<dyn Provider> = Arc::new(Declining);
+
+        let scoped = conversation_scoped(Arc::clone(&shared));
+
+        // Not an error path: a provider that does not chain has nothing to
+        // separate, and wrapping it would allocate for nothing.
+        assert!(Arc::ptr_eq(&scoped, &shared));
     }
 }

@@ -33,6 +33,7 @@ fn fresh_scope_detaches_session_state_but_keeps_endpoint_knowledge() {
     let (last_response_tx, last_response_rx) = oneshot::channel();
     old_session
         .state
+        .connection
         .websocket_session
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -58,6 +59,66 @@ fn fresh_scope_detaches_session_state_but_keeps_endpoint_knowledge() {
             .endpoint_capabilities
             .http_previous_response_id_is_unsupported("gpt-5")
     );
+}
+
+#[test]
+fn fresh_conversation_scope_splits_the_exchange_and_keeps_the_connection() {
+    let provider = ResponsesProvider::with_shared_credential_source(
+        super::super::openai_definition(),
+        Arc::new(StaticCredentialSource::new("test-key")),
+    );
+    let old_session = provider.session();
+    old_session.set_turn_state("scope-a-turn");
+    old_session.state.set_latest_response_id("resp_a");
+    old_session.set_connection_reused(true);
+    old_session.disable_websockets();
+    old_session
+        .endpoint_capabilities
+        .mark_http_previous_response_id_unsupported("gpt-5");
+
+    let next_session = provider.fresh_conversation_scope().session();
+
+    // The exchange is the new conversation's own.
+    assert_eq!(next_session.turn_state(), None);
+    assert_eq!(next_session.latest_response_id(), None);
+    // The endpoint is not: one socket, one decision to stop dialing it, one
+    // body of capability knowledge.
+    assert!(
+        next_session
+            .state
+            .shares_connection_with(&old_session.state)
+    );
+    assert!(next_session.connection_reused());
+    assert!(!next_session.websockets_enabled());
+    assert!(
+        next_session
+            .endpoint_capabilities
+            .http_previous_response_id_is_unsupported("gpt-5")
+    );
+
+    // And the split runs both ways: neither conversation can reach the other's.
+    next_session.set_turn_state("scope-b-turn");
+    next_session.state.set_latest_response_id("resp_b");
+    assert_eq!(old_session.turn_state().as_deref(), Some("scope-a-turn"));
+    assert_eq!(old_session.latest_response_id().as_deref(), Some("resp_a"));
+}
+
+#[test]
+fn fresh_session_scope_still_splits_the_connection_too() {
+    let provider = ResponsesProvider::with_shared_credential_source(
+        super::super::openai_definition(),
+        Arc::new(StaticCredentialSource::new("test-key")),
+    );
+    let old_session = provider.session();
+    let conversation = provider.fresh_conversation_scope().session();
+    let full = provider.fresh_session_scope().session();
+
+    assert!(
+        conversation
+            .state
+            .shares_connection_with(&old_session.state)
+    );
+    assert!(!full.state.shares_connection_with(&old_session.state));
 }
 
 #[tokio::test]

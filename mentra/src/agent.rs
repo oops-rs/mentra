@@ -246,6 +246,10 @@ impl Agent {
             max_rounds,
             teammate_identity,
         } = options;
+        // This agent's own conversation on the provider, so its response
+        // chain and turn affinity are not the ones the last agent left
+        // behind. See `crate::provider::conversation_scoped`.
+        let provider = crate::provider::conversation_scoped(provider);
         let store = runtime.store();
         let agent_id = format!(
             "agent-{:x}-{}",
@@ -327,6 +331,10 @@ impl Agent {
         mut state: LoadedAgentState,
         provider: Arc<dyn Provider>,
     ) -> Result<Self, RuntimeError> {
+        // As in `new`: a resumed agent resumes a transcript, not a chain — no
+        // chain head is persisted — so it starts on its own conversation
+        // rather than inheriting whatever the shared scope holds right now.
+        let provider = crate::provider::conversation_scoped(provider);
         let runtime = runtime.rebind_persisted_runtime_identifier(Arc::<str>::from(
             state.record.runtime_identifier.as_str(),
         ));
@@ -437,10 +445,11 @@ impl Agent {
     /// Updates the model and provider used for future turns, then persists the
     /// new agent record so resumed sessions continue with the same setting.
     pub fn set_model(&mut self, model: crate::ModelInfo) -> Result<(), RuntimeError> {
-        let provider = self
-            .runtime
-            .get_provider(Some(&model.provider))
-            .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?;
+        let provider = crate::provider::conversation_scoped(
+            self.runtime
+                .get_provider(Some(&model.provider))
+                .ok_or_else(|| RuntimeError::ProviderNotFound(Some(model.provider.clone())))?,
+        );
         self.model = model.id;
         self.context_window = model.context_window;
         self.provider_id = provider.descriptor().id;

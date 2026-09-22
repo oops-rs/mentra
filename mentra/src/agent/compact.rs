@@ -166,6 +166,10 @@ impl Agent {
             self.runtime.responses_transport(),
             &mut provider_request_options,
         )?;
+        crate::provider::select_responses_state_mode(
+            self.runtime.responses_state_mode(),
+            &mut provider_request_options,
+        );
         let Some(proposal) = self
             .runtime
             .compaction_engine()
