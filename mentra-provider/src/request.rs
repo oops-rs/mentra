@@ -69,17 +69,28 @@ pub enum ResponsesRequestCompression {
 }
 
 /// Provider-side conversation state strategy for Responses-family providers.
+///
+/// The default is [`ReplayOnly`](Self::ReplayOnly), because a request built by
+/// this crate carries its whole transcript in `input` and nothing here removes
+/// the items a chain would repeat. Both modes that chain therefore *add* the
+/// chained response's context to a request that already states it, and the
+/// chain head is a property of the session scope rather than of the
+/// conversation: a caller that shares one scope between conversations chains
+/// each request from whichever one answered last. A caller states
+/// [`Hybrid`](Self::Hybrid) or [`Stateful`](Self::Stateful) when it knows both
+/// — that it sends only what the chain does not already hold, and that its
+/// scope follows the conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsesStateMode {
     /// Send the complete local transcript and do not attach provider-side state.
+    #[default]
     ReplayOnly,
     /// Keep local replay as the source of truth while opportunistically chaining provider state.
     ///
     /// An unknown HTTP endpoint may receive one capability probe before Hybrid
     /// learns that `previous_response_id` is unsupported. Hosts that already
     /// know this can disable the probe on [`crate::responses::ResponsesProvider`].
-    #[default]
     Hybrid,
     /// Require provider-side state chaining once a previous response id is available.
     Stateful,
@@ -162,7 +173,7 @@ impl Default for ResponsesRequestOptions {
         Self {
             parallel_tool_calls: None,
             previous_response_id: None,
-            state_mode: ResponsesStateMode::Hybrid,
+            state_mode: ResponsesStateMode::ReplayOnly,
             transport: ResponsesTransport::HttpSse,
             store: None,
             stream: Some(true),

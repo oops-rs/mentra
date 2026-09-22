@@ -204,6 +204,11 @@ async fn websocket_prewarm_is_shared_only_inside_the_fresh_scope() {
     server.await.expect("websocket server should finish");
 }
 
+/// A request that chains, because what these tests separate is the chain head.
+///
+/// Stated rather than defaulted: [`ResponsesStateMode::ReplayOnly`] is the
+/// default and attaches no `previous_response_id` at all, which would leave
+/// every scope here indistinguishable from every other.
 fn test_request(message: &'static str) -> Request<'static> {
     Request {
         model: Cow::Borrowed("gpt-5"),
@@ -216,7 +221,13 @@ fn test_request(message: &'static str) -> Request<'static> {
         temperature: None,
         max_output_tokens: None,
         metadata: Cow::Owned(BTreeMap::new()),
-        provider_request_options: ProviderRequestOptions::default(),
+        provider_request_options: ProviderRequestOptions {
+            responses: crate::ResponsesRequestOptions {
+                state_mode: crate::ResponsesStateMode::Hybrid,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
     }
 }
 

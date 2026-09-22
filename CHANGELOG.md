@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.28.4 / mentra-provider 0.9.3
+
+### Responses requests no longer chain a `previous_response_id` by default
+
+- `ResponsesStateMode::ReplayOnly` is now the default; it was `Hybrid`.
+- Hybrid was never a replacement for the replay, only an addition to it. A
+  request built here carries its whole transcript in `input`, and nothing
+  removes the items the chained response already holds — so an endpoint that
+  honours the id was handed that context twice.
+- The chain head is a property of the session scope, not of a conversation.
+  One `ResponsesProvider` hands every session it makes an `Arc` of the same
+  state, so a host running several conversations through one provider chained
+  each request from whichever conversation answered last. Against an endpoint
+  that refuses the id, that is a refused request and a resend on every turn —
+  0.28.2 made it recoverable, and it should not have been happening at all.
+  Against one that honours it, it is another conversation's context prepended
+  to this one's answer.
+- `Hybrid` and `Stateful` are unchanged and still selected the same way,
+  through `ProviderRequestOptions::responses.state_mode`. A caller states one
+  when it knows both halves: that it sends only what the chain does not
+  already hold, and that its session scope follows the conversation
+  (`ResponsesProvider::fresh_session_scope`).
+- mentra's runtime is a replaying host — it sends the projected transcript on
+  every request — so this is the correct default for it and for everything
+  built on it.
+
 ## 0.28.3
 
 ### A lost MCP SSE stream no longer costs the server for the life of the process
