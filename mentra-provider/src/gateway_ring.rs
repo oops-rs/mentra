@@ -39,9 +39,26 @@
 //! # The policy
 //!
 //! [`GatewayRingPolicy`] says when to leave a member and whether to come
-//! back; the module doc on [`health`] spells out the rules. The defaults
-//! rotate after five consecutive failures and drift back to the preferred
-//! member once it has rested a minute.
+//! back. The defaults rotate after five consecutive failures and drift back
+//! to the preferred member once it has rested a minute. The rules:
+//!
+//! - **One member answers at a time**: the *current* one. The ring starts on
+//!   the first member, the preferred one.
+//! - **Consecutive failures rotate.** A counted failure on the current member
+//!   increments its streak; reaching
+//!   [`failure_threshold`](GatewayRingPolicy::failure_threshold) rotates the
+//!   ring to the next member. A success resets the streak.
+//! - **A rejection rotates at once.** A member that answers `4xx` — the wrong
+//!   key, a path it does not serve, a request shape it refuses — is not going
+//!   to improve by being asked again, so it costs one failure, not five.
+//! - **A member that was left is on probation when the ring comes back to
+//!   it.** Its first failure rotates again immediately; its first success
+//!   clears the probation. This is what keeps a dead ring cycling quickly
+//!   instead of spending a full streak on each corpse.
+//! - **Coming back is the policy's call.** With a
+//!   [`cooldown`](GatewayRingPolicy::cooldown), the ring drifts back to a more
+//!   preferred member once that member has rested that long; without one, the
+//!   ring is sticky and only reaches a member again by rotating around to it.
 
 mod health;
 #[cfg(test)]
