@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### A tool for one agent, and the A2A exchange as data
+
+Both additive; closes [#61](https://github.com/oops-rs/mentra/issues/61).
+
+- `Agent::register_tool` and `Session::register_tool` register a tool for
+  that agent alone, on the registry's exact-agent layer: under its name the
+  agent is offered — and resolves — that tool, while every other agent on the
+  runtime keeps the audience or global one. The layer existed and was
+  ordered above the other two; only `read_tool_result` could reach it. It is
+  what a host sharing one runtime among several callers needs when two of
+  them share an audience but must not share a tool's description — the same
+  handler, telling each caller about its own remote agents, say. The
+  registration is live-only: dropped with the agent or session, not
+  persisted, and not inherited by subagents.
+- `mentra::a2a::exchange` is the submit → poll → settle loop behind
+  `A2aAgentTool`, returning data instead of text:
+  `A2aRequest::{Send, Resume}` in, `A2aExchange::{Reply, Settled,
+  StillWorking}` out, `A2aExchangeError::{Send, Poll, Abandoned}` when there
+  is no outcome. The bounds, stop and cancel rules — and the best-effort
+  cancel when the future is dropped — are the tool's, unchanged. A host
+  offering a remote agent through a tool of its own drives the same loop and
+  writes its own guidance about what to call next.
+- `remote_output`, `remote_reply` and `card_summary` frame a remote agent's
+  words between the delimiter lines, clipped to the output bound, and
+  summarize its card, exactly as the bridged tool does; `is_settled` and
+  `state_name` are public beside them.
+- `A2aAgentTool` is rebuilt on all of the above. Its name, description,
+  input, output text and details are byte-for-byte what they were.
+
 ## 0.28.6
 
 ### Remote A2A agents, behind the `a2a` feature
