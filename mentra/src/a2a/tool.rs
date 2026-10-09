@@ -35,15 +35,17 @@ mod render;
 mod tests;
 
 use std::sync::Arc;
+// The wait loop moved to `exchange`; the tests still read their bounds as
+// `Duration`s through `use super::*`.
+#[cfg(test)]
 use std::time::Duration;
 
-use a2a_lf::{Message, Part, Role, SendMessageConfiguration, SendMessageResponse, Task, TaskState};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::time::Instant;
 
 use super::client::A2aClient;
+use super::exchange::{A2aExchange, A2aExchangeError, A2aRequest, exchange, state_name};
 use super::name::a2a_tool_name;
 use crate::runtime::RunOptions;
 use crate::tool::{
@@ -51,14 +53,8 @@ use crate::tool::{
     ToolDefinition, ToolDurability, ToolExecutionCategory, ToolExecutor, ToolOutput, ToolResult,
     ToolSideEffectLevel,
 };
-use render::{Frame, StillWorking};
-
-/// How often the wait between polls checks whether the run was cancelled.
-///
-/// A poll interval is seconds long, and the cancellation token is a flag
-/// rather than a notification, so without this a cancelled run would wait out
-/// the rest of the interval before noticing.
-const INTERRUPT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+use a2a_lf::{Task, TaskState};
+use render::Frame;
 
 /// One remote agent, bridged into the tool roster as `a2a__{agent}`.
 ///
@@ -123,106 +119,37 @@ impl A2aAgentTool {
         options: &RunOptions,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> Result<ToolOutput, String> {
-        let started = Instant::now();
-        let task = match call {
+        let request = match call {
             Call::Send {
                 text,
                 task_id,
                 context_id,
-            } => {
-                let mut message = Message::new(Role::User, vec![Part::text(text)]);
-                message.task_id = task_id;
-                message.context_id = context_id;
-                let configuration = SendMessageConfiguration {
-                    accepted_output_modes: None,
-                    task_push_notification_config: None,
-                    history_length: Some(0),
-                    return_immediately: Some(true),
-                };
-                match self
-                    .client
-                    .send_message(message, configuration)
-                    .await
-                    .map_err(|error| self.failure(error))?
-                {
-                    SendMessageResponse::Message(reply) => {
-                        let details = json!({ "context_id": reply.context_id });
-                        return Ok(
-                            ToolOutput::text(render::direct_reply(&self.frame(), &reply))
-                                .with_details(details),
-                        );
-                    }
-                    SendMessageResponse::Task(task) => task,
-                }
-            }
-            Call::Resume { task_id } => self
-                .client
-                .get_task(&task_id, Some(0))
-                .await
-                .map_err(|error| self.failure(error))?,
+            } => A2aRequest::Send {
+                text,
+                task_id,
+                context_id,
+            },
+            Call::Resume { task_id } => A2aRequest::Resume { task_id },
         };
-        self.settle(task, started, options, progress).await
-    }
-
-    /// Polls a task until it settles, the wait bound passes, or the run ends.
-    async fn settle(
-        &self,
-        mut task: Task,
-        started: Instant,
-        options: &RunOptions,
-        progress: &(dyn Fn(String) + Send + Sync),
-    ) -> Result<ToolOutput, String> {
         let frame = self.frame();
-        let limits = self.client.limits();
-        let guard = CancelOnDrop::new(&self.client, &task);
-
-        loop {
-            if is_settled(&task.status.state) {
-                guard.disarm();
-                return finished(render::settled(&frame, &task), &task);
+        match exchange(&self.client, request, options, progress).await {
+            Ok(A2aExchange::Reply(reply)) => {
+                let details = json!({ "context_id": reply.context_id });
+                Ok(ToolOutput::text(render::direct_reply(&frame, &reply)).with_details(details))
             }
-
-            let remaining = limits.max_wait.saturating_sub(started.elapsed());
-            if remaining.is_zero() {
-                guard.disarm();
-                let why = StillWorking::WaitBound(limits.max_wait);
-                return Ok(output(render::still_working(&frame, &task, why), &task));
+            Ok(A2aExchange::Settled(task)) => finished(render::settled(&frame, &task), &task),
+            Ok(A2aExchange::StillWorking { task, reason }) => {
+                Ok(output(render::still_working(&frame, &task, reason), &task))
             }
-
-            match wait(limits.poll_interval.min(remaining), options).await {
-                Wake::Elapsed => {}
-                Wake::Stopping => {
-                    guard.disarm();
-                    let why = StillWorking::RunStopping;
-                    return Ok(output(render::still_working(&frame, &task, why), &task));
-                }
-                Wake::Cancelled => {
-                    guard.disarm();
-                    let canceled = self
-                        .client
-                        .cancel_task(&task.id)
-                        .await
-                        .map(drop)
-                        .map_err(|error| error.to_string());
-                    return Err(render::abandoned(&frame, &task.id, canceled));
-                }
+            Err(A2aExchangeError::Send(error)) => Err(self.failure(error)),
+            Err(A2aExchangeError::Poll { task_id, error }) => {
+                Err(render::poll_failed(&frame, &task_id, &error.to_string()))
             }
-
-            let previous = task.status.state.clone();
-            task = match self.client.get_task(&task.id, Some(0)).await {
-                Ok(next) => next,
-                Err(error) => {
-                    guard.disarm();
-                    return Err(render::poll_failed(&frame, &task.id, &error.to_string()));
-                }
-            };
-            if task.status.state != previous {
-                progress(format!(
-                    "remote task {} is {}",
-                    task.id,
-                    render::state_name(&task.status.state)
-                ));
-            }
+            Err(A2aExchangeError::Abandoned { task_id, canceled }) => Err(render::abandoned(
+                &frame,
+                &task_id,
+                canceled.map_err(|error| error.to_string()),
+            )),
         }
     }
 
@@ -375,12 +302,6 @@ fn input_schema() -> Value {
     })
 }
 
-/// Whether a task has stopped needing this call to wait on it: terminal, or
-/// paused for something only the caller can give.
-fn is_settled(state: &TaskState) -> bool {
-    state.is_terminal() || matches!(state, TaskState::InputRequired | TaskState::AuthRequired)
-}
-
 /// A settled task's result: an error for the states that mean the work was
 /// not done.
 fn finished(text: String, task: &Task) -> Result<ToolOutput, String> {
@@ -394,68 +315,6 @@ fn output(text: String, task: &Task) -> ToolOutput {
     ToolOutput::text(text).with_details(json!({
         "task_id": task.id,
         "context_id": task.context_id,
-        "state": render::state_name(&task.status.state),
+        "state": state_name(&task.status.state),
     }))
-}
-
-/// Why the wait between polls ended.
-enum Wake {
-    Elapsed,
-    Stopping,
-    Cancelled,
-}
-
-/// Waits `duration`, waking early if the run is cancelled, passes its
-/// deadline, or is asked to stop.
-async fn wait(duration: Duration, options: &RunOptions) -> Wake {
-    let deadline = Instant::now() + duration;
-    loop {
-        if options.check_limits().is_err() {
-            return Wake::Cancelled;
-        }
-        if options.stop_requested() {
-            return Wake::Stopping;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Wake::Elapsed;
-        }
-        tokio::time::sleep((deadline - now).min(INTERRUPT_CHECK_INTERVAL)).await;
-    }
-}
-
-/// Cancels a still-working task if the call is dropped while waiting on it.
-///
-/// Every path that returns disarms it first, so it fires only when the future
-/// itself is dropped. `Drop` cannot await, so the cancel is spawned detached:
-/// it is skipped outside a Tokio context and may never run during runtime
-/// teardown, which is why this is best-effort rather than a guarantee.
-struct CancelOnDrop {
-    pending: Option<(Arc<A2aClient>, String)>,
-}
-
-impl CancelOnDrop {
-    fn new(client: &Arc<A2aClient>, task: &Task) -> Self {
-        Self {
-            pending: Some((Arc::clone(client), task.id.clone())),
-        }
-    }
-
-    fn disarm(mut self) {
-        self.pending = None;
-    }
-}
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        let Some((client, task_id)) = self.pending.take() else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        runtime.spawn(async move {
-            let _ = client.cancel_task(&task_id).await;
-        });
-    }
 }

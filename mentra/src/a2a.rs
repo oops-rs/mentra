@@ -12,9 +12,11 @@
 //!
 //! - [`A2aClient`](crate::a2a::A2aClient) fetches and validates an agent's card and speaks the
 //!   JSON-RPC binding — `SendMessage`, `GetTask`, `CancelTask` — over HTTP.
+//! - [`exchange`](crate::a2a::exchange()) submits a message, or resumes a task, and
+//!   polls the task until it settles or the client's wait bound passes,
+//!   returning what happened as data.
 //! - [`A2aAgentTool`](crate::a2a::A2aAgentTool) bridges one connected agent into the tool roster as
-//!   `a2a__{agent}`, submitting a message and polling the task it starts until
-//!   it settles or the call's wait bound passes.
+//!   `a2a__{agent}`: that exchange, with the text a model reads.
 //!
 //! # Scope
 //!
@@ -33,6 +35,8 @@
 //!   the card, and the limits a host tunes
 //! - [`client`](crate::a2a::client) — the JSON-RPC client for one agent
 //! - [`error`](crate::a2a::error) — [`A2aError`](crate::a2a::A2aError) and the A2A JSON-RPC codes
+//! - [`exchange`](mod@crate::a2a::exchange) — one request waited on until it settles, as data
+//! - [`output`](crate::a2a::output) — a remote agent's words framed apart from the harness's
 //! - [`tool`](crate::a2a::tool) — [`A2aAgentTool`](crate::a2a::A2aAgentTool), the call contract and
 //!   what a reply looks like to the model
 //! - [`name`](crate::a2a::name) — the `a2a__{agent}` tool name and the rule
@@ -43,7 +47,9 @@
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod exchange;
 pub mod name;
+pub mod output;
 pub mod tool;
 
 #[cfg(test)]
@@ -59,5 +65,9 @@ pub use a2a_lf as types;
 pub use client::{A2A_PROTOCOL_VERSION, A2aClient};
 pub use config::{A2aAgentConfig, A2aConfigError, A2aLimits, A2aUrlError};
 pub use error::{A2aError, A2aRpcError};
+pub use exchange::{
+    A2aExchange, A2aExchangeError, A2aRequest, A2aStillWorking, exchange, is_settled, state_name,
+};
 pub use name::{A2aAgentNameError, a2a_tool_name, parse_a2a_tool_name, validate_a2a_agent_name};
+pub use output::{card_summary, remote_output, remote_reply};
 pub use tool::A2aAgentTool;
