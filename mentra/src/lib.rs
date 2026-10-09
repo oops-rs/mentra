@@ -4,6 +4,9 @@ mod default_paths;
 
 pub use mentra_provider as provider_core;
 
+/// Agent2Agent (A2A) protocol client and tool bridge.
+#[cfg(feature = "a2a")]
+pub mod a2a;
 /// Agent configuration, lifecycle, and event handling.
 pub mod agent;
 /// Optional OAuth helpers for provider authentication.

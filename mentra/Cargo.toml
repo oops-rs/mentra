@@ -28,6 +28,13 @@ responses-websocket = ["mentra-provider/responses-websocket"]
 # default persistent store is then the file-backed one.
 store-sqlite = ["dep:rusqlite", "dep:windows-sys"]
 openai-oauth = ["dep:ring"]
+# Default-off: the A2A (Agent2Agent protocol v1.0) client and its tool bridge,
+# `mentra::a2a`. Off by default because no caller who linked mentra before it
+# existed reaches a remote agent, and it brings the `a2a-lf` wire types (and
+# with them chrono and uuid) into the tree. Only the types crate is taken: the
+# official client crate pulls tonic, prost and reqwest 0.13 beside the 0.12
+# linked here, so the JSON-RPC binding is spoken over the `reqwest` above.
+a2a = ["dep:a2a_lf"]
 test-utils = []
 
 [dependencies]
@@ -59,6 +66,9 @@ libc = "0.2"
 regex = "1.12.2"
 rand = "0.9.2"
 ring = { version = "0.17.14", optional = true }
+# The A2A v1.0 wire types, renamed so the extern crate cannot be confused with
+# the `mentra::a2a` module it serves (its library name is otherwise `a2a`).
+a2a_lf = { package = "a2a-lf", version = "0.4.1", optional = true }
 glob-match = { workspace = true }
 # Gitignore matching for the workspace search walk. `ignore` also ships a
 # directory walker, which is deliberately unused: the walk here reauthorizes
