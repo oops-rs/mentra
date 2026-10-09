@@ -108,6 +108,9 @@ pub struct Agent {
     /// Exact-agent registration for `read_tool_result`, retained only while
     /// this paging agent is live.
     _tool_result_reader: Option<crate::tool::AgentToolRegistration>,
+    /// Exact-agent registrations a host made with
+    /// [`register_tool`](Self::register_tool), retained for the same span.
+    agent_tools: Vec<crate::tool::AgentToolRegistration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,6 +302,7 @@ impl Agent {
             current_run_id: None,
             paged_tool_results: Default::default(),
             _tool_result_reader: None,
+            agent_tools: Vec::new(),
         };
         agent
             .runtime
@@ -396,6 +400,7 @@ impl Agent {
             current_run_id: None,
             paged_tool_results: Default::default(),
             _tool_result_reader: None,
+            agent_tools: Vec::new(),
         };
         let execution_config = AgentExecutionConfig {
             name: agent.name.clone(),
@@ -729,6 +734,27 @@ impl Agent {
         tool_authorizer: Arc<dyn crate::tool::ToolAuthorizer>,
     ) {
         self.runtime.execution.tool_authorizer = Some(tool_authorizer);
+    }
+
+    /// Registers `tool` for this agent alone, for as long as this agent lives.
+    ///
+    /// The registration sits on the registry's exact-agent layer, above the
+    /// audience and global ones, so under its name this agent resolves — and
+    /// offers its model — this tool, while every other agent on the runtime
+    /// keeps resolving whatever the audience or global layer holds. It is how
+    /// a host sharing one runtime among several callers gives one agent its
+    /// own copy of a tool: the same handler with a description only this
+    /// agent's caller should read, say.
+    ///
+    /// Registering a second tool under the same name replaces the first for
+    /// this agent. Nothing outlives the agent: the registration is dropped
+    /// with it, and a resumed agent registers again.
+    pub fn register_tool<T>(&mut self, tool: T)
+    where
+        T: crate::tool::ExecutableTool + 'static,
+    {
+        let registration = self.runtime.register_agent_tool(&self.id, tool);
+        self.agent_tools.push(registration);
     }
 
     /// Registers this paging agent's exact reader for its live lifetime.

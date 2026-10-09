@@ -1,3 +1,4 @@
+mod agent_tools;
 mod budgets;
 mod event_tap;
 mod hook_authorization_order;
