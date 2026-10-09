@@ -129,3 +129,30 @@ fn deserializes_the_operator_facing_fields() {
         "Bearer sekrit"
     );
 }
+
+#[test]
+fn neither_the_plaintext_refusal_nor_debug_repeats_a_url_credential() {
+    let config = A2aAgentConfig::new("nous", "http://u:pw@nous.example.com/card.json?key=sekrit")
+        .with_bearer_token("token");
+    let error = A2aConfigError::PlaintextCredentials {
+        host: "nous.example.com".to_string(),
+    };
+    assert!(error.to_string().contains("nous.example.com"));
+
+    let printed = format!("{config:?}");
+    assert!(!printed.contains("sekrit"), "{printed}");
+    assert!(!printed.contains("pw"), "{printed}");
+    assert!(!printed.contains("token"), "{printed}");
+    assert!(printed.contains("nous.example.com/card.json"), "{printed}");
+}
+
+#[test]
+fn the_plaintext_refusal_names_the_host_and_not_the_query() {
+    let error = A2aAgentConfig::new("nous", "http://nous.example.com/card.json?key=sekrit")
+        .with_bearer_token("token")
+        .validate()
+        .expect_err("plaintext refused");
+    let message = error.to_string();
+    assert!(message.contains("nous.example.com"), "{message}");
+    assert!(!message.contains("sekrit"), "{message}");
+}

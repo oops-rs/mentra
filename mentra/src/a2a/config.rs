@@ -125,7 +125,7 @@ impl Default for A2aLimits {
 /// override, as the MCP HTTP transports — and the rule is applied again to
 /// the JSON-RPC endpoint the card names, because that URL is chosen by the
 /// remote side rather than by the operator.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct A2aAgentConfig {
     /// The agent's local name, which names its tool `a2a__{name}`.
     pub name: String,
@@ -143,6 +143,45 @@ pub struct A2aAgentConfig {
     /// Timeouts and size limits, defaulted rather than deserialized.
     #[serde(skip)]
     pub limits: A2aLimits,
+}
+
+/// Hand-written so no `{:?}` of a config prints a credential. Header values
+/// are [`SecretString`]s and redact themselves; `url` is a plain `String`, and
+/// its userinfo and query string are where a credential would sit, so both
+/// are replaced. String surgery rather than a URL parser: `Debug` must never
+/// fail, and an unparseable URL is exactly what someone will debug-print.
+impl std::fmt::Debug for A2aAgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("A2aAgentConfig")
+            .field("name", &self.name)
+            .field("url", &redacted_url(&self.url))
+            .field("headers", &self.headers)
+            .field(
+                "allow_plaintext_credentials",
+                &self.allow_plaintext_credentials,
+            )
+            .field("limits", &self.limits)
+            .finish()
+    }
+}
+
+/// `url` with its userinfo and query string replaced by `[redacted]`.
+fn redacted_url(url: &str) -> String {
+    let (base, query) = match url.split_once('?') {
+        Some((base, _)) => (base, "?[redacted]"),
+        None => (url, ""),
+    };
+    let base = match base.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority_end = rest.find('/').unwrap_or(rest.len());
+            match rest[..authority_end].rfind('@') {
+                Some(at) => format!("{scheme}://[redacted]@{}", &rest[at + 1..]),
+                None => base.to_string(),
+            }
+        }
+        None => base.to_string(),
+    };
+    format!("{base}{query}")
 }
 
 /// Errors from validating an [`A2aAgentConfig`].
@@ -164,11 +203,13 @@ pub enum A2aConfigError {
     #[error("A2A header '{name}' is set by the client and must not be configured")]
     ReservedHeader { name: String },
 
+    /// Names the host, never the URL: a query string is where an expanded
+    /// credential sits (`?key=…`), and this message reaches logs.
     #[error(
-        "refusing to send configured headers to '{url}' over plaintext http; \
+        "refusing to send configured headers to '{host}' over plaintext http; \
          use https, a loopback host, or set allow_plaintext_credentials"
     )]
-    PlaintextCredentials { url: String },
+    PlaintextCredentials { host: String },
 
     #[error("A2A limit '{name}' must be greater than zero")]
     ZeroLimit { name: &'static str },
@@ -267,7 +308,7 @@ impl A2aAgentConfig {
 
         if self.refuses_plaintext_to(&url) {
             return Err(A2aConfigError::PlaintextCredentials {
-                url: self.url.clone(),
+                host: url.host_str().unwrap_or_default().to_string(),
             });
         }
 
