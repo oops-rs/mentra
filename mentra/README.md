@@ -17,6 +17,7 @@ MSRV: Rust 1.88.
 - context management with optional request-only tool-result elision (disabled
   by default), auto-summary compaction, and a builtin `compact` tool
 - Model Context Protocol servers over stdio and the legacy HTTP+SSE transport, with their tools bridged into the runtime
+- remote Agent2Agent (A2A v1.0) agents bridged into the runtime as one polling tool each, behind the `a2a` feature
 - agent events and snapshots for CLI or UI watchers
 - Anthropic provider support
 - Gemini Developer API provider support
@@ -921,6 +922,40 @@ client.shutdown().await;
 # Ok(())
 # }
 ```
+
+## Remote A2A Agents
+
+With the default-off `a2a` feature, `mentra::a2a` reaches agents that speak
+[A2A v1.0](https://a2a-protocol.org/v1.0.0/specification) over its JSON-RPC
+binding. `A2aClient::connect` fetches the agent's card — from
+`/.well-known/agent-card.json` when given a bare origin, or from the URL itself
+when it has a path — and `A2aAgentTool` bridges the agent into the roster as
+`a2a__<agent>`:
+
+```rust,no_run
+# #[cfg(feature = "a2a")]
+# async fn demo(runtime: mentra::Runtime) -> Result<(), Box<dyn std::error::Error>> {
+use std::sync::Arc;
+
+use mentra::a2a::{A2aAgentConfig, A2aAgentTool, A2aClient};
+
+let config = A2aAgentConfig::new("nous", "https://nous.example.com")
+    .with_bearer_token(std::env::var("NOUS_TOKEN")?);
+let client = A2aClient::connect(&config).await?;
+runtime.register_tool(A2aAgentTool::new(Arc::new(client)));
+# Ok(())
+# }
+```
+
+The tool takes `{message?, task_id?, context_id?}`. A message starts a task, a
+`task_id` with a message answers a task waiting for input, and a `task_id`
+alone resumes waiting without resending. Each call polls the task until it
+finishes, pauses for input, or `A2aLimits::max_wait` passes; a task still
+working then comes back with its ids so the next call can pick it up. The
+remote agent's words are returned between delimiters naming it, and the tool
+declares `External` side effects so an approval policy treats it like an MCP
+tool. Headers follow the MCP HTTP transports' plaintext-credential rule, which
+is applied again to the endpoint the card names.
 
 ## Tool Profiles
 

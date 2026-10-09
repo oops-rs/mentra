@@ -10,16 +10,16 @@
 //!
 //! This module is the client half, behind the default-off `a2a` feature:
 //!
-//! - [`A2aClient`] fetches and validates an agent's card and speaks the
+//! - [`A2aClient`](crate::a2a::A2aClient) fetches and validates an agent's card and speaks the
 //!   JSON-RPC binding — `SendMessage`, `GetTask`, `CancelTask` — over HTTP.
-//! - [`A2aAgentTool`] bridges one connected agent into the tool roster as
+//! - [`A2aAgentTool`](crate::a2a::A2aAgentTool) bridges one connected agent into the tool roster as
 //!   `a2a__{agent}`, submitting a message and polling the task it starts until
 //!   it settles or the call's wait bound passes.
 //!
 //! # Scope
 //!
 //! One binding and one version: JSON-RPC at protocol 1.0, the only interface
-//! [`A2aClient::connect`] will select from a card. Every request carries
+//! [`A2aClient::connect`](crate::a2a::A2aClient::connect) will select from a card. Every request carries
 //! `A2A-Version: 1.0`. The streaming methods, push notifications, the extended
 //! card, and the REST and gRPC bindings are not implemented.
 //!
@@ -29,11 +29,11 @@
 //! with the outer comment on its `pub mod` declaration, which resolves relative
 //! links against the crate root rather than this module.
 //!
-//! - [`config`](crate::a2a::config) — [`A2aAgentConfig`], how its URL names
+//! - [`config`](crate::a2a::config) — [`A2aAgentConfig`](crate::a2a::A2aAgentConfig), how its URL names
 //!   the card, and the limits a host tunes
 //! - [`client`](crate::a2a::client) — the JSON-RPC client for one agent
-//! - [`error`](crate::a2a::error) — [`A2aError`] and the A2A JSON-RPC codes
-//! - [`tool`](crate::a2a::tool) — [`A2aAgentTool`], the call contract and
+//! - [`error`](crate::a2a::error) — [`A2aError`](crate::a2a::A2aError) and the A2A JSON-RPC codes
+//! - [`tool`](crate::a2a::tool) — [`A2aAgentTool`](crate::a2a::A2aAgentTool), the call contract and
 //!   what a reply looks like to the model
 //! - [`name`](crate::a2a::name) — the `a2a__{agent}` tool name and the rule
 //!   an agent's name must pass

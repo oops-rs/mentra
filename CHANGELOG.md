@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased
+
+### Remote A2A agents, behind the `a2a` feature
+
+- A default-off `a2a` feature adds `mentra::a2a`, a client for
+  [A2A v1.0](https://a2a-protocol.org/v1.0.0/specification) — the protocol one
+  agent uses to hand work to another whose insides it cannot see. It speaks
+  the JSON-RPC binding over the `reqwest` 0.12 already linked, and takes only
+  the wire types from the official `a2a-lf` crate (re-exported as
+  `mentra::a2a::types`): the official client crate pulls tonic, prost, a
+  vendored `protoc` and `reqwest` 0.13. With the feature off, the dependency
+  tree is unchanged.
+- `A2aClient::connect` fetches the Agent Card — from
+  `/.well-known/agent-card.json` when `A2aAgentConfig::url` is a bare origin,
+  from the URL itself when it has a path — and selects the first `JSONRPC`
+  interface at protocol 1.0, refusing a card that offers none rather than
+  speaking a binding or version it does not implement. `send_message`,
+  `get_task` and `cancel_task` each carry `A2A-Version: 1.0`, which the
+  reference server refuses a request without.
+- Headers are `SecretString`s held to the MCP HTTP transports' rule —
+  refused over plaintext to a non-loopback host unless
+  `allow_plaintext_credentials` — and the rule is applied again to the
+  endpoint the card names, because that URL is the remote side's choice.
+  Agent names follow the MCP server-name rules. Replies are bounded in time
+  and size, redirects are not followed, A2A and JSON-RPC error codes map to
+  `A2aRpcError`, and no error carries server text or a header value. A
+  `SendMessage` that may have been accepted but was never answered is
+  `A2aError::SendIndeterminate`, never a plain failure: resending it would
+  start a second task.
+- `A2aAgentTool` bridges one agent into the roster as `a2a__{agent}`. It
+  takes `{message?, task_id?, context_id?}`, submits with `returnImmediately`,
+  and polls `GetTask` until the task is terminal, needs input or
+  authorization, or `A2aLimits::max_wait` passes. A task still working at the
+  bound comes back with its ids and the instruction to call again with
+  `task_id` alone, so a long task costs more calls rather than a second task.
+  The remote agent's words are returned between delimiters naming it, with
+  non-text parts summarized; the task's ids and state also ride on
+  `ToolOutput::details`.
+- The tool declares `External` side effects, `Delegation` execution and
+  approval, and `Ephemeral` durability. A cancelled run cancels the remote
+  task; a run asked to stop hands it back still running; a dropped call
+  cancels it best-effort.
+
 ## 0.28.5 / mentra-provider 0.9.4
 
 ### Every agent gets its own conversation on its provider
