@@ -317,6 +317,29 @@ impl Session {
         self.agent.tool_audience()
     }
 
+    /// Registers `tool` for this session's agent alone, for as long as this
+    /// live session holds it.
+    ///
+    /// [`Agent::register_tool`](crate::agent::Agent::register_tool) on the
+    /// agent underneath: the registration sits above the audience and global
+    /// layers, so under its name this session's model is offered — and its
+    /// calls resolve — this tool, while every other agent on the runtime,
+    /// including a sibling session in the same audience, keeps whatever those
+    /// layers hold. Registering a second tool under the same name replaces the
+    /// first for this session.
+    ///
+    /// The registration is live-only, like
+    /// [`with_tool_authorizer`](Self::with_tool_authorizer): it is dropped with
+    /// the session and not persisted, so register again after resuming.
+    /// Subagents this session spawns resolve under their own ids and do not
+    /// inherit it.
+    pub fn register_tool<T>(&mut self, tool: T)
+    where
+        T: crate::tool::ExecutableTool + 'static,
+    {
+        self.agent.register_tool(tool);
+    }
+
     /// Replaces the runtime's tool authorizer for this live session.
     ///
     /// The replacement is scoped to this session's agent and descendants
