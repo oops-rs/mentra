@@ -23,7 +23,12 @@ Both additive; closes [#61](https://github.com/oops-rs/mentra/issues/61).
   is no outcome. The bounds, stop and cancel rules — and the best-effort
   cancel when the future is dropped — are the tool's, unchanged. A host
   offering a remote agent through a tool of its own drives the same loop and
-  writes its own guidance about what to call next.
+  writes its own guidance about what to call next. Its two halves are public
+  too — `submit` (send, or read an existing task, and return at once with
+  `A2aSubmitted::{Reply, Task}`) and `settle` (poll that task under the same
+  rules) — so a host that persists its conversations can record a task the
+  moment it exists, and a process that dies mid-wait resumes it rather than
+  sending the work again.
 - `remote_output`, `remote_reply` and `card_summary` frame a remote agent's
   words between the delimiter lines, clipped to the output bound, and
   summarize its card, exactly as the bridged tool does; `is_settled` and

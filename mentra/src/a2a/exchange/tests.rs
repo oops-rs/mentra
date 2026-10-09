@@ -89,6 +89,35 @@ async fn a_task_is_polled_until_it_settles() {
 }
 
 #[tokio::test]
+async fn submit_returns_the_task_before_anything_waits_on_it() {
+    // The two halves exist so a host can record the task between them: a
+    // process that dies while settling must find the task, not resend it.
+    let completed = with_artifact(task_json("t1", "c1", "TASK_STATE_COMPLETED"), "42");
+    let fixture = A2aFixture::start(Script {
+        send: RpcAnswer::Result(json!({"task": task_json("t1", "c1", "TASK_STATE_SUBMITTED")})),
+        get: vec![RpcAnswer::Result(completed)],
+        ..Script::default()
+    });
+    let client = client_with(&fixture, fast_limits()).await;
+
+    let A2aSubmitted::Task(task) = submit(&client, send("ask")).await.expect("submitted") else {
+        panic!("expected a task");
+    };
+    assert_eq!(task.id, "t1");
+    assert_eq!(
+        fixture.rpc_methods(),
+        ["SendMessage"],
+        "nothing has polled yet"
+    );
+
+    let outcome = settle(&client, task, &RunOptions::default(), &|_| {})
+        .await
+        .expect("settled");
+    assert!(matches!(outcome, A2aExchange::Settled(_)), "{outcome:?}");
+    assert_eq!(fixture.rpc_methods(), ["SendMessage", "GetTask"]);
+}
+
+#[tokio::test]
 async fn a_resume_waits_without_sending() {
     let fixture = A2aFixture::start(Script {
         get: vec![RpcAnswer::Result(with_artifact(

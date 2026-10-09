@@ -109,11 +109,26 @@ fn cancel_outcome(canceled: &Result<(), A2aError>) -> String {
     }
 }
 
+/// What a request produced before anything waited on it.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum A2aSubmitted {
+    /// The agent answered with a message; there is no task to wait on.
+    Reply(Message),
+    /// The task the request created or resumed, as it stood when it came back.
+    Task(Task),
+}
+
 /// Runs one request against `client` and waits for its task to settle.
 ///
 /// `options` are the bounds of the run this exchange is part of — its
 /// cancellation, stop and deadline are checked between polls — and
 /// `progress` hears each change of the task's state.
+///
+/// [`submit`] then [`settle`], with the wait bound counted from before the
+/// submit. A host that must record the task before waiting on it — so that a
+/// process that dies mid-wait does not send the same work again when it comes
+/// back — calls the two halves itself.
 pub async fn exchange(
     client: &Arc<A2aClient>,
     request: A2aRequest,
@@ -121,6 +136,22 @@ pub async fn exchange(
     progress: &(dyn Fn(String) + Send + Sync),
 ) -> Result<A2aExchange, A2aExchangeError> {
     let started = Instant::now();
+    match submit(client, request).await? {
+        A2aSubmitted::Reply(reply) => Ok(A2aExchange::Reply(reply)),
+        A2aSubmitted::Task(task) => settle_from(client, task, started, options, progress).await,
+    }
+}
+
+/// Sends a request — a message with `returnImmediately`, or a read of an
+/// existing task — and returns as soon as the agent answers, without waiting
+/// for the task to settle.
+///
+/// A failure here is [`A2aExchangeError::Send`]: nothing is known to have been
+/// created, so there is nothing to cancel or resume.
+pub async fn submit(
+    client: &Arc<A2aClient>,
+    request: A2aRequest,
+) -> Result<A2aSubmitted, A2aExchangeError> {
     let task = match request {
         A2aRequest::Send {
             text,
@@ -141,7 +172,7 @@ pub async fn exchange(
                 .await
                 .map_err(A2aExchangeError::Send)?
             {
-                SendMessageResponse::Message(reply) => return Ok(A2aExchange::Reply(reply)),
+                SendMessageResponse::Message(reply) => return Ok(A2aSubmitted::Reply(reply)),
                 SendMessageResponse::Task(task) => task,
             }
         }
@@ -150,11 +181,25 @@ pub async fn exchange(
             .await
             .map_err(A2aExchangeError::Send)?,
     };
-    settle(client, task, started, options, progress).await
+    Ok(A2aSubmitted::Task(task))
+}
+
+/// Polls a task [`submit`] returned until it settles, the client's wait bound
+/// passes — counted from this call — or the run ends.
+///
+/// Cancels the task if the run is cancelled, and, best-effort, if this future
+/// is dropped mid-wait.
+pub async fn settle(
+    client: &Arc<A2aClient>,
+    task: Task,
+    options: &RunOptions,
+    progress: &(dyn Fn(String) + Send + Sync),
+) -> Result<A2aExchange, A2aExchangeError> {
+    settle_from(client, task, Instant::now(), options, progress).await
 }
 
 /// Polls a task until it settles, the wait bound passes, or the run ends.
-async fn settle(
+async fn settle_from(
     client: &Arc<A2aClient>,
     mut task: Task,
     started: Instant,

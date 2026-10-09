@@ -66,7 +66,8 @@ pub use client::{A2A_PROTOCOL_VERSION, A2aClient};
 pub use config::{A2aAgentConfig, A2aConfigError, A2aLimits, A2aUrlError};
 pub use error::{A2aError, A2aRpcError};
 pub use exchange::{
-    A2aExchange, A2aExchangeError, A2aRequest, A2aStillWorking, exchange, is_settled, state_name,
+    A2aExchange, A2aExchangeError, A2aRequest, A2aStillWorking, A2aSubmitted, exchange, is_settled,
+    settle, state_name, submit,
 };
 pub use name::{A2aAgentNameError, a2a_tool_name, parse_a2a_tool_name, validate_a2a_agent_name};
 pub use output::{card_summary, remote_output, remote_reply};
