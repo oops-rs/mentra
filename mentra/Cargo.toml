@@ -1,6 +1,6 @@
 [package]
 name = "mentra"
-version = "0.28.6"
+version = "0.28.7"
 edition.workspace = true
 rust-version.workspace = true
 description = "An agent runtime for tool-using LLM applications"

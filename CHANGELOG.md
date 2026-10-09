@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.28.7
 
 ### A tool for one agent, and the A2A exchange as data
 
