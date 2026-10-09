@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.28.6
 
 ### Remote A2A agents, behind the `a2a` feature
 
