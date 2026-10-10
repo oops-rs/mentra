@@ -17,7 +17,7 @@ MSRV: Rust 1.88.
 - context management with optional request-only tool-result elision (disabled
   by default), auto-summary compaction, and a builtin `compact` tool
 - Model Context Protocol servers over stdio and the legacy HTTP+SSE transport, with their tools bridged into the runtime
-- remote Agent2Agent (A2A v1.0) agents bridged into the runtime as one polling tool each, behind the `a2a` feature
+- remote Agent2Agent (A2A v1.0) agents, over JSON-RPC or HTTP+JSON, bridged into the runtime as one tool each, behind the `a2a` feature
 - agent events and snapshots for CLI or UI watchers
 - Anthropic provider support
 - Gemini Developer API provider support
@@ -926,8 +926,9 @@ client.shutdown().await;
 ## Remote A2A Agents
 
 With the default-off `a2a` feature, `mentra::a2a` reaches agents that speak
-[A2A v1.0](https://a2a-protocol.org/v1.0.0/specification) over its JSON-RPC
-binding. `A2aClient::connect` fetches the agent's card — from
+[A2A v1.0](https://a2a-protocol.org/v1.0.0/specification) over its JSON-RPC or
+HTTP+JSON binding, whichever the agent's card offers first.
+`A2aClient::connect` fetches the agent's card — from
 `/.well-known/agent-card.json` when given a bare origin, or from the URL itself
 when it has a path — and `A2aAgentTool` bridges the agent into the roster as
 `a2a__<agent>`:
@@ -949,13 +950,16 @@ runtime.register_tool(A2aAgentTool::new(Arc::new(client)));
 
 The tool takes `{message?, task_id?, context_id?}`. A message starts a task, a
 `task_id` with a message answers a task waiting for input, and a `task_id`
-alone resumes waiting without resending. Each call polls the task until it
-finishes, pauses for input, or `A2aLimits::max_wait` passes; a task still
-working then comes back with its ids so the next call can pick it up. The
+alone resumes waiting without resending. Each call follows the task — by its
+event stream when the agent streams, by polling otherwise or when the stream
+fails — until it finishes, pauses for input, or `A2aLimits::max_wait` passes; a
+task still working then comes back with its ids so the next call can pick it
+up. `A2aClient` itself speaks every method, streaming and push-notification
+configuration included, for a host that wants its own policy. The
 remote agent's words are returned between delimiters naming it, and the tool
 declares `External` side effects so an approval policy treats it like an MCP
 tool. Headers follow the MCP HTTP transports' plaintext-credential rule, which
-is applied again to the endpoint the card names.
+is applied again to the interface URL the card names.
 
 ## Tool Profiles
 

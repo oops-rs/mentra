@@ -33,7 +33,8 @@ openai-oauth = ["dep:ring"]
 # existed reaches a remote agent, and it brings the `a2a-lf` wire types (and
 # with them chrono and uuid) into the tree. Only the types crate is taken: the
 # official client crate pulls tonic, prost and reqwest 0.13 beside the 0.12
-# linked here, so the JSON-RPC binding is spoken over the `reqwest` above.
+# linked here, so the JSON-RPC and HTTP+JSON bindings, and their event
+# streams, are spoken over the `reqwest` above.
 a2a = ["dep:a2a_lf"]
 test-utils = []
 
