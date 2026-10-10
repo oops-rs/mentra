@@ -553,6 +553,36 @@ impl ToolRegistry {
         Some(removed.handler)
     }
 
+    /// Re-captures every registration's descriptor from its tool, on every
+    /// layer, keeping each registration's identity (its generation), and
+    /// reports whether any descriptor changed.
+    ///
+    /// A descriptor is captured once, at registration; this is for a tool
+    /// whose description is computed from state that changes while it stays
+    /// registered — the remote agents a host can reach, say. A tool whose
+    /// fresh descriptor names a different tool keeps the one it was
+    /// registered under, because the name is what the registration is keyed
+    /// by.
+    pub fn refresh_descriptors(&mut self) -> bool {
+        let layers = self
+            .tools
+            .iter_mut()
+            .chain(self.agent_tools.values_mut().flatten())
+            .chain(self.audience_tools.values_mut().flatten());
+        let mut changed = false;
+        for (name, tool) in layers {
+            let fresh = tool.handler.descriptor();
+            if fresh.provider.name == *name && fresh != tool.descriptor {
+                tool.descriptor = fresh;
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_provider_specs();
+        }
+        changed
+    }
+
     fn refresh_provider_specs(&mut self) {
         self.provider_specs = self
             .tools
@@ -889,6 +919,93 @@ mod tests {
         fn execution_category(&self, _input: &serde_json::Value) -> ToolExecutionCategory {
             self.execution_category
         }
+    }
+
+    fn counting(calls: &Arc<AtomicUsize>, label: &'static str) -> CountingDescriptorTool {
+        CountingDescriptorTool {
+            calls: Arc::clone(calls),
+            label,
+            execution_category: ToolExecutionCategory::ReadOnlyParallel,
+        }
+    }
+
+    fn description_of(registry: &ToolRegistry, agent_id: Option<&str>) -> Option<String> {
+        registry
+            .visible_registrations(agent_id, None)
+            .into_iter()
+            .find(|registration| registration.name() == "counting_tool")
+            .and_then(|registration| registration.descriptor().provider.description.clone())
+    }
+
+    #[test]
+    fn refreshing_descriptors_recaptures_every_layer_and_keeps_each_registration() {
+        let global_calls = Arc::new(AtomicUsize::new(0));
+        let agent_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::default();
+        registry.register_tool(counting(&global_calls, "global"));
+        let agent_registration = registry
+            .insert_agent_prepared(
+                "agent-1",
+                PreparedTool::new(counting(&agent_calls, "agent")),
+            )
+            .into_parts()
+            .0;
+        assert_eq!(
+            description_of(&registry, None).as_deref(),
+            Some("global descriptor call 1")
+        );
+
+        assert!(registry.refresh_descriptors(), "both descriptions moved on");
+
+        assert_eq!(
+            description_of(&registry, None).as_deref(),
+            Some("global descriptor call 2")
+        );
+        assert_eq!(
+            description_of(&registry, Some("agent-1")).as_deref(),
+            Some("agent descriptor call 2")
+        );
+        assert!(
+            registry
+                .tools()
+                .iter()
+                .any(|spec| spec.description.as_deref() == Some("global descriptor call 2")),
+            "the cached provider specs follow"
+        );
+        assert!(
+            registry
+                .detach_agent_registration("agent-1", &agent_registration)
+                .is_some(),
+            "the owner's registration is still the one registered"
+        );
+    }
+
+    struct RenamingTool(AtomicUsize);
+
+    impl ToolDefinition for RenamingTool {
+        fn descriptor(&self) -> ToolSpec {
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            ToolSpec::builder(format!("renaming_{call}")).build()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for RenamingTool {}
+
+    #[test]
+    fn a_refresh_never_renames_a_registration() {
+        let mut registry = ToolRegistry::default();
+        registry.register_tool(RenamingTool(AtomicUsize::new(0)));
+
+        assert!(!registry.refresh_descriptors());
+
+        assert!(registry.contains("renaming_0"));
+        assert!(
+            registry
+                .tools()
+                .iter()
+                .all(|spec| spec.name == "renaming_0")
+        );
     }
 
     #[test]

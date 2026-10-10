@@ -139,6 +139,16 @@ impl RuntimeHandle {
         }
     }
 
+    /// Re-captures every registered tool's descriptor — see
+    /// [`ToolRegistry::refresh_descriptors`](crate::tool::ToolRegistry::refresh_descriptors).
+    pub fn refresh_tool_descriptors(&self) -> bool {
+        self.tooling
+            .tool_registry
+            .write()
+            .expect("tool registry poisoned")
+            .refresh_descriptors()
+    }
+
     /// Removes a tool by name, reporting whether one was there.
     pub fn unregister_tool_by_name(&self, name: &str) -> bool {
         let detached_handler = {

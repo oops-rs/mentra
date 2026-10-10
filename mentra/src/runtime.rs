@@ -198,6 +198,20 @@ impl Runtime {
         self.handle.register_tool(tool);
     }
 
+    /// Re-captures every registered tool's descriptor from the tool itself,
+    /// on every layer, and reports whether any changed.
+    ///
+    /// A descriptor is captured once, when its tool is registered, and the
+    /// roster an agent offers is re-read on every model request. So a tool
+    /// whose description is computed from live state — the remote agents a
+    /// host can currently reach, say — calls for this after that state
+    /// changes, and the next request carries the new description. A
+    /// registration keeps its identity: the agent or guard that owns it still
+    /// owns it, and a terminal-tool gate still matches it.
+    pub fn refresh_tool_descriptors(&self) -> bool {
+        self.handle.refresh_tool_descriptors()
+    }
+
     /// Registers a custom tool from an already validated descriptor snapshot.
     ///
     /// Construction of [`PreparedTool`](crate::tool::PreparedTool) evaluates

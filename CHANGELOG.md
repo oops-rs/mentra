@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Re-capturing a tool's description
+
+- `Runtime::refresh_tool_descriptors` (and `ToolRegistry::refresh_descriptors`)
+  re-reads every registered tool's descriptor, on every layer, and reports
+  whether any changed ([#62](https://github.com/oops-rs/mentra/issues/62)). A
+  descriptor is captured once at registration; this is for a tool whose
+  description is computed from state that changes while it stays registered.
+  Each registration keeps its identity, so its owner, its guard and a
+  terminal-tool gate still match it, and a refresh never renames one.
+
 ## 0.28.7
 
 ### A tool for one agent, and the A2A exchange as data
