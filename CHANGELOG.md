@@ -31,19 +31,25 @@ settles by streaming ([#63](https://github.com/oops-rs/mentra/issues/63)).
   new `A2aLimits::max_event_bytes` and the stream by
   `A2aLimits::stream_idle_timeout` (defaults: the reply bound, and 60s).
   `SubscribeToTask` is a `GET`, as `a2a.proto` binds it; the specification's
-  prose table says `POST`.
+  prose table says `POST`, so a 405 is asked once more by `POST`.
 - **Every other method:** `list_tasks`, `create_push_config`,
   `get_push_config`, `list_push_configs`, `delete_push_config` and
   `get_extended_card`. `connect` fetches the extended card when the public
   card declares one and credentials are configured, and uses it as
   `card()`; if that fails the public card is kept and the failure is
   reported by `A2aClient::extended_card_status()` rather than failing the
-  connection.
+  connection. A push config carrying a `token` or `authentication` is held
+  to the plaintext-credentials rule configured headers are
+  (`A2aError::PlaintextPushCredentials`). `TaskPushNotificationConfig`'s
+  derived `Debug` prints those credentials, so never log one.
+- **Ids a path cannot carry** — empty, `.` or `..` — are refused before
+  anything is sent, on both bindings, as `A2aError::InvalidId`.
 - **The exchange settles by streaming** when the card declares
   `capabilities.streaming`: `settle` subscribes to the task, applies its
   events, and reports each status message as progress. A stream that is
   refused, drops, falls idle or fails hands over to polling `GetTask` from
-  where it left off; no path resends the message. `submit` and `settle`
+  where it left off, with one progress line saying why; no path resends the
+  message. `submit` and `settle`
   split exactly as before.
 - **Metadata and extensions on a message.** `A2aSend` carries `metadata`
   and `extensions`; the extensions are listed in the message and activated
@@ -64,7 +70,8 @@ Breaking, for callers of `mentra::a2a`:
   extensions were the second time this shape grew: constructors are the
   form a new field does not break.
 - `A2aError` is `#[non_exhaustive]` and gains `EventTooLarge`,
-  `StreamIdle`, `NotAStream` and `InvalidExtensionUri`.
+  `StreamIdle`, `NotAStream`, `InvalidExtensionUri`,
+  `PlaintextPushCredentials` and `InvalidId`.
 - `A2aLimits` gains `stream_idle_timeout` and `max_event_bytes`; a literal
   that ends in `..A2aLimits::default()` is unaffected.
 

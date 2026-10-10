@@ -64,6 +64,10 @@ pub(crate) struct Script {
     pub(crate) tenant: Option<&'static str>,
     /// Whether the default card declares `capabilities.streaming`.
     pub(crate) streaming: bool,
+    /// Whether HTTP+JSON's `SubscribeToTask` is served as the
+    /// specification's prose table has it — by `POST`, answering a `GET`
+    /// with 405 — rather than by `GET`, as `a2a.proto` binds it.
+    pub(crate) subscribe_by_post: bool,
     /// The answer to `SendMessage`.
     pub(crate) send: RpcAnswer,
     /// Successive answers to `GetTask`; the last one repeats.
@@ -89,6 +93,7 @@ impl Default for Script {
             binding: A2aBinding::JsonRpc,
             tenant: None,
             streaming: false,
+            subscribe_by_post: false,
             send: RpcAnswer::Result(json!({"task": task_json("t1", "c1", "TASK_STATE_COMPLETED")})),
             get: vec![RpcAnswer::Result(task_json(
                 "t1",
@@ -315,7 +320,7 @@ fn rest_route(request: &CapturedRequest) -> Option<RestRoute> {
             ("GET", ["tasks"]) => "ListTasks",
             ("GET", ["extendedAgentCard"]) => "GetExtendedAgentCard",
             ("POST", ["tasks", id]) if id.ends_with(":cancel") => "CancelTask",
-            ("GET", ["tasks", id]) if id.ends_with(":subscribe") => "SubscribeToTask",
+            ("GET" | "POST", ["tasks", id]) if id.ends_with(":subscribe") => "SubscribeToTask",
             ("GET", ["tasks", _]) => "GetTask",
             ("POST", ["tasks", _, "pushNotificationConfigs"]) => "CreateTaskPushNotificationConfig",
             ("GET", ["tasks", _, "pushNotificationConfigs"]) => "ListTaskPushNotificationConfigs",
@@ -361,6 +366,18 @@ fn answer(state: &State, request: &CapturedRequest) -> Reply {
             .clone()
             .unwrap_or_else(|| default_card(&state.base, &state.script));
         return Reply::Body(200, card.to_string());
+    }
+
+    let refused_verb = if state.script.subscribe_by_post {
+        "GET"
+    } else {
+        "POST"
+    };
+    if route.is_some()
+        && operation_of(request).as_deref() == Some("SubscribeToTask")
+        && request.method == refused_verb
+    {
+        return Reply::Body(405, String::new());
     }
 
     let answer = match operation_of(request).as_deref() {

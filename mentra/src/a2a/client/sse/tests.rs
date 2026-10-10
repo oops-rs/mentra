@@ -16,7 +16,7 @@ fn parse(chunks: &[&[u8]]) -> Vec<String> {
     let mut parser = SseParser::new(1024);
     let mut events = Vec::new();
     for chunk in chunks {
-        events.extend(parser.push(chunk).expect("within the limit"));
+        parser.push(chunk, &mut events).expect("within the limit");
     }
     events.extend(parser.finish());
     events
@@ -60,15 +60,97 @@ fn an_event_the_agent_never_ended_is_still_read() {
 fn an_event_larger_than_the_limit_is_refused_before_it_is_buffered() {
     let mut parser = SseParser::new(16);
     let error = parser
-        .push(b"data: 0123456789abcdef")
+        .push(b"data: 0123456789abcdef", &mut Vec::new())
         .expect_err("too large");
     assert!(matches!(error, A2aError::EventTooLarge { limit: 16 }));
 
     // Lines of one event count together.
     let mut parser = SseParser::new(16);
-    parser.push(b"data: 01234\n").expect("fits");
-    let error = parser.push(b"data: 567890").expect_err("too large");
+    parser
+        .push(b"data: 01234\n", &mut Vec::new())
+        .expect("fits");
+    let error = parser
+        .push(b"data: 567890", &mut Vec::new())
+        .expect_err("too large");
     assert!(matches!(error, A2aError::EventTooLarge { limit: 16 }));
+}
+
+#[test]
+fn events_completed_before_an_error_in_the_same_chunk_are_kept() {
+    let mut parser = SseParser::new(16);
+    let mut events = Vec::new();
+    let error = parser
+        .push(b"data: a\n\ndata: b\n\ndata: 0123456789abcdef", &mut events)
+        .expect_err("too large");
+    assert!(matches!(error, A2aError::EventTooLarge { limit: 16 }));
+    assert_eq!(events, [b"a".to_vec(), b"b".to_vec()]);
+}
+
+#[test]
+fn one_leading_byte_order_mark_is_skipped() {
+    assert_eq!(parse(&[b"\xEF\xBB\xBFdata: a\n\n"]), ["a"]);
+    // Split across chunks, it is still one mark.
+    assert_eq!(parse(&[b"\xEF", b"\xBB", b"\xBFdata: a\n\n"]), ["a"]);
+    // Only the first: a second is the start of a field name, which then
+    // is not `data`.
+    assert!(parse(&[b"\xEF\xBB\xBF\xEF\xBB\xBFdata: a\n\n"]).is_empty());
+    // A mark anywhere else is content.
+    assert_eq!(parse(&[b"data: a\xEF\xBB\xBF\n\n"]), ["a\u{feff}"]);
+}
+
+#[test]
+fn bytes_that_only_begin_like_a_byte_order_mark_are_kept() {
+    let mut parser = SseParser::new(1024);
+    let mut events = Vec::new();
+    parser
+        .push(b"\xEF\xBBdata", &mut events)
+        .expect("within the limit");
+    parser
+        .push(b": a\n\n", &mut events)
+        .expect("within the limit");
+    // The held-back bytes were the start of the field name, so this line was
+    // not `data` and no event came of it.
+    assert!(events.is_empty());
+
+    let mut parser = SseParser::new(1024);
+    parser.push(b"\xEF", &mut events).expect("within the limit");
+    assert_eq!(parser.finish(), [] as [Vec<u8>; 0]);
+}
+
+#[test]
+fn a_bare_status_mid_stream_is_read_as_a_status_not_as_json_rpc() {
+    let method = "SubscribeToTask";
+    let bare = rest_error(-32001)["error"].clone();
+    let error = decode_bare(method, bare.to_string().as_bytes()).expect_err("an error");
+    assert!(
+        matches!(
+            error,
+            A2aError::Rpc {
+                error: A2aRpcError::TaskNotFound,
+                ..
+            }
+        ),
+        "{error}"
+    );
+
+    // A status naming no A2A error is not taken for a JSON-RPC code.
+    let foreign = json!({"code": 400, "status": "INVALID_ARGUMENT", "message": "no"});
+    let error = decode_bare(method, foreign.to_string().as_bytes()).expect_err("an error");
+    assert!(matches!(error, A2aError::Transport(_)), "{error}");
+
+    // A JSON-RPC error object still is one.
+    let jsonrpc = json!({"code": -32001, "message": "no"});
+    let error = decode_bare(method, jsonrpc.to_string().as_bytes()).expect_err("an error");
+    assert!(
+        matches!(
+            error,
+            A2aError::Rpc {
+                error: A2aRpcError::TaskNotFound,
+                ..
+            }
+        ),
+        "{error}"
+    );
 }
 
 fn limits() -> A2aLimits {
@@ -349,4 +431,48 @@ async fn a_streamed_send_that_may_have_been_accepted_is_indeterminate() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn events_before_an_oversized_one_are_delivered_first() {
+    let event = json!({"task": task_json("t1", "c1", "TASK_STATE_WORKING")});
+    let fixture = A2aFixture::start(Script {
+        subscribe: vec![RpcAnswer::RawEvents(
+            format!("data: {event}\n\ndata: {}\n\n", "x".repeat(4096)),
+            StreamEnd::Close,
+        )],
+        ..Script::over(A2aBinding::HttpJson)
+    });
+    let config = A2aAgentConfig::new("nous", fixture.base()).with_limits(A2aLimits {
+        max_event_bytes: 1024,
+        ..limits()
+    });
+    let client = A2aClient::connect(&config).await.expect("connect");
+
+    let events = collect(client.subscribe_to_task("t1").await.expect("open")).await;
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(matches!(&events[0], Ok(StreamResponse::Task(task)) if task.id == "t1"));
+    assert!(matches!(
+        events[1],
+        Err(A2aError::EventTooLarge { limit: 1024 })
+    ));
+}
+
+#[tokio::test]
+async fn a_stream_that_starts_with_a_byte_order_mark_is_read() {
+    let event = json!({"task": task_json("t1", "c1", "TASK_STATE_COMPLETED")});
+    let fixture = A2aFixture::start(Script {
+        subscribe: vec![RpcAnswer::RawEvents(
+            format!("\u{feff}data: {event}\n\n"),
+            StreamEnd::Close,
+        )],
+        ..Script::over(A2aBinding::HttpJson)
+    });
+    let client = connect(&fixture).await;
+
+    let events = collect(client.subscribe_to_task("t1").await.expect("open")).await;
+    assert!(
+        matches!(events.as_slice(), [Ok(StreamResponse::Task(_))]),
+        "{events:?}"
+    );
 }

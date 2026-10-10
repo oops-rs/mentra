@@ -86,6 +86,21 @@ pub enum A2aError {
     )]
     PlaintextEndpoint,
 
+    /// A push config carrying a token or authentication would be sent to a
+    /// plaintext interface. Those are credentials the agent presents to a
+    /// webhook, and are held to the same rule as configured headers.
+    #[error(
+        "refusing to send a push config's token or authentication to the A2A agent's interface \
+         over plaintext http; the card must name https or a loopback host, or set \
+         allow_plaintext_credentials"
+    )]
+    PlaintextPushCredentials,
+
+    /// An id a request would name in a path is empty, `.` or `..`, which a
+    /// path cannot carry as a segment of its own. Nothing was sent.
+    #[error("{method} names an id that is empty, `.` or `..`")]
+    InvalidId { method: &'static str },
+
     #[error("the A2A agent's reply to {method} could not be decoded")]
     Decode { method: &'static str },
 

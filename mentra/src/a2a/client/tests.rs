@@ -568,3 +568,100 @@ async fn list_tasks_sends_its_filters_and_reads_a_last_page() {
         }
     }
 }
+
+#[tokio::test]
+async fn an_id_no_path_can_carry_is_refused_before_anything_is_sent() {
+    for binding in BINDINGS {
+        let fixture = A2aFixture::start(Script::over(binding));
+        let client = connect(&fixture).await;
+
+        for id in ["", ".", ".."] {
+            let refusals = [
+                client.get_task(id, None).await.map(drop),
+                client.cancel_task(id).await.map(drop),
+                client.subscribe_to_task(id).await.map(drop),
+                client.get_push_config(id, "cfg1").await.map(drop),
+                client.get_push_config("t1", id).await.map(drop),
+                client.delete_push_config(id, "cfg1").await,
+                client.delete_push_config("t1", id).await,
+                client
+                    .list_push_configs(a2a_lf::ListTaskPushNotificationConfigsRequest {
+                        task_id: id.to_string(),
+                        page_size: None,
+                        page_token: None,
+                        tenant: None,
+                    })
+                    .await
+                    .map(drop),
+                client
+                    .create_push_config(a2a_lf::TaskPushNotificationConfig {
+                        url: "https://hooks.example.com/a2a".to_string(),
+                        id: None,
+                        task_id: id.to_string(),
+                        token: None,
+                        authentication: None,
+                        tenant: None,
+                    })
+                    .await
+                    .map(drop),
+            ];
+            for refusal in refusals {
+                assert!(
+                    matches!(refusal, Err(A2aError::InvalidId { .. })),
+                    "{binding} {id:?}: {refusal:?}"
+                );
+            }
+        }
+        assert!(
+            fixture.operations().is_empty(),
+            "{binding}: nothing was sent"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_tenant_a_path_would_drop_is_refused_at_connect() {
+    for tenant in [".", ".."] {
+        let fixture = A2aFixture::start(Script {
+            tenant: Some(tenant),
+            ..Script::over(A2aBinding::HttpJson)
+        });
+        let error = A2aClient::connect(&config(&fixture))
+            .await
+            .expect_err("refused");
+        assert!(matches!(error, A2aError::InvalidEndpoint(_)), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn a_subscription_refused_by_get_is_asked_again_by_post() {
+    let fixture = A2aFixture::start(Script {
+        subscribe_by_post: true,
+        ..Script::over(A2aBinding::HttpJson)
+    });
+    let client = connect(&fixture).await;
+
+    let mut events = client.subscribe_to_task("t1").await.expect("open");
+    let first = futures_util::StreamExt::next(&mut events).await;
+    assert!(matches!(first, Some(Ok(_))), "{first:?}");
+    assert_eq!(
+        targets(&fixture),
+        [
+            "GET /rest/tasks/t1:subscribe",
+            "POST /rest/tasks/t1:subscribe"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn only_a_405_asks_again() {
+    let fixture = A2aFixture::start(Script {
+        subscribe: vec![RpcAnswer::Http(404, String::new())],
+        ..Script::over(A2aBinding::HttpJson)
+    });
+    let client = connect(&fixture).await;
+
+    let error = client.subscribe_to_task("t1").await.expect_err("not found");
+    assert!(matches!(error, A2aError::HttpStatus { status, .. } if status == 404));
+    assert_eq!(targets(&fixture), ["GET /rest/tasks/t1:subscribe"]);
+}

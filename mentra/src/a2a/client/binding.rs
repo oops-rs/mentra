@@ -82,6 +82,24 @@ pub(super) fn speaks_version(declared: &str) -> bool {
     major == Some(1) && rest_numeric
 }
 
+/// Whether a path segment is one a URL path cannot carry as itself: empty,
+/// or `.` and `..`, which path normalization drops or climbs out of.
+pub(super) fn is_dot_segment(segment: &str) -> bool {
+    matches!(segment, "" | "." | "..")
+}
+
+/// `id`, refused when it could not be a path segment of its own.
+///
+/// Checked for both bindings, before anything is built: over HTTP+JSON such
+/// an id would turn `GET /tasks/..` into another method's path, and an id
+/// that no path can name is no more valid in a JSON-RPC body.
+pub(super) fn checked_id<'a>(method: &'static str, id: &'a str) -> Result<&'a str, A2aError> {
+    if is_dot_segment(id) {
+        return Err(A2aError::InvalidId { method });
+    }
+    Ok(id)
+}
+
 /// One A2A operation, in the terms of both bindings.
 #[derive(Debug)]
 pub(super) struct Operation {

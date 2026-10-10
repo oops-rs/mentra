@@ -4,7 +4,16 @@
 //! state, for a caller that cannot hold a stream open. This client only
 //! manages the configs; receiving the calls is the host's own server's job.
 //! A config's `token` and `authentication` are credentials the agent will
-//! present to that webhook, so nothing here logs or renders one.
+//! present to that webhook, so nothing here logs or renders one, and one is
+//! never sent to a plaintext interface that configured headers could not be
+//! sent to either.
+//!
+//! # Debug output
+//!
+//! [`TaskPushNotificationConfig`] is the `a2a-lf` wire type, and its derived
+//! `Debug` prints `token` and `authentication.credentials` as they are. A
+//! host must not `{:?}` a config it passes to or receives from these
+//! methods — nor a [`ListTaskPushNotificationConfigsResponse`] — into a log.
 
 #[cfg(test)]
 mod tests;
@@ -16,7 +25,7 @@ use a2a_lf::{
 };
 use reqwest::Method;
 
-use super::binding::Operation;
+use super::binding::{Operation, checked_id};
 use super::{A2aClient, segments};
 use crate::a2a::error::A2aError;
 
@@ -28,11 +37,25 @@ impl A2aClient {
     /// `config.task_id`'s state, returning the config as the agent stored it
     /// (with the id it assigned, when `config.id` was empty).
     ///
-    /// The config's tenant is replaced by the interface's.
+    /// The config's tenant is replaced by the interface's. A config carrying
+    /// a `token` or `authentication` is refused as
+    /// [`A2aError::PlaintextPushCredentials`] when the interface is plaintext
+    /// `http` to a host that is not loopback, unless the configuration sets
+    /// `allow_plaintext_credentials`.
+    ///
+    /// `TaskPushNotificationConfig`'s derived `Debug` prints `token` and
+    /// `authentication.credentials` as they are, so neither the config passed
+    /// nor the one returned may be logged with `{:?}`.
     pub async fn create_push_config(
         &self,
         mut config: TaskPushNotificationConfig,
     ) -> Result<TaskPushNotificationConfig, A2aError> {
+        let method = methods::CREATE_PUSH_CONFIG;
+        checked_id(method, &config.task_id)?;
+        let carries_credentials = config.token.is_some() || config.authentication.is_some();
+        if carries_credentials && self.transport.refuses_credentials_in_clear {
+            return Err(A2aError::PlaintextPushCredentials);
+        }
         config.tenant = self.transport.tenant.clone();
         let task_id = config.task_id.clone();
         let operation = Operation::new(
@@ -46,11 +69,17 @@ impl A2aClient {
     }
 
     /// Reads one of a task's push configs.
+    ///
+    /// `TaskPushNotificationConfig`'s derived `Debug` prints `token` and
+    /// `authentication.credentials` as they are, so the config returned may
+    /// not be logged with `{:?}`.
     pub async fn get_push_config(
         &self,
         task_id: &str,
         config_id: &str,
     ) -> Result<TaskPushNotificationConfig, A2aError> {
+        checked_id(methods::GET_PUSH_CONFIG, task_id)?;
+        checked_id(methods::GET_PUSH_CONFIG, config_id)?;
         let request = GetTaskPushNotificationConfigRequest {
             task_id: task_id.to_string(),
             id: config_id.to_string(),
@@ -69,10 +98,15 @@ impl A2aClient {
     /// Lists a task's push configs, a page at a time.
     ///
     /// The request's tenant is replaced by the interface's.
+    ///
+    /// `TaskPushNotificationConfig`'s derived `Debug` prints `token` and
+    /// `authentication.credentials` as they are, so the response may not be
+    /// logged with `{:?}`.
     pub async fn list_push_configs(
         &self,
         mut request: ListTaskPushNotificationConfigsRequest,
     ) -> Result<ListTaskPushNotificationConfigsResponse, A2aError> {
+        checked_id(methods::LIST_PUSH_CONFIGS, &request.task_id)?;
         request.tenant = self.transport.tenant.clone();
         let operation = Operation::new(
             methods::LIST_PUSH_CONFIGS,
@@ -97,7 +131,14 @@ impl A2aClient {
     }
 
     /// Deletes one of a task's push configs.
+    ///
+    /// Nothing comes back, so nothing here prints a credential; but the ids
+    /// passed come from a `TaskPushNotificationConfig`, whose derived `Debug`
+    /// prints `token` and `authentication.credentials` as they are — log the
+    /// ids, never the config.
     pub async fn delete_push_config(&self, task_id: &str, config_id: &str) -> Result<(), A2aError> {
+        checked_id(methods::DELETE_PUSH_CONFIG, task_id)?;
+        checked_id(methods::DELETE_PUSH_CONFIG, config_id)?;
         let request = DeleteTaskPushNotificationConfigRequest {
             task_id: task_id.to_string(),
             id: config_id.to_string(),

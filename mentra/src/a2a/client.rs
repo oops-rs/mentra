@@ -41,15 +41,15 @@ use a2a_lf::{
     ListTasksResponse, Message, SendMessageConfiguration, SendMessageRequest, SendMessageResponse,
     SubscribeToTaskRequest, Task, methods,
 };
-use reqwest::Method;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName};
+use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use url::Url;
 
-use super::config::{A2aAgentConfig, A2aLimits, check_url};
+use super::config::{A2aAgentConfig, A2aLimits, A2aUrlError, check_url};
 use super::error::A2aError;
-use binding::{Operation, select_interface};
+use binding::{Operation, checked_id, is_dot_segment, select_interface};
 use sse::{Decoder, EVENT_STREAM, EventFormat};
 
 pub use binding::A2aBinding;
@@ -113,6 +113,10 @@ struct Transport {
     endpoint: Url,
     /// The tenant that interface names, sent on every request when present.
     tenant: Option<String>,
+    /// Whether a credential a request carries in its body — a push config's
+    /// token — may not be sent to the endpoint: plaintext, not loopback, and
+    /// not overridden.
+    refuses_credentials_in_clear: bool,
     headers: HeaderMap,
     limits: A2aLimits,
     next_id: AtomicI64,
@@ -150,6 +154,12 @@ impl A2aClient {
             return Err(A2aError::PlaintextEndpoint);
         }
         let tenant = interface.tenant.clone().filter(|tenant| !tenant.is_empty());
+        // The tenant is a path segment over HTTP+JSON, chosen by the remote
+        // side; one a path would drop or climb out of is no tenant at all.
+        if tenant.as_deref().is_some_and(is_dot_segment) {
+            return Err(A2aError::InvalidEndpoint(A2aUrlError::Malformed));
+        }
+        let refuses_credentials_in_clear = config.refuses_credentials_in_clear_to(&endpoint);
         let declares_extended = card.capabilities.extended_agent_card == Some(true);
 
         let mut client = Self {
@@ -162,6 +172,7 @@ impl A2aClient {
                 binding,
                 endpoint,
                 tenant,
+                refuses_credentials_in_clear,
                 headers,
                 limits: config.limits.clone(),
                 next_id: AtomicI64::new(1),
@@ -319,22 +330,38 @@ impl A2aClient {
     ///
     /// The agent refuses a task that has already reached a terminal state, with
     /// `UnsupportedOperationError`; [`get_task`](Self::get_task) reads one.
+    ///
+    /// Over HTTP+JSON this is a `GET`, as the normative `a2a.proto` binds it.
+    /// The specification's prose table says `POST`, so an agent built from
+    /// that answers a `GET` with 405, and is asked once more by `POST`: a
+    /// subscription only reads, so asking twice is safe.
     pub async fn subscribe_to_task(&self, task_id: &str) -> Result<A2aEventStream, A2aError> {
+        let method = methods::SUBSCRIBE_TO_TASK;
+        checked_id(method, task_id)?;
         let request = SubscribeToTaskRequest {
             id: task_id.to_string(),
             tenant: self.transport.tenant.clone(),
         };
-        // `GET`, as the normative `a2a.proto` binds it; the specification's
-        // prose table says `POST`, and the reference server accepts both.
-        let operation = Operation::new(
-            methods::SUBSCRIBE_TO_TASK,
-            &request,
-            Method::GET,
-            segments(["tasks", &format!("{task_id}:subscribe")]),
-        )?;
-        self.transport
-            .open_stream(operation, Some(task_id.to_string()))
+        let subscribe = |verb| {
+            let path = segments(["tasks", &format!("{task_id}:subscribe")]);
+            Operation::new(method, &request, verb, path)
+        };
+        let expected = Some(task_id.to_string());
+        match self
+            .transport
+            .open_stream(subscribe(Method::GET)?, expected.clone())
             .await
+        {
+            Err(A2aError::HttpStatus { status, .. })
+                if status == StatusCode::METHOD_NOT_ALLOWED
+                    && self.transport.binding == A2aBinding::HttpJson =>
+            {
+                self.transport
+                    .open_stream(subscribe(Method::POST)?, expected)
+                    .await
+            }
+            opened => opened,
+        }
     }
 
     /// Reads a task's current state.
@@ -346,6 +373,7 @@ impl A2aClient {
         task_id: &str,
         history_length: Option<i32>,
     ) -> Result<Task, A2aError> {
+        checked_id(methods::GET_TASK, task_id)?;
         let request = GetTaskRequest {
             id: task_id.to_string(),
             history_length,
@@ -435,6 +463,7 @@ impl A2aClient {
 
     /// Asks the agent to cancel a task, returning the task as it then stands.
     pub async fn cancel_task(&self, task_id: &str) -> Result<Task, A2aError> {
+        checked_id(methods::CANCEL_TASK, task_id)?;
         let request = CancelTaskRequest {
             id: task_id.to_string(),
             metadata: None,

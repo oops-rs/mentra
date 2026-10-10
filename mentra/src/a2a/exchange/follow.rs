@@ -11,12 +11,14 @@
 #[cfg(test)]
 mod tests;
 
-use a2a_lf::{StreamResponse, Task, TaskArtifactUpdateEvent, TaskStatus};
+use std::collections::HashMap;
+
+use a2a_lf::{Artifact, StreamResponse, Task, TaskArtifactUpdateEvent, TaskStatus};
 use futures_util::StreamExt;
 use tokio::time::Instant;
 
 use super::wait::{Wake, race};
-use super::{is_settled, state_name};
+use super::{is_settled, progress_id, status_line};
 use crate::a2a::client::A2aClient;
 use crate::a2a::output::remote_line;
 use crate::runtime::RunOptions;
@@ -26,19 +28,25 @@ const MAX_PROGRESS_TEXT_BYTES: usize = 512;
 
 /// How following a task's stream ended.
 pub(super) enum Followed {
-    /// The task settled, the stream ended, or it failed: `task` is as the
-    /// stream last left it, and polling decides what happens next.
+    /// The task settled, or the stream was given up: `task` is as the stream
+    /// last left it, and polling decides what happens next.
     Ended,
     /// The run or the wait bound woke the wait first.
     Woke(Wake),
 }
 
-/// Applies a task's events to `task` until it settles, the stream ends, or
-/// `deadline` or the run wakes the wait.
+/// Why a stream was given up before the task settled.
+enum GaveUp {
+    Woke(Wake),
+    /// Said in a progress line, so a host can see why it is polling.
+    Because(String),
+}
+
+/// Applies a task's events to `task` until it settles, the stream is given
+/// up, or `deadline` or the run wakes the wait.
 ///
-/// The task held is bounded as a `GetTask` reply is: once the artifacts the
-/// stream has added outgrow the client's reply bound, the stream is left and
-/// polling reads the task — and refuses it — whole.
+/// A stream given up for any reason but a wake is reported in one progress
+/// line saying why, then left to polling.
 pub(super) async fn follow(
     client: &A2aClient,
     task: &mut Task,
@@ -46,43 +54,125 @@ pub(super) async fn follow(
     options: &RunOptions,
     progress: &(dyn Fn(String) + Send + Sync),
 ) -> Followed {
-    let mut events = match race(client.subscribe_to_task(&task.id), deadline, options).await {
-        Err(wake) => return Followed::Woke(wake),
-        Ok(Err(_)) => return Followed::Ended,
-        Ok(Ok(events)) => events,
-    };
-    let mut budget = client.limits().max_response_bytes;
+    match stream_until_settled(client, task, deadline, options, progress).await {
+        Ok(()) => Followed::Ended,
+        Err(GaveUp::Woke(wake)) => Followed::Woke(wake),
+        Err(GaveUp::Because(why)) => {
+            progress(format!(
+                "stopped following remote task {} ({why}); polling it instead",
+                progress_id(&task.id)
+            ));
+            Followed::Ended
+        }
+    }
+}
+
+async fn stream_until_settled(
+    client: &A2aClient,
+    task: &mut Task,
+    deadline: Instant,
+    options: &RunOptions,
+    progress: &(dyn Fn(String) + Send + Sync),
+) -> Result<(), GaveUp> {
+    let mut events = race(client.subscribe_to_task(&task.id), deadline, options)
+        .await
+        .map_err(GaveUp::Woke)?
+        .map_err(|error| GaveUp::Because(format!("subscribing failed: {error}")))?;
+    let mut held = Held::new(client.limits().max_response_bytes);
+    held.reset(task);
 
     loop {
         let event = match race(events.next(), deadline, options).await {
-            Err(wake) => return Followed::Woke(wake),
+            Err(wake) => return Err(GaveUp::Woke(wake)),
             Ok(Some(Ok(event))) => event,
-            Ok(Some(Err(_)) | None) => return Followed::Ended,
+            Ok(Some(Err(error))) => {
+                return Err(GaveUp::Because(format!("the stream failed: {error}")));
+            }
+            Ok(None) => {
+                let why = "the stream ended before the task settled";
+                return Err(GaveUp::Because(why.to_string()));
+            }
         };
         match event {
             StreamResponse::Task(snapshot) => {
                 let changed = snapshot.status.state != task.status.state;
                 *task = snapshot;
+                held.reset(task);
                 if changed {
                     progress(status_line(task, None));
                 }
             }
             StreamResponse::StatusUpdate(update) => apply_status(task, update.status, progress),
             StreamResponse::ArtifactUpdate(update) => {
-                let size = serde_json::to_vec(&update.artifact).map_or(usize::MAX, |v| v.len());
-                let Some(left) = budget.checked_sub(size) else {
-                    return Followed::Ended;
-                };
-                budget = left;
+                held.update(&update);
                 apply_artifact(task, update);
             }
             // A message has no place in a task's state.
             StreamResponse::Message(_) => {}
         }
+        if held.total > held.limit {
+            return Err(GaveUp::Because(format!(
+                "its artifacts outgrew the {} byte reply bound",
+                held.limit
+            )));
+        }
         if is_settled(&task.status.state) {
-            return Followed::Ended;
+            return Ok(());
         }
     }
+}
+
+/// The bytes of artifacts the followed task holds, by artifact.
+///
+/// The task is bounded as a `GetTask` reply is: once what it holds outgrows
+/// the client's reply bound, the stream is given up and polling reads the
+/// task — and refuses it — whole. A replacement counts as its own size, not
+/// as growth, and a snapshot counts as what it holds.
+struct Held {
+    sizes: HashMap<String, usize>,
+    total: usize,
+    limit: usize,
+}
+
+impl Held {
+    fn new(limit: usize) -> Self {
+        Self {
+            sizes: HashMap::new(),
+            total: 0,
+            limit,
+        }
+    }
+
+    /// Counts what a task snapshot holds, replacing what was counted.
+    fn reset(&mut self, task: &Task) {
+        self.sizes.clear();
+        self.total = 0;
+        for artifact in task.artifacts.as_deref().unwrap_or_default() {
+            self.set(&artifact.artifact_id, size_of(artifact));
+        }
+    }
+
+    /// Counts an update as [`apply_artifact`] applies it.
+    fn update(&mut self, update: &TaskArtifactUpdateEvent) {
+        let id = &update.artifact.artifact_id;
+        let size = size_of(&update.artifact);
+        let held = self.sizes.get(id).copied();
+        let size = match held {
+            Some(held) if update.append == Some(true) => held.saturating_add(size),
+            _ => size,
+        };
+        self.set(id, size);
+    }
+
+    fn set(&mut self, id: &str, size: usize) {
+        let previous = self.sizes.insert(id.to_string(), size).unwrap_or(0);
+        self.total = self.total.saturating_sub(previous).saturating_add(size);
+    }
+}
+
+/// An artifact's size as JSON, which is how a reply would carry it.
+fn size_of(artifact: &Artifact) -> usize {
+    serde_json::to_vec(artifact).map_or(usize::MAX, |json| json.len())
 }
 
 /// Takes a status update, reporting a change of state or a status message.
@@ -105,21 +195,6 @@ fn apply_status(task: &mut Task, status: TaskStatus, progress: &(dyn Fn(String) 
     if changed || said.is_some() {
         progress(status_line(task, said.as_deref()));
     }
-}
-
-/// `remote task {id} is {state}`, and what the agent said, when it said
-/// something.
-fn status_line(task: &Task, said: Option<&str>) -> String {
-    let mut line = format!(
-        "remote task {} is {}",
-        task.id,
-        state_name(&task.status.state)
-    );
-    if let Some(said) = said {
-        line.push_str(": ");
-        line.push_str(said);
-    }
-    line
 }
 
 /// Takes an artifact update: a new artifact, a replacement, or — when it

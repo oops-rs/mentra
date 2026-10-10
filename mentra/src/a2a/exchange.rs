@@ -44,9 +44,13 @@ use tokio::time::Instant;
 
 use super::client::A2aClient;
 use super::error::A2aError;
+use super::output::remote_line;
 use crate::runtime::RunOptions;
 use follow::{Followed, follow};
 use wait::{Wake, wait};
+
+/// Bound on a task id in a progress line.
+const MAX_PROGRESS_ID_BYTES: usize = 128;
 
 /// What one exchange asks of the remote agent.
 ///
@@ -343,13 +347,32 @@ async fn settle_from(
             }
         };
         if task.status.state != previous {
-            progress(format!(
-                "remote task {} is {}",
-                task.id,
-                state_name(&task.status.state)
-            ));
+            progress(status_line(&task, None));
         }
     }
+}
+
+/// `remote task {id} is {state}`, and what the agent said, when it said
+/// something.
+fn status_line(task: &Task, said: Option<&str>) -> String {
+    let mut line = format!(
+        "remote task {} is {}",
+        progress_id(&task.id),
+        state_name(&task.status.state)
+    );
+    if let Some(said) = said {
+        line.push_str(": ");
+        line.push_str(said);
+    }
+    line
+}
+
+/// A task id as a progress line shows it.
+///
+/// The agent chose the id, so it is held to the rule its words are: one
+/// line, no control characters, bounded.
+fn progress_id(task_id: &str) -> String {
+    remote_line(task_id, MAX_PROGRESS_ID_BYTES)
 }
 
 /// What a wait the run or the wait bound ended means for a task still

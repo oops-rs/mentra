@@ -183,3 +183,79 @@ async fn an_agent_without_push_support_is_reported_by_code() {
         );
     }
 }
+
+/// A card whose HTTP+JSON interface is plaintext to a host that is not
+/// loopback: TEST-NET-1, which nothing answers.
+fn plaintext_remote_card() -> Value {
+    let mut card = crate::a2a::testing::standard_card("http://127.0.0.1:1", A2aBinding::HttpJson);
+    card["supportedInterfaces"] = json!([
+        {"url": "http://192.0.2.1/rest", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"},
+    ]);
+    card
+}
+
+fn with_credentials(token: Option<&str>, credentials: Option<&str>) -> TaskPushNotificationConfig {
+    TaskPushNotificationConfig {
+        url: "https://hooks.example.com/a2a".to_string(),
+        id: None,
+        task_id: "t1".to_string(),
+        token: token.map(str::to_string),
+        authentication: credentials.map(|credentials| AuthenticationInfo {
+            scheme: "Bearer".to_string(),
+            credentials: Some(credentials.to_string()),
+        }),
+        tenant: None,
+    }
+}
+
+#[tokio::test]
+async fn push_credentials_are_never_sent_over_plaintext_to_a_remote_host() {
+    let fixture = A2aFixture::start(Script {
+        card: Some(plaintext_remote_card()),
+        ..Script::default()
+    });
+    // No headers are configured, so connecting to a plaintext interface is
+    // allowed; only the credentials in the request body are at stake.
+    let client = connect(&fixture).await;
+
+    for config in [
+        with_credentials(Some("per-task-token"), None),
+        with_credentials(None, Some(WEBHOOK_SECRET)),
+    ] {
+        let error = client
+            .create_push_config(config)
+            .await
+            .expect_err("refused");
+        assert!(
+            matches!(error, A2aError::PlaintextPushCredentials),
+            "{error}"
+        );
+        assert!(!error.to_string().contains(WEBHOOK_SECRET));
+    }
+}
+
+#[tokio::test]
+async fn the_override_lets_push_credentials_through() {
+    let fixture = A2aFixture::start(Script {
+        card: Some(plaintext_remote_card()),
+        ..Script::default()
+    });
+    let limits = crate::a2a::A2aLimits {
+        connect_timeout: std::time::Duration::from_millis(100),
+        request_timeout: std::time::Duration::from_millis(500),
+        ..crate::a2a::A2aLimits::default()
+    };
+    let config = A2aAgentConfig::new("nous", fixture.base())
+        .allowing_plaintext_credentials()
+        .with_limits(limits);
+    let client = A2aClient::connect(&config).await.expect("connect");
+
+    let error = client
+        .create_push_config(with_credentials(Some("per-task-token"), None))
+        .await
+        .expect_err("nothing answers TEST-NET-1");
+    assert!(
+        !matches!(error, A2aError::PlaintextPushCredentials),
+        "the override was not honored: {error}"
+    );
+}

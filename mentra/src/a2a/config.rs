@@ -360,10 +360,15 @@ impl A2aAgentConfig {
     /// remote plaintext host is refused, and only when there is a header to
     /// protect and the operator has not overridden the refusal.
     pub(crate) fn refuses_plaintext_to(&self, url: &Url) -> bool {
-        !self.headers.is_empty()
-            && url.scheme() == "http"
-            && !self.allow_plaintext_credentials
-            && !is_loopback(url)
+        !self.headers.is_empty() && self.refuses_credentials_in_clear_to(url)
+    }
+
+    /// Whether a credential of any kind — a configured header, or one a
+    /// request carries in its body — may not be sent to `url`: the same rule
+    /// as [`refuses_plaintext_to`](Self::refuses_plaintext_to), for a request
+    /// that brings its own credential.
+    pub(crate) fn refuses_credentials_in_clear_to(&self, url: &Url) -> bool {
+        url.scheme() == "http" && !self.allow_plaintext_credentials && !is_loopback(url)
     }
 }
 

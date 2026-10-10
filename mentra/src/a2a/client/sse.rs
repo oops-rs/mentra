@@ -26,6 +26,9 @@ use crate::a2a::error::{A2aError, A2aRpcError};
 /// The media type of an event stream.
 pub(super) const EVENT_STREAM: &str = "text/event-stream";
 
+/// The UTF-8 byte order mark the event-stream standard skips at the start.
+const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
 /// The events of one streaming call, in the order the agent sent them.
 ///
 /// Every event is about one task: the one the call named, or — for a message
@@ -52,6 +55,7 @@ impl A2aEventStream {
             decoder,
             expected_task,
             idle_timeout: limits.stream_idle_timeout,
+            failure: None,
             ended: false,
             finished: false,
         };
@@ -110,15 +114,26 @@ impl Decoder {
 /// An HTTP+JSON event: a `StreamResponse`, or an error in place of one.
 ///
 /// The specification does not say how an error mid-stream is sent over
-/// HTTP+JSON, so both shapes servers use are read: the binding's own
-/// `google.rpc.Status`, and a bare JSON-RPC error object, which the reference
-/// server sends.
+/// HTTP+JSON, so every shape servers use is read: the binding's own
+/// `google.rpc.Status`, wrapped in `{"error": …}` as a reply carries it or
+/// bare, and a bare JSON-RPC error object, which the reference server sends.
+///
+/// A bare status is tried before the JSON-RPC shape, because it has a `code`
+/// and a `message` too: read as JSON-RPC, its HTTP-like code would be taken
+/// for an A2A one.
 fn decode_bare(method: &'static str, data: &[u8]) -> Result<StreamResponse, A2aError> {
     if let Ok(event) = serde_json::from_slice::<StreamResponse>(data) {
         return Ok(event);
     }
+    let bare_status = || {
+        serde_json::from_slice::<rest::Status>(data)
+            .ok()
+            .filter(rest::Status::is_status)
+    };
     let error = if let Ok(status) = serde_json::from_slice::<rest::StatusEnvelope>(data) {
         status.error.a2a_error()
+    } else if let Some(status) = bare_status() {
+        status.a2a_error()
     } else if let Ok(error) = serde_json::from_slice::<JsonRpcError>(data) {
         Some(A2aRpcError::from_code(error.code))
     } else {
@@ -139,6 +154,9 @@ struct Reader {
     decoder: Decoder,
     expected_task: Option<String>,
     idle_timeout: Duration,
+    /// An error the reader met after the events in `ready`, handed out once
+    /// they have been.
+    failure: Option<A2aError>,
     /// The body has been read to its end.
     ended: bool,
     /// Nothing more will be handed out.
@@ -163,24 +181,31 @@ impl Reader {
                     .and_then(|event| self.expect_task(event));
                 return Some(self.finish_on_error(event));
             }
+            if let Some(error) = self.failure.take() {
+                return Some(self.finish_on_error(Err(error)));
+            }
             if self.ended {
                 self.finished = true;
                 return None;
             }
 
             let chunk = tokio::time::timeout(self.idle_timeout, self.response.chunk()).await;
-            let parsed = match chunk {
-                Err(_) => Err(A2aError::StreamIdle(self.idle_timeout)),
-                Ok(Err(_)) => Err(A2aError::Transport("the event stream was interrupted")),
-                Ok(Ok(Some(chunk))) => self.parser.push(&chunk),
+            match chunk {
+                Err(_) => self.failure = Some(A2aError::StreamIdle(self.idle_timeout)),
+                Ok(Err(_)) => {
+                    self.failure = Some(A2aError::Transport("the event stream was interrupted"));
+                }
+                Ok(Ok(Some(chunk))) => {
+                    // Events the chunk completed before an error are the
+                    // agent's, and are handed out before it.
+                    let mut events = Vec::new();
+                    self.failure = self.parser.push(&chunk, &mut events).err();
+                    self.ready.extend(events);
+                }
                 Ok(Ok(None)) => {
                     self.ended = true;
-                    Ok(self.parser.finish())
+                    self.ready.extend(self.parser.finish());
                 }
-            };
-            match parsed {
-                Ok(events) => self.ready.extend(events),
-                Err(error) => return Some(self.finish_on_error(Err(error))),
             }
         }
     }
@@ -224,11 +249,15 @@ fn event_task_id(event: &StreamResponse) -> Option<&str> {
 /// The `text/event-stream` framing, reduced to what A2A uses: each event's
 /// `data`, with comments and every other field ignored.
 ///
-/// Lines end in CRLF, LF or CR; a blank line ends an event; `data` lines are
+/// One UTF-8 byte order mark at the very start of the stream is skipped;
+/// lines end in CRLF, LF or CR; a blank line ends an event; `data` lines are
 /// joined with LF. The line being read and the event being gathered together
 /// are held to `limit` bytes, so an agent that never ends an event cannot
 /// grow the buffer without bound.
 pub(super) struct SseParser {
+    /// How many bytes of a leading byte order mark have been read, until the
+    /// stream is known to have one or not.
+    bom: Option<usize>,
     line: Vec<u8>,
     data: Vec<u8>,
     has_data: bool,
@@ -240,6 +269,7 @@ pub(super) struct SseParser {
 impl SseParser {
     pub(super) fn new(limit: usize) -> Self {
         Self {
+            bom: Some(0),
             line: Vec::new(),
             data: Vec::new(),
             has_data: false,
@@ -248,23 +278,40 @@ impl SseParser {
         }
     }
 
-    /// Reads a chunk, returning the data of every event it completed.
-    pub(super) fn push(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, A2aError> {
-        let mut events = Vec::new();
+    /// Reads a chunk, adding the data of every event it completes to
+    /// `events` — those completed before an error included.
+    pub(super) fn push(&mut self, chunk: &[u8], events: &mut Vec<Vec<u8>>) -> Result<(), A2aError> {
         for &byte in chunk {
-            let after_cr = std::mem::replace(&mut self.after_cr, byte == b'\r');
-            match byte {
-                b'\n' if after_cr => {}
-                b'\r' | b'\n' => self.end_line(&mut events),
-                _ => {
-                    self.line.push(byte);
-                    if self.line.len() + self.data.len() > self.limit {
-                        return Err(A2aError::EventTooLarge { limit: self.limit });
-                    }
+            if let Some(matched) = self.bom {
+                if byte == BOM[matched] {
+                    self.bom = (matched + 1 < BOM.len()).then_some(matched + 1);
+                    continue;
+                }
+                // Not a byte order mark after all: what was held back is the
+                // start of the first line.
+                self.bom = None;
+                for &held in &BOM[..matched] {
+                    self.take(held, events)?;
+                }
+            }
+            self.take(byte, events)?;
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, byte: u8, events: &mut Vec<Vec<u8>>) -> Result<(), A2aError> {
+        let after_cr = std::mem::replace(&mut self.after_cr, byte == b'\r');
+        match byte {
+            b'\n' if after_cr => {}
+            b'\r' | b'\n' => self.end_line(events),
+            _ => {
+                self.line.push(byte);
+                if self.line.len() + self.data.len() > self.limit {
+                    return Err(A2aError::EventTooLarge { limit: self.limit });
                 }
             }
         }
-        Ok(events)
+        Ok(())
     }
 
     /// Ends the stream, returning an event the agent sent whole but never
@@ -275,6 +322,9 @@ impl SseParser {
     /// rather than as a stream that ended cleanly.
     pub(super) fn finish(&mut self) -> Vec<Vec<u8>> {
         let mut events = Vec::new();
+        if let Some(matched) = self.bom.take() {
+            self.line.extend_from_slice(&BOM[..matched]);
+        }
         if !self.line.is_empty() {
             self.end_line(&mut events);
         }

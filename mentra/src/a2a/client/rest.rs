@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::Transport;
-use super::binding::Operation;
+use super::binding::{Operation, is_dot_segment};
 use crate::a2a::config::A2aUrlError;
 use crate::a2a::error::{A2aError, A2aRpcError};
 
@@ -41,10 +41,24 @@ impl Transport {
         })
     }
 
-    /// The interface URL, then the tenant, then the operation's path, each
-    /// segment percent-encoded so an id the agent chose cannot add segments
-    /// of its own.
+    /// The interface URL, then the tenant, then the operation's path.
+    ///
+    /// Each segment is percent-encoded, so a `/` or `?` in an id stays inside
+    /// its segment. Encoding does not cover `.` and `..`, which the URL
+    /// library drops rather than appends; the ids are refused before an
+    /// operation is built ([`checked_id`](super::binding::checked_id)), and
+    /// refused again here so no path is ever built short of a segment.
     fn rest_url(&self, operation: &Operation) -> Result<url::Url, A2aError> {
+        let dropped = self
+            .tenant
+            .iter()
+            .chain(operation.path.iter())
+            .any(|segment| is_dot_segment(segment));
+        if dropped {
+            return Err(A2aError::InvalidId {
+                method: operation.method,
+            });
+        }
         let mut url = self.endpoint.clone();
         {
             // The endpoint was checked to be http(s) with a host, which
@@ -104,13 +118,23 @@ pub(super) struct StatusEnvelope {
 /// The part of a `google.rpc.Status` this client reads.
 #[derive(Deserialize)]
 pub(super) struct Status {
+    /// The canonical status name, such as `NOT_FOUND`.
     #[serde(default)]
-    details: Vec<Value>,
+    status: Option<String>,
+    #[serde(default)]
+    details: Option<Vec<Value>>,
 }
 
 impl Status {
+    /// Whether this has a field only a `google.rpc.Status` has — `status`
+    /// or `details` — rather than being any object at all, which every field
+    /// here being optional would otherwise make it.
+    pub(super) fn is_status(&self) -> bool {
+        self.status.is_some() || self.details.is_some()
+    }
+
     pub(super) fn a2a_error(&self) -> Option<A2aRpcError> {
-        self.details.iter().find_map(|detail| {
+        self.details.iter().flatten().find_map(|detail| {
             let field = |name: &str| detail.get(name).and_then(Value::as_str);
             if field("@type") != Some(ERROR_INFO_TYPE) || field("domain") != Some(PROTOCOL_DOMAIN) {
                 return None;

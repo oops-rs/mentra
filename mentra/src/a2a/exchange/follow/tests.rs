@@ -134,6 +134,8 @@ async fn a_stream_dropped_mid_task_falls_back_to_polling_without_resending() {
             heard,
             [
                 "remote task t1 is working: halfway",
+                "stopped following remote task t1 (the stream ended before the task \
+                 settled); polling it instead",
                 "remote task t1 is completed",
             ]
         );
@@ -168,11 +170,22 @@ async fn a_refused_or_silent_stream_falls_back_to_polling() {
         )
         .await;
 
-        let (outcome, _) = run(&client, &RunOptions::default()).await;
+        let (outcome, heard) = run(&client, &RunOptions::default()).await;
         assert!(
             matches!(outcome, Ok(A2aExchange::Settled(_))),
             "{why}: {outcome:?}"
         );
+        // The host hears, once, why the stream was given up for polling.
+        let gave_up: Vec<&String> = heard
+            .iter()
+            .filter(|line| line.starts_with("stopped following remote task t1 ("))
+            .collect();
+        assert_eq!(gave_up.len(), 1, "{why}: {heard:?}");
+        assert!(
+            gave_up[0].ends_with("; polling it instead"),
+            "{why}: {heard:?}"
+        );
+        assert!(!gave_up[0].contains("server text"), "{why}: {heard:?}");
         assert_eq!(sends(&fixture), 1, "{why}");
         assert_eq!(
             fixture.operations().last().map(String::as_str),
@@ -319,4 +332,128 @@ async fn an_exchange_dropped_while_following_cancels_the_task() {
         "no CancelTask after the exchange was dropped: {:?}",
         fixture.operations()
     );
+}
+
+#[tokio::test]
+async fn an_agent_that_subscribes_by_post_is_still_followed() {
+    let events = vec![
+        json!({"task": task_json("t1", "c1", "TASK_STATE_WORKING")}),
+        status_event("TASK_STATE_COMPLETED", None),
+    ];
+    let fixture = A2aFixture::start(Script {
+        subscribe_by_post: true,
+        get: vec![RpcAnswer::Error(-32001)],
+        ..streaming(
+            A2aBinding::HttpJson,
+            RpcAnswer::Events(events, StreamEnd::Close),
+        )
+    });
+    let client = client_with(&fixture, limits()).await;
+
+    let (outcome, heard) = run(&client, &RunOptions::default()).await;
+    assert!(
+        matches!(outcome, Ok(A2aExchange::Settled(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.operations(),
+        ["SendMessage", "SubscribeToTask", "SubscribeToTask"]
+    );
+    assert_eq!(heard, ["remote task t1 is completed"]);
+}
+
+/// An artifact update for `a1` carrying `text`, replacing what was held.
+fn replacing(text: &str) -> Value {
+    artifact(text, false)
+}
+
+#[tokio::test]
+async fn replacing_an_artifact_does_not_count_as_growth() {
+    // Each replacement is a third of the bound; ten of them, counted as
+    // growth, would outgrow it three times over.
+    let mut events = vec![json!({"task": task_json("t1", "c1", "TASK_STATE_WORKING")})];
+    events.extend((0..10).map(|n| replacing(&format!("{n}{}", "x".repeat(300)))));
+    events.push(status_event("TASK_STATE_COMPLETED", None));
+    let fixture = A2aFixture::start(Script {
+        get: vec![RpcAnswer::Error(-32001)],
+        ..streaming(
+            A2aBinding::JsonRpc,
+            RpcAnswer::Events(events, StreamEnd::Close),
+        )
+    });
+    let client = client_with(
+        &fixture,
+        A2aLimits {
+            max_response_bytes: 1024,
+            max_event_bytes: 64 * 1024,
+            ..limits()
+        },
+    )
+    .await;
+
+    let (outcome, heard) = run(&client, &RunOptions::default()).await;
+    let Ok(A2aExchange::Settled(task)) = outcome else {
+        panic!("expected a settled task, got {outcome:?}");
+    };
+    assert!(remote_output("nous", &task, 4096).contains("\n9xxx"));
+    assert_eq!(fixture.operations(), ["SendMessage", "SubscribeToTask"]);
+    assert_eq!(heard, ["remote task t1 is completed"]);
+}
+
+#[tokio::test]
+async fn a_snapshot_larger_than_a_reply_may_be_is_left_to_polling() {
+    let mut snapshot = task_json("t1", "c1", "TASK_STATE_WORKING");
+    snapshot["artifacts"] = json!([{"artifactId": "a1", "parts": [{"text": "x".repeat(2048)}]}]);
+    let fixture = A2aFixture::start(Script {
+        get: vec![completed_with("42")],
+        ..streaming(
+            A2aBinding::JsonRpc,
+            RpcAnswer::Events(vec![json!({"task": snapshot})], StreamEnd::Hang),
+        )
+    });
+    let client = client_with(
+        &fixture,
+        A2aLimits {
+            max_response_bytes: 1024,
+            max_event_bytes: 64 * 1024,
+            ..limits()
+        },
+    )
+    .await;
+
+    let (outcome, heard) = run(&client, &RunOptions::default()).await;
+    assert!(
+        matches!(outcome, Ok(A2aExchange::Settled(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.operations(),
+        ["SendMessage", "SubscribeToTask", "GetTask"]
+    );
+    assert!(
+        heard[0].contains("its artifacts outgrew the 1024 byte reply bound"),
+        "{heard:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_task_id_reaches_progress_as_one_clean_line() {
+    let id = "t1\u{1b}[2J\nforged line";
+    let fixture = A2aFixture::start(Script {
+        send: RpcAnswer::Result(json!({"task": task_json(id, "c1", "TASK_STATE_WORKING")})),
+        get: vec![RpcAnswer::Result(task_json(
+            id,
+            "c1",
+            "TASK_STATE_COMPLETED",
+        ))],
+        ..Script::default()
+    });
+    let client = client_with(&fixture, limits()).await;
+
+    let (outcome, heard) = run(&client, &RunOptions::default()).await;
+    assert!(
+        matches!(outcome, Ok(A2aExchange::Settled(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(heard, ["remote task t1 [2J forged line is completed"]);
 }
