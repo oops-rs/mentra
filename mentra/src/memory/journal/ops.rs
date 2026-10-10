@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-    recovery::RecoveryOutcome,
+    recovery::{RecoveryOutcome, TurnState, closing_message},
     snapshot::AgentSnapshotMemoryView,
     state::{AgentMemoryState, PendingTurnState, RunMemoryState},
 };
@@ -117,24 +117,65 @@ impl AgentMemory {
         self.persist()
     }
 
+    /// Opens a run that continues the interrupted turn from the transcript's
+    /// end, appending no user message of its own.
+    ///
+    /// The baseline is the transcript as recovery left it, and the
+    /// interrupted marker stays set until the run finishes: a continuation
+    /// that fails, or crashes before the model commits anything, rolls back
+    /// to exactly the turn it set out to continue.
+    pub fn begin_continuation(&mut self, run_id: String) -> Result<(), RuntimeError> {
+        self.state.run = Some(RunMemoryState {
+            run_id,
+            baseline_transcript: self.state.transcript.clone(),
+            assistant_committed: false,
+        });
+        self.state.pending_turn = None;
+        self.persist()
+    }
+
     pub fn finish_run(&mut self) -> Result<(), RuntimeError> {
         self.state.pending_turn = None;
         self.state.run = None;
         self.state.resumable_user_message = None;
+        self.state.interrupted_turn = false;
         self.persist()
     }
 
+    /// Settles a run the previous process left open.
+    ///
+    /// - Nothing the model said was committed: the run rolls back to its
+    ///   baseline and its user message stays resumable, as before #64.
+    /// - The last committed message is an assistant message with no
+    ///   unresolved tool calls: the turn finished, and only its bookkeeping
+    ///   was lost.
+    /// - Otherwise the turn was interrupted: every unresolved call is closed
+    ///   with an error result (never re-executed), the transcript is kept,
+    ///   and the turn is marked for [`begin_continuation`](Self::begin_continuation).
+    ///
+    /// With no open run, state that an older version recovered — its
+    /// transcript ending in calls nobody answered — is repaired the same way.
     pub fn recover(&mut self) -> Result<RecoveryOutcome, RuntimeError> {
         let Some(run) = self.state.run.take() else {
+            if let TurnState::Interrupted { unresolved } = TurnState::of(&self.history_cache)
+                && !unresolved.is_empty()
+            {
+                self.close_interrupted_turn(&unresolved);
+                self.persist()?;
+            }
             return Ok(RecoveryOutcome::default());
         };
 
-        let had_pending_turn = self.state.pending_turn.take().is_some();
-        if had_pending_turn || !run.assistant_committed {
+        self.state.pending_turn = None;
+        if run.assistant_committed {
+            self.state.resumable_user_message = None;
+            match TurnState::of(&self.history_cache) {
+                TurnState::Finished => self.state.interrupted_turn = false,
+                TurnState::Interrupted { unresolved } => self.close_interrupted_turn(&unresolved),
+            }
+        } else {
             self.state.transcript = run.baseline_transcript;
             self.sync_history_cache();
-        } else {
-            self.state.resumable_user_message = None;
         }
 
         self.persist()?;
@@ -144,6 +185,22 @@ impl AgentMemory {
         })
     }
 
+    fn close_interrupted_turn(&mut self, unresolved: &[String]) {
+        if let Some(message) = closing_message(unresolved) {
+            self.state
+                .transcript
+                .push(transcript_item_from_message(message));
+            self.sync_history_cache();
+        }
+        self.state.interrupted_turn = true;
+    }
+
+    /// Whether the transcript ends inside a turn a crash interrupted, which
+    /// [`begin_continuation`](Self::begin_continuation) picks back up.
+    pub fn has_interrupted_turn(&self) -> bool {
+        self.state.interrupted_turn
+    }
+
     /// Moves the transcript leaf back to `id` and re-derives history.
     pub fn branch_from(&mut self, id: &EntryId) -> Result<usize, RuntimeError> {
         let moved = self
@@ -151,6 +208,9 @@ impl AgentMemory {
             .transcript
             .branch_from(id)
             .map_err(RuntimeError::Branch)?;
+        // The next turn now starts from `id`, chosen by the host, so whatever
+        // turn the old leaf was interrupted in is no longer the one to finish.
+        self.state.interrupted_turn = false;
         self.sync_history_cache();
         self.persist()?;
         Ok(moved)
