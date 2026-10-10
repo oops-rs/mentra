@@ -25,6 +25,7 @@
 //! what went wrong.
 
 mod binding;
+mod card;
 mod http;
 mod jsonrpc;
 mod push;
@@ -141,11 +142,9 @@ impl A2aClient {
                 status,
             });
         }
-        let card: AgentCard = serde_json::from_slice(&body)
-            .map_err(|_| A2aError::InvalidCard("it is not a JSON Agent Card"))?;
-        if card.name.trim().is_empty() {
-            return Err(A2aError::InvalidCard("it has no name"));
-        }
+        let card = serde_json::from_slice(&body)
+            .map_err(|_| A2aError::InvalidCard("it is not a JSON Agent Card"))
+            .and_then(card::decode)?;
 
         let (binding, interface) =
             select_interface(&card).ok_or(A2aError::NoCompatibleInterface)?;
@@ -454,11 +453,8 @@ impl A2aClient {
             Method::GET,
             segments(["extendedAgentCard"]),
         )?;
-        let card: AgentCard = self.transport.call(operation).await?;
-        if card.name.trim().is_empty() {
-            return Err(A2aError::InvalidCard("it has no name"));
-        }
-        Ok(card)
+        let card: Value = self.transport.call(operation).await?;
+        card::decode(card)
     }
 
     /// Asks the agent to cancel a task, returning the task as it then stands.

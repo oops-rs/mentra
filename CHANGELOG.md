@@ -75,6 +75,13 @@ Breaking, for callers of `mentra::a2a`:
 - `A2aLimits` gains `stream_idle_timeout` and `max_event_bytes`; a literal
   that ends in `..A2aLimits::default()` is unaffected.
 
+### Cards the official SDKs write
+
+- A v1.0 card whose security requirement has no scopes —
+  `{"schemes": {"bearer": {}}}`, what proto3 JSON writes and the official
+  Python SDK sends — now connects. `a2a-lf` 0.4.1 refuses that shape, so the
+  missing list is restored before the card, public or extended, is decoded.
+
 ## 0.28.7
 
 ### A tool for one agent, and the A2A exchange as data
