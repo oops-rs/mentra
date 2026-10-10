@@ -139,7 +139,11 @@ fn parts_text(parts: &[Part]) -> String {
     parts.iter().map(part_text).collect::<Vec<_>>().join("\n")
 }
 
-/// One part as text: text itself, anything else as a one-line summary.
+/// One part as text: text itself; data as indented JSON; a file by its
+/// name, media type and size, with its contents when they are inline text.
+///
+/// Every form stays inside the frame and under its bound, so a large data
+/// part or file is clipped with the rest of the agent's words.
 fn part_text(part: &Part) -> String {
     let mut about = String::new();
     if let Some(filename) = &part.filename {
@@ -151,11 +155,46 @@ fn part_text(part: &Part) -> String {
     match &part.content {
         PartContent::Text(text) => text.clone(),
         PartContent::Raw(bytes) => {
-            format!("[file{about}: {} bytes inline, not shown]", bytes.len())
+            let size = bytes.len();
+            let text = part
+                .media_type
+                .as_deref()
+                .filter(|media_type| is_textual(media_type))
+                .and_then(|_| std::str::from_utf8(bytes).ok());
+            match text {
+                Some(text) => format!("[file{about}: {size} bytes]\n{text}"),
+                None => format!("[file{about}: {size} bytes inline, not shown]"),
+            }
         }
         PartContent::Url(url) => format!("[file{about} at {url}]"),
-        PartContent::Data(value) => format!("[data{about}]\n{value}"),
+        PartContent::Data(value) => {
+            let json = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+            format!("[data{about}]\n{json}")
+        }
     }
+}
+
+/// Whether a media type names text a reader can be shown as it is: `text/*`,
+/// and JSON, XML and YAML whether bare or as a structured-syntax suffix.
+fn is_textual(media_type: &str) -> bool {
+    let essence = media_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let Some((kind, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    if kind == "text" {
+        return true;
+    }
+    let structured = ["json", "xml", "yaml", "x-yaml"];
+    kind == "application"
+        && (structured.contains(&subtype)
+            || ["+json", "+xml", "+yaml"]
+                .iter()
+                .any(|suffix| subtype.ends_with(suffix)))
 }
 
 /// The agent's own words between delimiters, clipped to the output bound.
@@ -182,3 +221,6 @@ fn clip(text: &str, max_bytes: usize) -> (&str, usize) {
     }
     (&text[..end], text.len() - end)
 }
+
+#[cfg(test)]
+mod tests;

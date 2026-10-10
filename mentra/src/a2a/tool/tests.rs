@@ -419,7 +419,7 @@ async fn non_text_parts_are_summarized_not_dropped() {
         "see attached",
         "[file report.pdf (application/pdf): 3 bytes inline, not shown]",
         "[file (image/png) at https://example.com/chart.png]",
-        "[data (application/json)]\n{\"rows\":3}",
+        "[data (application/json)]\n{\n  \"rows\": 3\n}",
     ] {
         assert!(text.contains(expected), "missing {expected:?} in {text}");
     }
