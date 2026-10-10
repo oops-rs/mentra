@@ -52,6 +52,10 @@ struct StateFile {
     transcript: TranscriptShape,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run: Option<RunFile>,
+    /// See [`AgentMemoryState::interrupted_turn`]. Absent in files older
+    /// versions wrote, and written only when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    interrupted_turn: bool,
 }
 
 /// A transcript by reference: the active path root to leaf, then the
@@ -336,6 +340,7 @@ fn decompose_memory(memory: &AgentMemoryState) -> StateFile {
             assistant_committed: run.assistant_committed,
             baseline: shape_of(&run.baseline_transcript),
         }),
+        interrupted_turn: memory.interrupted_turn,
     }
 }
 
@@ -358,6 +363,7 @@ fn compose_memory(
                 })
             })
             .transpose()?,
+        interrupted_turn: state.interrupted_turn,
     })
 }
 

@@ -193,6 +193,25 @@ fn a_run_baseline_round_trips_and_rolls_back_identically() {
 }
 
 #[test]
+fn an_interrupted_turn_marker_round_trips() {
+    let store = FileRuntimeStore::new(temp_root("interrupted"));
+    let record = agent_record("agent-1");
+    let memory = AgentMemoryState {
+        interrupted_turn: true,
+        ..memory_with(transcript_of(&["go"]))
+    };
+
+    store.create_agent(&record, &memory).expect("create agent");
+    let loaded = store
+        .load_agent("agent-1")
+        .expect("load agent")
+        .expect("agent present");
+
+    assert!(loaded.memory.interrupted_turn);
+    assert_eq!(state_value(&loaded.memory), state_value(&memory));
+}
+
+#[test]
 fn a_replaced_transcript_loads_as_replaced_while_the_log_keeps_history() {
     let store = FileRuntimeStore::new(temp_root("compaction"));
     let record = agent_record("agent-1");

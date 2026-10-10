@@ -246,16 +246,17 @@ async fn resume_agent_keeps_committed_transcript_when_tool_execution_was_interru
             .assistant_committed
     );
 
+    let reboot_provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![text_stream(&model.id, "checked; done")],
+    );
     let reboot_runtime = Runtime::empty_builder()
         .with_store(store.clone())
-        .with_provider_instance(ScriptedProvider::new(
-            BuiltinProvider::Anthropic,
-            vec![model.clone()],
-            Vec::new(),
-        ))
+        .with_provider_instance(reboot_provider.clone())
         .build()
         .expect("rebuild runtime");
-    let resumed = reboot_runtime
+    let mut resumed = reboot_runtime
         .resume_agent(&agent_id)
         .expect("resume interrupted agent");
 
@@ -263,7 +264,8 @@ async fn resume_agent_keeps_committed_transcript_when_tool_execution_was_interru
         resumed.watch_snapshot().borrow().status,
         AgentStatus::Interrupted
     );
-    assert_eq!(resumed.history().len(), 2);
+    assert!(resumed.has_interrupted_turn());
+    assert_eq!(resumed.history().len(), 3, "the running call was closed");
     assert_eq!(
         resumed.history()[0],
         Message::user(ContentBlock::text("hello"))
@@ -272,13 +274,124 @@ async fn resume_agent_keeps_committed_transcript_when_tool_execution_was_interru
         &resumed.history()[1].content[0],
         ContentBlock::ToolUse { name, .. } if name == "blocking_tool"
     ));
+    assert!(matches!(
+        &resumed.history()[2].content[..],
+        [ContentBlock::ToolResult { tool_use_id, is_error: true, content }]
+            if tool_use_id == "tool-1" && content.to_string().contains("effect is unknown")
+    ));
 
     let persisted_after_resume = store
         .load_agent(&agent_id)
         .expect("load recovered state")
         .expect("agent state");
     assert!(persisted_after_resume.memory.run.is_none());
-    assert_eq!(persisted_after_resume.memory.transcript.len(), 2);
+    assert!(persisted_after_resume.memory.interrupted_turn);
+    assert_eq!(persisted_after_resume.memory.transcript.len(), 3);
+
+    assert!(
+        matches!(
+            resumed.resume().await,
+            Err(crate::runtime::RuntimeError::NoResumableTurn)
+        ),
+        "the prompt is already in the transcript; replaying it would ask twice"
+    );
+
+    let answer = resumed
+        .continue_interrupted(crate::runtime::RunOptions::default())
+        .await
+        .expect("continue the interrupted turn");
+    assert_eq!(
+        answer,
+        Message::assistant(ContentBlock::text("checked; done"))
+    );
+    assert!(!resumed.has_interrupted_turn());
+    assert_eq!(resumed.history().len(), 4, "no user message was appended");
+    assert_eq!(
+        resumed.watch_snapshot().borrow().status,
+        AgentStatus::Finished
+    );
+
+    let requests = reboot_provider.recorded_requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].messages.last().map(|message| &message.role),
+        Some(&Role::User),
+        "the model is asked with the closed call as the transcript's end"
+    );
+    assert!(
+        matches!(
+            resumed.continue_interrupted(Default::default()).await,
+            Err(crate::runtime::RuntimeError::NoInterruptedTurn)
+        ),
+        "a finished turn has nothing to continue"
+    );
+    let persisted_after_continue = store
+        .load_agent(&agent_id)
+        .expect("load continued state")
+        .expect("agent state");
+    assert!(!persisted_after_continue.memory.interrupted_turn);
+}
+
+#[tokio::test]
+async fn a_crash_after_tool_results_continues_without_running_the_tool_again() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let store = temp_store("results-recovery");
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "tool-1", "details_tool", "{}"),
+            super::support::StreamScript::Pending,
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_store(store.clone())
+        .with_provider_instance(provider.clone())
+        .with_tool(DetailsTool)
+        .build()
+        .expect("build runtime");
+    let agent = runtime.spawn("agent", model.clone()).expect("spawn agent");
+    let agent_id = agent.id().to_string();
+
+    let send_task = tokio::spawn(async move {
+        let mut agent = agent;
+        let _ = agent.send(vec![ContentBlock::text("hello")]).await;
+    });
+    // The second request is the model being asked to answer the result.
+    wait_for_recorded_requests(&provider, 2).await;
+    send_task.abort();
+    let _ = send_task.await;
+    clear_leases(&store);
+
+    let reboot_provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![text_stream(&model.id, "done")],
+    );
+    let reboot_runtime = Runtime::empty_builder()
+        .with_store(store.clone())
+        .with_provider_instance(reboot_provider.clone())
+        .build()
+        .expect("rebuild runtime");
+    let mut resumed = reboot_runtime
+        .resume_agent(&agent_id)
+        .expect("resume interrupted agent");
+
+    assert!(resumed.has_interrupted_turn());
+    assert_eq!(resumed.history().len(), 3, "the real result is kept");
+    assert!(matches!(
+        &resumed.history()[2].content[..],
+        [ContentBlock::ToolResult { is_error: false, content, .. }]
+            if *content == "tool output"
+    ));
+
+    let answer = resumed
+        .continue_interrupted(Default::default())
+        .await
+        .expect("continue");
+    assert_eq!(answer, Message::assistant(ContentBlock::text("done")));
+    assert_eq!(resumed.history().len(), 4);
+    assert_eq!(reboot_provider.recorded_requests().await.len(), 1);
 }
 
 #[test]

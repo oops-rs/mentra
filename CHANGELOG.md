@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### A crash mid tool round is recovered as interrupted, not finished
+
+Recovery used to keep the transcript of any run that had committed an
+assistant message, so a process that died while tool calls ran came back with
+calls nobody answered (which providers refuse) and no resumable turn
+([#64](https://github.com/oops-rs/mentra/issues/64)).
+
+- A run counts as finished only when its last committed message is an
+  assistant message with no unresolved tool calls. A run that committed
+  nothing the model said still rolls back, and `resume()` replays its prompt.
+- Otherwise each unresolved call is closed with an error result saying the
+  process stopped while it ran, its effect is unknown, and the state should be
+  checked before repeating it. No call is re-executed. The transcript, real
+  tool results included, is kept.
+- `Agent::has_interrupted_turn()` and `Session::has_interrupted_turn()` say
+  whether a resumed agent is in that state.
+  `Agent::continue_interrupted(options)` and
+  `Session::continue_interrupted(options)` continue the turn from the
+  transcript's end without appending a user message, with the same run
+  checkpoint, events and rollback as `run`. A continuation that fails stays
+  continuable; one that finishes clears the state. Without an interrupted
+  turn they fail with the new `RuntimeError::NoInterruptedTurn`.
+- Persisted state gains an optional `interrupted_turn` marker, written only
+  when set. State older versions wrote loads unchanged, and a transcript they
+  left ending in unanswered calls is repaired on load.
+
 ### Re-capturing a tool's description
 
 - `Runtime::refresh_tool_descriptors` (and `ToolRegistry::refresh_descriptors`)

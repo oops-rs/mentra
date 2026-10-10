@@ -83,6 +83,10 @@ pub enum RuntimeError {
     EmptyAssistantResponse,
     #[error("no resumable user turn is available")]
     NoResumableTurn,
+    /// [`Agent::continue_interrupted`](crate::agent::Agent::continue_interrupted)
+    /// on an agent whose transcript does not end inside an interrupted turn.
+    #[error("no interrupted turn is available to continue")]
+    NoInterruptedTurn,
     #[error("invalid tool input for '{name}' ({id}): {source}")]
     InvalidToolUseInput {
         id: String,
@@ -134,6 +138,7 @@ impl RuntimeError {
             | Self::MaxRoundsExceeded(_)
             | Self::EmptyAssistantResponse
             | Self::NoResumableTurn
+            | Self::NoInterruptedTurn
             | Self::InvalidToolUseInput { .. }
             | Self::MalformedProviderEvent(_)
             | Self::InvalidTask(_)

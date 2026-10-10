@@ -691,6 +691,29 @@ impl Session {
         self.finish_turn(turn, result)
     }
 
+    /// Whether the session's transcript ends inside a turn a crash
+    /// interrupted after its tool calls ran — see
+    /// [`Agent::has_interrupted_turn`](crate::agent::Agent::has_interrupted_turn).
+    pub fn has_interrupted_turn(&self) -> bool {
+        self.agent.has_interrupted_turn()
+    }
+
+    /// Continues an interrupted turn from the transcript's end without
+    /// appending a user message, emitting session events as the turn runs.
+    ///
+    /// The turn opens and closes like any other: no
+    /// [`SessionEvent::UserMessage`] is emitted, because nobody said anything
+    /// new. See
+    /// [`Agent::continue_interrupted`](crate::agent::Agent::continue_interrupted).
+    pub async fn continue_interrupted(
+        &mut self,
+        options: RunOptions,
+    ) -> Result<Message, RuntimeError> {
+        let turn = self.begin_turn();
+        let result = self.agent.continue_interrupted(options).await;
+        self.finish_turn(turn, result)
+    }
+
     /// Opens a turn: marks the session active and starts forwarding agent
     /// events onto the session stream.
     ///
