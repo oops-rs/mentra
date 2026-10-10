@@ -5,9 +5,12 @@
 //! own wire: JSON-RPC names it in a POST body, HTTP+JSON gives it a verb and
 //! a path. An [`Operation`] carries both mappings, so a client method is
 //! written once and the binding the card offered decides which is used.
+//! What both share — the extensions a request activates — travels as a
+//! header either way.
 
 use a2a_lf::{AgentCard, AgentInterface, TRANSPORT_PROTOCOL_HTTP_JSON, TRANSPORT_PROTOCOL_JSONRPC};
 use reqwest::Method;
+use reqwest::header::HeaderValue;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -94,6 +97,8 @@ pub(super) struct Operation {
     pub(super) path: Vec<String>,
     /// The HTTP+JSON query, for a method whose request travels in it.
     pub(super) query: Vec<(&'static str, String)>,
+    /// The `A2A-Extensions` value: the extensions this request activates.
+    pub(super) extensions: Option<HeaderValue>,
 }
 
 impl Operation {
@@ -109,6 +114,7 @@ impl Operation {
             verb,
             path: path.into_iter().collect(),
             query: Vec::new(),
+            extensions: None,
         })
     }
 
@@ -118,6 +124,27 @@ impl Operation {
             self.query.push((key, value.to_string()));
         }
         self
+    }
+
+    /// Activates `extensions` for this request, as the comma-separated list
+    /// `A2A-Extensions` carries.
+    ///
+    /// A URI that is empty, or holds a comma or whitespace, would change what
+    /// the list says, so it is refused rather than sent.
+    pub(super) fn activating(mut self, extensions: &[String]) -> Result<Self, A2aError> {
+        if extensions.is_empty() {
+            return Ok(self);
+        }
+        let well_formed = |uri: &String| {
+            !uri.is_empty() && !uri.contains(',') && !uri.chars().any(char::is_whitespace)
+        };
+        if !extensions.iter().all(well_formed) {
+            return Err(A2aError::InvalidExtensionUri);
+        }
+        let value = HeaderValue::try_from(extensions.join(","))
+            .map_err(|_| A2aError::InvalidExtensionUri)?;
+        self.extensions = Some(value);
+        Ok(self)
     }
 
     /// Whether the HTTP+JSON binding sends the request as a body.

@@ -106,6 +106,14 @@ pub enum A2aError {
         error: A2aRpcError,
     },
 
+    /// An extension URI to activate is empty, or holds a comma, whitespace,
+    /// or a character a header cannot carry. Nothing was sent.
+    #[error(
+        "an A2A extension URI is empty or contains a comma, whitespace, or a character an HTTP \
+         header cannot carry"
+    )]
+    InvalidExtensionUri,
+
     /// The message may have reached the agent, but no answer arrived.
     ///
     /// A `SendMessage` that fails in transit, times out, or is answered with a

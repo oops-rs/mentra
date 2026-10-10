@@ -25,7 +25,7 @@ impl Transport {
         );
         self.http
             .post(self.endpoint.clone())
-            .headers(self.headers.clone())
+            .headers(self.operation_headers(operation))
             .header(ACCEPT, accept)
             .json(&request)
     }

@@ -32,7 +32,7 @@ impl Transport {
         let request = self
             .http
             .request(operation.verb.clone(), url)
-            .headers(self.headers.clone())
+            .headers(self.operation_headers(operation))
             .header(ACCEPT, accept);
         Ok(if operation.has_body() {
             request.json(&operation.params)

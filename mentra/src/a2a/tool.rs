@@ -45,7 +45,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::client::A2aClient;
-use super::exchange::{A2aExchange, A2aExchangeError, A2aRequest, exchange, state_name};
+use super::exchange::{A2aExchange, A2aExchangeError, A2aRequest, A2aSend, exchange, state_name};
 use super::name::a2a_tool_name;
 use crate::runtime::RunOptions;
 use crate::tool::{
@@ -124,12 +124,13 @@ impl A2aAgentTool {
                 text,
                 task_id,
                 context_id,
-            } => A2aRequest::Send {
-                text,
-                task_id,
-                context_id,
-            },
-            Call::Resume { task_id } => A2aRequest::Resume { task_id },
+            } => {
+                let mut send = A2aSend::new(text);
+                send.task_id = task_id;
+                send.context_id = context_id;
+                A2aRequest::Send(send)
+            }
+            Call::Resume { task_id } => A2aRequest::resume(task_id),
         };
         let frame = self.frame();
         match exchange(&self.client, request, options, progress).await {

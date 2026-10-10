@@ -23,10 +23,12 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use a2a_lf::{Message, Part, Role, SendMessageConfiguration, SendMessageResponse, Task, TaskState};
+use serde_json::Value;
 use tokio::time::Instant;
 
 use super::client::A2aClient;
@@ -41,17 +43,109 @@ use crate::runtime::RunOptions;
 const INTERRUPT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What one exchange asks of the remote agent.
+///
+/// Non-exhaustive so that a way of asking added later is not a breaking
+/// change; build one with [`A2aRequest::send`], [`A2aRequest::resume`], or
+/// from an [`A2aSend`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum A2aRequest {
-    /// Send a message: a new task — in `context_id`'s conversation when
-    /// given — or, with `task_id`, an answer to a task waiting for input.
-    Send {
-        text: String,
-        task_id: Option<String>,
-        context_id: Option<String>,
-    },
+    /// Send a message.
+    Send(A2aSend),
     /// Wait on an existing task without sending anything.
     Resume { task_id: String },
+}
+
+impl A2aRequest {
+    /// Sends `text` as a new task.
+    pub fn send(text: impl Into<String>) -> Self {
+        Self::Send(A2aSend::new(text))
+    }
+
+    /// Waits on `task_id` without sending anything.
+    pub fn resume(task_id: impl Into<String>) -> Self {
+        Self::Resume {
+            task_id: task_id.into(),
+        }
+    }
+}
+
+impl From<A2aSend> for A2aRequest {
+    fn from(send: A2aSend) -> Self {
+        Self::Send(send)
+    }
+}
+
+/// A message to send: a new task — in a conversation when it names a
+/// context — or, when it names a task, an answer to a task waiting for input.
+///
+/// Its fields are readable, and it is built with [`new`](Self::new) and the
+/// `with_*` methods, so a field added later — as `metadata` and `extensions`
+/// were — does not break a host that builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct A2aSend {
+    /// The message's text.
+    pub text: String,
+    /// The task this message answers, when it answers one.
+    pub task_id: Option<String>,
+    /// The conversation a new task joins.
+    pub context_id: Option<String>,
+    /// The message's `metadata`: where an extension puts what it carries,
+    /// under its own URI.
+    pub metadata: HashMap<String, Value>,
+    /// The URIs of the extensions this message uses: listed in the message's
+    /// `extensions`, and activated for the request in `A2A-Extensions`.
+    pub extensions: Vec<String>,
+}
+
+impl A2aSend {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            task_id: None,
+            context_id: None,
+            metadata: HashMap::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    /// Answers `task_id`, a task waiting for input.
+    pub fn with_task_id(mut self, task_id: impl Into<String>) -> Self {
+        self.task_id = Some(task_id.into());
+        self
+    }
+
+    /// Starts the task in `context_id`'s conversation.
+    pub fn with_context_id(mut self, context_id: impl Into<String>) -> Self {
+        self.context_id = Some(context_id.into());
+        self
+    }
+
+    /// Sets one `metadata` entry, replacing any under the same key.
+    pub fn with_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.metadata.insert(key.into(), value);
+        self
+    }
+
+    /// Uses the extension `uri`, once however often it is added.
+    pub fn with_extension(mut self, uri: impl Into<String>) -> Self {
+        let uri = uri.into();
+        if !self.extensions.contains(&uri) {
+            self.extensions.push(uri);
+        }
+        self
+    }
+
+    /// The A2A message this sends.
+    fn into_message(self) -> Message {
+        let mut message = Message::new(Role::User, vec![Part::text(self.text)]);
+        message.task_id = self.task_id;
+        message.context_id = self.context_id;
+        message.metadata = (!self.metadata.is_empty()).then_some(self.metadata);
+        message.extensions = (!self.extensions.is_empty()).then_some(self.extensions);
+        message
+    }
 }
 
 /// What came back once the exchange stopped waiting.
@@ -153,14 +247,8 @@ pub async fn submit(
     request: A2aRequest,
 ) -> Result<A2aSubmitted, A2aExchangeError> {
     let task = match request {
-        A2aRequest::Send {
-            text,
-            task_id,
-            context_id,
-        } => {
-            let mut message = Message::new(Role::User, vec![Part::text(text)]);
-            message.task_id = task_id;
-            message.context_id = context_id;
+        A2aRequest::Send(send) => {
+            let message = send.into_message();
             let configuration = SendMessageConfiguration {
                 accepted_output_modes: None,
                 task_push_notification_config: None,

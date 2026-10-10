@@ -42,7 +42,7 @@ use a2a_lf::{
     SubscribeToTaskRequest, Task, methods,
 };
 use reqwest::Method;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use url::Url;
@@ -61,6 +61,9 @@ pub use sse::A2aEventStream;
 /// the reference server refuses it, so it is on every request — the card
 /// fetch included.
 pub const A2A_PROTOCOL_VERSION: &str = "1.0";
+
+/// The header naming the extensions a request activates.
+const EXTENSIONS_HEADER: &str = "a2a-extensions";
 
 /// The media type of a reply that is one JSON document.
 const JSON: &str = "application/json";
@@ -239,6 +242,10 @@ impl A2aClient {
     ///
     /// A message that names a task must be answered about that task; an answer
     /// about another one is refused as [`A2aError::MismatchedTask`].
+    ///
+    /// The extensions the message lists in `extensions` are activated for the
+    /// request, in the `A2A-Extensions` header, so an agent that reads only
+    /// the header and one that reads only the message both see them.
     pub async fn send_message(
         &self,
         message: Message,
@@ -256,7 +263,8 @@ impl A2aClient {
             &request,
             Method::POST,
             segments(["message:send"]),
-        )?;
+        )?
+        .activating(request.message.extensions.as_deref().unwrap_or_default())?;
         let response: SendMessageResponse =
             self.transport.call(operation).await.map_err(send_failure)?;
 
@@ -272,7 +280,8 @@ impl A2aClient {
 
     /// Sends a message and streams what follows: the task (or a direct reply
     /// message) first, then its status and artifact updates, until the agent
-    /// closes the stream.
+    /// closes the stream. Its extensions are activated as
+    /// [`send_message`](Self::send_message) activates them.
     ///
     /// Opening the stream fails as [`send_message`](Self::send_message) does,
     /// [`A2aError::SendIndeterminate`] included. Once it is open the task
@@ -297,7 +306,8 @@ impl A2aClient {
             &request,
             Method::POST,
             segments(["message:stream"]),
-        )?;
+        )?
+        .activating(request.message.extensions.as_deref().unwrap_or_default())?;
         self.transport
             .open_stream(operation, task_id)
             .await
@@ -442,6 +452,19 @@ impl A2aClient {
 }
 
 impl Transport {
+    /// The headers every request carries, and the extensions `operation`
+    /// activates.
+    fn operation_headers(&self, operation: &Operation) -> HeaderMap {
+        let mut headers = self.headers.clone();
+        if let Some(extensions) = &operation.extensions {
+            headers.insert(
+                HeaderName::from_static(EXTENSIONS_HEADER),
+                extensions.clone(),
+            );
+        }
+        headers
+    }
+
     /// Sends one operation in this client's binding and decodes what it
     /// answered with.
     async fn call<R: DeserializeOwned>(&self, operation: Operation) -> Result<R, A2aError> {
@@ -568,13 +591,16 @@ fn expect_task(method: &'static str, task_id: &str, task: Task) -> Result<Task, 
 /// Failures that prove the agent never accepted the message are reported as
 /// themselves: a connection that was never made, a 4xx (the agent refusing
 /// the request before acting on it), an A2A error (the agent's answer), and a
-/// local configuration error. Everything else happened after the request may
+/// local configuration or request error. Everything else happened after the request may
 /// have been accepted — a timeout, a dropped connection, a 5xx, a redirect, a
 /// reply that does not decode — and is indeterminate.
 fn send_failure(error: A2aError) -> A2aError {
     match &error {
         A2aError::HttpStatus { status, .. } if status.is_client_error() => error,
-        A2aError::Connect | A2aError::Config(_) | A2aError::Rpc { .. } => error,
+        A2aError::Connect
+        | A2aError::Config(_)
+        | A2aError::Rpc { .. }
+        | A2aError::InvalidExtensionUri => error,
         _ => A2aError::SendIndeterminate,
     }
 }
