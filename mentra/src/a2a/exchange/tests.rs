@@ -60,7 +60,7 @@ async fn a_direct_reply_comes_back_as_the_message() {
         "--- begin output from remote agent `nous` ---\nhello back\n\
          --- end output from remote agent `nous` ---"
     );
-    assert_eq!(fixture.rpc_methods(), ["SendMessage"]);
+    assert_eq!(fixture.operations(), ["SendMessage"]);
 }
 
 #[tokio::test]
@@ -105,7 +105,7 @@ async fn submit_returns_the_task_before_anything_waits_on_it() {
     };
     assert_eq!(task.id, "t1");
     assert_eq!(
-        fixture.rpc_methods(),
+        fixture.operations(),
         ["SendMessage"],
         "nothing has polled yet"
     );
@@ -114,7 +114,7 @@ async fn submit_returns_the_task_before_anything_waits_on_it() {
         .await
         .expect("settled");
     assert!(matches!(outcome, A2aExchange::Settled(_)), "{outcome:?}");
-    assert_eq!(fixture.rpc_methods(), ["SendMessage", "GetTask"]);
+    assert_eq!(fixture.operations(), ["SendMessage", "GetTask"]);
 }
 
 #[tokio::test]
@@ -135,7 +135,7 @@ async fn a_resume_waits_without_sending() {
         .await
         .expect("settled");
     assert!(matches!(outcome, A2aExchange::Settled(_)));
-    assert_eq!(fixture.rpc_methods(), ["GetTask"]);
+    assert_eq!(fixture.operations(), ["GetTask"]);
 }
 
 #[tokio::test]
@@ -164,7 +164,7 @@ async fn a_task_still_working_at_the_bound_is_handed_back() {
     assert_eq!(task.id, "t1");
     assert_eq!(reason, A2aStillWorking::WaitBound(bound));
     assert!(
-        !fixture.rpc_methods().contains(&"CancelTask".to_string()),
+        !fixture.operations().contains(&"CancelTask".to_string()),
         "a task handed back is left running"
     );
 }
@@ -203,7 +203,7 @@ async fn a_failed_send_starts_nothing() {
         .await
         .expect_err("send failed");
     assert!(matches!(error, A2aExchangeError::Send(_)), "{error:?}");
-    assert_eq!(fixture.rpc_methods(), ["SendMessage"]);
+    assert_eq!(fixture.operations(), ["SendMessage"]);
 }
 
 #[tokio::test]

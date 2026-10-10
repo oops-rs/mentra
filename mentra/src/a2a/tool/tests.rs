@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::*;
 use crate::a2a::testing::{A2aFixture, RpcAnswer, Script, standard_card, task_json};
-use crate::a2a::{A2aAgentConfig, A2aLimits};
+use crate::a2a::{A2aAgentConfig, A2aBinding, A2aLimits};
 use crate::runtime::CancellationToken;
 use crate::test::{MockRuntime, MockToolCall};
 use crate::{ContentBlock, tool::ToolResultContent};
@@ -96,7 +96,7 @@ async fn a_message_is_submitted_then_polled_to_completion() {
         Some(json!({"task_id": "t1", "context_id": "c1", "state": "completed"}))
     );
 
-    assert_eq!(fixture.rpc_methods(), ["SendMessage", "GetTask", "GetTask"]);
+    assert_eq!(fixture.operations(), ["SendMessage", "GetTask", "GetTask"]);
     let sent = &fixture.params_of("SendMessage")[0];
     assert_eq!(sent["configuration"]["returnImmediately"], json!(true));
     assert_eq!(
@@ -126,7 +126,7 @@ async fn a_direct_message_reply_is_returned_without_polling() {
         "{text}"
     );
     assert!(text.contains("hello back"), "{text}");
-    assert_eq!(fixture.rpc_methods(), ["SendMessage"]);
+    assert_eq!(fixture.operations(), ["SendMessage"]);
 }
 
 #[tokio::test]
@@ -158,7 +158,7 @@ async fn an_input_required_task_surfaces_its_question_and_ids() {
         "{text}"
     );
     assert!(text.contains("Which branch should I look at?"), "{text}");
-    assert_eq!(fixture.rpc_methods(), ["SendMessage"]);
+    assert_eq!(fixture.operations(), ["SendMessage"]);
 }
 
 #[tokio::test]
@@ -228,7 +228,7 @@ async fn a_task_still_working_at_the_bound_returns_its_ids_and_resuming_does_not
     .await
     .expect("completed");
     assert!(text(&resumed).contains("done at last"));
-    assert_eq!(fixture.rpc_methods(), ["SendMessage", "GetTask"]);
+    assert_eq!(fixture.operations(), ["SendMessage", "GetTask"]);
 }
 
 #[tokio::test]
@@ -252,7 +252,7 @@ async fn reaching_the_bound_while_polling_leaves_the_task_running() {
 
     // Returning disarms the drop guard: no cancel follows the call.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let methods = fixture.rpc_methods();
+    let methods = fixture.operations();
     assert!(methods.iter().filter(|m| *m == "GetTask").count() >= 1);
     assert!(!methods.contains(&"CancelTask".to_string()), "{methods:?}");
 }
@@ -341,7 +341,7 @@ async fn a_stopping_run_hands_the_task_back_without_cancelling_it() {
         .await
         .expect("handed back");
     assert!(text(&output).contains("the run is ending"));
-    assert_eq!(fixture.rpc_methods(), ["SendMessage"]);
+    assert_eq!(fixture.operations(), ["SendMessage"]);
 }
 
 #[tokio::test]
@@ -358,14 +358,14 @@ async fn a_dropped_call_cancels_the_remote_task() {
     assert!(dropped.is_err(), "the call should still be waiting");
 
     for _ in 0..50 {
-        if fixture.rpc_methods().contains(&"CancelTask".to_string()) {
+        if fixture.operations().contains(&"CancelTask".to_string()) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!(
         "no CancelTask after the call was dropped: {:?}",
-        fixture.rpc_methods()
+        fixture.operations()
     );
 }
 
@@ -515,7 +515,7 @@ async fn the_descriptor_declares_an_external_delegation() {
 
 #[tokio::test]
 async fn the_description_is_bounded_however_large_the_card() {
-    let mut card = standard_card("http://127.0.0.1:1");
+    let mut card = standard_card("http://127.0.0.1:1", A2aBinding::JsonRpc);
     card["description"] = json!("d".repeat(50_000));
     card["skills"] = json!(
         (0..100)

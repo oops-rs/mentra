@@ -62,7 +62,7 @@ pub(crate) mod testing;
 /// same version of them that this crate was built against.
 pub use a2a_lf as types;
 
-pub use client::{A2A_PROTOCOL_VERSION, A2aClient};
+pub use client::{A2A_PROTOCOL_VERSION, A2aBinding, A2aClient};
 pub use config::{A2aAgentConfig, A2aConfigError, A2aLimits, A2aUrlError};
 pub use error::{A2aError, A2aRpcError};
 pub use exchange::{

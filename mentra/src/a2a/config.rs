@@ -19,10 +19,10 @@ pub const WELL_KNOWN_AGENT_CARD_PATH: &str = "/.well-known/agent-card.json";
 
 /// Default timeout for establishing the TCP and TLS connection.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Default bound on one HTTP exchange: the card fetch, or one JSON-RPC call,
+/// Default bound on one HTTP exchange: the card fetch, or one call,
 /// from sending the request to the last byte of the reply.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Default cap on the bytes read for one reply, card or JSON-RPC.
+/// Default cap on the bytes read for one reply, card or call.
 ///
 /// A task carries every artifact it has produced on every `GetTask`, so this
 /// is sized for a task with a large text result rather than for one message.
@@ -120,10 +120,10 @@ impl Default for A2aLimits {
 ///
 /// Header values are stored as [`SecretString`] and never appear in `Debug`
 /// output, error messages, or logs. They are sent on the card fetch and on
-/// every JSON-RPC call. Configuring a header on a plaintext `http://` URL is
+/// every call. Configuring a header on a plaintext `http://` URL is
 /// rejected unless the host is loopback — the same rule, with the same
 /// override, as the MCP HTTP transports — and the rule is applied again to
-/// the JSON-RPC endpoint the card names, because that URL is chosen by the
+/// the interface URL the card names, because that URL is chosen by the
 /// remote side rather than by the operator.
 #[derive(Clone, Deserialize)]
 pub struct A2aAgentConfig {
@@ -218,7 +218,7 @@ pub enum A2aConfigError {
 /// Why a URL is not one this client will send a request to.
 ///
 /// No variant carries the URL, because one of the two URLs checked — the
-/// JSON-RPC endpoint — is chosen by the remote agent's card.
+/// interface URL — is chosen by the remote agent's card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum A2aUrlError {
     #[error("the URL could not be parsed")]

@@ -52,22 +52,22 @@ pub enum A2aError {
 
     /// The card names no interface this client speaks.
     #[error(
-        "the A2A agent card offers no JSONRPC interface at protocol version 1.0, which is the \
-         only binding and version this client speaks"
+        "the A2A agent card offers no JSONRPC or HTTP+JSON interface at protocol version 1.x, \
+         which are the only bindings and version this client speaks"
     )]
     NoCompatibleInterface,
 
-    /// The JSON-RPC endpoint the card names is not one this client will use.
-    #[error("the A2A agent card's JSONRPC endpoint is unusable: {0}")]
+    /// The interface URL the card names is not one this client will use.
+    #[error("the A2A agent card's interface URL is unusable: {0}")]
     InvalidEndpoint(A2aUrlError),
 
-    /// The card names a plaintext JSON-RPC endpoint and headers are configured.
+    /// The card names a plaintext interface URL and headers are configured.
     ///
-    /// The endpoint URL is chosen by the remote side, so it is held to the
+    /// The interface URL is chosen by the remote side, so it is held to the
     /// same rule as the operator's own URL rather than trusted.
     #[error(
-        "refusing to send configured headers to the A2A agent's JSONRPC endpoint over \
-         plaintext http; the card must name https or a loopback host, or set \
+        "refusing to send configured headers to the A2A agent's interface over plaintext \
+         http; the card must name https or a loopback host, or set \
          allow_plaintext_credentials"
     )]
     PlaintextEndpoint,
@@ -84,6 +84,8 @@ pub enum A2aError {
     #[error("the A2A agent answered {method} about a different task")]
     MismatchedTask { method: &'static str },
 
+    /// The agent answered with an A2A error: a JSON-RPC error code, or the
+    /// HTTP+JSON `ErrorInfo` reason, which names the same errors.
     #[error("the A2A agent answered {method} with {error}")]
     Rpc {
         method: &'static str,
@@ -104,9 +106,11 @@ pub enum A2aError {
     SendIndeterminate,
 }
 
-/// A JSON-RPC error an A2A agent answered with, by code.
+/// An error an A2A agent answered with, by its JSON-RPC code.
 ///
-/// The server's message is not kept; see [`A2aError`] for why.
+/// Over HTTP+JSON the same errors are named by an `ErrorInfo` reason, which
+/// is classified into the code JSON-RPC gives it. The server's message is not
+/// kept; see [`A2aError`] for why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum A2aRpcError {
     #[error("TaskNotFoundError (-32001)")]
