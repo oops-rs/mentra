@@ -1,4 +1,4 @@
-use a2a_lf::{Part, Role, TaskState};
+use a2a_lf::{ListTasksRequest, Part, Role, TaskState};
 use serde_json::json;
 
 use super::binding::speaks_version;
@@ -436,6 +436,135 @@ async fn get_task_decodes_state_and_artifacts() {
         match binding {
             A2aBinding::HttpJson => assert_eq!(*history_length, json!("0")),
             _ => assert_eq!(*history_length, json!(0)),
+        }
+    }
+}
+
+fn extended_card(base: &str) -> serde_json::Value {
+    let mut card = standard_card(base, A2aBinding::JsonRpc);
+    card["name"] = json!("Nous, extended");
+    card
+}
+
+#[tokio::test]
+async fn connect_adopts_a_declared_extended_card_when_it_has_credentials() {
+    for binding in BINDINGS {
+        let fixture = A2aFixture::start(Script {
+            extended_card: Some(RpcAnswer::Result(extended_card("http://127.0.0.1:1"))),
+            ..Script::over(binding)
+        });
+        let client = connect(&fixture).await;
+
+        assert!(matches!(
+            client.extended_card_status(),
+            A2aExtendedCardStatus::InUse
+        ));
+        assert_eq!(client.card().name, "Nous, extended");
+        // The interface is the one the public card offered.
+        assert_eq!(client.binding(), binding);
+        assert_eq!(fixture.operations(), ["GetExtendedAgentCard"]);
+        let request = &fixture.requests()[1];
+        assert_eq!(
+            request.header("authorization"),
+            Some(format!("Bearer {SECRET}").as_str())
+        );
+        if binding == A2aBinding::HttpJson {
+            assert_eq!(targets(&fixture), ["GET /rest/extendedAgentCard"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_unavailable_extended_card_keeps_the_public_one() {
+    for (answer, why) in [
+        (RpcAnswer::Error(-32007), "refused"),
+        (RpcAnswer::Result(json!({"name": ""})), "malformed"),
+    ] {
+        let fixture = A2aFixture::start(Script {
+            extended_card: Some(answer),
+            ..Script::over(A2aBinding::HttpJson)
+        });
+        let client = connect(&fixture).await;
+
+        assert!(
+            matches!(
+                client.extended_card_status(),
+                A2aExtendedCardStatus::Unavailable(_)
+            ),
+            "{why}: {:?}",
+            client.extended_card_status()
+        );
+        assert_eq!(client.card().name, "Nous");
+    }
+}
+
+#[tokio::test]
+async fn an_extended_card_is_not_asked_for_without_credentials_or_a_declaration() {
+    let fixture = A2aFixture::start(Script {
+        extended_card: Some(RpcAnswer::Result(extended_card("http://127.0.0.1:1"))),
+        ..Script::default()
+    });
+    let client = A2aClient::connect(&A2aAgentConfig::new("nous", fixture.base()))
+        .await
+        .expect("connect");
+    assert!(matches!(
+        client.extended_card_status(),
+        A2aExtendedCardStatus::NoCredentials
+    ));
+    assert_eq!(client.card().name, "Nous");
+
+    let fixture = A2aFixture::start(Script::default());
+    let client = connect(&fixture).await;
+    assert!(matches!(
+        client.extended_card_status(),
+        A2aExtendedCardStatus::NotDeclared
+    ));
+    assert!(fixture.operations().is_empty());
+}
+
+#[tokio::test]
+async fn list_tasks_sends_its_filters_and_reads_a_last_page() {
+    for binding in BINDINGS {
+        let fixture = A2aFixture::start(Script {
+            // The last page as ProtoJSON writes it: no token and no counts.
+            other: vec![(
+                "ListTasks",
+                RpcAnswer::Result(json!({"tasks": [task_json("t1", "c1", "TASK_STATE_WORKING")]})),
+            )],
+            ..Script::over(binding)
+        });
+        let client = connect(&fixture).await;
+
+        let listed = client
+            .list_tasks(ListTasksRequest {
+                context_id: Some("c1".to_string()),
+                status: Some(TaskState::Working),
+                page_size: Some(10),
+                page_token: None,
+                history_length: None,
+                status_timestamp_after: None,
+                include_artifacts: Some(false),
+                tenant: Some("ignored".to_string()),
+            })
+            .await
+            .expect("list");
+        assert_eq!(listed.tasks.len(), 1);
+        assert_eq!(listed.next_page_token, "");
+
+        match binding {
+            A2aBinding::HttpJson => assert_eq!(
+                targets(&fixture),
+                [
+                    "GET /rest/tasks?contextId=c1&status=TASK_STATE_WORKING&pageSize=10\
+                     &includeArtifacts=false"
+                ]
+            ),
+            _ => {
+                let params = &fixture.params_of("ListTasks")[0];
+                assert_eq!(params["contextId"], json!("c1"));
+                assert_eq!(params["status"], json!("TASK_STATE_WORKING"));
+                assert_eq!(params.get("tenant"), None, "the client's tenant wins");
+            }
         }
     }
 }

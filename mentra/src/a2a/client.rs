@@ -27,6 +27,7 @@
 mod binding;
 mod http;
 mod jsonrpc;
+mod push;
 mod rest;
 mod sse;
 
@@ -36,8 +37,9 @@ mod tests;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use a2a_lf::{
-    AgentCard, CancelTaskRequest, GetTaskRequest, Message, SendMessageConfiguration,
-    SendMessageRequest, SendMessageResponse, SubscribeToTaskRequest, Task, methods,
+    AgentCard, CancelTaskRequest, GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest,
+    ListTasksResponse, Message, SendMessageConfiguration, SendMessageRequest, SendMessageResponse,
+    SubscribeToTaskRequest, Task, methods,
 };
 use reqwest::Method;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
@@ -73,7 +75,31 @@ pub struct A2aClient {
     name: String,
     card_url: Url,
     card: AgentCard,
+    extended_card: A2aExtendedCardStatus,
     transport: Transport,
+}
+
+/// What became of the extended card a public card may declare.
+///
+/// An agent can describe more of itself — more skills, a longer description —
+/// to a caller it has authenticated. [`A2aClient::connect`] asks for that
+/// card when the public one declares it and the configuration carries
+/// credentials to present, and uses it as [`A2aClient::card`] when it
+/// arrives. A failure is not fatal: the public card still describes an agent
+/// this client can talk to, so it is kept and the failure is kept here for
+/// the host to report.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum A2aExtendedCardStatus {
+    /// The public card declares no extended card.
+    NotDeclared,
+    /// The public card declares one, but no credentials are configured, so it
+    /// was not asked for.
+    NoCredentials,
+    /// The extended card was fetched and is the client's card.
+    InUse,
+    /// Fetching it failed; the public card is the client's card.
+    Unavailable(A2aError),
 }
 
 /// How requests reach the agent: one interface, in one binding.
@@ -121,11 +147,13 @@ impl A2aClient {
             return Err(A2aError::PlaintextEndpoint);
         }
         let tenant = interface.tenant.clone().filter(|tenant| !tenant.is_empty());
+        let declares_extended = card.capabilities.extended_agent_card == Some(true);
 
-        Ok(Self {
+        let mut client = Self {
             name: config.name.clone(),
             card_url,
             card,
+            extended_card: A2aExtendedCardStatus::NotDeclared,
             transport: Transport {
                 http,
                 binding,
@@ -135,7 +163,29 @@ impl A2aClient {
                 limits: config.limits.clone(),
                 next_id: AtomicI64::new(1),
             },
-        })
+        };
+        if declares_extended {
+            client.extended_card = client.adopt_extended_card(config).await;
+        }
+        Ok(client)
+    }
+
+    /// Fetches the extended card and makes it the client's card.
+    ///
+    /// The interface stays the one chosen from the public card: the
+    /// credentials have already been checked against it, and the extended
+    /// card describes the same agent.
+    async fn adopt_extended_card(&mut self, config: &A2aAgentConfig) -> A2aExtendedCardStatus {
+        if config.headers.is_empty() {
+            return A2aExtendedCardStatus::NoCredentials;
+        }
+        match self.get_extended_card().await {
+            Ok(card) => {
+                self.card = card;
+                A2aExtendedCardStatus::InUse
+            }
+            Err(error) => A2aExtendedCardStatus::Unavailable(error),
+        }
     }
 
     /// The configured name of this agent, which names its tool.
@@ -146,6 +196,12 @@ impl A2aClient {
     /// The Agent Card fetched at connect time.
     pub fn card(&self) -> &AgentCard {
         &self.card
+    }
+
+    /// Whether [`card`](Self::card) is the extended card, and why not when
+    /// it is not.
+    pub fn extended_card_status(&self) -> &A2aExtendedCardStatus {
+        &self.extended_card
     }
 
     /// The URL the card was fetched from.
@@ -294,6 +350,77 @@ impl A2aClient {
         .query("historyLength", history_length);
         let task: Task = self.transport.call(operation).await?;
         expect_task(methods::GET_TASK, task_id, task)
+    }
+
+    /// Lists the tasks the agent holds for this caller, a page at a time,
+    /// filtered by the request.
+    ///
+    /// The request's tenant is replaced by the interface's.
+    pub async fn list_tasks(
+        &self,
+        mut request: ListTasksRequest,
+    ) -> Result<ListTasksResponse, A2aError> {
+        request.tenant = self.transport.tenant.clone();
+        let status = request
+            .status
+            .as_ref()
+            .and_then(|status| serde_json::to_value(status).ok())
+            .and_then(|status| status.as_str().map(str::to_string));
+        let operation = Operation::new(
+            methods::LIST_TASKS,
+            &request,
+            Method::GET,
+            segments(["tasks"]),
+        )?
+        .query("contextId", request.context_id.as_ref())
+        .query("status", status)
+        .query("pageSize", request.page_size)
+        .query("pageToken", request.page_token.as_ref())
+        .query("historyLength", request.history_length)
+        .query(
+            "statusTimestampAfter",
+            request
+                .status_timestamp_after
+                .map(|after| after.to_rfc3339()),
+        )
+        .query("includeArtifacts", request.include_artifacts);
+        let mut listed = self.transport.call_value(operation).await?;
+        // ProtoJSON leaves out a field at its default value — the last page's
+        // empty token, a zero count — which the wire type requires.
+        if let Value::Object(fields) = &mut listed {
+            for (name, default) in [
+                ("tasks", Value::Array(Vec::new())),
+                ("nextPageToken", Value::String(String::new())),
+                ("pageSize", Value::from(0)),
+                ("totalSize", Value::from(0)),
+            ] {
+                fields.entry(name).or_insert(default);
+            }
+        }
+        serde_json::from_value(listed).map_err(|_| A2aError::Decode {
+            method: methods::LIST_TASKS,
+        })
+    }
+
+    /// Fetches the card the agent shows a caller it has authenticated.
+    ///
+    /// [`connect`](Self::connect) already does this when the public card
+    /// declares one; see [`A2aExtendedCardStatus`].
+    pub async fn get_extended_card(&self) -> Result<AgentCard, A2aError> {
+        let request = GetExtendedAgentCardRequest {
+            tenant: self.transport.tenant.clone(),
+        };
+        let operation = Operation::new(
+            methods::GET_EXTENDED_AGENT_CARD,
+            &request,
+            Method::GET,
+            segments(["extendedAgentCard"]),
+        )?;
+        let card: AgentCard = self.transport.call(operation).await?;
+        if card.name.trim().is_empty() {
+            return Err(A2aError::InvalidCard("it has no name"));
+        }
+        Ok(card)
     }
 
     /// Asks the agent to cancel a task, returning the task as it then stands.

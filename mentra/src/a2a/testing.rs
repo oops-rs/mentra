@@ -72,6 +72,12 @@ pub(crate) struct Script {
     pub(crate) stream: RpcAnswer,
     /// Successive answers to `SubscribeToTask`; the last one repeats.
     pub(crate) subscribe: Vec<RpcAnswer>,
+    /// The answer to `GetExtendedAgentCard`; when set, the default card
+    /// declares an extended card.
+    pub(crate) extended_card: Option<RpcAnswer>,
+    /// The answers to every other operation, by method name; one not listed
+    /// is answered `MethodNotFound`.
+    pub(crate) other: Vec<(&'static str, RpcAnswer)>,
 }
 
 impl Default for Script {
@@ -89,6 +95,8 @@ impl Default for Script {
             cancel: RpcAnswer::Result(task_json("t1", "c1", "TASK_STATE_CANCELED")),
             stream: completed_stream(),
             subscribe: vec![completed_stream()],
+            extended_card: None,
+            other: Vec::new(),
         }
     }
 }
@@ -241,6 +249,9 @@ fn default_card(base: &str, script: &Script) -> Value {
     if let Some(tenant) = script.tenant {
         card["supportedInterfaces"][1]["tenant"] = json!(tenant);
     }
+    if script.extended_card.is_some() {
+        card["capabilities"]["extendedAgentCard"] = json!(true);
+    }
     card
 }
 
@@ -362,7 +373,19 @@ fn answer(state: &State, request: &CapturedRequest) -> Reply {
             let subscribes = &state.script.subscribe;
             subscribes[index.min(subscribes.len() - 1)].clone()
         }
-        _ => RpcAnswer::Error(error_code::METHOD_NOT_FOUND),
+        Some("GetExtendedAgentCard") => state
+            .script
+            .extended_card
+            .clone()
+            .unwrap_or(RpcAnswer::Error(error_code::EXTENDED_CARD_NOT_CONFIGURED)),
+        Some(method) => state
+            .script
+            .other
+            .iter()
+            .find(|(name, _)| *name == method)
+            .map(|(_, answer)| answer.clone())
+            .unwrap_or(RpcAnswer::Error(error_code::METHOD_NOT_FOUND)),
+        None => RpcAnswer::Error(error_code::METHOD_NOT_FOUND),
     };
 
     match route {
