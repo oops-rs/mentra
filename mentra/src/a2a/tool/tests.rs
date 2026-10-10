@@ -3,7 +3,9 @@ use std::sync::Mutex;
 use serde_json::json;
 
 use super::*;
-use crate::a2a::testing::{A2aFixture, RpcAnswer, Script, standard_card, task_json};
+use crate::a2a::testing::{
+    A2aFixture, RpcAnswer, Script, StreamEnd, standard_card, status_event, task_json,
+};
 use crate::a2a::{A2aAgentConfig, A2aBinding, A2aLimits};
 use crate::runtime::CancellationToken;
 use crate::test::{MockRuntime, MockToolCall};
@@ -587,4 +589,65 @@ async fn the_tool_runs_through_the_runtime() {
         .expect("tool result");
     assert!(!result.1);
     assert!(matches!(&result.0, ToolResultContent::Text(text) if text.contains("remote answer")));
+}
+
+#[tokio::test]
+async fn the_tool_speaks_http_json_and_follows_a_streaming_agent() {
+    let fixture = A2aFixture::start(Script {
+        streaming: true,
+        send: RpcAnswer::Result(json!({"task": task_json("t1", "c1", "TASK_STATE_WORKING")})),
+        subscribe: vec![RpcAnswer::Events(
+            vec![
+                json!({"task": task_json("t1", "c1", "TASK_STATE_WORKING")}),
+                status_event("TASK_STATE_WORKING", Some("looking")),
+                json!({"artifactUpdate": {"taskId": "t1", "contextId": "c1", "artifact": {
+                    "artifactId": "a1", "parts": [{"data": {"answer": 42}}],
+                }}}),
+                status_event("TASK_STATE_COMPLETED", None),
+            ],
+            StreamEnd::Close,
+        )],
+        ..Script::over(A2aBinding::HttpJson)
+    });
+    let tool = tool(&fixture).await;
+    let seen = Mutex::new(Vec::new());
+
+    let output = tool
+        .run(
+            send("what is the answer?"),
+            &RunOptions::default(),
+            &|text| seen.lock().expect("progress log").push(text),
+        )
+        .await
+        .expect("completed");
+    let text = text(&output);
+    assert!(
+        text.contains("Remote agent `nous` (A2A) replied:"),
+        "{text}"
+    );
+    assert!(text.contains("[data]\n{\n  \"answer\": 42\n}"), "{text}");
+    assert_eq!(
+        output.details.as_ref().expect("details")["state"],
+        json!("completed")
+    );
+    assert_eq!(
+        *seen.lock().expect("progress log"),
+        [
+            "remote task t1 is working: looking",
+            "remote task t1 is completed",
+        ]
+    );
+    assert_eq!(
+        fixture.operations(),
+        ["SendMessage", "SubscribeToTask"],
+        "the tool settled by the stream, without polling"
+    );
+    let targets: Vec<String> = fixture.requests()[1..]
+        .iter()
+        .map(|request| format!("{} {}", request.method, request.target))
+        .collect();
+    assert_eq!(
+        targets,
+        ["POST /rest/message:send", "GET /rest/tasks/t1:subscribe"]
+    );
 }
