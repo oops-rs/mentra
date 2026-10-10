@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.29.0
+
+Breaking, in summary — each is detailed below: `A2aRequest`, `A2aError` and
+`A2aSend` are `#[non_exhaustive]` (build requests with `A2aRequest::send` /
+`resume` or `A2aSend`), `A2aLimits` gains two fields, and `RuntimeError` gains
+`NoInterruptedTurn`, so an exhaustive match on it needs a new arm.
 
 ### A crash mid tool round is recovered as interrupted, not finished
 
