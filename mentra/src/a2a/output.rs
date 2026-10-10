@@ -81,6 +81,25 @@ pub fn card_summary(card: &AgentCard) -> String {
     summary
 }
 
+/// A remote agent's words as one line for a progress report: every run of
+/// whitespace or control characters — newlines and terminal escapes
+/// included — becomes one space, and the line is clipped to `max_bytes`, with
+/// `…` when anything was cut.
+///
+/// A progress line is not framed, so it must not be able to look like more
+/// than one line, or like anything but the agent's words.
+pub(crate) fn remote_line(text: &str, max_bytes: usize) -> String {
+    let line = text
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    match clip(&line, max_bytes) {
+        (shown, 0) => shown.to_string(),
+        (shown, _) => format!("{shown}…"),
+    }
+}
+
 /// The text of a task: its artifacts, and its status message when that is
 /// where the agent put its words.
 fn task_text(task: &Task) -> String {

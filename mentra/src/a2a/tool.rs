@@ -11,20 +11,21 @@
 //! | `task_id` alone | resumes waiting on a task, sending nothing |
 //!
 //! A message is submitted with `returnImmediately`, so the agent answers as
-//! soon as the task exists, and the task is then polled with `GetTask` until
-//! it reaches a terminal state, pauses for input or authorization, or the
-//! call's wait bound ([`A2aLimits::max_wait`]) passes. A task still working at
+//! soon as the task exists, and the task is then followed — by its stream
+//! when the agent offers one, by polling `GetTask` otherwise or when the
+//! stream fails — until it reaches a terminal state, pauses for input or
+//! authorization, or the call's wait bound ([`A2aLimits::max_wait`]) passes. A task still working at
 //! the bound is handed back with its ids and the instruction to call again
 //! with `task_id` alone — so a long task costs the model more calls, never a
 //! second task.
 //!
 //! # Cancellation
 //!
-//! The poll checks the run's cancellation and deadline between polls. A
+//! The wait checks the run's cancellation and deadline throughout. A
 //! cancelled run asks the remote agent to cancel the task before the call
 //! returns; a run asked to *stop* gracefully hands the task back still
 //! running, with its ids, because a stop keeps the transcript and a later turn
-//! may want to resume it. A call whose future is dropped mid-poll — the
+//! may want to resume it. A call whose future is dropped mid-wait — the
 //! runtime's own execution timeout, or a host aborting the run — sends the
 //! cancel from a detached task, best-effort, because `Drop` cannot await.
 //!

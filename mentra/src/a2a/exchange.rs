@@ -1,7 +1,7 @@
 //! One request to a remote agent, waited on until it settles — as data.
 //!
 //! [`exchange`] is the loop behind [`A2aAgentTool`](crate::a2a::A2aAgentTool)
-//! without the tool's words: it submits or resumes, polls the task, and hands
+//! without the tool's words: it submits or resumes, waits on the task, and hands
 //! back what happened rather than text a model reads. A host that offers a
 //! remote agent through a tool of its own — a different name, different
 //! guidance about what to call next — drives the same loop and writes its own
@@ -12,16 +12,27 @@
 //! # The loop
 //!
 //! A message is submitted with `returnImmediately`, so the agent answers as
-//! soon as the task exists, and the task is then polled with `GetTask` until
-//! it [settles](is_settled), the client's wait bound
+//! soon as the task exists — the moment a host records the task id, between
+//! [`submit`] and [`settle`]. The task is then waited on until it
+//! [settles](is_settled), the client's wait bound
 //! ([`A2aLimits::max_wait`](crate::a2a::A2aLimits::max_wait)) passes, or the
-//! run ends. A cancelled run asks the remote agent to cancel the task before
-//! the exchange returns; a run asked to *stop* hands the task back still
-//! running. A future dropped mid-poll sends the cancel from a detached task,
-//! best-effort, because `Drop` cannot await.
+//! run ends:
+//!
+//! - when the agent's card declares `capabilities.streaming`, by following
+//!   the task with `SubscribeToTask`, applying its status and artifact events
+//!   and reporting each status message as progress;
+//! - otherwise, and whenever that stream is refused, drops, falls idle or
+//!   fails, by polling `GetTask` from the task as it last stood.
+//!
+//! Neither path sends the message again. A cancelled run asks the remote
+//! agent to cancel the task before the exchange returns; a run asked to
+//! *stop* hands the task back still running. A future dropped mid-wait sends
+//! the cancel from a detached task, best-effort, because `Drop` cannot await.
 
+mod follow;
 #[cfg(test)]
 mod tests;
+mod wait;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,13 +45,8 @@ use tokio::time::Instant;
 use super::client::A2aClient;
 use super::error::A2aError;
 use crate::runtime::RunOptions;
-
-/// How often the wait between polls checks whether the run was cancelled.
-///
-/// A poll interval is seconds long, and the cancellation token is a flag
-/// rather than a notification, so without this a cancelled run would wait out
-/// the rest of the interval before noticing.
-const INTERRUPT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+use follow::{Followed, follow};
+use wait::{Wake, wait};
 
 /// What one exchange asks of the remote agent.
 ///
@@ -216,8 +222,9 @@ pub enum A2aSubmitted {
 /// Runs one request against `client` and waits for its task to settle.
 ///
 /// `options` are the bounds of the run this exchange is part of — its
-/// cancellation, stop and deadline are checked between polls — and
-/// `progress` hears each change of the task's state.
+/// cancellation, stop and deadline are checked throughout the wait — and
+/// `progress` hears each change of the task's state, and each status message
+/// a followed stream carries.
 ///
 /// [`submit`] then [`settle`], with the wait bound counted from before the
 /// submit. A host that must record the task before waiting on it — so that a
@@ -272,8 +279,9 @@ pub async fn submit(
     Ok(A2aSubmitted::Task(task))
 }
 
-/// Polls a task [`submit`] returned until it settles, the client's wait bound
-/// passes — counted from this call — or the run ends.
+/// Waits on a task [`submit`] returned — following its stream when the agent
+/// offers one, polling otherwise — until it settles, the client's wait bound
+/// passes (counted from this call), or the run ends.
 ///
 /// Cancels the task if the run is cancelled, and, best-effort, if this future
 /// is dropped mid-wait.
@@ -286,7 +294,8 @@ pub async fn settle(
     settle_from(client, task, Instant::now(), options, progress).await
 }
 
-/// Polls a task until it settles, the wait bound passes, or the run ends.
+/// Waits on a task until it settles, the wait bound passes, or the run
+/// ends: by following its stream when the agent offers one, then by polling.
 async fn settle_from(
     client: &Arc<A2aClient>,
     mut task: Task,
@@ -295,36 +304,31 @@ async fn settle_from(
     progress: &(dyn Fn(String) + Send + Sync),
 ) -> Result<A2aExchange, A2aExchangeError> {
     let limits = client.limits();
+    let deadline = started + limits.max_wait;
     let guard = CancelOnDrop::new(client, &task);
+
+    let streams = client.card().capabilities.streaming == Some(true);
+    if streams && !is_settled(&task.status.state) {
+        // Whatever ended the stream short of a wake, polling picks up from
+        // the task as the stream left it — settled or not.
+        if let Followed::Woke(wake) = follow(client, &mut task, deadline, options, progress).await {
+            return woken(client, task, wake, guard).await;
+        }
+    }
 
     loop {
         if is_settled(&task.status.state) {
             guard.disarm();
             return Ok(A2aExchange::Settled(task));
         }
-
-        let remaining = limits.max_wait.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            guard.disarm();
-            let reason = A2aStillWorking::WaitBound(limits.max_wait);
-            return Ok(A2aExchange::StillWorking { task, reason });
+        if Instant::now() >= deadline {
+            return woken(client, task, Wake::Elapsed, guard).await;
         }
 
-        match wait(limits.poll_interval.min(remaining), options).await {
+        let next_poll = (Instant::now() + limits.poll_interval).min(deadline);
+        match wait(next_poll, options).await {
             Wake::Elapsed => {}
-            Wake::Stopping => {
-                guard.disarm();
-                let reason = A2aStillWorking::RunStopping;
-                return Ok(A2aExchange::StillWorking { task, reason });
-            }
-            Wake::Cancelled => {
-                guard.disarm();
-                let canceled = client.cancel_task(&task.id).await.map(drop);
-                return Err(A2aExchangeError::Abandoned {
-                    task_id: task.id,
-                    canceled,
-                });
-            }
+            wake => return woken(client, task, wake, guard).await,
         }
 
         let previous = task.status.state.clone();
@@ -348,6 +352,29 @@ async fn settle_from(
     }
 }
 
+/// What a wait the run or the wait bound ended means for a task still
+/// working: handed back, or — when the run was cancelled — cancelled.
+async fn woken(
+    client: &A2aClient,
+    task: Task,
+    wake: Wake,
+    guard: CancelOnDrop,
+) -> Result<A2aExchange, A2aExchangeError> {
+    guard.disarm();
+    let reason = match wake {
+        Wake::Elapsed => A2aStillWorking::WaitBound(client.limits().max_wait),
+        Wake::Stopping => A2aStillWorking::RunStopping,
+        Wake::Cancelled => {
+            let canceled = client.cancel_task(&task.id).await.map(drop);
+            return Err(A2aExchangeError::Abandoned {
+                task_id: task.id,
+                canceled,
+            });
+        }
+    };
+    Ok(A2aExchange::StillWorking { task, reason })
+}
+
 /// Whether a task has stopped needing anyone to wait on it: terminal, or
 /// paused for something only the caller can give.
 pub fn is_settled(state: &TaskState) -> bool {
@@ -366,32 +393,6 @@ pub fn state_name(state: &TaskState) -> &'static str {
         TaskState::InputRequired => "input-required",
         TaskState::Rejected => "rejected",
         TaskState::AuthRequired => "auth-required",
-    }
-}
-
-/// Why the wait between polls ended.
-enum Wake {
-    Elapsed,
-    Stopping,
-    Cancelled,
-}
-
-/// Waits `duration`, waking early if the run is cancelled, passes its
-/// deadline, or is asked to stop.
-async fn wait(duration: Duration, options: &RunOptions) -> Wake {
-    let deadline = Instant::now() + duration;
-    loop {
-        if options.check_limits().is_err() {
-            return Wake::Cancelled;
-        }
-        if options.stop_requested() {
-            return Wake::Stopping;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Wake::Elapsed;
-        }
-        tokio::time::sleep((deadline - now).min(INTERRUPT_CHECK_INTERVAL)).await;
     }
 }
 

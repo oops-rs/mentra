@@ -62,6 +62,8 @@ pub(crate) struct Script {
     pub(crate) binding: A2aBinding,
     /// The tenant the default card's offered interface names.
     pub(crate) tenant: Option<&'static str>,
+    /// Whether the default card declares `capabilities.streaming`.
+    pub(crate) streaming: bool,
     /// The answer to `SendMessage`.
     pub(crate) send: RpcAnswer,
     /// Successive answers to `GetTask`; the last one repeats.
@@ -86,6 +88,7 @@ impl Default for Script {
             card: None,
             binding: A2aBinding::JsonRpc,
             tenant: None,
+            streaming: false,
             send: RpcAnswer::Result(json!({"task": task_json("t1", "c1", "TASK_STATE_COMPLETED")})),
             get: vec![RpcAnswer::Result(task_json(
                 "t1",
@@ -249,6 +252,7 @@ fn default_card(base: &str, script: &Script) -> Value {
     if let Some(tenant) = script.tenant {
         card["supportedInterfaces"][1]["tenant"] = json!(tenant);
     }
+    card["capabilities"]["streaming"] = json!(script.streaming);
     if script.extended_card.is_some() {
         card["capabilities"]["extendedAgentCard"] = json!(true);
     }
