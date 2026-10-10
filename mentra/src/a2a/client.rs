@@ -28,6 +28,7 @@ mod binding;
 mod http;
 mod jsonrpc;
 mod rest;
+mod sse;
 
 #[cfg(test)]
 mod tests;
@@ -36,10 +37,10 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use a2a_lf::{
     AgentCard, CancelTaskRequest, GetTaskRequest, Message, SendMessageConfiguration,
-    SendMessageRequest, SendMessageResponse, Task, methods,
+    SendMessageRequest, SendMessageResponse, SubscribeToTaskRequest, Task, methods,
 };
 use reqwest::Method;
-use reqwest::header::{ACCEPT, HeaderMap};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use url::Url;
@@ -47,8 +48,10 @@ use url::Url;
 use super::config::{A2aAgentConfig, A2aLimits, check_url};
 use super::error::A2aError;
 use binding::{Operation, select_interface};
+use sse::{Decoder, EVENT_STREAM, EventFormat};
 
 pub use binding::A2aBinding;
+pub use sse::A2aEventStream;
 
 /// The protocol version this client speaks, sent as `A2A-Version`.
 ///
@@ -211,6 +214,63 @@ impl A2aClient {
         Ok(response)
     }
 
+    /// Sends a message and streams what follows: the task (or a direct reply
+    /// message) first, then its status and artifact updates, until the agent
+    /// closes the stream.
+    ///
+    /// Opening the stream fails as [`send_message`](Self::send_message) does,
+    /// [`A2aError::SendIndeterminate`] included. Once it is open the task
+    /// exists, so an error mid-stream says nothing about whether to resend:
+    /// the task's id is in the first event, and
+    /// [`subscribe_to_task`](Self::subscribe_to_task) or
+    /// [`get_task`](Self::get_task) pick it up again.
+    pub async fn send_streaming_message(
+        &self,
+        message: Message,
+        configuration: SendMessageConfiguration,
+    ) -> Result<A2aEventStream, A2aError> {
+        let task_id = message.task_id.clone();
+        let request = SendMessageRequest {
+            message,
+            configuration: Some(configuration),
+            metadata: None,
+            tenant: self.transport.tenant.clone(),
+        };
+        let operation = Operation::new(
+            methods::SEND_STREAMING_MESSAGE,
+            &request,
+            Method::POST,
+            segments(["message:stream"]),
+        )?;
+        self.transport
+            .open_stream(operation, task_id)
+            .await
+            .map_err(send_failure)
+    }
+
+    /// Streams a task's updates from now until it ends: the task as it stands
+    /// first, then its status and artifact updates.
+    ///
+    /// The agent refuses a task that has already reached a terminal state, with
+    /// `UnsupportedOperationError`; [`get_task`](Self::get_task) reads one.
+    pub async fn subscribe_to_task(&self, task_id: &str) -> Result<A2aEventStream, A2aError> {
+        let request = SubscribeToTaskRequest {
+            id: task_id.to_string(),
+            tenant: self.transport.tenant.clone(),
+        };
+        // `GET`, as the normative `a2a.proto` binds it; the specification's
+        // prose table says `POST`, and the reference server accepts both.
+        let operation = Operation::new(
+            methods::SUBSCRIBE_TO_TASK,
+            &request,
+            Method::GET,
+            segments(["tasks", &format!("{task_id}:subscribe")]),
+        )?;
+        self.transport
+            .open_stream(operation, Some(task_id.to_string()))
+            .await
+    }
+
     /// Reads a task's current state.
     ///
     /// `history_length` bounds how many history messages come back; `Some(0)`
@@ -282,6 +342,61 @@ impl Transport {
     }
 }
 
+impl Transport {
+    /// Sends one streaming operation and returns its events once the reply's
+    /// head has arrived.
+    ///
+    /// A reply that is not an event stream is read whole, as a plain reply
+    /// would be, so an error the agent answered with is reported as itself.
+    async fn open_stream(
+        &self,
+        operation: Operation,
+        expected_task: Option<String>,
+    ) -> Result<A2aEventStream, A2aError> {
+        let method = operation.method;
+        let (request, format) = match self.binding {
+            A2aBinding::JsonRpc => {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let request = self.jsonrpc_request(&operation, id, EVENT_STREAM);
+                (request, EventFormat::JsonRpc { id })
+            }
+            A2aBinding::HttpJson => (
+                self.rest_request(&operation, EVENT_STREAM)?,
+                EventFormat::HttpJson,
+            ),
+        };
+
+        // One deadline covers the head and, for a reply that is not a
+        // stream, its body; a stream's own events are bounded by the idle
+        // timeout instead.
+        let timeout = self.limits.request_timeout;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let response = tokio::time::timeout_at(deadline, http::send(request))
+            .await
+            .map_err(|_| A2aError::Timeout(timeout))??;
+        let status = response.status();
+        if status.is_success() && is_event_stream(&response) {
+            let decoder = Decoder { method, format };
+            return Ok(A2aEventStream::new(
+                response,
+                decoder,
+                expected_task,
+                &self.limits,
+            ));
+        }
+
+        let read = http::read_bounded(response, self.limits.max_response_bytes);
+        let body = tokio::time::timeout_at(deadline, read)
+            .await
+            .map_err(|_| A2aError::Timeout(timeout))??;
+        match format {
+            EventFormat::JsonRpc { id } => jsonrpc::decode_reply(method, id, status, &body),
+            EventFormat::HttpJson => rest::decode_reply(method, status, &body),
+        }?;
+        Err(A2aError::NotAStream { method })
+    }
+}
+
 impl std::fmt::Debug for A2aClient {
     /// Renders without the header map, which holds credentials.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -292,6 +407,20 @@ impl std::fmt::Debug for A2aClient {
             .field("endpoint", &self.transport.endpoint.as_str())
             .finish_non_exhaustive()
     }
+}
+
+/// Whether a reply declares itself an event stream.
+fn is_event_stream(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .trim_start()
+                .get(..EVENT_STREAM.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(EVENT_STREAM))
+        })
 }
 
 /// An HTTP+JSON path, as owned segments.

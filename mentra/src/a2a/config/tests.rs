@@ -105,6 +105,31 @@ fn zero_limits_that_would_spin_or_starve_are_refused() {
             name: "poll_interval"
         })
     );
+
+    let streaming = [
+        (
+            A2aLimits {
+                stream_idle_timeout: Duration::ZERO,
+                ..A2aLimits::default()
+            },
+            "stream_idle_timeout",
+        ),
+        (
+            A2aLimits {
+                max_event_bytes: 0,
+                ..A2aLimits::default()
+            },
+            "max_event_bytes",
+        ),
+    ];
+    for (limits, name) in streaming {
+        assert_eq!(
+            A2aAgentConfig::new("nous", "https://example.com")
+                .with_limits(limits)
+                .validate(),
+            Err(A2aConfigError::ZeroLimit { name })
+        );
+    }
 }
 
 #[test]

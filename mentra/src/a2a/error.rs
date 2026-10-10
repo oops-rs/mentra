@@ -17,6 +17,7 @@ use super::config::{A2aConfigError, A2aUrlError};
 /// status or a JSON-RPC code remains available. This is the rule the MCP
 /// clients follow, for the same reason.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum A2aError {
     #[error("invalid A2A agent configuration: {0}")]
     Config(#[from] A2aConfigError),
@@ -45,6 +46,19 @@ pub enum A2aError {
 
     #[error("timed out after {0:?} waiting for the A2A agent")]
     Timeout(Duration),
+
+    /// One event in a stream outgrew the bound before it ended.
+    #[error("an event in the A2A agent's stream exceeded the {limit} byte limit")]
+    EventTooLarge { limit: usize },
+
+    /// A stream sent nothing at all — not even a keep-alive — for this long.
+    #[error("the A2A agent's event stream sent nothing for {0:?}")]
+    StreamIdle(Duration),
+
+    /// A streaming method was answered with something other than an event
+    /// stream that is not an error either.
+    #[error("the A2A agent answered {method} without an event stream")]
+    NotAStream { method: &'static str },
 
     /// The card did not parse, or parsed into something no client can use.
     #[error("the A2A agent card is invalid: {0}")]

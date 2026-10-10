@@ -35,6 +35,17 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(300);
 /// Default interval between `GetTask` polls while a task is working.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Default bound on how long an event stream may send nothing at all.
+///
+/// Servers keep an idle stream open with comment lines (the reference server
+/// sends one every 15 seconds), and those count as activity, so this only
+/// ends a stream whose connection has silently died.
+pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default cap on the bytes of one event in a stream.
+///
+/// A stream's first event is the whole task, every artifact included, so this
+/// matches the cap on a reply that carries the same task.
+pub const DEFAULT_MAX_EVENT_BYTES: usize = DEFAULT_MAX_RESPONSE_BYTES;
 /// Default cap on the bytes of text one tool call returns.
 ///
 /// The runtime's own tool-result policy truncates (and can spill) far below
@@ -72,6 +83,11 @@ pub struct A2aLimits {
     pub poll_interval: Duration,
     /// Bound on the bytes of text one tool call returns.
     pub max_output_bytes: usize,
+    /// Bound on how long an event stream may send nothing, keep-alive
+    /// comments included.
+    pub stream_idle_timeout: Duration,
+    /// Bound on the bytes of one event in a stream.
+    pub max_event_bytes: usize,
 }
 
 impl Default for A2aLimits {
@@ -83,6 +99,8 @@ impl Default for A2aLimits {
             max_wait: DEFAULT_MAX_WAIT,
             poll_interval: DEFAULT_POLL_INTERVAL,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
         }
     }
 }
@@ -316,20 +334,20 @@ impl A2aAgentConfig {
             ("connect_timeout", self.limits.connect_timeout),
             ("request_timeout", self.limits.request_timeout),
             ("poll_interval", self.limits.poll_interval),
+            ("stream_idle_timeout", self.limits.stream_idle_timeout),
         ] {
             if value.is_zero() {
                 return Err(A2aConfigError::ZeroLimit { name });
             }
         }
-        if self.limits.max_response_bytes == 0 {
-            return Err(A2aConfigError::ZeroLimit {
-                name: "max_response_bytes",
-            });
-        }
-        if self.limits.max_output_bytes == 0 {
-            return Err(A2aConfigError::ZeroLimit {
-                name: "max_output_bytes",
-            });
+        for (name, value) in [
+            ("max_response_bytes", self.limits.max_response_bytes),
+            ("max_output_bytes", self.limits.max_output_bytes),
+            ("max_event_bytes", self.limits.max_event_bytes),
+        ] {
+            if value == 0 {
+                return Err(A2aConfigError::ZeroLimit { name });
+            }
         }
 
         Ok(url)

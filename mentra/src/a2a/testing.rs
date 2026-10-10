@@ -11,7 +11,7 @@
 //!
 //! [`TcpListener`]: std::net::TcpListener
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,20 @@ pub(crate) enum RpcAnswer {
     Error(i32),
     /// This HTTP status and raw body, bypassing either binding's envelope.
     Http(u16, String),
+    /// An event stream: one `StreamResponse` per event, each in the
+    /// binding's envelope, then `end`.
+    Events(Vec<Value>, StreamEnd),
+    /// An event stream with this raw body, framing and all, then `end`.
+    RawEvents(String, StreamEnd),
+}
+
+/// How an event stream the fixture sends ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamEnd {
+    /// The connection closes after the last event.
+    Close,
+    /// The connection stays open, sending nothing, until the client leaves.
+    Hang,
 }
 
 /// A scripted agent: a card, and an answer per operation.
@@ -54,6 +68,10 @@ pub(crate) struct Script {
     pub(crate) get: Vec<RpcAnswer>,
     /// The answer to `CancelTask`.
     pub(crate) cancel: RpcAnswer,
+    /// The answer to `SendStreamingMessage`.
+    pub(crate) stream: RpcAnswer,
+    /// Successive answers to `SubscribeToTask`; the last one repeats.
+    pub(crate) subscribe: Vec<RpcAnswer>,
 }
 
 impl Default for Script {
@@ -69,6 +87,8 @@ impl Default for Script {
                 "TASK_STATE_COMPLETED",
             ))],
             cancel: RpcAnswer::Result(task_json("t1", "c1", "TASK_STATE_CANCELED")),
+            stream: completed_stream(),
+            subscribe: vec![completed_stream()],
         }
     }
 }
@@ -100,6 +120,7 @@ impl A2aFixture {
             base: base.clone(),
             script,
             gets: AtomicUsize::new(0),
+            subscribes: AtomicUsize::new(0),
             requests: Arc::clone(&requests),
         });
 
@@ -149,7 +170,16 @@ struct State {
     base: String,
     script: Script,
     gets: AtomicUsize,
+    subscribes: AtomicUsize,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
+}
+
+/// One reply the fixture writes.
+enum Reply {
+    /// A whole reply with this status and JSON body.
+    Body(u16, String),
+    /// An event stream with this body, then `end`.
+    Events(String, StreamEnd),
 }
 
 /// A card offering `binding` at `{base}/rpc` or `{base}/rest`, after a gRPC
@@ -181,6 +211,28 @@ pub(crate) fn standard_card(base: &str, binding: A2aBinding) -> Value {
             "tags": ["code"],
         }],
     })
+}
+
+/// A stream of one event: task `t1`, completed.
+fn completed_stream() -> RpcAnswer {
+    RpcAnswer::Events(
+        vec![json!({"task": task_json("t1", "c1", "TASK_STATE_COMPLETED")})],
+        StreamEnd::Close,
+    )
+}
+
+/// A status-update event for task `t1`, with a status message when `text`
+/// is given.
+pub(crate) fn status_event(state: &str, text: Option<&str>) -> Value {
+    let mut status = json!({"state": state});
+    if let Some(text) = text {
+        status["message"] = json!({
+            "messageId": "s1",
+            "role": "ROLE_AGENT",
+            "parts": [{"text": text}],
+        });
+    }
+    json!({"statusUpdate": {"taskId": "t1", "contextId": "c1", "status": status}})
 }
 
 /// The card a script serves when it names none.
@@ -269,14 +321,23 @@ fn serve(mut stream: TcpStream, state: &State) {
             .lock()
             .expect("fixture request log")
             .push(request.clone());
-        let (status, body) = answer(state, &request);
-        if !write_response(&mut stream, status, &body) {
-            break;
+        match answer(state, &request) {
+            Reply::Body(status, body) => {
+                if !write_response(&mut stream, status, &body) {
+                    break;
+                }
+            }
+            // A stream's body runs to the end of the connection, so the
+            // connection serves nothing after it.
+            Reply::Events(body, end) => {
+                write_events(&mut stream, &body, end);
+                break;
+            }
         }
     }
 }
 
-fn answer(state: &State, request: &CapturedRequest) -> (u16, String) {
+fn answer(state: &State, request: &CapturedRequest) -> Reply {
     let route = rest_route(request);
     if request.method == "GET" && route.is_none() {
         let card = state
@@ -284,7 +345,7 @@ fn answer(state: &State, request: &CapturedRequest) -> (u16, String) {
             .card
             .clone()
             .unwrap_or_else(|| default_card(&state.base, &state.script));
-        return (200, card.to_string());
+        return Reply::Body(200, card.to_string());
     }
 
     let answer = match operation_of(request).as_deref() {
@@ -295,6 +356,12 @@ fn answer(state: &State, request: &CapturedRequest) -> (u16, String) {
             gets[index.min(gets.len() - 1)].clone()
         }
         Some("CancelTask") => state.script.cancel.clone(),
+        Some("SendStreamingMessage") => state.script.stream.clone(),
+        Some("SubscribeToTask") => {
+            let index = state.subscribes.fetch_add(1, Ordering::SeqCst);
+            let subscribes = &state.script.subscribe;
+            subscribes[index.min(subscribes.len() - 1)].clone()
+        }
         _ => RpcAnswer::Error(error_code::METHOD_NOT_FOUND),
     };
 
@@ -305,17 +372,15 @@ fn answer(state: &State, request: &CapturedRequest) -> (u16, String) {
 }
 
 /// An answer in JSON-RPC's envelope.
-fn jsonrpc_answer(request: &CapturedRequest, answer: RpcAnswer) -> (u16, String) {
+fn jsonrpc_answer(request: &CapturedRequest, answer: RpcAnswer) -> Reply {
     let id = serde_json::from_str::<Value>(&request.body)
         .ok()
         .and_then(|body| body.get("id").cloned())
         .unwrap_or(Value::Null);
+    let envelope = |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
     match answer {
-        RpcAnswer::Result(result) => (
-            200,
-            json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
-        ),
-        RpcAnswer::Error(code) => (
+        RpcAnswer::Result(result) => Reply::Body(200, envelope(result).to_string()),
+        RpcAnswer::Error(code) => Reply::Body(
             200,
             json!({"jsonrpc": "2.0", "id": id, "error": {
                 "code": code,
@@ -323,18 +388,29 @@ fn jsonrpc_answer(request: &CapturedRequest, answer: RpcAnswer) -> (u16, String)
             }})
             .to_string(),
         ),
-        RpcAnswer::Http(status, body) => (status, body),
+        RpcAnswer::Http(status, body) => Reply::Body(status, body),
+        RpcAnswer::Events(events, end) => {
+            Reply::Events(sse_body(events.into_iter().map(envelope)), end)
+        }
+        RpcAnswer::RawEvents(body, end) => Reply::Events(body, end),
     }
 }
 
 /// An answer in HTTP+JSON's terms: a result is the body, an error a
 /// `google.rpc.Status` with the HTTP status the specification maps it to.
-fn rest_answer(answer: RpcAnswer) -> (u16, String) {
+fn rest_answer(answer: RpcAnswer) -> Reply {
     match answer {
-        RpcAnswer::Result(result) => (200, result.to_string()),
-        RpcAnswer::Error(code) => (rest_status(code), rest_error(code).to_string()),
-        RpcAnswer::Http(status, body) => (status, body),
+        RpcAnswer::Result(result) => Reply::Body(200, result.to_string()),
+        RpcAnswer::Error(code) => Reply::Body(rest_status(code), rest_error(code).to_string()),
+        RpcAnswer::Http(status, body) => Reply::Body(status, body),
+        RpcAnswer::Events(events, end) => Reply::Events(sse_body(events.into_iter()), end),
+        RpcAnswer::RawEvents(body, end) => Reply::Events(body, end),
     }
+}
+
+/// One `data` line per event, each event ended by a blank line.
+fn sse_body(events: impl Iterator<Item = Value>) -> String {
+    events.map(|event| format!("data: {event}\n\n")).collect()
 }
 
 /// The `{"error": google.rpc.Status}` body naming an A2A error.
@@ -357,6 +433,24 @@ fn rest_status(code: i32) -> u16 {
         error_code::METHOD_NOT_FOUND => 404,
         error_code::INVALID_AGENT_RESPONSE | error_code::INTERNAL_ERROR => 500,
         _ => 400,
+    }
+}
+
+/// Writes an event stream whose body runs to the end of the connection.
+fn write_events(stream: &mut TcpStream, body: &str, end: StreamEnd) {
+    let head =
+        "HTTP/1.1 200 Fixture\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    if stream.write_all(head.as_bytes()).is_err()
+        || stream.write_all(body.as_bytes()).is_err()
+        || stream.flush().is_err()
+    {
+        return;
+    }
+    if end == StreamEnd::Hang {
+        // Blocks until the client closes its end, which is what ends the
+        // stream from its side.
+        let mut sink = [0_u8; 256];
+        while matches!(stream.read(&mut sink), Ok(read) if read > 0) {}
     }
 }
 
