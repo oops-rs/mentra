@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.30.1
 
 ### A2A requests carry metadata
 
@@ -10,7 +10,11 @@
   beside the message rather than in it. An agent reads it for what is about
   the call rather than the conversation — which product a question concerns,
   say. `send_message` and `send_streaming_message` are unchanged and send
-  none. No breaking changes.
+  none.
+- `A2aSend::with_request_metadata` (and its `request_metadata` field) carries
+  the same through `exchange` and `submit`, beside the message's own
+  `metadata`, which stays where extensions put theirs. No breaking changes:
+  `A2aSend` is non-exhaustive and built with its methods.
 
 ## 0.30.0
 
