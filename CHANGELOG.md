@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.30.0
 
 Breaking: `AgentEvent` gains `SubagentResumed`, so an exhaustive match on it
 needs a new arm. `SKILL.md` frontmatter is read by mentra's own flat parser
