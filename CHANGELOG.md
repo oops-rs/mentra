@@ -3,7 +3,22 @@
 ## Unreleased
 
 Breaking: `AgentEvent` gains `SubagentResumed`, so an exhaustive match on it
-needs a new arm.
+needs a new arm. `SKILL.md` frontmatter is read by mentra's own flat parser
+rather than a YAML library; a frontmatter block that used YAML beyond
+`key: value` lines — a list, a nested mapping, a block scalar — is now
+refused with a message saying so, where it was silently ignored before.
+
+### Frontmatter is mentra's, and flat ([#66](https://github.com/oops-rs/mentra/issues/66))
+
+- `mentra::frontmatter` is public: `scan` splits a markdown file at its
+  `---` delimiters (byte-order mark and CRLF understood, an unterminated
+  block an error, an empty block distinct from none), `parse` reads the flat
+  `key: value` block into `Fields` (plain, double- and single-quoted values,
+  `true`/`false`, `#` comments), and `quote` writes a value `parse` reads
+  back exactly. Every convention built on this shape — `SKILL.md` here,
+  templates and memories in basis — needed strings and booleans and nothing
+  more, so the YAML dependency, and the archived C-library port under it
+  (RUSTSEC-2024-0449), is gone.
 
 ### A subagent run again is resumed, not spawned twice
 

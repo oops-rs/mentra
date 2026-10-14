@@ -6,8 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
 use thiserror::Error;
+
+use crate::frontmatter;
 
 pub(crate) use registry::{SkillRegistry, SkillRoot};
 
@@ -99,7 +100,7 @@ pub enum SkillLoadError {
     },
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 struct SkillFrontmatter {
     name: Option<String>,
     description: Option<String>,
@@ -108,11 +109,6 @@ struct SkillFrontmatter {
     /// Both spellings are accepted because the frontmatter convention uses
     /// hyphens and Rust callers reach for underscores; a skill author should
     /// not have to know which one this parser preferred.
-    #[serde(
-        default,
-        rename = "disable-model-invocation",
-        alias = "disable_model_invocation"
-    )]
     disable_model_invocation: bool,
 }
 
@@ -213,47 +209,24 @@ fn collect_skill_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), Skil
 }
 
 fn parse_skill_file(path: &Path, raw: &str) -> Result<(SkillFrontmatter, String), SkillLoadError> {
-    let Some(opening_len) = raw
-        .strip_prefix("---\r\n")
-        .map(|_| 5)
-        .or_else(|| raw.strip_prefix("---\n").map(|_| 4))
-    else {
+    let invalid = |message: String| SkillLoadError::InvalidFrontmatter {
+        path: path.to_path_buf(),
+        message,
+    };
+    let scanned = frontmatter::scan(raw).map_err(|error| invalid(error.to_string()))?;
+    let Some(block) = scanned.frontmatter else {
         return Ok((SkillFrontmatter::default(), raw.to_string()));
     };
-
-    let rest = &raw[opening_len..];
-    let mut cursor = 0usize;
-    for segment in rest.split_inclusive('\n') {
-        let line = segment.trim_end_matches(['\n', '\r']);
-        if line == "---" {
-            let frontmatter = &rest[..cursor];
-            let body = &rest[cursor + segment.len()..];
-            let meta = serde_yaml_ng::from_str(frontmatter).map_err(|error| {
-                SkillLoadError::InvalidFrontmatter {
-                    path: path.to_path_buf(),
-                    message: error.to_string(),
-                }
-            })?;
-            return Ok((meta, body.to_string()));
-        }
-        cursor += segment.len();
-    }
-
-    if rest[cursor..].trim_end_matches('\r') == "---" {
-        let frontmatter = &rest[..cursor];
-        let meta = serde_yaml_ng::from_str(frontmatter).map_err(|error| {
-            SkillLoadError::InvalidFrontmatter {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            }
-        })?;
-        return Ok((meta, String::new()));
-    }
-
-    Err(SkillLoadError::InvalidFrontmatter {
-        path: path.to_path_buf(),
-        message: "missing closing frontmatter delimiter".to_string(),
-    })
+    let fields = frontmatter::parse(block).map_err(|error| invalid(error.to_string()))?;
+    let meta = SkillFrontmatter {
+        name: fields.text("name").map(str::to_string),
+        description: fields.text("description").map(str::to_string),
+        disable_model_invocation: fields
+            .boolean_any(&["disable-model-invocation", "disable_model_invocation"])
+            .map_err(|error| invalid(error.to_string()))?
+            .unwrap_or(false),
+    };
+    Ok((meta, scanned.body.to_string()))
 }
 
 #[cfg(test)]
