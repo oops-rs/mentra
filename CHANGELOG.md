@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+Breaking: `AgentEvent` gains `SubagentResumed`, so an exhaustive match on it
+needs a new arm.
+
+### A subagent run again is resumed, not spawned twice
+
+A tool that keeps a child and runs it for another turn registers it again
+([#65](https://github.com/oops-rs/mentra/issues/65)). That used to push a
+second entry into the parent's snapshot and announce a `SubagentSpawned`
+observers had already seen.
+
+- `ToolContext::register_subagent` on an id the parent already holds takes
+  that entry back to `Running` instead of adding one, and emits
+  `AgentEvent::SubagentResumed`; a session maps it to `TaskUpdated` with
+  status `running`. The first registration is unchanged.
+
 ## 0.29.0
 
 Breaking, in summary — each is detailed below: `A2aRequest`, `A2aError` and

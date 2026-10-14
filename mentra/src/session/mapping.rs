@@ -121,6 +121,7 @@ fn map_event_inner(event: &AgentEvent, tool_names: &mut ToolNameIndex) -> Vec<Se
         }
 
         AgentEvent::SubagentSpawned { agent } => map_subagent(agent, TaskLifecycleStatus::Spawned),
+        AgentEvent::SubagentResumed { agent } => map_subagent(agent, TaskLifecycleStatus::Running),
         AgentEvent::SubagentFinished { agent } => map_subagent_finished(agent),
 
         AgentEvent::BackgroundTaskStarted { task } => {

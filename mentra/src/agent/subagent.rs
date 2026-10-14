@@ -268,7 +268,12 @@ impl Agent {
         DisposableSubagentTemplate::from_agent(self)
     }
 
-    pub(crate) fn register_subagent(&mut self, agent: &Agent) -> SpawnedAgentSummary {
+    /// Records `agent` as running under this one — once per subagent: a
+    /// subagent registered again, run for another turn, takes its existing
+    /// entry back to `Running` rather than gaining a second one
+    /// ([#65](https://github.com/oops-rs/mentra/issues/65)). Returns the
+    /// summary and whether the entry already existed.
+    pub(crate) fn register_subagent(&mut self, agent: &Agent) -> (SpawnedAgentSummary, bool) {
         let summary = SpawnedAgentSummary {
             id: agent.id.clone(),
             name: agent.name.clone(),
@@ -276,10 +281,21 @@ impl Agent {
             status: SpawnedAgentStatus::Running,
         };
         let summary_for_snapshot = summary.clone();
+        let mut again = false;
         self.mutate_snapshot(|snapshot| {
-            snapshot.subagents.push(summary_for_snapshot);
+            match snapshot
+                .subagents
+                .iter_mut()
+                .find(|known| known.id == summary_for_snapshot.id)
+            {
+                Some(known) => {
+                    *known = summary_for_snapshot;
+                    again = true;
+                }
+                None => snapshot.subagents.push(summary_for_snapshot),
+            }
         });
-        summary
+        (summary, again)
     }
 
     pub(crate) fn finish_subagent(

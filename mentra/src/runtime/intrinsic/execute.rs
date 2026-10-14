@@ -270,7 +270,7 @@ async fn execute_task(agent: &mut Agent, call: ToolCall, options: RunOptions) ->
                 edge.clone(),
             );
             agent.sync_memory_snapshot();
-            let started = agent.register_subagent(&child);
+            let (started, _) = agent.register_subagent(&child);
             agent.emit_event(AgentEvent::SubagentSpawned { agent: started });
 
             // A subagent has its own event bus, so a parent's observer would

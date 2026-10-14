@@ -5994,6 +5994,84 @@ async fn a_tool_that_registers_a_subagent_announces_it() {
 }
 
 #[tokio::test]
+async fn a_subagent_registered_again_is_resumed_not_spawned_twice() {
+    // #65: a tool that keeps a child and runs it for a second turn registers
+    // it again. That is one subagent: one entry in the parent's snapshot,
+    // back to running, and a resume on the stream rather than a second spawn.
+    struct KeepingTool;
+
+    #[async_trait]
+    impl crate::tool::ToolDefinition for KeepingTool {
+        fn descriptor(&self) -> crate::tool::ToolSpec {
+            crate::tool::ToolSpec::builder("keep")
+                .description("runs one child twice")
+                .input_schema(json!({"type": "object", "properties": {}}))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl crate::tool::ToolExecutor for KeepingTool {
+        async fn execute_mut(
+            &self,
+            mut ctx: crate::tool::ToolContext<'_>,
+            _input: serde_json::Value,
+        ) -> crate::tool::ToolResult {
+            let child = ctx.spawn_subagent().map_err(|error| error.to_string())?;
+            let first = ctx.register_subagent(&child);
+            ctx.finish_subagent(&first.id, SpawnedAgentStatus::Finished);
+            let second = ctx.register_subagent(&child);
+            assert_eq!(first.id, second.id);
+            assert_eq!(second.status, SpawnedAgentStatus::Running);
+            ctx.finish_subagent(&second.id, SpawnedAgentStatus::Finished);
+            Ok("kept".to_string())
+        }
+    }
+
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "call-1", "keep", "{}"),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(KeepingTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+    let mut events = agent.subscribe_events();
+
+    agent
+        .send(vec![ContentBlock::text("keep it")])
+        .await
+        .expect("the run completes");
+
+    let lifecycle: Vec<&'static str> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AgentEvent::SubagentSpawned { .. } => Some("spawned"),
+            AgentEvent::SubagentResumed { .. } => Some("resumed"),
+            AgentEvent::SubagentFinished { .. } => Some("finished"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lifecycle,
+        vec!["spawned", "finished", "resumed", "finished"]
+    );
+    let subagents = agent.watch_snapshot().borrow().subagents.clone();
+    assert_eq!(
+        subagents.len(),
+        1,
+        "one child, however many turns: {subagents:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_tool_can_spawn_a_subagent_from_a_template_it_narrowed() {
     // ToolContext::spawn_subagent_from is the template-taking sibling of
     // spawn_subagent: a delegating tool starts from

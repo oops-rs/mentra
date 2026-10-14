@@ -903,7 +903,7 @@ impl Session {
         options: RunOptions,
     ) -> Result<SubagentHandle, RuntimeError> {
         let agent_id = subagent.id().to_string();
-        let summary = self.agent.register_subagent(&subagent);
+        let (summary, _) = self.agent.register_subagent(&subagent);
 
         self.agent.emit_event(AgentEvent::SubagentSpawned {
             agent: summary.clone(),

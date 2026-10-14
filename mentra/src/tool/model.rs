@@ -304,12 +304,24 @@ impl ToolContext<'_> {
     /// announcing it left the child in the parent's snapshot and absent from
     /// every observer's view of it, and there is no reason a caller would
     /// want that. The event is the same `SubagentSpawned` the intrinsic emits.
+    ///
+    /// A subagent a tool keeps and runs again — registered a second time
+    /// after [`finish_subagent`](Self::finish_subagent) — is one subagent:
+    /// its entry in the parent's snapshot goes back to `Running` rather than
+    /// doubling, and the stream says `SubagentResumed` rather than announcing
+    /// an agent observers already know
+    /// ([#65](https://github.com/oops-rs/mentra/issues/65)).
     pub fn register_subagent(&mut self, agent: &crate::agent::Agent) -> SpawnedAgentSummary {
-        let summary = self.agent.register_subagent(agent);
-        self.agent
-            .emit_event(crate::agent::AgentEvent::SubagentSpawned {
+        let (summary, again) = self.agent.register_subagent(agent);
+        self.agent.emit_event(if again {
+            crate::agent::AgentEvent::SubagentResumed {
                 agent: summary.clone(),
-            });
+            }
+        } else {
+            crate::agent::AgentEvent::SubagentSpawned {
+                agent: summary.clone(),
+            }
+        });
         summary
     }
 

@@ -167,6 +167,11 @@ pub enum AgentEvent {
     SubagentSpawned {
         agent: SpawnedAgentSummary,
     },
+    /// A subagent the parent already announced, running another turn
+    /// (`ToolContext::register_subagent` on a kept child).
+    SubagentResumed {
+        agent: SpawnedAgentSummary,
+    },
     SubagentFinished {
         agent: SpawnedAgentSummary,
     },
