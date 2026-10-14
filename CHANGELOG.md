@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### A2A requests carry metadata
+
+- `A2aClient::send_message_with_metadata` and
+  `send_streaming_message_with_metadata` send request metadata
+  (`params.metadata` over JSON-RPC, the body's `metadata` over HTTP+JSON),
+  beside the message rather than in it. An agent reads it for what is about
+  the call rather than the conversation — which product a question concerns,
+  say. `send_message` and `send_streaming_message` are unchanged and send
+  none. No breaking changes.
+
 ## 0.30.0
 
 Breaking: `AgentEvent` gains `SubagentResumed`, so an exhaustive match on it

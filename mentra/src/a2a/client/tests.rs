@@ -151,6 +151,41 @@ async fn send_message_puts_the_configuration_and_message_on_the_wire() {
 }
 
 #[tokio::test]
+async fn request_metadata_goes_beside_the_message_and_none_sends_none() {
+    for binding in BINDINGS {
+        let fixture = A2aFixture::start(Script::over(binding));
+        let client = connect(&fixture).await;
+
+        let metadata = HashMap::from([("project".to_owned(), json!("lama"))]);
+        client
+            .send_message_with_metadata(user_message("hello"), immediately(), Some(metadata))
+            .await
+            .expect("send with metadata");
+        client
+            .send_message(user_message("again"), immediately())
+            .await
+            .expect("send without");
+
+        let sent = fixture.params_of("SendMessage");
+        assert_eq!(
+            sent[0]["metadata"],
+            json!({"project": "lama"}),
+            "{binding:?}"
+        );
+        assert_eq!(
+            sent[0]["message"]["metadata"],
+            json!(null),
+            "not in the message"
+        );
+        assert!(
+            sent[1].get("metadata").is_none(),
+            "{binding:?}: {}",
+            sent[1]
+        );
+    }
+}
+
+#[tokio::test]
 async fn http_json_gives_every_method_its_verb_and_path() {
     let fixture = A2aFixture::start(Script::over(A2aBinding::HttpJson));
     let client = connect(&fixture).await;

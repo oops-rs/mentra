@@ -35,6 +35,7 @@ mod sse;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use a2a_lf::{
@@ -261,11 +262,27 @@ impl A2aClient {
         message: Message,
         configuration: SendMessageConfiguration,
     ) -> Result<SendMessageResponse, A2aError> {
+        self.send_message_with_metadata(message, configuration, None)
+            .await
+    }
+
+    /// [`send_message`](Self::send_message), with request metadata: the
+    /// `metadata` of the request (`params.metadata` over JSON-RPC, the
+    /// body's `metadata` over HTTP+JSON), beside the message rather than in
+    /// it. An agent reads it for what is about the call rather than the
+    /// conversation — which product a question is about, say. `None` sends
+    /// none, as `send_message` does.
+    pub async fn send_message_with_metadata(
+        &self,
+        message: Message,
+        configuration: SendMessageConfiguration,
+        metadata: Option<HashMap<String, Value>>,
+    ) -> Result<SendMessageResponse, A2aError> {
         let task_id = message.task_id.clone();
         let request = SendMessageRequest {
             message,
             configuration: Some(configuration),
-            metadata: None,
+            metadata,
             tenant: self.transport.tenant.clone(),
         };
         let operation = Operation::new(
@@ -304,11 +321,24 @@ impl A2aClient {
         message: Message,
         configuration: SendMessageConfiguration,
     ) -> Result<A2aEventStream, A2aError> {
+        self.send_streaming_message_with_metadata(message, configuration, None)
+            .await
+    }
+
+    /// [`send_streaming_message`](Self::send_streaming_message), with request
+    /// metadata, as [`send_message_with_metadata`](Self::send_message_with_metadata)
+    /// sends it.
+    pub async fn send_streaming_message_with_metadata(
+        &self,
+        message: Message,
+        configuration: SendMessageConfiguration,
+        metadata: Option<HashMap<String, Value>>,
+    ) -> Result<A2aEventStream, A2aError> {
         let task_id = message.task_id.clone();
         let request = SendMessageRequest {
             message,
             configuration: Some(configuration),
-            metadata: None,
+            metadata,
             tenant: self.transport.tenant.clone(),
         };
         let operation = Operation::new(
