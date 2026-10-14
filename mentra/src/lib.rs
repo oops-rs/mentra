@@ -16,7 +16,6 @@ pub mod auth;
 pub mod background;
 /// Transcript compaction engine and related types.
 pub mod compaction;
-/// Markdown frontmatter: the `---` split and the flat `key: value` block.
 pub mod frontmatter;
 /// Model Context Protocol (MCP) client and tool bridge.
 pub mod mcp;
