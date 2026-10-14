@@ -107,6 +107,10 @@ pub struct A2aSend {
     /// The URIs of the extensions this message uses: listed in the message's
     /// `extensions`, and activated for the request in `A2A-Extensions`.
     pub extensions: Vec<String>,
+    /// The request's `metadata` (`params.metadata`): beside the message
+    /// rather than in it, for what is about the call rather than the
+    /// conversation — which product a question concerns, say.
+    pub request_metadata: HashMap<String, Value>,
 }
 
 impl A2aSend {
@@ -117,6 +121,7 @@ impl A2aSend {
             context_id: None,
             metadata: HashMap::new(),
             extensions: Vec::new(),
+            request_metadata: HashMap::new(),
         }
     }
 
@@ -138,6 +143,13 @@ impl A2aSend {
         self
     }
 
+    /// Sets one entry of the request's `metadata`, replacing any under the
+    /// same key — see [`request_metadata`](Self::request_metadata).
+    pub fn with_request_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.request_metadata.insert(key.into(), value);
+        self
+    }
+
     /// Uses the extension `uri`, once however often it is added.
     pub fn with_extension(mut self, uri: impl Into<String>) -> Self {
         let uri = uri.into();
@@ -145,6 +157,15 @@ impl A2aSend {
             self.extensions.push(uri);
         }
         self
+    }
+
+    /// The A2A message this sends, and the request's metadata beside it.
+    fn into_parts(mut self) -> (Message, Option<HashMap<String, Value>>) {
+        let request_metadata = std::mem::take(&mut self.request_metadata);
+        (
+            self.into_message(),
+            (!request_metadata.is_empty()).then_some(request_metadata),
+        )
     }
 
     /// The A2A message this sends.
@@ -259,7 +280,7 @@ pub async fn submit(
 ) -> Result<A2aSubmitted, A2aExchangeError> {
     let task = match request {
         A2aRequest::Send(send) => {
-            let message = send.into_message();
+            let (message, request_metadata) = send.into_parts();
             let configuration = SendMessageConfiguration {
                 accepted_output_modes: None,
                 task_push_notification_config: None,
@@ -267,7 +288,7 @@ pub async fn submit(
                 return_immediately: Some(true),
             };
             match client
-                .send_message(message, configuration)
+                .send_message_with_metadata(message, configuration, request_metadata)
                 .await
                 .map_err(A2aExchangeError::Send)?
             {

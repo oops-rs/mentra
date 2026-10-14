@@ -311,3 +311,34 @@ async fn an_extension_uri_that_would_change_the_list_is_refused_before_sending()
     }
     assert!(fixture.operations().is_empty(), "nothing was sent");
 }
+
+#[tokio::test]
+async fn request_metadata_goes_beside_the_message_not_in_it() {
+    let fixture = A2aFixture::start(Script::default());
+    let client = client_with(&fixture, fast_limits()).await;
+    let request: A2aRequest = A2aSend::new("which login?")
+        .with_metadata("ext", json!("in the message"))
+        .with_request_metadata("project", json!("lama"))
+        .into();
+
+    submit(&client, request).await.expect("submit");
+
+    let params = &fixture.params_of("SendMessage")[0];
+    assert_eq!(params["metadata"], json!({"project": "lama"}));
+    assert_eq!(
+        params["message"]["metadata"],
+        json!({"ext": "in the message"})
+    );
+}
+
+#[tokio::test]
+async fn a_send_with_no_request_metadata_sends_none() {
+    let fixture = A2aFixture::start(Script::default());
+    let client = client_with(&fixture, fast_limits()).await;
+    submit(&client, send("hello")).await.expect("submit");
+    assert!(
+        fixture.params_of("SendMessage")[0]
+            .get("metadata")
+            .is_none()
+    );
+}
