@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.31.0
 
 Breaking: `ToolOutput` gains a public `images` field, so a struct literal
 needs it; one built with `ToolOutput::text`/`structured` is unaffected.
