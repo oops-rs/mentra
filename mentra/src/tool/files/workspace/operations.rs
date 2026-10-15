@@ -1,16 +1,44 @@
 use regex::RegexBuilder;
 
 use super::{EntryKind, IgnoreFilter, OverlayEntry, SearchOptions, Walk, WorkspaceEditor};
-use crate::tool::files::schema::{FileOperation, InsertPosition};
+use crate::{
+    ImageSource, media,
+    tool::{
+        ToolOutput,
+        files::schema::{FileOperation, InsertPosition},
+    },
+};
+
+/// One operation's answer: its text, and the image a read showed.
+pub(crate) struct Section {
+    pub(crate) text: String,
+    pub(crate) image: Option<ImageSource>,
+}
+
+impl From<String> for Section {
+    fn from(text: String) -> Self {
+        Self { text, image: None }
+    }
+}
+
+impl From<Section> for ToolOutput {
+    fn from(section: Section) -> Self {
+        let output = ToolOutput::text(section.text);
+        match section.image {
+            Some(image) => output.with_image(image),
+            None => output,
+        }
+    }
+}
 
 impl WorkspaceEditor {
-    pub(crate) fn apply_operation(&mut self, operation: FileOperation) -> Result<String, String> {
-        match operation {
+    pub(crate) fn apply_operation(&mut self, operation: FileOperation) -> Result<Section, String> {
+        let text = match operation {
             FileOperation::Read {
                 path,
                 offset,
                 limit,
-            } => self.read(path, offset.unwrap_or(1), limit.unwrap_or(2000)),
+            } => return self.read(path, offset.unwrap_or(1), limit.unwrap_or(2000)),
             FileOperation::List { path, depth, limit } => {
                 self.list(path, depth.unwrap_or(1), limit.unwrap_or(200))
             }
@@ -43,22 +71,35 @@ impl WorkspaceEditor {
             } => self.insert(path, &anchor, position, &content, occurrence),
             FileOperation::Move { from, to } => self.move_path(from, to),
             FileOperation::Delete { path } => self.delete(path),
-        }
+        }?;
+        Ok(text.into())
     }
 
+    /// A file's lines, numbered — or, for an image a model can be shown, the
+    /// image itself.
     pub(crate) fn read(
         &mut self,
         path: String,
         offset: usize,
         limit: usize,
-    ) -> Result<String, String> {
+    ) -> Result<Section, String> {
         if offset == 0 {
             return Err("read offset must be at least 1".to_string());
         }
 
         let path = self.resolve_path(&path)?;
         let path = self.authorize_read(&path, "files_read")?;
-        let content = self.load_text_file(&path)?;
+        let bytes = self.load_file_bytes(&path)?;
+        if let Some(media_type) = media::sniff(&bytes).filter(|kind| media::is_viewable_image(kind))
+        {
+            return self.read_image(&path, media_type, bytes);
+        }
+        let content = String::from_utf8(bytes).map_err(|_| {
+            format!(
+                "Path '{}' is not valid UTF-8 text",
+                self.display_path(&path)
+            )
+        })?;
         let lines = content.lines().collect::<Vec<_>>();
         let start = offset.saturating_sub(1).min(lines.len());
         let end = start.saturating_add(limit).min(lines.len());
@@ -73,7 +114,31 @@ impl WorkspaceEditor {
         } else {
             numbered.join("\n")
         };
-        Ok(format!("read {}\n{}", self.display_path(&path), body))
+        Ok(format!("read {}\n{}", self.display_path(&path), body).into())
+    }
+
+    fn read_image(
+        &self,
+        path: &std::path::Path,
+        media_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Section, String> {
+        let shown = self.display_path(path);
+        if bytes.len() > media::MAX_VIEWABLE_IMAGE_BYTES {
+            return Err(format!(
+                "'{shown}' is an image ({media_type}, {} bytes), larger than the {} bytes a \
+                 model can be shown",
+                bytes.len(),
+                media::MAX_VIEWABLE_IMAGE_BYTES
+            ));
+        }
+        Ok(Section {
+            text: format!(
+                "read {shown}\nan image ({media_type}, {} bytes), shown after this result",
+                bytes.len()
+            ),
+            image: Some(ImageSource::bytes(media_type, bytes)),
+        })
     }
 
     pub(crate) fn list(&self, path: String, depth: usize, limit: usize) -> Result<String, String> {

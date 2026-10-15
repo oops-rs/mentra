@@ -13,6 +13,8 @@
 
 use a2a_lf::{AgentCard, Message, Part, PartContent, Task, TaskState};
 
+use crate::media::is_textual;
+
 /// Bound on the card text — description and skills — in a summary.
 const MAX_CARD_TEXT_BYTES: usize = 2 * 1024;
 /// Bound on one skill's description within that.
@@ -172,29 +174,6 @@ fn part_text(part: &Part) -> String {
             format!("[data{about}]\n{json}")
         }
     }
-}
-
-/// Whether a media type names text a reader can be shown as it is: `text/*`,
-/// and JSON, XML and YAML whether bare or as a structured-syntax suffix.
-fn is_textual(media_type: &str) -> bool {
-    let essence = media_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    let Some((kind, subtype)) = essence.split_once('/') else {
-        return false;
-    };
-    if kind == "text" {
-        return true;
-    }
-    let structured = ["json", "xml", "yaml", "x-yaml"];
-    kind == "application"
-        && (structured.contains(&subtype)
-            || ["+json", "+xml", "+yaml"]
-                .iter()
-                .any(|suffix| subtype.ends_with(suffix)))
 }
 
 /// The agent's own words between delimiters, clipped to the output bound.

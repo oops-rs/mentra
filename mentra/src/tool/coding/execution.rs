@@ -5,16 +5,20 @@ use crate::tool::{ParallelToolContext, ToolOutput, ToolResult};
 use super::input::{parse_edit, parse_glob, parse_grep, parse_list, parse_read, parse_write};
 use crate::tool::files::workspace::{EditOutcome, TextEdit, WorkspaceEditor};
 
-pub(super) async fn execute_read(ctx: ParallelToolContext, input: Value) -> ToolResult {
+pub(super) async fn execute_read(
+    ctx: ParallelToolContext,
+    input: Value,
+) -> Result<ToolOutput, String> {
     let input = parse_read(input)?;
-    with_editor(ctx, move |editor| {
+    let section = with_editor(ctx, move |editor| {
         editor.read(
             input.path,
             input.offset.unwrap_or(1),
             input.limit.unwrap_or(2_000),
         )
     })
-    .await
+    .await?;
+    Ok(section.into())
 }
 
 pub(super) async fn execute_list(ctx: ParallelToolContext, input: Value) -> ToolResult {

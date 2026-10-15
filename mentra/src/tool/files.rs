@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::tool::{
     ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory, ToolAuthorizationPreview,
     ToolCapability, ToolContext, ToolDefinition, ToolDurability, ToolExecutionCategory,
-    ToolExecutor, ToolResult, ToolSideEffectLevel,
+    ToolExecutor, ToolOutput, ToolSideEffectLevel,
 };
 
 use self::{
@@ -28,7 +28,7 @@ pub struct FilesTool;
 impl ToolDefinition for FilesTool {
     fn descriptor(&self) -> RuntimeToolDescriptor {
         RuntimeToolDescriptor::builder("files")
-            .description("Read, search, list, create, update, move, and delete files within the workspace.")
+            .description("Read, search, list, create, update, move, and delete files within the workspace. Reading a PNG, JPEG, GIF or WebP image shows it.")
             .input_schema(json!({
                 "type": "object",
                 "properties": {
@@ -165,7 +165,11 @@ impl ToolExecutor for FilesTool {
         build_files_authorization_preview(self.descriptor(), ctx, input)
     }
 
-    async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
+    async fn execute_output(
+        &self,
+        ctx: ParallelToolContext,
+        input: Value,
+    ) -> Result<ToolOutput, String> {
         execute_files_tool(
             ctx.agent_id.clone(),
             ctx.tool_call_id.clone(),
@@ -179,7 +183,11 @@ impl ToolExecutor for FilesTool {
         .await
     }
 
-    async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
+    async fn execute_mut_output(
+        &self,
+        ctx: ToolContext<'_>,
+        input: Value,
+    ) -> Result<ToolOutput, String> {
         execute_files_tool(
             ctx.agent_id.clone(),
             ctx.tool_call_id.clone(),

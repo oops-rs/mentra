@@ -12,6 +12,12 @@ needs it; one built with `ToolOutput::text`/`structured` is unaffected.
   turn's tool results first and images after them, so no provider carries an
   image inside a tool result. A result a post-execution hook turns into an
   error drops its images.
+- `read` (and the `files` tool's `read` operation) shows PNG, JPEG, GIF and
+  WebP files as images, up to 5 MiB, where it refused them as not UTF-8.
+- `mentra::media` names what kind of file some bytes are: `media_type` asks
+  the bytes' signature, then the name's extension, then whether they are
+  UTF-8; `is_viewable_image`, `is_textual` and `extension_for` answer the
+  questions a file crossing a boundary raises.
 
 ## 0.30.1
 

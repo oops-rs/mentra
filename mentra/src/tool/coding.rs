@@ -59,7 +59,7 @@ impl ToolDefinition for ReadTool {
     fn descriptor(&self) -> RuntimeToolDescriptor {
         read_only_descriptor(
             "read",
-            "Read a UTF-8 text file from the workspace with line numbers.",
+            "Read a UTF-8 text file from the workspace with line numbers, or look at a PNG, JPEG, GIF or WebP image.",
             json!({
                 "type": "object",
                 "properties": {
@@ -203,7 +203,11 @@ impl ToolDefinition for EditTool {
 
 #[async_trait]
 impl ToolExecutor for ReadTool {
-    async fn execute(&self, ctx: ParallelToolContext, input: Value) -> ToolResult {
+    async fn execute_output(
+        &self,
+        ctx: ParallelToolContext,
+        input: Value,
+    ) -> Result<ToolOutput, String> {
         execute_read(ctx, input).await
     }
 }

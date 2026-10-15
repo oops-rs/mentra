@@ -19,6 +19,8 @@ pub mod compaction;
 pub mod frontmatter;
 /// Model Context Protocol (MCP) client and tool bridge.
 pub mod mcp;
+/// Media types for files crossing a boundary: sniffed, named, and viewable.
+pub mod media;
 /// Working-memory journal and long-term memory services.
 pub mod memory;
 /// Host-owned process hygiene for running other programs with explicit bounds.

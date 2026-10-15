@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::{
     agent::{AgentEvent, AgentEventBus},
     runtime::RuntimeHandle,
-    tool::ToolResult,
+    tool::ToolOutput,
 };
 
 use super::{
@@ -19,7 +19,7 @@ pub(crate) async fn execute_files_tool(
     default_working_directory: std::path::PathBuf,
     event_tx: AgentEventBus,
     input: Value,
-) -> ToolResult {
+) -> Result<ToolOutput, String> {
     let input = parse_files_input(&input)?;
     ensure_files_have_operations(&input)?;
 
@@ -34,8 +34,11 @@ pub(crate) async fn execute_files_tool(
     tokio::task::spawn_blocking(move || {
         let mut editor = WorkspaceEditor::new(agent_id, runtime, base_dir, working_directory);
         let mut sections = Vec::with_capacity(input.operations.len());
+        let mut images = Vec::new();
         for operation in input.operations {
             let section = editor.apply_operation(operation)?;
+            images.extend(section.image);
+            let section = section.text;
             if let Some(progress) = file_op_progress(&section) {
                 event_tx.send(AgentEvent::ToolExecutionProgress {
                     id: tool_call_id.clone(),
@@ -47,7 +50,10 @@ pub(crate) async fn execute_files_tool(
         }
         editor.commit()?;
 
-        Ok(sections.join("\n\n"))
+        Ok(images.into_iter().fold(
+            ToolOutput::text(sections.join("\n\n")),
+            ToolOutput::with_image,
+        ))
     })
     .await
     .map_err(|error| format!("Files tool task failed: {error}"))?

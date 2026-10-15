@@ -814,6 +814,68 @@ async fn files_tool_reads_numbered_lines() {
 }
 
 #[tokio::test]
+async fn files_tool_shows_an_image_it_reads() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "files-read",
+                "files",
+                r#"{"operations":[{"op":"read","path":"shot.png"}]}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("files-read-image");
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    fs::write(repo_dir.join("shot.png"), &png).expect("write image");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("look at the screenshot")])
+        .await
+        .expect("send");
+
+    assert_eq!(
+        agent.history()[2],
+        Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "files-read".to_string(),
+                    content: format!(
+                        "read shot.png\nan image (image/png, {} bytes), shown after this result",
+                        png.len()
+                    )
+                    .into(),
+                    is_error: false,
+                },
+                ContentBlock::Image {
+                    source: crate::ImageSource::bytes("image/png", png),
+                },
+            ],
+        }
+    );
+}
+
+#[tokio::test]
 async fn oversized_files_read_is_truncated_by_runtime_policy() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
