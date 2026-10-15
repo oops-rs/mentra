@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, future::Future, path::PathBuf, sync::Arc, time:
 use tokio::task::JoinSet;
 
 use crate::{
-    ContentBlock,
+    ContentBlock, ImageSource,
     agent::{Agent, AgentEvent, AgentStatus},
     error::RuntimeError,
     runtime::control::{
@@ -133,6 +133,9 @@ struct CompletedToolExecution {
     /// This execution's opaque `ToolOutput::details`, if any — collected by
     /// [`ToolRuntime::execute_calls`] into [`ToolExecutionOutcome::details`].
     details: Option<serde_json::Value>,
+    /// This execution's `ToolOutput::images`, shown after the round's results
+    /// when the result survives review as a success.
+    images: Vec<ImageSource>,
     /// The one mixed participant snapshot that admitted and then reviews this
     /// genuine execution. Synthetic/refused results carry `None`.
     execution_hooks: Option<ExecutionHookSnapshot>,
@@ -183,6 +186,9 @@ impl ToolRuntime {
         let mut successful_task = false;
         let mut end_turn = false;
         let mut details = BTreeMap::new();
+        // Shown after every result in the round: each wire wants a turn's
+        // tool results first, and takes images after them in the same turn.
+        let mut images = Vec::new();
 
         let mut batches = ToolCallSchedule::new(self, agent, calls)
             .batches
@@ -226,6 +232,22 @@ impl ToolRuntime {
                 {
                     details.insert(tool_use_id.clone(), value);
                 }
+                // A result a hook turned into an error no longer vouches for
+                // the images the tool produced, so they are not shown.
+                if matches!(
+                    result,
+                    ContentBlock::ToolResult {
+                        is_error: false,
+                        ..
+                    }
+                ) {
+                    images.extend(
+                        execution
+                            .images
+                            .into_iter()
+                            .map(|source| ContentBlock::Image { source }),
+                    );
+                }
                 results.push(result);
             }
 
@@ -244,6 +266,7 @@ impl ToolRuntime {
                 break;
             }
         }
+        results.extend(images);
 
         Ok(ToolExecutionOutcome {
             results,
@@ -868,6 +891,7 @@ impl ToolRuntime {
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details: None,
             execution_hooks: None,
+            images: Vec::new(),
         }
     }
 
@@ -932,6 +956,7 @@ impl ToolRuntime {
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details: None,
             execution_hooks: None,
+            images: Vec::new(),
         }
     }
 
@@ -953,6 +978,7 @@ impl ToolRuntime {
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details: None,
             execution_hooks: None,
+            images: Vec::new(),
         }
     }
 
@@ -1006,7 +1032,12 @@ impl ToolRuntime {
         call: &ToolCall,
         output: Result<crate::tool::ToolOutput, String>,
         rewrite_source: Option<&str>,
-    ) -> (ContentBlock, Option<serde_json::Value>, bool) {
+    ) -> (
+        ContentBlock,
+        Option<serde_json::Value>,
+        bool,
+        Vec<ImageSource>,
+    ) {
         match output {
             Ok(output) => (
                 ContentBlock::ToolResult {
@@ -1016,6 +1047,7 @@ impl ToolRuntime {
                 },
                 output.details,
                 output.terminate,
+                output.images,
             ),
             Err(content) => (
                 ContentBlock::ToolResult {
@@ -1030,6 +1062,7 @@ impl ToolRuntime {
                 },
                 None,
                 false,
+                Vec::new(),
             ),
         }
     }
@@ -1067,6 +1100,7 @@ impl ToolRuntime {
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details,
             execution_hooks: None,
+            images: Vec::new(),
         }
     }
 
@@ -1341,7 +1375,7 @@ impl ToolRuntime {
                     execution_hooks,
                     rewrite_source,
                 )))) => {
-                    let (result, details, terminate) = self
+                    let (result, details, terminate, images) = self
                         .tool_output_block(&call, output, rewrite_source.as_deref())
                         .await;
                     // RUNTIME defense: a parallel-lane execution can never end
@@ -1349,15 +1383,15 @@ impl ToolRuntime {
                     // misuse (or a static-coercion gap), never honored as
                     // termination, and never a silent race with the rest of
                     // the batch.
-                    let (result, details) = if terminate {
+                    let (result, details, images) = if terminate {
                         eprintln!(
                             "warning: tool '{}' requested termination from a parallel \
                              execution; rejecting as a misuse error, run continues",
                             call.name
                         );
-                        (parallel_termination_rejected(&call), None)
+                        (parallel_termination_rejected(&call), None, Vec::new())
                     } else {
-                        (result, details)
+                        (result, details, images)
                     };
                     let mut execution = self.completed_execution(
                         agent,
@@ -1368,6 +1402,7 @@ impl ToolRuntime {
                         details,
                     );
                     execution.execution_hooks = execution_hooks;
+                    execution.images = images;
                     results[index] = Some(execution);
                 }
                 Ok(Some(Err(error))) => {
@@ -1453,7 +1488,7 @@ impl ToolRuntime {
         let working_directory = authorization_ctx.working_directory.clone();
         let runtime = authorization_ctx.runtime.clone();
         let event_tx = agent.event_sender();
-        let (result, details, terminate) = self
+        let (result, details, terminate, images) = self
             .tool_output_block(
                 &call,
                 execute_tool_future(
@@ -1484,6 +1519,7 @@ impl ToolRuntime {
         let mut execution =
             self.completed_execution(agent, &call, &descriptor, result, effect, details);
         execution.execution_hooks = execution_hooks;
+        execution.images = images;
         execution
     }
 }

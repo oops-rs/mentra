@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use mentra_provider::ToolResultContent;
+use mentra_provider::{ImageSource, ToolResultContent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -696,6 +696,12 @@ pub type ToolResult = Result<String, String>;
 /// call executes in an exclusive lane (see
 /// [`RuntimeToolDescriptorBuilder::terminal`](crate::tool::RuntimeToolDescriptorBuilder::terminal)).
 ///
+/// `images` are shown to the model after the round's tool results, in the
+/// same turn: every wire takes a turn's tool results first and images after
+/// them, so a tool can let a model see a picture without a provider having to
+/// carry images inside a tool result. They are dropped when a post-execution
+/// hook turns the result into an error.
+///
 /// Tool-level failures keep using the existing `Err(String)` channel on
 /// [`ToolExecutor::execute_output`] / [`ToolExecutor::execute_mut_output`];
 /// `ToolOutput` only ever appears on the `Ok` side.
@@ -704,6 +710,7 @@ pub struct ToolOutput {
     pub content: ToolResultContent,
     pub details: Option<Value>,
     pub terminate: bool,
+    pub images: Vec<ImageSource>,
 }
 
 impl ToolOutput {
@@ -713,6 +720,7 @@ impl ToolOutput {
             content: ToolResultContent::Text(content.into()),
             details: None,
             terminate: false,
+            images: Vec::new(),
         }
     }
 
@@ -722,6 +730,7 @@ impl ToolOutput {
             content: ToolResultContent::Structured(content),
             details: None,
             terminate: false,
+            images: Vec::new(),
         }
     }
 
@@ -729,6 +738,12 @@ impl ToolOutput {
     /// is never projected to a provider.
     pub fn with_details(mut self, details: Value) -> Self {
         self.details = Some(details);
+        self
+    }
+
+    /// Shows `image` to the model after this round's results.
+    pub fn with_image(mut self, image: ImageSource) -> Self {
+        self.images.push(image);
         self
     }
 

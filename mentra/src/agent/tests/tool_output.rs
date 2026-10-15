@@ -1485,3 +1485,90 @@ fn send_tool_response(
         tx.send(Ok(event)).expect("stream receiver remains alive");
     }
 }
+
+/// A parallel tool that lets the model see a picture beside its text.
+struct PictureTool;
+
+#[async_trait]
+impl ToolDefinition for PictureTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("picture_tool")
+            .description("test tool: returns text and an image")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .durability(ToolDurability::ReplaySafe)
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for PictureTool {
+    async fn execute_output(
+        &self,
+        _ctx: ParallelToolContext,
+        _input: Value,
+    ) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::text("here it is")
+            .with_image(crate::ImageSource::bytes("image/png", vec![0x89, b'P'])))
+    }
+}
+
+#[tokio::test]
+async fn a_tools_images_follow_every_result_in_its_round() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            multi_tool_use_stream(
+                &model.id,
+                &[
+                    ("call-p", "picture_tool", r#"{}"#),
+                    ("call-b", "details_tool_b", r#"{}"#),
+                ],
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(PictureTool)
+        .with_tool(DetailsToolB)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("show me")])
+        .await
+        .expect("send");
+
+    let round = agent
+        .history()
+        .iter()
+        .find(|message| {
+            message.role == Role::User
+                && message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        })
+        .expect("the tool round was committed");
+    let kinds: Vec<&str> = round
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => tool_use_id.as_str(),
+            ContentBlock::Image { .. } => "image",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["call-p", "call-b", "image"]);
+    assert_eq!(
+        round.content[2],
+        ContentBlock::Image {
+            source: crate::ImageSource::bytes("image/png", vec![0x89, b'P'])
+        }
+    );
+}

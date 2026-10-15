@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+Breaking: `ToolOutput` gains a public `images` field, so a struct literal
+needs it; one built with `ToolOutput::text`/`structured` is unaffected.
+
+### A tool can show the model an image
+
+- `ToolOutput::with_image` (and `images`) shows images to the model after the
+  round's tool results, in the same turn. Every wire mentra speaks takes a
+  turn's tool results first and images after them, so no provider carries an
+  image inside a tool result. A result a post-execution hook turns into an
+  error drops its images.
+
 ## 0.30.1
 
 ### A2A requests carry metadata
