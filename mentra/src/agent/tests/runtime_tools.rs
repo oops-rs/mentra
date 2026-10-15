@@ -6209,3 +6209,112 @@ async fn a_tool_can_spawn_a_subagent_from_a_template_it_narrowed() {
         "a tool outside the narrowed allowlist must be blocked on the child"
     );
 }
+
+/// A tool that copies a file the way a tool sending or saving one does: read
+/// through the policy, written back through it.
+struct CopyTool;
+
+#[async_trait]
+impl crate::tool::ToolDefinition for CopyTool {
+    fn descriptor(&self) -> crate::tool::ToolSpec {
+        crate::tool::ToolSpec::builder("copy")
+            .description("test tool: copies `from` to `to`")
+            .input_schema(json!({ "type": "object" }))
+            .build()
+    }
+}
+
+#[async_trait]
+impl crate::tool::ToolExecutor for CopyTool {
+    async fn execute_mut(
+        &self,
+        ctx: crate::tool::ToolContext<'_>,
+        input: serde_json::Value,
+    ) -> crate::tool::ToolResult {
+        let from = input["from"].as_str().unwrap_or_default();
+        let to = input["to"].as_str().unwrap_or_default();
+        let (_, bytes) = ctx.read_file_bytes(from)?;
+        let written = ctx.write_file_bytes(to, &bytes)?;
+        Ok(written.display().to_string())
+    }
+}
+
+#[tokio::test]
+async fn a_tool_reads_and_writes_files_under_the_file_tools_policy() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(
+                &model.id,
+                "copy-in",
+                "copy",
+                r#"{"from":"shot.png","to":".basis/inbox/t1/shot.png"}"#,
+            ),
+            tool_use_stream(
+                &model.id,
+                "copy-out",
+                "copy",
+                r#"{"from":"../copy-policy-outside/secret.txt","to":"secret.txt"}"#,
+            ),
+            text_stream(&model.id, "done"),
+        ],
+    );
+
+    let repo_dir = temp_team_dir("copy-policy");
+    let outside_dir = repo_dir
+        .parent()
+        .expect("temp dir has a parent")
+        .join("copy-policy-outside");
+    fs::create_dir_all(&outside_dir).expect("make outside dir");
+    fs::write(outside_dir.join("secret.txt"), "outside").expect("write outside file");
+    fs::write(repo_dir.join("shot.png"), [0x89, b'P']).expect("write image");
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_tool(CopyTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&repo_dir),
+                ..Default::default()
+            },
+        )
+        .expect("spawn agent");
+
+    agent
+        .send(vec![ContentBlock::text("copy")])
+        .await
+        .expect("send");
+
+    assert_eq!(
+        fs::read(repo_dir.join(".basis/inbox/t1/shot.png")).expect("copied in"),
+        [0x89, b'P']
+    );
+    let refused = agent
+        .history()
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } if tool_use_id == "copy-out" => Some((content.to_display_string(), *is_error)),
+            _ => None,
+        })
+        .expect("the second copy answered");
+    assert!(refused.1, "{refused:?}");
+    assert!(
+        refused.0.contains("outside the runtime policy read roots"),
+        "{refused:?}"
+    );
+    assert!(!repo_dir.join("secret.txt").exists());
+
+    fs::remove_dir_all(&repo_dir).expect("remove workspace");
+    fs::remove_dir_all(&outside_dir).expect("remove outside directory");
+}

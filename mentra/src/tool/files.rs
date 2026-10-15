@@ -1,3 +1,5 @@
+#[path = "files/access.rs"]
+pub(crate) mod access;
 #[path = "files/execution.rs"]
 mod execution;
 #[path = "files/input.rs"]

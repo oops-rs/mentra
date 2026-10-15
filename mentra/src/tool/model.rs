@@ -160,6 +160,30 @@ impl ToolContext<'_> {
         self.runtime.load_skill(name)
     }
 
+    /// Reads `path` — relative to the agent's working directory, or absolute —
+    /// under the runtime's read policy, as the file tools do: the resolved
+    /// path and the bytes. A refusal is reported as the file tools report one.
+    pub fn read_file_bytes(&self, path: &str) -> Result<(PathBuf, Vec<u8>), String> {
+        crate::tool::files::access::read(
+            &self.runtime,
+            &self.agent_id,
+            &self.working_directory,
+            path,
+        )
+    }
+
+    /// Writes `bytes` to `path` under the runtime's write policy, as the file
+    /// tools do, making its directories: the resolved path written.
+    pub fn write_file_bytes(&self, path: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+        crate::tool::files::access::write(
+            &self.runtime,
+            &self.agent_id,
+            &self.working_directory,
+            path,
+            bytes,
+        )
+    }
+
     pub fn skill_descriptions(&self) -> Option<String> {
         self.runtime.skill_descriptions()
     }
@@ -557,6 +581,30 @@ impl ParallelToolContext {
 
     pub fn load_skill(&self, name: &str) -> Result<String, String> {
         self.runtime.load_skill(name)
+    }
+
+    /// Reads `path` — relative to the agent's working directory, or absolute —
+    /// under the runtime's read policy, as the file tools do: the resolved
+    /// path and the bytes. A refusal is reported as the file tools report one.
+    pub fn read_file_bytes(&self, path: &str) -> Result<(PathBuf, Vec<u8>), String> {
+        crate::tool::files::access::read(
+            &self.runtime,
+            &self.agent_id,
+            &self.working_directory,
+            path,
+        )
+    }
+
+    /// Writes `bytes` to `path` under the runtime's write policy, as the file
+    /// tools do, making its directories: the resolved path written.
+    pub fn write_file_bytes(&self, path: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+        crate::tool::files::access::write(
+            &self.runtime,
+            &self.agent_id,
+            &self.working_directory,
+            path,
+            bytes,
+        )
     }
 
     pub fn skill_descriptions(&self) -> Option<String> {

@@ -23,6 +23,13 @@ the parts they now carry are not.
   URL — of what a task or a reply says, from the same messages and artifacts
   `remote_output` shows. The text still summarizes each file; these are the
   files themselves, for a caller that keeps them.
+- `ToolContext::read_file_bytes` / `write_file_bytes` (and the same on
+  `ParallelToolContext`) let a tool read or write a file for the agent under
+  the file tools' own policy: resolved against the agent's working
+  directory, authorized against the runtime's read or write roots, and a
+  refusal reported as the same `AuthorizationDenied` hook event. A tool that
+  sends a workspace file somewhere, or saves one it was handed, no longer has
+  to go around the roots to do it.
 - `mentra::media` names what kind of file some bytes are: `media_type` asks
   the bytes' signature, then the name's extension, then whether they are
   UTF-8; `is_viewable_image`, `is_textual` and `extension_for` answer the

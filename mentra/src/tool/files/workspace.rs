@@ -740,7 +740,7 @@ fn normalize_display_path(path: String) -> String {
     path.replace('\\', "/")
 }
 
-fn normalize_path(path: PathBuf) -> Result<PathBuf, String> {
+pub(crate) fn normalize_path(path: PathBuf) -> Result<PathBuf, String> {
     let mut normalized = if path.is_absolute() {
         PathBuf::new()
     } else {
