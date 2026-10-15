@@ -32,7 +32,9 @@ the parts they now carry are not.
   to go around the roots to do it.
 - `mentra::media` names what kind of file some bytes are: `media_type` asks
   the bytes' signature, then the name's extension, then whether they are
-  UTF-8; `is_viewable_image`, `is_textual` and `extension_for` answer the
+  UTF-8; `is_viewable_image`, `is_textual`, `extension_for` and
+  `safe_file_name` (a sender-chosen name reduced to one safe path component)
+  answer the
   questions a file crossing a boundary raises.
 
 ## 0.30.1

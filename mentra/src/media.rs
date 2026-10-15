@@ -92,6 +92,20 @@ pub fn is_textual(media_type: &str) -> bool {
                 .any(|suffix| subtype.ends_with(suffix)))
 }
 
+/// `raw` as a file name safe to save under: its last path segment, without
+/// control characters or surrounding space, and never empty, `.` or `..`.
+///
+/// A file sent from elsewhere names itself, and the name may try to climb out
+/// of the folder it is saved in (`../../.ssh/authorized_keys`) or to paint
+/// over a terminal; this keeps only what can be a name. `None` when nothing
+/// is left.
+pub fn safe_file_name(raw: &str) -> Option<String> {
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or_default();
+    let cleaned: String = last.chars().filter(|c| !c.is_control()).collect();
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty() && cleaned != "." && cleaned != "..").then(|| cleaned.to_string())
+}
+
 /// A media type without its parameters, lowercased.
 fn essence(media_type: &str) -> String {
     media_type
@@ -166,6 +180,21 @@ mod tests {
         assert_eq!(extension_for("image/jpeg"), Some("jpg"));
         assert_eq!(extension_for("application/yaml"), Some("yaml"));
         assert_eq!(extension_for("application/x-unknown"), None);
+    }
+
+    #[test]
+    fn a_name_from_elsewhere_cannot_leave_its_folder() {
+        assert_eq!(
+            safe_file_name("../../etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(
+            safe_file_name("C:\\Users\\x\\shot.png").as_deref(),
+            Some("shot.png")
+        );
+        assert_eq!(safe_file_name(".."), None);
+        assert_eq!(safe_file_name("dir/"), None);
+        assert_eq!(safe_file_name("a\u{1b}[31mb").as_deref(), Some("a[31mb"));
     }
 
     #[test]
