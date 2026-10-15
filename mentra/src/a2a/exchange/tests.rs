@@ -242,6 +242,37 @@ fn settled_means_terminal_or_waiting_on_the_caller() {
 }
 
 #[tokio::test]
+async fn a_message_sends_its_files_after_its_text() {
+    let fixture = A2aFixture::start(Script::over(A2aBinding::JsonRpc));
+    let client = client_with(&fixture, fast_limits()).await;
+
+    let request = A2aSend::new("what is wrong here?").with_part(
+        a2a_lf::Part::raw(vec![0x89, b'P', b'N', b'G'])
+            .with_filename("login.png")
+            .with_media_type("image/png"),
+    );
+    exchange(&client, request.into(), &RunOptions::default(), &|_| {})
+        .await
+        .expect("settled");
+
+    let parts = &fixture.params_of("SendMessage")[0]["message"]["parts"];
+    assert_eq!(parts[0]["text"], json!("what is wrong here?"));
+    assert_eq!(parts[1]["filename"], json!("login.png"));
+    assert_eq!(parts[1]["mediaType"], json!("image/png"));
+    assert!(parts[1]["raw"].is_string(), "{parts}");
+    assert!(parts.get(2).is_none());
+}
+
+#[test]
+fn a_message_of_files_alone_sends_no_empty_text_part() {
+    let (message, _) = A2aSend::new("")
+        .with_part(a2a_lf::Part::raw(vec![1]))
+        .into_parts();
+    assert_eq!(message.parts.len(), 1);
+    assert!(message.parts[0].as_text().is_none());
+}
+
+#[tokio::test]
 async fn a_message_carries_its_metadata_and_activates_its_extensions() {
     const HOPS: &str = "https://example.com/a2a/hops/v1";
     const TRACE: &str = "https://example.com/a2a/trace/v1";

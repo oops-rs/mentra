@@ -94,5 +94,5 @@ pub use exchange::{
     is_settled, settle, state_name, submit,
 };
 pub use name::{A2aAgentNameError, a2a_tool_name, parse_a2a_tool_name, validate_a2a_agent_name};
-pub use output::{card_summary, remote_output, remote_reply};
+pub use output::{card_summary, remote_files, remote_output, remote_reply, reply_files};
 pub use tool::A2aAgentTool;

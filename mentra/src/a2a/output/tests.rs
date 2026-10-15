@@ -94,3 +94,60 @@ fn a_remote_line_is_one_bounded_line_without_control_characters() {
     assert_eq!(remote_line("éé", 3), "é…");
     assert_eq!(remote_line(" \n ", 64), "");
 }
+
+fn task_with(state: TaskState, status: Vec<Part>, answer: Vec<Part>) -> Task {
+    Task {
+        id: "t1".into(),
+        context_id: "c1".into(),
+        status: TaskStatus {
+            state,
+            message: (!status.is_empty()).then(|| Message::new(Role::Agent, status)),
+            timestamp: None,
+        },
+        artifacts: (!answer.is_empty()).then(|| {
+            vec![Artifact {
+                artifact_id: "a1".into(),
+                name: None,
+                description: None,
+                parts: answer,
+                metadata: None,
+                extensions: None,
+            }]
+        }),
+        history: None,
+        metadata: None,
+    }
+}
+
+#[test]
+fn a_tasks_files_are_its_raw_and_url_parts_from_what_it_says() {
+    let png = Part::raw(vec![0x89, b'P']).with_filename("shot.png");
+    let link = Part::url("https://example.com/big.zip");
+    let task = task_with(
+        TaskState::Completed,
+        vec![Part::raw(vec![1]).with_filename("progress.png")],
+        vec![
+            Part::text("done"),
+            png.clone(),
+            Part::data(json!({})),
+            link.clone(),
+        ],
+    );
+    // A completed task with artifacts answers in them; its status message
+    // is not shown, so its files are not the answer's either.
+    assert_eq!(remote_files(&task), vec![&png, &link]);
+
+    let asking = task_with(
+        TaskState::InputRequired,
+        vec![Part::text("which one?"), png.clone()],
+        Vec::new(),
+    );
+    assert_eq!(remote_files(&asking), vec![&png]);
+    assert_eq!(
+        reply_files(&Message::new(
+            Role::Agent,
+            vec![Part::text("hi"), link.clone()]
+        )),
+        vec![&link]
+    );
+}

@@ -4,6 +4,8 @@
 
 Breaking: `ToolOutput` gains a public `images` field, so a struct literal
 needs it; one built with `ToolOutput::text`/`structured` is unaffected.
+`A2aSend` and `A2aRequest` are no longer `Eq` (still `PartialEq`), because
+the parts they now carry are not.
 
 ### A tool can show the model an image
 
@@ -14,6 +16,13 @@ needs it; one built with `ToolOutput::text`/`structured` is unaffected.
   error drops its images.
 - `read` (and the `files` tool's `read` operation) shows PNG, JPEG, GIF and
   WebP files as images, up to 5 MiB, where it refused them as not UTF-8.
+- `A2aSend::with_part` (and `parts`) sends parts after the message's text —
+  a file as a `raw` part with its name and media type. A message of parts
+  alone sends no empty text part.
+- `remote_files` and `reply_files` give the file parts — inline bytes or a
+  URL — of what a task or a reply says, from the same messages and artifacts
+  `remote_output` shows. The text still summarizes each file; these are the
+  files themselves, for a caller that keeps them.
 - `mentra::media` names what kind of file some bytes are: `media_type` asks
   the bytes' signature, then the name's extension, then whether they are
   UTF-8; `is_viewable_image`, `is_textual` and `extension_for` answer the

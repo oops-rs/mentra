@@ -108,11 +108,7 @@ fn task_text(task: &Task) -> String {
     let artifacts = task.artifacts.as_deref().unwrap_or_default();
     let mut sections = Vec::new();
 
-    let status_message = task
-        .status
-        .message
-        .as_ref()
-        .filter(|_| task.status.state != TaskState::Completed || artifacts.is_empty())
+    let status_message = shown_status(task)
         .map(|message| parts_text(&message.parts))
         .filter(|text| !text.is_empty());
     sections.extend(status_message);
@@ -134,6 +130,43 @@ fn task_text(task: &Task) -> String {
     }
 
     sections.join("\n\n")
+}
+
+/// A task's status message, when it is part of what the task says: always,
+/// except for a completed task whose artifacts are its answer.
+fn shown_status(task: &Task) -> Option<&Message> {
+    let artifacts = task.artifacts.as_deref().unwrap_or_default();
+    task.status
+        .message
+        .as_ref()
+        .filter(|_| task.status.state != TaskState::Completed || artifacts.is_empty())
+}
+
+/// The file parts — inline bytes or a URL — of what a task says, from the
+/// same messages and artifacts as [`remote_output`] shows, in the same order.
+///
+/// The text summarizes each file by name, media type and size; these are the
+/// files themselves, for a caller that keeps them.
+pub fn remote_files(task: &Task) -> Vec<&Part> {
+    let artifacts = task.artifacts.as_deref().unwrap_or_default();
+    shown_status(task)
+        .map(|message| message.parts.as_slice())
+        .into_iter()
+        .chain(artifacts.iter().map(|artifact| artifact.parts.as_slice()))
+        .flatten()
+        .filter(|part| is_file(part))
+        .collect()
+}
+
+/// The file parts of a direct reply, as [`remote_files`] gives a task's.
+pub fn reply_files(message: &Message) -> Vec<&Part> {
+    message.parts.iter().filter(|part| is_file(part)).collect()
+}
+
+/// Whether `part` is a file: inline bytes, or a URL. A text or data part is
+/// not, whatever its name says.
+fn is_file(part: &Part) -> bool {
+    matches!(part.content, PartContent::Raw(_) | PartContent::Url(_))
 }
 
 /// The text of a list of parts, with every non-text part summarized.

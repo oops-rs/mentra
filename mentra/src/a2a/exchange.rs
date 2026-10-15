@@ -57,7 +57,7 @@ const MAX_PROGRESS_ID_BYTES: usize = 128;
 /// Non-exhaustive so that a way of asking added later is not a breaking
 /// change; build one with [`A2aRequest::send`], [`A2aRequest::resume`], or
 /// from an [`A2aSend`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum A2aRequest {
     /// Send a message.
@@ -92,7 +92,7 @@ impl From<A2aSend> for A2aRequest {
 /// Its fields are readable, and it is built with [`new`](Self::new) and the
 /// `with_*` methods, so a field added later — as `metadata` and `extensions`
 /// were — does not break a host that builds one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct A2aSend {
     /// The message's text.
@@ -111,6 +111,9 @@ pub struct A2aSend {
     /// rather than in it, for what is about the call rather than the
     /// conversation — which product a question concerns, say.
     pub request_metadata: HashMap<String, Value>,
+    /// Parts sent after the text — files, say, as `raw` parts with a name
+    /// and a media type.
+    pub parts: Vec<Part>,
 }
 
 impl A2aSend {
@@ -122,7 +125,14 @@ impl A2aSend {
             metadata: HashMap::new(),
             extensions: Vec::new(),
             request_metadata: HashMap::new(),
+            parts: Vec::new(),
         }
+    }
+
+    /// Sends `part` after the text and any parts already added.
+    pub fn with_part(mut self, part: Part) -> Self {
+        self.parts.push(part);
+        self
     }
 
     /// Answers `task_id`, a task waiting for input.
@@ -170,7 +180,11 @@ impl A2aSend {
 
     /// The A2A message this sends.
     fn into_message(self) -> Message {
-        let mut message = Message::new(Role::User, vec![Part::text(self.text)]);
+        // A message of files alone has no text part to send: an empty one
+        // would be a part saying nothing.
+        let text = (!self.text.is_empty() || self.parts.is_empty()).then(|| Part::text(self.text));
+        let parts = text.into_iter().chain(self.parts).collect();
+        let mut message = Message::new(Role::User, parts);
         message.task_id = self.task_id;
         message.context_id = self.context_id;
         message.metadata = (!self.metadata.is_empty()).then_some(self.metadata);
