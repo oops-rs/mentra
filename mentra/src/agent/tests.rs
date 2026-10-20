@@ -1,5 +1,6 @@
 mod agent_tools;
 mod budgets;
+mod deferred;
 mod event_tap;
 mod hook_authorization_order;
 mod live_hooks;

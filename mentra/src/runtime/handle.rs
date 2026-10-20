@@ -74,6 +74,8 @@ pub(crate) struct PersistenceServices {
 #[derive(Clone)]
 pub(crate) struct CollaborationServices {
     pub(crate) background_tasks: BackgroundTaskManager,
+    /// What tools left for each agent's next round (`crate::agent::Deferred`).
+    pub(crate) deferred: crate::agent::DeferredQueue,
     pub(crate) team: TeamManager,
     pub(crate) teammate_host: TeammateHost,
 }

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.32.0
+
+No breaking changes.
+
+### A tool can leave something for the next round
+
+- `ToolContext::deferred` (and `ParallelToolContext::deferred`) hands a tool
+  a `Deferred` handle — `Clone + Send + 'static` — that reaches its agent
+  after the call has returned. What it pushes is applied at the agent's next
+  round boundary, before the model is asked again: a `DeferredItem::Context`
+  message as canonical context, a `DelegationResult` with its artifact and
+  edge as the `task` intrinsic records one, and a `SubagentFinished` that
+  settles a registered child and announces it on the parent's stream. This
+  is `background_run`'s notification path, generalized for anything a tool
+  starts and does not wait for.
+- A run does not return on an answer the model has not seen: an item that
+  lands after the model's last message runs one more round, under the run's
+  own bounds. A background command's notification still waits for the next
+  run, as before.
+
 ## 0.31.0
 
 Breaking: `ToolOutput` gains a public `images` field, so a struct literal

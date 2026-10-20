@@ -110,6 +110,16 @@ impl ToolContext<'_> {
         self.run_options.child()
     }
 
+    /// A handle that reaches this agent after this call has returned: what
+    /// a tool carries into work it starts and does not wait for, so the
+    /// result still reaches the model — see [`crate::agent::Deferred`].
+    pub fn deferred(&self) -> crate::agent::Deferred {
+        crate::agent::Deferred::new(
+            self.runtime.collaboration.deferred.clone(),
+            self.agent_id.clone(),
+        )
+    }
+
     /// Emit a progress event for the currently executing tool.
     pub fn emit_progress(&self, progress: String) {
         self.event_tx
@@ -726,6 +736,14 @@ impl ParallelToolContext {
     /// none of the parent run's cancellation, stop, or deadline.
     pub fn child_run_options(&self) -> crate::runtime::RunOptions {
         self.run_options.child()
+    }
+
+    /// The parallel-lane counterpart of [`ToolContext::deferred`].
+    pub fn deferred(&self) -> crate::agent::Deferred {
+        crate::agent::Deferred::new(
+            self.runtime.collaboration.deferred.clone(),
+            self.agent_id.clone(),
+        )
     }
 }
 

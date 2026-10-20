@@ -1,5 +1,6 @@
 mod compact;
 mod config;
+mod deferred;
 mod events;
 mod lifecycle;
 mod pending;
@@ -48,6 +49,8 @@ pub use config::{
     TaskConfig, TeamAutonomyConfig, TeamConfig, ToolProfile, ToolResultPagingConfig,
     WorkspaceConfig,
 };
+pub(crate) use deferred::DeferredQueue;
+pub use deferred::{Deferred, DeferredItem};
 pub use events::{
     AgentEvent, AgentSnapshot, AgentStatus, CompactionDetails, CompactionTrigger, ElidedToolResult,
     PendingToolUseSummary, RequestToolResultElision, RequestToolResultElisionPolicy,

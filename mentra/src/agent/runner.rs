@@ -180,11 +180,26 @@ impl<'a> TurnRunner<'a> {
                             self.agent.persist_agent_record()?;
                             continue;
                         }
-                        RoundFlow::Continue | RoundFlow::Stop => {
+                        RoundFlow::Stop => {
                             self.agent.note_round_without_task();
                             return Ok(());
                         }
+                        RoundFlow::Continue => {}
                     }
+                }
+                // Something a tool started has answered since the model last
+                // looked (`Agent::apply_deferred`): a run does not return on
+                // an answer the model has not seen. Applied by the next
+                // `stream_turn`, like a background command's notification;
+                // unlike one, it does not wait for the next run.
+                if self.agent.has_deferred() {
+                    if !self.next_request_is_available(rounds)? {
+                        self.agent.note_round_without_task();
+                        return Ok(());
+                    }
+                    self.agent.note_round_without_task();
+                    self.agent.persist_agent_record()?;
+                    continue;
                 }
                 self.agent.note_round_without_task();
                 return Ok(());
@@ -490,6 +505,7 @@ impl<'a> TurnRunner<'a> {
         }
         self.agent.inject_team_inbox()?;
         self.agent.inject_background_notifications()?;
+        self.agent.apply_deferred()?;
         self.agent.set_status(AgentStatus::AwaitingModel);
         self.agent.refresh_tasks_from_disk()?;
         // The compaction about to happen is part of this turn, so it runs
