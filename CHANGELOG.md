@@ -14,7 +14,8 @@ No breaking changes.
   edge as the `task` intrinsic records one, and a `SubagentFinished` that
   settles a registered child and announces it on the parent's stream. This
   is `background_run`'s notification path, generalized for anything a tool
-  starts and does not wait for.
+  starts and does not wait for. `Runtime::deferred(agent_id)` hands out the
+  same handle from outside a tool call.
 - A run does not return on an answer the model has not seen: an item that
   lands after the model's last message runs one more round, under the run's
   own bounds. A background command's notification still waits for the next

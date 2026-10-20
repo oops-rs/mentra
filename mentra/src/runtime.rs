@@ -661,6 +661,14 @@ impl Runtime {
         TaskBoard::lead(self.handle.clone(), namespace.as_ref().to_path_buf())
     }
 
+    /// A handle that leaves something for the agent `agent_id` to find at
+    /// its next round, from outside any tool call — a host delivering an
+    /// event to a running agent, a test standing in for a tool. See
+    /// [`Deferred`](crate::agent::Deferred).
+    pub fn deferred(&self, agent_id: impl Into<String>) -> crate::agent::Deferred {
+        crate::agent::Deferred::new(self.handle.collaboration.deferred.clone(), agent_id.into())
+    }
+
     /// Spawns a new agent with the default [`AgentConfig`].
     pub fn spawn(&self, name: impl Into<String>, model: ModelInfo) -> Result<Agent, RuntimeError> {
         self.spawn_with_config(name, model, AgentConfig::default())
