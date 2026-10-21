@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+Breaking: `RunOptions` gains a public `locals` field, so a struct literal
+without `..RunOptions::default()` needs it.
+
+### A run can carry who it works for
+
+- `RunLocals` is a typed, copy-on-write map of values a host attaches to one
+  run — `RunOptions::with_locals`, or the `locals` field — and a tool reads
+  back with `ToolContext::run_local::<T>()` (and
+  `ParallelToolContext::run_local`). It is the per-run sibling of
+  `app_context`: one runtime and one toolset can serve many callers, each
+  run's tools seeing that run's caller, without a toolset per caller or a
+  side table keyed by agent id.
+- `RunOptions::child` carries it, so a delegated run's tools — the `task`
+  intrinsic's included — read what the delegating run's tools read.
+
 ## 0.32.0
 
 No breaking changes.

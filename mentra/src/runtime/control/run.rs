@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::runtime::error::RuntimeError;
 
+use super::RunLocals;
+
 const DEFAULT_PROVIDER_RETRY_BUDGET: usize = 5;
 const DEFAULT_PROVIDER_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 const DEFAULT_PROVIDER_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
@@ -273,6 +275,11 @@ pub struct RunOptions {
     /// `RunOptions { .., ..RunOptions::default() }` construction keeps working;
     /// leave it at its default (a fresh, empty slot).
     pub early_end: Arc<OnceLock<EarlyEnd>>,
+    /// Values the host attaches to this run, read by the tools it calls
+    /// through [`ToolContext::run_local`](crate::tool::ToolContext::run_local).
+    /// Empty by default. Inherited by [`child`](Self::child) runs; see
+    /// [`RunLocals`] for why.
+    pub locals: RunLocals,
 }
 
 impl Default for RunOptions {
@@ -289,6 +296,7 @@ impl Default for RunOptions {
             token_budget: None,
             token_usage: Arc::new(AtomicU64::new(0)),
             early_end: Arc::new(OnceLock::new()),
+            locals: RunLocals::default(),
         }
     }
 }
@@ -306,6 +314,12 @@ impl RunOptions {
     /// attempts this schedule spaces, alone.
     pub fn with_provider_retry(mut self, provider_retry: ProviderRetry) -> Self {
         self.provider_retry = provider_retry;
+        self
+    }
+
+    /// Sets the values this run's tools read, returning the updated value.
+    pub fn with_locals(mut self, locals: RunLocals) -> Self {
+        self.locals = locals;
         self
     }
 
@@ -329,6 +343,10 @@ impl RunOptions {
     /// above they aggregate nothing: a child's retries are its own, and being
     /// patient costs the parent none of them. `deadline` and `cancellation`,
     /// which do carry, remain the bound on how long all that patience may take.
+    ///
+    /// [`locals`](Self::locals) carry as well: they say who the run works
+    /// for, and a delegated run works for the same caller, so a tool the child
+    /// calls must read what the parent's tools read.
     ///
     /// The rest (`tool_budget`, `model_budget`, `round_strategy`) resets to
     /// [`RunOptions::default`]: those express per-run policy a child sets
@@ -361,6 +379,7 @@ impl RunOptions {
             token_usage: Arc::clone(&self.token_usage),
             retry_budget: self.retry_budget,
             provider_retry: self.provider_retry,
+            locals: self.locals.clone(),
             ..RunOptions::default()
         }
     }
@@ -441,6 +460,20 @@ impl RunOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_run_carries_its_parents_locals() {
+        #[derive(Debug, PartialEq)]
+        struct Caller(&'static str);
+        let parent = RunOptions::default().with_locals(RunLocals::new().with(Caller("nous")));
+
+        let child = parent.child();
+
+        assert_eq!(
+            child.locals.get::<Caller>().as_deref(),
+            Some(&Caller("nous"))
+        );
+    }
 
     /// What the runner waited before each retry before this type existed:
     /// 500 ms doubling to a 5 s ceiling. Pinned so a future edit to the

@@ -205,6 +205,17 @@ impl ToolContext<'_> {
         self.runtime.app_context::<T>()
     }
 
+    /// The value of type `T` the host attached to the run this call is a
+    /// step of, through [`RunOptions::locals`](crate::runtime::RunOptions::locals);
+    /// `None` when it attached none. See [`RunLocals`](crate::runtime::RunLocals)
+    /// for how this differs from [`app_context`](Self::app_context).
+    pub fn run_local<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.run_options.locals.get::<T>()
+    }
+
     /// Runs one command on the local executor.
     pub async fn execute_shell_command(
         &self,
@@ -626,6 +637,14 @@ impl ParallelToolContext {
         T: Any + Send + Sync + 'static,
     {
         self.runtime.app_context::<T>()
+    }
+
+    /// The parallel-lane counterpart of [`ToolContext::run_local`].
+    pub fn run_local<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.run_options.locals.get::<T>()
     }
 
     /// Runs one command on the local executor.

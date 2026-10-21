@@ -11,8 +11,8 @@ use crate::{
     BuiltinProvider, ContentBlock, Role,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderError, ProviderEvent, TokenUsage},
     runtime::{
-        RunOptions, Runtime, RuntimeHook, RuntimeHookEvent, RuntimePolicy, ShellValidationMode,
-        is_transient_runtime_error,
+        RunLocals, RunOptions, Runtime, RuntimeHook, RuntimeHookEvent, RuntimePolicy,
+        ShellValidationMode, is_transient_runtime_error,
     },
     tool::{
         ToolAuthorizationDecision, ToolAuthorizationOutcome, ToolAuthorizationRequest,
@@ -607,6 +607,59 @@ async fn tools_can_read_registered_app_context() {
 }
 
 #[tokio::test]
+async fn tools_read_the_locals_of_the_run_they_are_called_in() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(
+        BuiltinProvider::Anthropic,
+        vec![model.clone()],
+        vec![
+            tool_use_stream(&model.id, "tool-run-1", "run_local_tool", r#"{}"#),
+            text_stream("done"),
+            tool_use_stream(&model.id, "tool-run-2", "run_local_tool", r#"{}"#),
+            text_stream("done"),
+        ],
+    );
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .with_tool(RunLocalTool)
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime.spawn("agent", model).unwrap();
+
+    agent
+        .run(
+            vec![ContentBlock::Text {
+                text: "for the first caller".to_string(),
+            }],
+            RunOptions::default().with_locals(RunLocals::new().with(TestRunWorkspace("ws-first"))),
+        )
+        .await
+        .expect("first run");
+    // One agent, one toolset: what the second run's tool reads is the second
+    // run's, and a run with nothing attached reads nothing.
+    agent
+        .run(
+            vec![ContentBlock::Text {
+                text: "for nobody".to_string(),
+            }],
+            RunOptions::default(),
+        )
+        .await
+        .expect("second run");
+
+    let results: Vec<String> = agent
+        .history()
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.to_display_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["ws-first".to_string(), "none".to_string()]);
+}
+
+#[tokio::test]
 async fn tool_execution_timeout_returns_tool_error() {
     let model = model_info("model", BuiltinProvider::Anthropic);
     let provider = ScriptedProvider::new(
@@ -808,6 +861,34 @@ impl ToolDefinition for AppContextTool {
 impl ToolExecutor for AppContextTool {
     async fn execute_mut(&self, ctx: ToolContext<'_>, _input: Value) -> ToolResult {
         Ok(ctx.app_context::<TestAppState>()?.label.to_string())
+    }
+}
+
+#[derive(Debug)]
+struct TestRunWorkspace(&'static str);
+
+struct RunLocalTool;
+
+#[async_trait]
+impl ToolDefinition for RunLocalTool {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("run_local_tool")
+            .description("Return a value from the run's context.")
+            .input_schema(json!({
+                "type": "object",
+                "properties": {}
+            }))
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for RunLocalTool {
+    async fn execute_mut(&self, ctx: ToolContext<'_>, _input: Value) -> ToolResult {
+        Ok(ctx
+            .run_local::<TestRunWorkspace>()
+            .map_or("none", |workspace| workspace.0)
+            .to_string())
     }
 }
 

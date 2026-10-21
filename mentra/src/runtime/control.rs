@@ -3,6 +3,7 @@ mod execution_hooks;
 mod hooks;
 mod policy;
 mod run;
+mod run_locals;
 /// Container and sandbox environment detection.
 pub mod sandbox;
 
@@ -24,3 +25,4 @@ pub use hooks::{
 pub(crate) use policy::ShellValidation;
 pub use policy::{RuntimePolicy, ShellValidationMode, normalize_policy_root};
 pub use run::{CancellationToken, EarlyEnd, ProviderRetry, RunOptions};
+pub use run_locals::RunLocals;
