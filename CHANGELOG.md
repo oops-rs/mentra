@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.33.0
 
 Breaking: `RunOptions` gains a public `locals` field, so a struct literal
 without `..RunOptions::default()` needs it.
