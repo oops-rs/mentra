@@ -33,7 +33,7 @@ impl ToolProgress {
     /// event immediately, without waiting for a model round boundary.
     ///
     /// Event taps run synchronously on the emitting thread, with the same
-    /// restrictions as [`SessionHandle::register_agent_event_tap`](crate::SessionHandle::register_agent_event_tap).
+    /// restrictions as [`Session::register_agent_event_tap`](crate::Session::register_agent_event_tap).
     pub fn emit(&self, progress: impl Into<String>) {
         self.events.send(AgentEvent::ToolExecutionProgress {
             id: self.tool_call_id.clone(),
