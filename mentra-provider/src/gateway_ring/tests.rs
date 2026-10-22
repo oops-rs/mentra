@@ -537,3 +537,47 @@ fn classification_sorts_errors_by_whose_fault_they_are() {
         FailureKind::NotTheMembersFault
     );
 }
+
+#[test]
+fn every_event_reads_as_one_line_naming_its_members() {
+    let member = |index: usize, label: &str| GatewayMemberRef {
+        index,
+        label: label.to_string(),
+    };
+    let lines = [
+        GatewayRingEvent::MemberFailed {
+            member: member(0, "http://a/"),
+            kind: FailureKind::Counted,
+            consecutive_failures: 2,
+            error: "503".to_string(),
+        },
+        GatewayRingEvent::Rotated {
+            from: member(0, "http://a/"),
+            to: member(1, "http://b/"),
+            after_failures: 5,
+        },
+        GatewayRingEvent::Rotated {
+            from: member(0, "http://a/"),
+            to: member(1, "http://b/"),
+            after_failures: 0,
+        },
+        GatewayRingEvent::Returned {
+            member: member(0, "http://a/"),
+        },
+        GatewayRingEvent::Recovered {
+            member: member(0, "http://a/"),
+        },
+    ]
+    .map(|event| event.to_string());
+
+    assert_eq!(
+        lines,
+        [
+            "gateway #0 (http://a/) failed (counted; streak 2): 503",
+            "gateway ring rotated from #0 (http://a/) to #1 (http://b/) after 5 consecutive failures",
+            "gateway ring rotated from #0 (http://a/) to #1 (http://b/) at once",
+            "gateway ring returned to #0 (http://a/) on probation",
+            "gateway ring settled on #0 (http://a/)",
+        ]
+    );
+}

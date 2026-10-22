@@ -124,6 +124,57 @@ pub enum GatewayRingEvent {
     Recovered { member: GatewayMemberRef },
 }
 
+/// `#0 (http://gateway/)` — the position first, because two members can share
+/// a label and the position is what the configuration that built the ring
+/// says.
+impl fmt::Display for GatewayMemberRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{} ({})", self.index, self.label)
+    }
+}
+
+/// One line per event, so a host's observer can be `|event| log("{event}")`
+/// rather than a `match` every host writes again.
+impl fmt::Display for GatewayRingEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MemberFailed {
+                member,
+                kind,
+                consecutive_failures,
+                error,
+            } => {
+                let counted = match kind {
+                    FailureKind::Counted => "counted",
+                    FailureKind::Immediate => "rotates at once",
+                    FailureKind::NotTheMembersFault => "not counted: the request's own fault",
+                };
+                write!(
+                    f,
+                    "gateway {member} failed ({counted}; streak {consecutive_failures}): {error}"
+                )
+            }
+            Self::Rotated {
+                from,
+                to,
+                after_failures: 0,
+            } => write!(f, "gateway ring rotated from {from} to {to} at once"),
+            Self::Rotated {
+                from,
+                to,
+                after_failures,
+            } => write!(
+                f,
+                "gateway ring rotated from {from} to {to} after {after_failures} consecutive failures"
+            ),
+            Self::Returned { member } => {
+                write!(f, "gateway ring returned to {member} on probation")
+            }
+            Self::Recovered { member } => write!(f, "gateway ring settled on {member}"),
+        }
+    }
+}
+
 type Observer = Arc<dyn Fn(GatewayRingEvent) + Send + Sync>;
 
 struct Member {
