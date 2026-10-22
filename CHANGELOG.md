@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+No breaking changes.
+
+### A ring that is easy to log and easy to mix
+
+- `GatewayRingEvent` and `GatewayMemberRef` implement `Display`: one line per
+  event, naming each member by its position and label, so an observer is
+  `|event| log("{event}")` rather than a `match` every host writes again.
+- `StripModelPrefix` wraps a provider so a namespaced catalog id
+  (`openai/gpt-5.6-sol`) reaches it bare (`gpt-5.6-sol`) — a relay in front
+  of one vendor beside a unified gateway in the same ring. Only the id is
+  touched, on every request shape that carries one and through fresh scopes;
+  an id without the prefix passes through for the relay to judge.
+
 ## 0.33.0
 
 Breaking: `RunOptions` gains a public `locals` field, so a struct literal
