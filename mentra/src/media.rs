@@ -3,7 +3,7 @@
 //! A file crossing a boundary — shown to a model, sent to another agent,
 //! saved from one — needs a media type, and the bytes are a better witness
 //! than the name: a screenshot saved as `shot` is still a PNG. So
-//! [`media_type`] asks the bytes first, the name's extension second, and
+//! [`media_type`](crate::media::media_type) asks the bytes first, the name's extension second, and
 //! calls UTF-8 text `text/plain` before giving up on `application/octet-stream`.
 
 use std::path::Path;

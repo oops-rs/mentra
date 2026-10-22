@@ -120,7 +120,21 @@ impl ToolContext<'_> {
         )
     }
 
+    /// An owned handle for reporting progress after this tool call returns.
+    ///
+    /// Carry this into background work alongside [`Self::deferred`]: progress
+    /// reaches the parent's observers immediately, while deferred results
+    /// reach the model at its next round boundary.
+    pub fn progress(&self) -> super::ToolProgress {
+        super::ToolProgress::new(
+            self.event_tx.clone(),
+            self.tool_call_id.clone(),
+            self.tool_name.clone(),
+        )
+    }
+
     /// Emit a progress event for the currently executing tool.
+    /// Use [`Self::progress`] for work that outlives this context.
     pub fn emit_progress(&self, progress: String) {
         self.event_tx
             .send(crate::agent::AgentEvent::ToolExecutionProgress {
@@ -559,7 +573,17 @@ impl ParallelToolContext {
         self.working_directory.as_path()
     }
 
+    /// The parallel-lane counterpart of [`ToolContext::progress`].
+    pub fn progress(&self) -> super::ToolProgress {
+        super::ToolProgress::new(
+            self.event_tx.clone(),
+            self.tool_call_id.clone(),
+            self.tool_name.clone(),
+        )
+    }
+
     /// Emit a progress event for the currently executing tool.
+    /// Use [`Self::progress`] for work that outlives this context.
     pub fn emit_progress(&self, progress: String) {
         self.event_tx
             .send(crate::agent::AgentEvent::ToolExecutionProgress {
