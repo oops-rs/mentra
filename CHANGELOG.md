@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.34.0
 
-No breaking changes.
+No breaking changes. mentra-provider 0.9.5.
 
 ### A ring that is easy to log and easy to mix
 
