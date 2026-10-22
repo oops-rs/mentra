@@ -1092,19 +1092,21 @@ async fn bounds_the_initialized_notification_post() {
     let server = SseTestServer::start();
     let mut config = config(&server);
     config.limits = McpSseLimits {
-        // This deadline covers the initialize request, response processing,
-        // and the initialized notification POST. Leave enough scheduling
-        // margin for the highly parallel full suite while keeping the stalled
-        // POST itself firmly bounded.
+        // Allow scheduling margin for the highly parallel full suite while
+        // keeping the stalled notification POST firmly bounded.
         initialize_timeout: std::time::Duration::from_secs(2),
         ..McpSseLimits::default()
     };
     let connecting = tokio::spawn(async move { McpSseClient::connect(&config).await });
 
     server.wait_for_stream();
+    // Script both replies before either POST arrives: wait_for_posts observes
+    // the request before the fixture selects its response, so queuing the stall
+    // after that signal could accidentally stall initialize instead.
+    server.queue_post_reply(PostReply::Accepted);
+    server.queue_post_reply(PostReply::StallBeforeHeaders);
     server.send_endpoint("/messages/?session_id=abc");
     server.wait_for_posts(1);
-    server.queue_post_reply(PostReply::StallBeforeHeaders);
     server.send_message(&initialize_result(1));
     server.wait_for_posts(2);
 
