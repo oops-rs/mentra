@@ -25,3 +25,4 @@ mod terminal_output;
 mod tool_audience;
 mod tool_output;
 mod tool_paging;
+mod tool_progress;
