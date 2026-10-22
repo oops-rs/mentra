@@ -519,6 +519,8 @@ Internally, Mentra translates `ToolSpec` into a runtime-only `RuntimeToolDescrip
 
 When a tool needs disposable delegated work, `ParallelToolContext::spawn_subagent()` can create a child agent that inherits the current runtime and model defaults. See the `subagent_tool` example in the workspace examples crate for a complete usage pattern.
 
+For work that outlives its tool call, take `ctx.progress()` and `ctx.deferred()` before returning. Both `ToolContext` and `ParallelToolContext` expose these owned, cloneable handles. Call `progress.emit("halfway")` from the background task to send `AgentEvent::ToolExecutionProgress` immediately to the parent's event stream and synchronous event taps, retaining the original tool call's id and name. Progress is transient: it does not enter model context, wait for a round boundary, or keep the run alive. Deliver the completed answer with `deferred.push(DeferredItem::Context(answer))`; the runner applies deferred results before its next model request. The tool controls its background task's lifetime and cancellation.
+
 Override `ToolExecutor::authorization_preview(...)` when your custom tool needs to expose structured metadata to the installed `ToolAuthorizer`. The default preview includes the resolved working directory, tool capabilities, side-effect level, durability, the raw JSON input, and the same JSON as `structured_input`.
 
 ## Audience-Scoped Tools

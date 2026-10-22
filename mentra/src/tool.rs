@@ -10,6 +10,7 @@ pub(crate) mod internal;
 mod model;
 mod orchestrator;
 pub(crate) mod paging;
+mod progress;
 mod runtime;
 pub(crate) mod schema;
 mod truncation;
@@ -36,6 +37,7 @@ pub use model::{
     ExecutableTool, ParallelToolContext, ToolCall, ToolContext, ToolDefinition, ToolExecutor,
     ToolOutput, ToolResult, ToolSpec,
 };
+pub use progress::ToolProgress;
 pub(crate) use runtime::ToolRuntime;
 
 pub(crate) use builtin::ReadToolResultTool;

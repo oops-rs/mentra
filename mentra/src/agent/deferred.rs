@@ -33,6 +33,11 @@
 //!
 //! Items live in memory on the runtime, keyed by agent. They do not survive
 //! the process, and need not: nothing that pushes them does either.
+//!
+//! For progress while background work runs, carry a
+//! [`ToolProgress`](crate::tool::ToolProgress) from the tool context alongside
+//! this handle. Progress reaches the parent's observers immediately and does
+//! not add context or cause another model round.
 
 use std::{
     collections::HashMap,
