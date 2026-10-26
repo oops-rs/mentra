@@ -1,5 +1,14 @@
 # Changelog
 
+## mentra-provider 0.9.6 — 2026-10-27
+
+- Require Tokio 1.53.3 and zstd 0.14.3 or newer to exclude the affected
+  AsyncFd and compression implementations reported in [#70](https://github.com/oops-rs/mentra/issues/70).
+- No provider API, feature, or runtime implementation changes. Mentra 0.34.0's
+  existing provider requirement accepts this patch; no Mentra runtime release
+  is needed. Applications with lockfiles must update their resolved provider
+  and transitive dependencies to receive the fixes.
+
 ## 0.34.0
 
 No breaking changes. mentra-provider 0.9.5.
