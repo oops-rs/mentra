@@ -1,12 +1,27 @@
 # Changelog
 
+## 0.34.1 — 2026-10-27
+
+No breaking changes. mentra-provider 0.9.6.
+
+- Shell scheduling reads its fixed exclusive execution category directly,
+  avoiding reconstruction of the tool's JSON schema on each category lookup.
+  Approval previews, command execution, and scheduling classification are
+  unchanged.
+- `ToolContext::progress` and `ParallelToolContext::progress` return an owned
+  `ToolProgress` handle for work that outlives its tool call ([#67](https://github.com/oops-rs/mentra/issues/67)).
+  Updates reach the parent's event stream and synchronous taps immediately,
+  retaining the tool call's identity. They remain transient: they do not add
+  model context, cause another round, or keep a run alive.
+- Require the patched provider 0.9.6 and Tokio 1.53.3 dependency floors.
+
 ## mentra-provider 0.9.6 — 2026-10-27
 
 - Require Tokio 1.53.3 and zstd 0.14.3 or newer to exclude the affected
   AsyncFd and compression implementations reported in [#70](https://github.com/oops-rs/mentra/issues/70).
 - No provider API, feature, or runtime implementation changes. Mentra 0.34.0's
-  existing provider requirement accepts this patch; no Mentra runtime release
-  is needed. Applications with lockfiles must update their resolved provider
+  existing provider requirement also accepts this patch. Applications with
+  lockfiles must update their resolved provider
   and transitive dependencies to receive the fixes.
 
 ## 0.34.0

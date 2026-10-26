@@ -1,6 +1,6 @@
 [package]
 name = "mentra"
-version = "0.34.0"
+version = "0.34.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "An agent runtime for tool-using LLM applications"
@@ -39,8 +39,8 @@ a2a = ["dep:a2a_lf"]
 test-utils = []
 
 [dependencies]
-mentra-provider = { version = "0.9.5", path = "../mentra-provider", default-features = false }
-tokio = { version = "1.50.0", features = ["full"] }
+mentra-provider = { version = "0.9.6", path = "../mentra-provider", default-features = false }
+tokio = { version = "1.53.3", features = ["full"] }
 reqwest = { version = "0.12.23", default-features = false, features = [
     "json",
     "rustls-tls",
