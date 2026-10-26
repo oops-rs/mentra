@@ -237,6 +237,11 @@ impl ToolDefinition for ShellTool {
 
 #[async_trait]
 impl ToolExecutor for ShellTool {
+    // Scheduling asks on every invocation; it needs no freshly built JSON schema.
+    fn execution_category(&self, _input: &Value) -> ToolExecutionCategory {
+        ToolExecutionCategory::ExclusiveLocalMutation
+    }
+
     fn authorization_preview(
         &self,
         ctx: &ParallelToolContext,
@@ -268,5 +273,25 @@ impl ToolExecutor for BackgroundRunTool {
 
     async fn execute_mut(&self, ctx: ToolContext<'_>, input: Value) -> ToolResult {
         execute_background_command(&ctx, input).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_scheduling_category_matches_its_descriptor() {
+        let shell: &dyn ToolExecutor = &ShellTool;
+        let declared = shell.descriptor().execution_category;
+        assert_eq!(declared, ToolExecutionCategory::ExclusiveLocalMutation);
+
+        for input in [
+            Value::Null,
+            json!({ "command": "pwd" }),
+            json!({ "command": "touch output.txt", "workingDirectory": "/tmp" }),
+        ] {
+            assert_eq!(shell.execution_category(&input), declared);
+        }
     }
 }
