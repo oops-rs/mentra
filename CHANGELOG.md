@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.34.3 — 2026-10-28
+
+No breaking changes. mentra-provider 0.9.8.
+
+- `mentra::provider::RequestFields` re-exports the provider type for hosts
+  that build their own OpenAI-wire provider with request fields.
+- Require mentra-provider 0.9.8.
+
+## mentra-provider 0.9.8 — 2026-10-28
+
+- `ChatCompletionsProvider::with_request_fields` and
+  `ResponsesProvider::with_request_fields` add host-chosen top-level fields
+  to every request body, over HTTP and as a websocket `response.create`: a
+  parameter a gateway or vendor takes that mentra does not model, such as
+  LiteLLM's `extra_body`. Embedding requests are unaffected.
+- Fields only add. A request on which mentra already set one of them fails
+  with `ProviderError::InvalidRequest` naming the field, before anything is
+  sent, rather than either value silently winning.
+- No breaking changes.
+
 ## 0.34.2 — 2026-10-28
 
 No breaking changes. mentra-provider 0.9.7.
