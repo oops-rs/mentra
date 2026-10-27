@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.34.2 — 2026-10-28
+
+No breaking changes. mentra-provider 0.9.7.
+
+- The split coding tools (`read`, `write`, `edit`) declare plain object
+  parameter schemas with no root `anyOf`/`oneOf`. Gemini and xAI refuse a
+  whole request whose tool parameters are a root union, so any run that
+  offered these tools failed on them, even a plain question. The
+  `path`/`file_path` and `edits`/`old_string`+`new_string` alternatives are
+  now stated in property descriptions; the input parser still enforces them.
+  A test keeps every built-in tool schema a plain object at the root.
+- Require mentra-provider 0.9.7, which tolerates Responses reasoning events
+  without `summary_index` (LiteLLM's Gemini bridge).
+
 ## mentra-provider 0.9.7 — 2026-10-28
 
 - The Responses stream parser accepts reasoning summary and reasoning text
