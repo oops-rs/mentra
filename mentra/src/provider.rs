@@ -43,6 +43,7 @@ pub use mentra_provider::ReasoningFormat;
 pub use mentra_provider::ReasoningOptions;
 pub use mentra_provider::ReasoningProvenance;
 pub use mentra_provider::Request;
+pub use mentra_provider::RequestFields;
 pub use mentra_provider::Response;
 pub use mentra_provider::ResponsesRequestOptions;
 pub use mentra_provider::ResponsesStateMode;

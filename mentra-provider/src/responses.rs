@@ -22,6 +22,7 @@ use crate::ProviderCapabilities;
 use crate::ProviderDefinition;
 use crate::ProviderError;
 use crate::ProviderSessionScope;
+use crate::RequestFields;
 use crate::StaticCredentialSource;
 use crate::WireApi;
 use crate::embedding::EmbeddingModelInfo;
@@ -72,6 +73,7 @@ pub struct ResponsesProvider<C> {
     session_state: Arc<ResponsesSessionState>,
     endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
     hybrid_http_previous_response_id: bool,
+    request_fields: Arc<RequestFields>,
 }
 
 impl<C> ResponsesProvider<C>
@@ -103,6 +105,7 @@ where
             session_state: Arc::new(ResponsesSessionState::default()),
             endpoint_capabilities: Arc::new(ResponsesEndpointCapabilities::default()),
             hybrid_http_previous_response_id: true,
+            request_fields: Arc::new(RequestFields::new()),
         }
     }
 
@@ -123,6 +126,19 @@ where
         self
     }
 
+    /// Adds `fields` at the top level of every Responses request body this
+    /// provider sends, over HTTP or as a websocket `response.create`, such as
+    /// LiteLLM's `extra_body`.
+    ///
+    /// Fields only add: a request on which mentra already set one of them
+    /// fails with [`ProviderError::InvalidRequest`] naming it, rather than
+    /// either value silently winning. See [`RequestFields`]. Embedding
+    /// requests are not affected.
+    pub fn with_request_fields(mut self, fields: RequestFields) -> Self {
+        self.request_fields = Arc::new(fields);
+        self
+    }
+
     /// Returns the same configured provider with an independent session scope.
     ///
     /// The provider definition, credential source, HTTP client and its connection pool, and
@@ -138,6 +154,7 @@ where
             session_state: Arc::new(ResponsesSessionState::default()),
             endpoint_capabilities: Arc::clone(&self.endpoint_capabilities),
             hybrid_http_previous_response_id: self.hybrid_http_previous_response_id,
+            request_fields: Arc::clone(&self.request_fields),
         }
     }
 
@@ -166,6 +183,7 @@ where
             )),
             endpoint_capabilities: Arc::clone(&self.endpoint_capabilities),
             hybrid_http_previous_response_id: self.hybrid_http_previous_response_id,
+            request_fields: Arc::clone(&self.request_fields),
         }
     }
 
@@ -177,6 +195,7 @@ where
             Arc::clone(&self.session_state),
             Arc::clone(&self.endpoint_capabilities),
             self.hybrid_http_previous_response_id,
+            Arc::clone(&self.request_fields),
         )
     }
 

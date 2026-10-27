@@ -27,8 +27,10 @@ use crate::ProviderId;
 use crate::ProviderSession;
 use crate::ProviderSessionScope;
 use crate::Request;
+use crate::RequestFields;
 use crate::StaticCredentialSource;
 use crate::WireApi;
+use crate::request_fields::body_with_request_fields;
 
 use model::{ChatCompletionsRequest, ChatModelsPage};
 
@@ -79,6 +81,7 @@ pub struct ChatCompletionsProvider<C = StaticCredentialSource> {
     client: reqwest::Client,
     credential_source: Arc<C>,
     definition: ProviderDefinition,
+    request_fields: Arc<RequestFields>,
 }
 
 impl<C> Clone for ChatCompletionsProvider<C> {
@@ -87,6 +90,7 @@ impl<C> Clone for ChatCompletionsProvider<C> {
             client: self.client.clone(),
             credential_source: Arc::clone(&self.credential_source),
             definition: self.definition.clone(),
+            request_fields: Arc::clone(&self.request_fields),
         }
     }
 }
@@ -115,6 +119,7 @@ where
             client,
             credential_source,
             definition,
+            request_fields: Arc::new(RequestFields::new()),
         }
     }
 
@@ -122,12 +127,26 @@ where
         &self.definition
     }
 
+    /// Adds `fields` at the top level of every request body this provider
+    /// sends, such as LiteLLM's `extra_body`.
+    ///
+    /// Fields only add: a request on which mentra already set one of them
+    /// fails with [`ProviderError::InvalidRequest`] naming it, rather than
+    /// either value silently winning. See [`RequestFields`].
+    pub fn with_request_fields(mut self, fields: RequestFields) -> Self {
+        self.request_fields = Arc::new(fields);
+        self
+    }
+
     async fn send_completion(
         &self,
         request: Request<'_>,
         stream: bool,
     ) -> Result<reqwest::Response, ProviderError> {
-        let body = ChatCompletionsRequest::from_request(request, stream)?;
+        let body = body_with_request_fields(
+            &ChatCompletionsRequest::from_request(request, stream)?,
+            &self.request_fields,
+        )?;
         let credentials = self.credential_source.credentials().await?;
         let response = self
             .client
@@ -328,5 +347,69 @@ mod tests {
             "{request}"
         );
         assert!(request.contains("\"stream\":true"), "{request}");
+    }
+
+    fn ping_request() -> Request<'static> {
+        Request {
+            model: Cow::Borrowed("a-model"),
+            system: None,
+            messages: Cow::Owned(vec![Message::user(ContentBlock::text("ping"))]),
+            tools: Cow::Owned(vec![]),
+            tool_choice: Some(ToolChoice::Auto),
+            temperature: None,
+            max_output_tokens: Some(64),
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_fields_reach_the_wire_beside_what_mentra_sets() {
+        let (base_url, server) = spawn_sse_server(concat!(
+            "data: {\"id\":\"chatcmpl-9\",\"model\":\"served\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"pong\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ));
+        let fields = serde_json::json!({"extra_body": {"thinking": {"type": "disabled"}}});
+        let provider = ChatCompletionsProvider::new(
+            definition("local", base_url),
+            StaticCredentialSource::new("test-key"),
+        )
+        .with_request_fields(fields.as_object().cloned().expect("an object"));
+
+        ProviderSession::send(&provider, ping_request())
+            .await
+            .expect("the turn completes");
+
+        let request = server.join().expect("server thread");
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).expect("a body"))
+                .expect("a JSON body");
+        assert_eq!(body["extra_body"], fields["extra_body"]);
+        assert_eq!(body["model"], "a-model");
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[tokio::test]
+    async fn a_request_field_mentra_also_set_fails_before_anything_is_sent() {
+        let provider = ChatCompletionsProvider::new(
+            // Nothing listens here: the request must fail before it is sent.
+            definition("local", "http://127.0.0.1:1"),
+            StaticCredentialSource::new("test-key"),
+        )
+        .with_request_fields(
+            serde_json::json!({"tool_choice": "none"})
+                .as_object()
+                .cloned()
+                .expect("an object"),
+        );
+
+        let error = match ProviderSession::stream(&provider, ping_request()).await {
+            Ok(_) => panic!("a colliding field must fail the request"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(&error, ProviderError::InvalidRequest(message) if message.contains("`tool_choice`")),
+            "{error:?}"
+        );
     }
 }

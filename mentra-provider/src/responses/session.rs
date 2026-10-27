@@ -26,10 +26,12 @@ use crate::ProviderSession;
 use crate::ReasoningFormat;
 use crate::ReasoningProvenance;
 use crate::Request;
+use crate::RequestFields;
 use crate::Response;
 use crate::ResponsesTransport;
 use crate::SessionRequestOptions;
 use crate::request::ResponsesRequestCompression;
+use crate::request_fields::body_with_request_fields;
 
 use super::SharedTurnState;
 use super::model::ResponsesModelsPage;
@@ -55,6 +57,7 @@ pub struct ResponsesSession<C> {
     state: Arc<ResponsesSessionState>,
     endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
     hybrid_http_previous_response_id: bool,
+    request_fields: Arc<RequestFields>,
 }
 
 #[derive(Default)]
@@ -255,6 +258,7 @@ where
         state: Arc<ResponsesSessionState>,
         endpoint_capabilities: Arc<ResponsesEndpointCapabilities>,
         hybrid_http_previous_response_id: bool,
+        request_fields: Arc<RequestFields>,
     ) -> Self {
         Self {
             definition,
@@ -263,6 +267,7 @@ where
             state,
             endpoint_capabilities,
             hybrid_http_previous_response_id,
+            request_fields,
         }
     }
 
@@ -735,7 +740,7 @@ where
                 .store_connection(connection);
         }
 
-        let response = serde_json::to_value(request).map_err(ProviderError::Serialize)?;
+        let response = body_with_request_fields(&request, &self.request_fields)?;
         self.stream_websocket_request_with_provenance(
             response_create_frame(response),
             reasoning_provenance,
@@ -786,14 +791,15 @@ where
             .headers(self.build_http_headers_for_session(credentials, Some(session))?)
             .header(reqwest::header::ACCEPT, "text/event-stream");
 
+        let request = body_with_request_fields(request, &self.request_fields)?;
         match compression {
             ResponsesRequestCompression::None => request_builder
-                .json(request)
+                .json(&request)
                 .send()
                 .await
                 .map_err(ProviderError::Transport),
             ResponsesRequestCompression::Zstd => {
-                let body = serde_json::to_vec(request).map_err(ProviderError::Serialize)?;
+                let body = serde_json::to_vec(&request).map_err(ProviderError::Serialize)?;
                 let compressed =
                     zstd::stream::encode_all(std::io::Cursor::new(body), 3).map_err(|error| {
                         ProviderError::InvalidRequest(format!(
@@ -1499,6 +1505,49 @@ mod tests {
                 redacted: false,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn request_fields_reach_the_responses_body() {
+        let sse_body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\",\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\",\"status\":\"completed\"}}\n\n"
+        );
+        let (base_url, handle) = spawn_single_response_server(sse_body);
+        let mut definition = super::super::openai_definition();
+        definition.base_url = Some(base_url);
+        let fields = serde_json::json!({"extra_body": {"thinking": {"type": "disabled"}}});
+        let session = ResponsesProvider::new(definition, StaticCredentialSource::new("test-key"))
+            .with_request_fields(fields.as_object().cloned().expect("an object"))
+            .fresh_session_scope()
+            .session();
+        let request = Request {
+            model: Cow::Borrowed("m"),
+            system: None,
+            messages: Cow::Owned(vec![crate::Message::user(crate::ContentBlock::text(
+                "hello",
+            ))]),
+            tools: Cow::Owned(Vec::new()),
+            tool_choice: None,
+            temperature: None,
+            max_output_tokens: None,
+            metadata: Cow::Owned(BTreeMap::new()),
+            provider_request_options: ProviderRequestOptions::default(),
+        };
+
+        consume_stream(
+            session
+                .stream_response(request)
+                .await
+                .expect("stream response should succeed"),
+        )
+        .await;
+
+        let captured = handle.join().expect("server should capture the request");
+        let payload: serde_json::Value =
+            serde_json::from_str(request_body(&captured)).expect("request body should be json");
+        assert_eq!(payload["extra_body"], fields["extra_body"]);
+        assert_eq!(payload["model"], "m");
     }
 
     #[tokio::test]
