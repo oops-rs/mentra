@@ -1,5 +1,13 @@
 # Changelog
 
+## mentra-provider 0.9.7 — 2026-10-28
+
+- The Responses stream parser accepts reasoning summary and reasoning text
+  events without `summary_index`/`content_index`, reading a missing index as
+  0. LiteLLM's Responses bridge omits them for Gemini, which failed the whole
+  stream with "missing field `summary_index`".
+- No provider API or feature changes.
+
 ## 0.34.1 — 2026-10-27
 
 No breaking changes. mentra-provider 0.9.6.
