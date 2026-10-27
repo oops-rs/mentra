@@ -455,6 +455,9 @@ fn find_frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
+/// Reasoning `summary_index`/`content_index` default to 0 when absent: LiteLLM's
+/// Responses bridge (Gemini behind it, for one) omits them, and a missing
+/// index on a delta must not fail the whole stream.
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum ResponsesStreamEvent {
@@ -477,6 +480,7 @@ enum ResponsesStreamEvent {
         #[serde(default)]
         output_index: Option<usize>,
         delta: String,
+        #[serde(default)]
         summary_index: i64,
     },
     #[serde(rename = "response.reasoning_text.delta")]
@@ -484,12 +488,14 @@ enum ResponsesStreamEvent {
         #[serde(default)]
         output_index: Option<usize>,
         delta: String,
+        #[serde(default)]
         content_index: i64,
     },
     #[serde(rename = "response.reasoning_summary_part.added")]
     ResponseReasoningSummaryPartAdded {
         #[serde(default, rename = "output_index")]
         _output_index: Option<usize>,
+        #[serde(default)]
         summary_index: i64,
     },
     #[serde(rename = "response.reasoning_summary_part.done")]
@@ -1058,6 +1064,49 @@ mod tests {
                     ("x-ratelimit-limit-requests".to_string(), "1000".to_string()),
                 ],
             })
+        );
+    }
+
+    /// LiteLLM's Responses bridge omits the reasoning indices; a missing one
+    /// reads as the first summary part rather than failing the stream.
+    #[test]
+    fn reasoning_events_without_indices_still_parse() {
+        let mut state = StreamState::default();
+
+        let summary_delta = parse_frame(
+            br#"data: {"type":"response.reasoning_summary_text.delta","delta":"short summary"}"#,
+            &mut state,
+        )
+        .expect("a summary delta without summary_index should parse");
+        assert_eq!(
+            summary_delta,
+            vec![ProviderEvent::ReasoningSummaryDelta {
+                delta: "short summary".to_string(),
+                summary_index: 0,
+            }]
+        );
+
+        let part_added = parse_frame(
+            br#"data: {"type":"response.reasoning_summary_part.added"}"#,
+            &mut state,
+        )
+        .expect("a summary part without summary_index should parse");
+        assert_eq!(
+            part_added,
+            vec![ProviderEvent::ReasoningSummaryPartAdded { summary_index: 0 }]
+        );
+
+        let reasoning_delta = parse_frame(
+            br#"data: {"type":"response.reasoning_text.delta","delta":"internal chain"}"#,
+            &mut state,
+        )
+        .expect("a reasoning delta without content_index should parse");
+        assert_eq!(
+            reasoning_delta,
+            vec![ProviderEvent::ReasoningContentDelta {
+                delta: "internal chain".to_string(),
+                content_index: 0,
+            }]
         );
     }
 
