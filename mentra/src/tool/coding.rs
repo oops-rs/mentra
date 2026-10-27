@@ -16,6 +16,13 @@ use execution::{
     execute_edit, execute_glob, execute_grep, execute_list, execute_read, execute_write,
 };
 
+// `path` and `file_path` are alternatives. They are stated in descriptions
+// rather than as a root `anyOf`: Gemini and xAI reject a request whose tool
+// parameters are not a plain object schema, and the input parser enforces
+// that one of them is present.
+const PATH_DESCRIPTION: &str = "Workspace file path. Required unless `file_path` is given.";
+const FILE_PATH_DESCRIPTION: &str = "Alias for `path`.";
+
 pub(crate) struct ReadTool;
 pub(crate) struct ListTool;
 pub(crate) struct GrepTool;
@@ -63,15 +70,11 @@ impl ToolDefinition for ReadTool {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
-                    "file_path": { "type": "string" },
+                    "path": { "type": "string", "description": PATH_DESCRIPTION },
+                    "file_path": { "type": "string", "description": FILE_PATH_DESCRIPTION },
                     "offset": { "type": "integer", "minimum": 1 },
                     "limit": { "type": "integer", "minimum": 0 }
-                },
-                "anyOf": [
-                    { "required": ["path"] },
-                    { "required": ["file_path"] }
-                ]
+                }
             }),
         )
     }
@@ -143,15 +146,11 @@ impl ToolDefinition for WriteTool {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
-                    "file_path": { "type": "string" },
+                    "path": { "type": "string", "description": PATH_DESCRIPTION },
+                    "file_path": { "type": "string", "description": FILE_PATH_DESCRIPTION },
                     "content": { "type": "string" }
                 },
-                "required": ["content"],
-                "anyOf": [
-                    { "required": ["path"] },
-                    { "required": ["file_path"] }
-                ]
+                "required": ["content"]
             }),
         )
     }
@@ -163,6 +162,10 @@ impl ToolDefinition for EditTool {
     /// into one. Declaring only the first made `edits` look required while the
     /// tool happily took the second, which is exactly the disagreement input
     /// validation exists to catch.
+    ///
+    /// The alternatives are stated in descriptions rather than as a root
+    /// `anyOf`/`oneOf`: Gemini and xAI refuse a whole request whose tool
+    /// parameters are not a plain object, and `parse_edit` enforces them.
     fn descriptor(&self) -> RuntimeToolDescriptor {
         mutation_descriptor(
             "edit",
@@ -170,10 +173,11 @@ impl ToolDefinition for EditTool {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
-                    "file_path": { "type": "string" },
+                    "path": { "type": "string", "description": PATH_DESCRIPTION },
+                    "file_path": { "type": "string", "description": FILE_PATH_DESCRIPTION },
                     "edits": {
                         "type": "array",
+                        "description": "The replacements to make. Give either `edits` or a single `old_string`/`new_string` pair, not both.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -185,17 +189,15 @@ impl ToolDefinition for EditTool {
                         "minItems": 1
                     },
                     "replace_all": { "type": "boolean" },
-                    "old_string": { "type": "string" },
-                    "new_string": { "type": "string" }
-                },
-                "anyOf": [
-                    { "required": ["path"] },
-                    { "required": ["file_path"] }
-                ],
-                "oneOf": [
-                    { "required": ["edits"] },
-                    { "required": ["old_string", "new_string"] }
-                ]
+                    "old_string": {
+                        "type": "string",
+                        "description": "The text to replace, when making a single replacement instead of `edits`."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The replacement text, given together with `old_string`."
+                    }
+                }
             }),
         )
     }

@@ -939,6 +939,29 @@ mod tests {
             .and_then(|registration| registration.descriptor().provider.description.clone())
     }
 
+    /// Gemini and xAI reject a whole request when any tool's parameters are
+    /// not a plain object schema, so one built-in tool with a root union
+    /// breaks every run on those providers, even a plain question.
+    #[test]
+    fn every_builtin_tool_schema_is_a_plain_object_at_the_root() {
+        let mut registry = ToolRegistry::default();
+        registry.register_builtin_tools(FileToolProfile::Both);
+
+        let tools = registry.tools();
+        assert!(tools.len() > 3, "file tools are registered too");
+        for tool in tools.iter() {
+            let schema = &tool.input_schema;
+            assert_eq!(schema["type"], "object", "{} root type", tool.name);
+            for keyword in ["anyOf", "oneOf", "allOf", "not", "if"] {
+                assert!(
+                    schema.get(keyword).is_none(),
+                    "{} has a root `{keyword}`",
+                    tool.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn refreshing_descriptors_recaptures_every_layer_and_keeps_each_registration() {
         let global_calls = Arc::new(AtomicUsize::new(0));
