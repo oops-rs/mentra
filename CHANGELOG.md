@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.34.4 — 2026-11-04
+
+No breaking changes. mentra-provider 0.9.9.
+
+- Require mentra-provider 0.9.9: a run no longer fails on its first model
+  request after the Responses websocket sat idle long enough for the
+  gateway to close it.
+
+## mentra-provider 0.9.9 — 2026-11-04
+
+- A Responses websocket the server closed while idle between requests is
+  redialed before the next request. It used to look open, and the request
+  sent on it failed as `MalformedStream("Connection closed normally")`.
+- The request frame is sent before the event stream is returned. A send that
+  fails on a closed or broken socket delivered nothing, so it is now the
+  call's `ProviderError::Retryable` — which the runtime's request retry sends
+  again on a new connection — rather than a failure inside the stream.
+- No breaking changes.
+
 ## 0.34.3 — 2026-10-28
 
 No breaking changes. mentra-provider 0.9.8.
