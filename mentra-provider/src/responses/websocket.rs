@@ -149,6 +149,12 @@ impl WsStream {
     async fn next(&mut self) -> Option<Result<Message, WsError>> {
         self.rx_message.recv().await
     }
+
+    /// Whether the socket is gone: the pump exits when the server closes the
+    /// connection or the transport fails, and nothing can be sent after that.
+    fn is_finished(&self) -> bool {
+        self.pump_task.is_finished()
+    }
 }
 
 impl Drop for WsStream {
@@ -226,8 +232,18 @@ impl ResponsesWebsocketConnection {
         })
     }
 
+    /// Whether this connection can no longer carry a request.
+    ///
+    /// Closed after a request on it failed, and also when the server closed
+    /// it while it sat idle between requests — gateways do — which no request
+    /// of ours observed. A connection found closed that way is dropped here,
+    /// so a caller that redials on `true` never sends on a dead socket.
     pub async fn is_closed(&self) -> bool {
-        self.stream.lock().await.is_none()
+        let mut stream = self.stream.lock().await;
+        if stream.as_ref().is_some_and(WsStream::is_finished) {
+            *stream = None;
+        }
+        stream.is_none()
     }
 
     pub async fn stream_request(
@@ -252,21 +268,50 @@ impl ResponsesWebsocketConnection {
         .await
     }
 
+    /// Sends `request_body` and returns the stream of its response.
+    ///
+    /// The frame is sent before this returns, so a send that fails is this
+    /// call's error rather than an item of the stream: nothing of the request
+    /// reached the server, and a connection-level failure is
+    /// [`ProviderError::Retryable`], which a caller may send again on a new
+    /// connection. Once the frame is out, failures are items of the stream as
+    /// before — the server may already be acting on the request.
     pub(crate) async fn stream_request_with_provenance(
         &self,
         request_body: Value,
         connection_reused: bool,
         provenance: ReasoningProvenance,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let request_text =
+            serde_json::to_string(&request_body).map_err(ProviderError::Serialize)?;
+
+        let mut guard = Arc::clone(&self.stream).lock_owned().await;
+        let Some(ws_stream) = guard.as_mut() else {
+            return Err(closed_before_send(
+                "websocket connection is closed".to_string(),
+            ));
+        };
+        let request_start = Instant::now();
+        let send_result = ws_stream.send(Message::Text(request_text.into())).await;
+        let send_error = send_result.err().map(map_send_error);
+        if let Some(t) = self.telemetry.as_ref() {
+            t.on_ws_request(
+                request_start.elapsed(),
+                send_error.as_ref(),
+                connection_reused,
+            );
+        }
+        if let Some(error) = send_error {
+            // The socket that refused the frame carries nothing more.
+            guard.take();
+            return Err(error);
+        }
+
         let (tx_event, rx_event) =
             mpsc::unbounded_channel::<Result<ProviderEvent, ProviderError>>();
-        let stream = Arc::clone(&self.stream);
         let idle_timeout = self.idle_timeout;
         let response_headers = self.response_headers.clone();
         let telemetry = self.telemetry.clone();
-
-        let request_text =
-            serde_json::to_string(&request_body).map_err(ProviderError::Serialize)?;
 
         tokio::spawn(async move {
             if tx_event
@@ -276,21 +321,15 @@ impl ResponsesWebsocketConnection {
                 return;
             }
 
-            let mut guard = stream.lock().await;
             let result = {
-                let Some(ws_stream) = guard.as_mut() else {
-                    let _ = tx_event.send(Err(ProviderError::MalformedStream(
-                        "websocket connection is closed".to_string(),
-                    )));
-                    return;
-                };
-                run_websocket_response_stream(
+                let ws_stream = guard
+                    .as_mut()
+                    .expect("the connection the frame was sent on is held by this guard");
+                read_websocket_response_stream(
                     ws_stream,
                     tx_event.clone(),
-                    request_text,
                     idle_timeout,
                     telemetry,
-                    connection_reused,
                     StreamState::new(provenance.provider, provenance.model),
                 )
                 .await
@@ -305,6 +344,26 @@ impl ResponsesWebsocketConnection {
         });
 
         Ok(rx_event)
+    }
+}
+
+/// A request frame that could not be sent. A closed or broken connection
+/// delivered none of it, so it is safe to send again on a new connection;
+/// anything else is reported as the stream failure it was before.
+fn map_send_error(error: WsError) -> ProviderError {
+    match error {
+        WsError::ConnectionClosed | WsError::AlreadyClosed | WsError::Io(_) => closed_before_send(
+            format!("websocket connection was closed before the request was sent: {error}"),
+        ),
+        other => ProviderError::MalformedStream(other.to_string()),
+    }
+}
+
+fn closed_before_send(message: String) -> ProviderError {
+    ProviderError::Retryable {
+        message,
+        // Nothing to wait for: the retry dials a new connection.
+        delay: Some(Duration::ZERO),
     }
 }
 
@@ -341,30 +400,13 @@ pub(crate) fn response_create_frame(mut response: Value) -> Value {
     response
 }
 
-async fn run_websocket_response_stream(
+async fn read_websocket_response_stream(
     ws_stream: &mut WsStream,
     tx_event: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
-    request_text: String,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn ResponsesWebsocketTelemetry>>,
-    connection_reused: bool,
     mut state: StreamState,
 ) -> Result<(), ProviderError> {
-    let request_start = Instant::now();
-    let send_result = ws_stream.send(Message::Text(request_text.into())).await;
-    let send_error = send_result
-        .as_ref()
-        .err()
-        .map(|error| ProviderError::MalformedStream(error.to_string()));
-    if let Some(t) = telemetry.as_ref() {
-        t.on_ws_request(
-            request_start.elapsed(),
-            send_error.as_ref(),
-            connection_reused,
-        );
-    }
-    send_result.map_err(|error| ProviderError::MalformedStream(error.to_string()))?;
-
     loop {
         let poll_start = Instant::now();
         let message_result = tokio::time::timeout(idle_timeout, ws_stream.next())

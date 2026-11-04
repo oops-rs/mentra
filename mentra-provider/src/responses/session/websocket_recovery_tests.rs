@@ -195,6 +195,87 @@ async fn hybrid_websocket_passes_other_errors_through_in_order() {
     assert_eq!(session.latest_response_id().as_deref(), Some("resp_kept"));
 }
 
+/// A gateway closes a websocket left idle between requests. The next request
+/// must dial a new connection rather than fail on the closed one: nothing of it
+/// was delivered, so there is nothing to lose by sending it again.
+#[tokio::test]
+async fn a_connection_the_server_closed_while_idle_is_redialed() {
+    let (base_url, mut frames) = spawn_websocket_server(vec![
+        Reply::CompleteThenClose("resp_first"),
+        Reply::Complete("resp_second"),
+    ])
+    .await;
+    let session = websocket_session(base_url);
+
+    consume(
+        session
+            .stream_response(transcript_request(ResponsesStateMode::ReplayOnly))
+            .await
+            .expect("the first request opens a connection"),
+    )
+    .await;
+    // Give the server's close time to arrive while the connection sits idle.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let events = collect(
+        session
+            .stream_response(transcript_request(ResponsesStateMode::ReplayOnly))
+            .await
+            .expect("a closed idle connection is redialed, not used"),
+    )
+    .await;
+    assert!(
+        events.iter().all(Result::is_ok),
+        "the request on the redialed connection completes: {events:?}"
+    );
+
+    let captured = drain(&mut frames);
+    assert_eq!(captured.len(), 2, "each request sent once: {captured:?}");
+    assert_eq!(captured[0].connection, 1);
+    assert_eq!(captured[1].connection, 2, "the second request dialed anew");
+}
+
+/// The server can close the socket after a caller checked it and before the
+/// frame went out. That send fails having delivered nothing, so it is the
+/// call's retryable error — the runtime's request retry then dials anew —
+/// rather than a failure inside a stream that has already been handed over.
+#[tokio::test]
+async fn a_send_on_a_closed_connection_is_a_retryable_error_of_the_call() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket test server");
+    let addr = listener.local_addr().expect("read websocket server addr");
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut websocket = accept_async(stream).await.expect("upgrade");
+        let _ = websocket.close(None).await;
+        while let Some(Ok(_)) = websocket.next().await {}
+    });
+    let connection = crate::responses::websocket::ResponsesWebsocketConnection::connect(
+        url::Url::parse(&format!("ws://{addr}/v1/responses")).expect("url"),
+        http::HeaderMap::new(),
+        None,
+        Duration::from_secs(5),
+        None,
+    )
+    .await
+    .expect("connect");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let error = match connection
+        .stream_request(serde_json::json!({"model": "gpt-5"}), true)
+        .await
+    {
+        Ok(_) => panic!("a send on a closed socket must fail the call"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, ProviderError::Retryable { .. }),
+        "{error:?}"
+    );
+    assert!(connection.is_closed().await, "the dead socket is dropped");
+}
+
 fn websocket_session(base_url: String) -> ResponsesSession<StaticCredentialSource> {
     let mut definition = super::super::openai_definition();
     definition.base_url = Some(base_url);
@@ -252,22 +333,27 @@ enum Reply {
     Frame(serde_json::Value),
     /// Create and complete a response with this id.
     Complete(&'static str),
+    /// Complete a response with this id, then close the connection the way
+    /// a gateway closes one left idle between requests.
+    CompleteThenClose(&'static str),
 }
 
 impl Reply {
     fn frames(self) -> Vec<serde_json::Value> {
         match self {
             Self::Frame(frame) => vec![frame],
-            Self::Complete(id) => ["response.created", "response.completed"]
-                .into_iter()
-                .zip(["in_progress", "completed"])
-                .map(|(kind, status)| {
-                    serde_json::json!({
-                        "type": kind,
-                        "response": {"id": id, "model": "gpt-5", "status": status}
+            Self::Complete(id) | Self::CompleteThenClose(id) => {
+                ["response.created", "response.completed"]
+                    .into_iter()
+                    .zip(["in_progress", "completed"])
+                    .map(|(kind, status)| {
+                        serde_json::json!({
+                            "type": kind,
+                            "response": {"id": id, "model": "gpt-5", "status": status}
+                        })
                     })
-                })
-                .collect(),
+                    .collect()
+            }
         }
     }
 }
@@ -326,6 +412,7 @@ async fn serve_connection(
             let _ = websocket.close(None).await;
             return;
         };
+        let close_after = matches!(reply, Reply::CompleteThenClose(_));
         for frame in reply.frames() {
             if websocket
                 .send(WsMessage::Text(frame.to_string().into()))
@@ -334,6 +421,13 @@ async fn serve_connection(
             {
                 return;
             }
+        }
+        if close_after {
+            let _ = websocket.close(None).await;
+            // Drain until the client's close reply, so the close handshake
+            // completes rather than the socket being reset.
+            while let Some(Ok(_)) = websocket.next().await {}
+            return;
         }
     }
 }
