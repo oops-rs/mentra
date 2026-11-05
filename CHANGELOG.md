@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.34.5 — 2026-11-05
+
+No breaking changes. mentra-provider 0.9.10.
+
+- Require mentra-provider 0.9.10: a gateway ring leaves a gateway that
+  accepts a request and then goes silent, instead of waiting out the
+  stream's five-minute idle timeout on it.
+
+## mentra-provider 0.9.10 — 2026-11-05
+
+- `GatewayRing` judges a streamed call by the member's first event from the
+  far end, not by the stream being opened. A websocket member returns its
+  stream once the request frame is out, so a gateway that then said nothing
+  counted as a success, reset its streak, and was never left.
+- An error before that first event is the member's counted failure and the
+  call's error, so the runtime retries it like a refused request.
+- New `GatewayRing::first_event_timeout` (`with_first_event_timeout`):
+  silence past it rotates the ring at once and finishes the call on the next
+  member. It defaults to `GatewayRing::DEFAULT_FIRST_EVENT_TIMEOUT` (60s,
+  capped by the stream idle timeout) on the Responses and Anthropic Messages
+  wires, which acknowledge a request before the model starts, and to `None`
+  on Chat Completions and Gemini.
+- No breaking changes.
+
 ## 0.34.4 — 2026-11-04
 
 No breaking changes. mentra-provider 0.9.9.
