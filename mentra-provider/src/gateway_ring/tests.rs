@@ -499,6 +499,206 @@ async fn listing_models_rotates_like_any_other_call() {
     assert_eq!((a.calls(), b.calls()), (1, 1));
 }
 
+/// How a [`StreamingMember`] behaves once its stream is open. Each one
+/// first emits the transport's own `ResponseHeaders`, as the websocket
+/// transport does before the server has said anything.
+#[derive(Clone, Copy)]
+enum Opening {
+    /// Accepts the request and never says another word.
+    Silent,
+    /// Fails before the response begins.
+    Fails,
+    /// Acknowledges and answers.
+    Answers,
+}
+
+/// A member whose `stream` succeeds and whose *stream* decides the outcome —
+/// the shape of a websocket provider, which returns once the frame is out.
+#[derive(Clone)]
+struct StreamingMember {
+    definition: ProviderDefinition,
+    opening: Opening,
+    calls: Arc<AtomicUsize>,
+    /// Keeps a silent member's streams open for the length of the test.
+    open: Arc<Mutex<Vec<EventSender>>>,
+}
+
+type EventSender = mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>;
+
+impl StreamingMember {
+    fn new(label: &str, opening: Opening) -> Self {
+        let mut definition = ProviderDefinition::new("gateway");
+        definition.descriptor.display_name = Some(label.to_string());
+        Self {
+            definition,
+            opening,
+            calls: Arc::new(AtomicUsize::new(0)),
+            open: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Provider for StreamingMember {
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
+        Ok(Box::new(self.clone()))
+    }
+
+    fn definition(&self) -> ProviderDefinition {
+        self.definition.clone()
+    }
+
+    async fn stream(&self, _request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = tx.send(Ok(ProviderEvent::ResponseHeaders(Default::default())));
+        match self.opening {
+            Opening::Silent => self.open.lock().expect("open").push(tx),
+            Opening::Fails => {
+                let _ = tx.send(Err(ProviderError::MalformedStream(
+                    "stream closed before response.completed".to_string(),
+                )));
+            }
+            Opening::Answers => {
+                let _ = tx.send(Ok(ProviderEvent::ResponseCreated));
+                let _ = tx.send(Ok(ProviderEvent::MessageStopped));
+            }
+        }
+        Ok(rx)
+    }
+}
+
+#[async_trait]
+impl ProviderSession for StreamingMember {
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        Provider::stream(self, request).await
+    }
+}
+
+async fn drained(mut stream: ProviderEventStream) -> Vec<ProviderEvent> {
+    let mut events = Vec::new();
+    while let Some(item) = stream.recv().await {
+        events.push(item.expect("an answering member's stream carries no error"));
+    }
+    events
+}
+
+#[tokio::test]
+async fn a_member_that_goes_silent_is_left_at_once_for_the_next() {
+    let a = StreamingMember::new("a", Opening::Silent);
+    let b = StreamingMember::new("b", Opening::Answers);
+    let ring = GatewayRing::new(
+        [Arc::new(a.clone()) as _, Arc::new(b.clone()) as _],
+        policy(5, None),
+    )
+    .expect("members")
+    .with_first_event_timeout(Some(Duration::from_millis(50)));
+    let (ring, events) = recording(ring);
+
+    let stream = ring
+        .stream(request())
+        .await
+        .expect("b answers the call a never acknowledged");
+
+    assert_eq!(
+        drained(stream).await,
+        [
+            ProviderEvent::ResponseHeaders(Default::default()),
+            ProviderEvent::ResponseCreated,
+            ProviderEvent::MessageStopped,
+        ],
+        "everything the ring read ahead is handed on, in order"
+    );
+    assert_eq!((a.calls(), b.calls()), (1, 1));
+    assert_eq!(
+        labels(&events.lock().expect("events")),
+        ["failed a x0", "rotated a→b after 0"]
+    );
+}
+
+#[tokio::test]
+async fn silence_from_the_only_member_is_a_retryable_error() {
+    let a = StreamingMember::new("a", Opening::Silent);
+    let ring = GatewayRing::new([Arc::new(a) as _], policy(5, None))
+        .expect("members")
+        .with_first_event_timeout(Some(Duration::from_millis(50)));
+
+    let error = ring
+        .stream(request())
+        .await
+        .expect_err("nobody acknowledged the request");
+
+    assert!(
+        matches!(error, ProviderError::Retryable { .. }),
+        "the runtime retries a silent gateway: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_that_fails_before_its_first_event_counts_against_the_member() {
+    let a = StreamingMember::new("a", Opening::Fails);
+    let b = StreamingMember::new("b", Opening::Answers);
+    let (ring, events) = recording(
+        GatewayRing::new(
+            [Arc::new(a.clone()) as _, Arc::new(b.clone()) as _],
+            policy(2, None),
+        )
+        .expect("members"),
+    );
+
+    let first = ring.stream(request()).await;
+    assert!(
+        matches!(first, Err(ProviderError::MalformedStream(_))),
+        "the stream's failure is the call's, not a dead stream's first item"
+    );
+    ring.stream(request())
+        .await
+        .expect("the second failure rotates and b answers");
+
+    assert_eq!((a.calls(), b.calls()), (2, 1));
+    assert_eq!(
+        labels(&events.lock().expect("events")),
+        ["failed a x1", "failed a x2", "rotated a→b after 2"]
+    );
+}
+
+#[test]
+fn the_first_event_is_bounded_only_on_wires_that_acknowledge_first() {
+    let ring_on = |wire: WireApi, idle: Duration| {
+        let mut member = StreamingMember::new("a", Opening::Answers);
+        member.definition.wire_api = wire;
+        member.definition.stream_idle_timeout = idle;
+        GatewayRing::new([Arc::new(member) as _], GatewayRingPolicy::default())
+            .expect("members")
+            .first_event_timeout()
+    };
+    let long = Duration::from_secs(300);
+
+    assert_eq!(
+        ring_on(WireApi::Responses, long),
+        Some(GatewayRing::DEFAULT_FIRST_EVENT_TIMEOUT)
+    );
+    assert_eq!(
+        ring_on(WireApi::AnthropicMessages, long),
+        Some(GatewayRing::DEFAULT_FIRST_EVENT_TIMEOUT)
+    );
+    assert_eq!(
+        ring_on(WireApi::Responses, Duration::from_secs(10)),
+        Some(Duration::from_secs(10)),
+        "never longer than the members' own idle timeout"
+    );
+    assert_eq!(ring_on(WireApi::OpenAiChatCompletions, long), None);
+    assert_eq!(ring_on(WireApi::GeminiGenerateContent, long), None);
+}
+
 #[test]
 fn classification_sorts_errors_by_whose_fault_they_are() {
     assert_eq!(classify(&retryable()), FailureKind::Counted);

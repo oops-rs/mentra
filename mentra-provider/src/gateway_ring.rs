@@ -59,25 +59,52 @@
 //!   [`cooldown`](GatewayRingPolicy::cooldown), the ring drifts back to a more
 //!   preferred member once that member has rested that long; without one, the
 //!   ring is sticky and only reaches a member again by rotating around to it.
+//!
+//! # A stream is judged by its first event
+//!
+//! A member that opens a stream has not answered yet: a websocket provider
+//! returns its stream as soon as the request frame is out, and a gateway
+//! that then says nothing would otherwise count as a success — resetting
+//! the very streak that should have rotated it. So a streamed call reads
+//! ahead to the member's first event from the far end, past the transport's
+//! own response headers, before the ring decides:
+//!
+//! - **An event** is a success, and the stream is handed on with everything
+//!   read so far put back in front.
+//! - **An error** is the member's failure, classified like any other, and is
+//!   the call's error — so the runtime retries it as it retries a refused
+//!   request, instead of receiving it as the first item of a dead stream.
+//! - **Silence** past the
+//!   [`first_event_timeout`](GatewayRing::first_event_timeout) rotates at
+//!   once. The wires that bound it acknowledge a request before the model
+//!   does any work, so a gateway that has not done so is not thinking — it
+//!   is stuck, and the call goes on to the next member instead of waiting
+//!   out the stream's idle timeout on this one.
+//!
+//! Once the first event is through, the stream is the caller's: a failure
+//! later on is not the ring's to replay, because part of the answer has
+//! already been read.
 
 mod health;
 #[cfg(test)]
 mod tests;
 
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
+use tokio::sync::mpsc;
 
-use crate::definition::ProviderDefinition;
+use crate::definition::{ProviderDefinition, WireApi};
 use crate::error::ProviderError;
 use crate::model::ModelInfo;
 use crate::registry::{Provider, ProviderSession, ProviderSessionScope};
 use crate::request::{CompactionRequest, MemorySummarizeRequest, Request};
 use crate::response::{CompactionResponse, MemorySummarizeResponse};
-use crate::stream::ProviderEventStream;
+use crate::stream::{ProviderEvent, ProviderEventStream};
 
 pub use self::health::{FailureKind, GatewayRingPolicy};
 use self::health::{RingHealth, Selection};
@@ -214,8 +241,28 @@ pub struct GatewayRing {
     members: Arc<[Member]>,
     definition: ProviderDefinition,
     policy: GatewayRingPolicy,
+    first_event_timeout: Option<Duration>,
     health: Arc<Mutex<RingHealth>>,
     observer: Option<Observer>,
+}
+
+/// What one member's failed attempt was, and what it says about the member.
+///
+/// Most failures are the member's own error, classified by [`classify`]; a
+/// stream the ring gave up waiting on is classified by the ring, which is
+/// the only one that knows why it gave up.
+struct MemberFailure {
+    error: ProviderError,
+    kind: FailureKind,
+}
+
+impl From<ProviderError> for MemberFailure {
+    fn from(error: ProviderError) -> Self {
+        Self {
+            kind: classify(&error),
+            error,
+        }
+    }
 }
 
 impl fmt::Debug for GatewayRing {
@@ -230,16 +277,27 @@ impl fmt::Debug for GatewayRing {
                     .collect::<Vec<_>>(),
             )
             .field("policy", &self.policy)
+            .field("first_event_timeout", &self.first_event_timeout)
             .field("current", &self.health().current())
             .finish_non_exhaustive()
     }
 }
 
 impl GatewayRing {
+    /// How long a member may take to send the first event of a stream, on a
+    /// wire that acknowledges a request before the model starts on it.
+    ///
+    /// The acknowledgement — Responses' `response.created`, Anthropic's
+    /// `message_start` — costs the upstream nothing, so this covers a
+    /// gateway's queue and a slow connection, not a model thinking.
+    pub const DEFAULT_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(60);
+
     /// Builds a ring over `members`, in preference order.
     ///
     /// The ring takes its identity — id, wire, capabilities — from the first
-    /// member, and only its display name says there is a ring at all.
+    /// member, and only its display name says there is a ring at all. Its
+    /// [`first_event_timeout`](Self::first_event_timeout) follows from that
+    /// wire.
     pub fn new(
         members: impl IntoIterator<Item = Arc<dyn Provider>>,
         policy: GatewayRingPolicy,
@@ -249,11 +307,34 @@ impl GatewayRing {
         let definition = ring_definition(first.provider.definition(), &members);
         Ok(Self {
             health: Arc::new(Mutex::new(RingHealth::new(members.len()))),
+            first_event_timeout: default_first_event_timeout(&definition),
             members,
             definition,
             policy,
             observer: None,
         })
+    }
+
+    /// Sets how long a streamed call waits for a member's first event before
+    /// leaving it for the next; `None` waits as long as the member's own
+    /// stream idle timeout allows.
+    ///
+    /// The default is [`DEFAULT_FIRST_EVENT_TIMEOUT`](Self::DEFAULT_FIRST_EVENT_TIMEOUT)
+    /// on the Responses and Anthropic Messages wires, capped by the
+    /// members' stream idle timeout, and `None` on Chat Completions and
+    /// Gemini, whose first event can wait on the model itself.
+    #[must_use]
+    pub fn with_first_event_timeout(self, timeout: Option<Duration>) -> Self {
+        Self {
+            first_event_timeout: timeout,
+            ..self
+        }
+    }
+
+    /// How long a streamed call waits for a member's first event. See
+    /// [`with_first_event_timeout`](Self::with_first_event_timeout).
+    pub fn first_event_timeout(&self) -> Option<Duration> {
+        self.first_event_timeout
     }
 
     /// Reports what the ring does — every failure it counts, every rotation,
@@ -324,7 +405,7 @@ impl GatewayRing {
     async fn with_rotation<A, T>(
         &self,
         arg: A,
-        op: impl for<'a> Fn(&'a dyn Provider, &'a A) -> BoxFuture<'a, Result<T, ProviderError>>,
+        op: impl for<'a> Fn(&'a dyn Provider, &'a A) -> BoxFuture<'a, Result<T, MemberFailure>>,
     ) -> Result<T, ProviderError>
     where
         A: Sync,
@@ -351,8 +432,7 @@ impl GatewayRing {
                     }
                     return Ok(value);
                 }
-                Err(error) => {
-                    let kind = classify(&error);
+                Err(MemberFailure { error, kind }) => {
                     if kind == FailureKind::NotTheMembersFault {
                         return Err(error);
                     }
@@ -432,8 +512,10 @@ fn ring_definition(first: ProviderDefinition, members: &[Member]) -> ProviderDef
 #[async_trait]
 impl Provider for GatewayRing {
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        self.with_rotation((), |member, ()| member.list_models())
-            .await
+        self.with_rotation((), |member, ()| {
+            Box::pin(async move { Ok(member.list_models().await?) })
+        })
+        .await
     }
 
     async fn create_session(&self) -> Result<Box<dyn ProviderSession>, ProviderError> {
@@ -459,22 +541,28 @@ impl Provider for GatewayRing {
             members,
             definition: self.definition.clone(),
             policy: self.policy,
+            first_event_timeout: self.first_event_timeout,
             health: Arc::clone(&self.health),
             observer: self.observer.clone(),
         }))
     }
 
     async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
-        self.with_rotation(request, |member, request| member.stream(request.clone()))
-            .await
+        let limit = self.first_event_timeout;
+        self.with_rotation(request, move |member, request| {
+            Box::pin(first_event(member.stream(request.clone()), limit))
+        })
+        .await
     }
 
     async fn compact(
         &self,
         request: CompactionRequest<'_>,
     ) -> Result<CompactionResponse, ProviderError> {
-        self.with_rotation(request, |member, request| member.compact(request.clone()))
-            .await
+        self.with_rotation(request, |member, request| {
+            Box::pin(async move { Ok(member.compact(request.clone()).await?) })
+        })
+        .await
     }
 
     async fn summarize_memories(
@@ -482,10 +570,86 @@ impl Provider for GatewayRing {
         request: MemorySummarizeRequest<'_>,
     ) -> Result<MemorySummarizeResponse, ProviderError> {
         self.with_rotation(request, |member, request| {
-            member.summarize_memories(request.clone())
+            Box::pin(async move { Ok(member.summarize_memories(request.clone()).await?) })
         })
         .await
     }
+}
+
+/// The wire's answer to [`GatewayRing::first_event_timeout`]. See
+/// [`GatewayRing::with_first_event_timeout`].
+fn default_first_event_timeout(definition: &ProviderDefinition) -> Option<Duration> {
+    match definition.wire_api {
+        WireApi::Responses | WireApi::AnthropicMessages => {
+            Some(GatewayRing::DEFAULT_FIRST_EVENT_TIMEOUT.min(definition.stream_idle_timeout))
+        }
+        WireApi::OpenAiChatCompletions | WireApi::GeminiGenerateContent => None,
+    }
+}
+
+/// Opens a member's stream and reads it to the first event from the far
+/// end, within `limit`. See the module doc.
+async fn first_event(
+    opened: impl Future<Output = Result<ProviderEventStream, ProviderError>>,
+    limit: Option<Duration>,
+) -> Result<ProviderEventStream, MemberFailure> {
+    let started = async {
+        let mut stream = opened.await?;
+        let mut read = Vec::new();
+        loop {
+            match stream.recv().await {
+                // The transport's own record of the response, which a
+                // websocket emits before the server has said anything.
+                Some(Ok(headers @ ProviderEvent::ResponseHeaders(_))) => read.push(Ok(headers)),
+                Some(Ok(event)) => {
+                    read.push(Ok(event));
+                    break;
+                }
+                Some(Err(error)) => return Err(error),
+                None => break,
+            }
+        }
+        Ok(replayed(read, stream))
+    };
+    let Some(limit) = limit else {
+        return Ok(started.await?);
+    };
+    match tokio::time::timeout(limit, started).await {
+        Ok(started) => Ok(started?),
+        Err(_) => Err(MemberFailure {
+            error: ProviderError::Retryable {
+                message: format!(
+                    "the gateway sent no event within {}s of the request",
+                    limit.as_secs_f64()
+                ),
+                delay: None,
+            },
+            kind: FailureKind::Immediate,
+        }),
+    }
+}
+
+/// `stream` with the items already read from it put back in front, in order.
+fn replayed(
+    read: Vec<Result<ProviderEvent, ProviderError>>,
+    mut stream: ProviderEventStream,
+) -> ProviderEventStream {
+    if read.is_empty() {
+        return stream;
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    for item in read {
+        // `rx` is still in hand, so the channel cannot be closed yet.
+        let _ = tx.send(item);
+    }
+    tokio::spawn(async move {
+        while let Some(item) = stream.recv().await {
+            if tx.send(item).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 /// A session over the ring. Every call goes back through the ring so the
