@@ -49,10 +49,7 @@ impl AgentMemory {
         });
         self.state.pending_turn = None;
         self.state.resumable_user_message = Some(user_message.clone());
-        self.state
-            .transcript
-            .push(transcript_item_from_message(user_message));
-        self.sync_history_cache();
+        self.push_transcript_item(transcript_item_from_message(user_message));
         self.persist()
     }
 
@@ -73,8 +70,7 @@ impl AgentMemory {
     }
 
     pub fn append_transcript_item(&mut self, item: TranscriptItem) -> Result<(), RuntimeError> {
-        self.state.transcript.push(item);
-        self.sync_history_cache();
+        self.push_transcript_item(item);
         self.persist()
     }
 
@@ -89,10 +85,7 @@ impl AgentMemory {
     }
 
     pub fn commit_assistant_message(&mut self, message: Message) -> Result<(), RuntimeError> {
-        self.state
-            .transcript
-            .push(transcript_item_from_message(message));
-        self.sync_history_cache();
+        self.push_transcript_item(transcript_item_from_message(message));
         self.state.pending_turn = None;
         if let Some(run) = &mut self.state.run {
             run.assistant_committed = true;
@@ -187,10 +180,7 @@ impl AgentMemory {
 
     fn close_interrupted_turn(&mut self, unresolved: &[String]) {
         if let Some(message) = closing_message(unresolved) {
-            self.state
-                .transcript
-                .push(transcript_item_from_message(message));
-            self.sync_history_cache();
+            self.push_transcript_item(transcript_item_from_message(message));
         }
         self.state.interrupted_turn = true;
     }
@@ -266,6 +256,11 @@ impl AgentMemory {
         let _ = outcome.transcript_path;
         self.persist()?;
         Ok(true)
+    }
+
+    fn push_transcript_item(&mut self, item: TranscriptItem) {
+        self.history_cache.extend(item.project_message());
+        self.state.transcript.push(item);
     }
 
     fn sync_history_cache(&mut self) {

@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde_json::json;
 
 use crate::{
-    AgentTranscript, ContentBlock, Message, Role, TranscriptKind,
+    AgentTranscript, ContentBlock, Message, Role, TranscriptItem, TranscriptKind,
     memory::journal::{AgentMemory, AgentMemoryState, CompactionOutcome, PendingTurnState},
     runtime::VolatileRuntimeStore,
 };
@@ -129,6 +129,28 @@ fn append_message_with_details_attaches_metadata_keyed_by_tool_use_id() {
         item.detail("call-1"),
         Some(&json!({ "secret": "shh", "n": 42 }))
     );
+}
+
+#[test]
+fn append_preserves_history_projection_when_an_item_has_no_message() {
+    let mut memory = memory();
+    let user = Message::user(ContentBlock::text("go"));
+    let assistant = Message::assistant(ContentBlock::text("done"));
+    let mut unprojected = TranscriptItem::canonical_context(user.clone());
+    unprojected.message = None;
+
+    memory.append_message(user.clone()).expect("append user");
+    memory
+        .append_transcript_item(unprojected)
+        .expect("append unprojected item");
+    assert_eq!(memory.last_message(), Some(&user));
+    memory
+        .commit_assistant_message(assistant.clone())
+        .expect("append assistant");
+
+    assert_eq!(memory.transcript().len(), 3);
+    assert_eq!(memory.history(), &[user, assistant]);
+    assert_eq!(memory.history(), memory.transcript().to_messages());
 }
 
 // ---- Crash recovery: a finished turn versus an interrupted one (#64) ----
