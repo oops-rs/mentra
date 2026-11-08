@@ -17,6 +17,8 @@ use crate::{
     ProviderId, ReasoningFormat, ReasoningProvenance, Role, TokenUsage,
 };
 
+use crate::sse::{SseBuffer, frame_data};
+
 use super::model::{ChatCompletionChunk, ChatUsage};
 
 pub(crate) fn spawn_event_stream(
@@ -42,18 +44,15 @@ async fn forward_events(
     requested_model: String,
 ) -> Result<(), ProviderError> {
     let mut bytes_stream = response.bytes_stream();
-    let mut buffer = Vec::new();
+    let mut buffer = SseBuffer::default();
     let mut state = StreamState::new(provider, requested_model);
 
     while let Some(chunk) = bytes_stream.next().await {
         let chunk = chunk.map_err(ProviderError::Transport)?;
-        buffer.extend_from_slice(&chunk);
+        buffer.push(&chunk);
 
-        while let Some((frame_end, delimiter_len)) = find_frame_boundary(&buffer) {
-            let frame = buffer.drain(..frame_end).collect::<Vec<_>>();
-            buffer.drain(..delimiter_len);
-
-            for event in parse_frame(&frame, &mut state)? {
+        while let Some(frame) = buffer.next_frame() {
+            for event in parse_frame(frame, &mut state)? {
                 if tx.send(Ok(event)).is_err() {
                     return Ok(());
                 }
@@ -61,8 +60,9 @@ async fn forward_events(
         }
     }
 
-    if !buffer.is_empty() {
-        for event in parse_frame(&buffer, &mut state)? {
+    let tail = buffer.tail();
+    if !tail.is_empty() {
+        for event in parse_frame(tail, &mut state)? {
             if tx.send(Ok(event)).is_err() {
                 return Ok(());
             }
@@ -80,20 +80,6 @@ async fn forward_events(
     }
 
     Ok(())
-}
-
-/// Splits an SSE byte buffer on the first blank line, tolerating both `\n\n`
-/// and `\r\n\r\n`.
-fn find_frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
-    let crlf = buffer.windows(4).position(|window| window == b"\r\n\r\n");
-    let lf = buffer.windows(2).position(|window| window == b"\n\n");
-
-    match (crlf, lf) {
-        (Some(crlf), Some(lf)) if crlf <= lf => Some((crlf, 4)),
-        (_, Some(lf)) => Some((lf, 2)),
-        (Some(crlf), None) => Some((crlf, 4)),
-        (None, None) => None,
-    }
 }
 
 struct StreamState {
@@ -170,25 +156,11 @@ impl StreamState {
 }
 
 fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEvent>, ProviderError> {
-    let frame = std::str::from_utf8(frame)
-        .map_err(|error| ProviderError::MalformedStream(error.to_string()))?;
-    let mut data_lines = Vec::new();
-
-    for raw_line in frame.lines() {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("data:") {
-            data_lines.push(rest.trim_start().to_string());
-        }
-    }
-
-    if data_lines.is_empty() {
+    let Some(data) =
+        frame_data(frame).map_err(|error| ProviderError::MalformedStream(error.to_string()))?
+    else {
         return Ok(Vec::new());
-    }
-
-    let data = data_lines.join("\n");
+    };
     if data == "[DONE]" {
         return Ok(state.finish());
     }
@@ -338,16 +310,16 @@ mod tests {
     /// then closes the stream, and returns every event produced.
     fn events(raw: &str) -> Vec<ProviderEvent> {
         let mut state = StreamState::new(ProviderId::new("test"), "asked-for".to_string());
-        let mut buffer = raw.as_bytes().to_vec();
+        let mut buffer = SseBuffer::default();
+        buffer.push(raw.as_bytes());
         let mut events = Vec::new();
 
-        while let Some((frame_end, delimiter_len)) = find_frame_boundary(&buffer) {
-            let frame = buffer.drain(..frame_end).collect::<Vec<_>>();
-            buffer.drain(..delimiter_len);
-            events.extend(parse_frame(&frame, &mut state).expect("frame parses"));
+        while let Some(frame) = buffer.next_frame() {
+            events.extend(parse_frame(frame, &mut state).expect("frame parses"));
         }
-        if !buffer.is_empty() {
-            events.extend(parse_frame(&buffer, &mut state).expect("trailing frame parses"));
+        let tail = buffer.tail();
+        if !tail.is_empty() {
+            events.extend(parse_frame(tail, &mut state).expect("trailing frame parses"));
         }
         events.extend(state.finish());
         events

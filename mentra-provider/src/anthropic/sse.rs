@@ -9,6 +9,8 @@ use crate::{
     ReasoningProvenance, TokenUsage,
 };
 
+use crate::sse::{SseBuffer, frame_data};
+
 use super::stream_model::AnthropicContentBlockDelta;
 use super::stream_model::AnthropicStreamContentBlock;
 use super::stream_model::AnthropicStreamEvent;
@@ -36,18 +38,15 @@ async fn forward_events(
     requested_model: String,
 ) -> Result<(), ProviderError> {
     let mut bytes_stream = response.bytes_stream();
-    let mut buffer = Vec::new();
+    let mut buffer = SseBuffer::default();
     let mut state = StreamState::new(provider, requested_model);
 
     while let Some(chunk) = bytes_stream.next().await {
         let chunk = chunk.map_err(ProviderError::Transport)?;
-        buffer.extend_from_slice(&chunk);
+        buffer.push(&chunk);
 
-        while let Some((frame_end, delimiter_len)) = find_frame_boundary(&buffer) {
-            let frame = buffer.drain(..frame_end).collect::<Vec<_>>();
-            buffer.drain(..delimiter_len);
-
-            for event in parse_frame(&frame, &mut state)? {
+        while let Some(frame) = buffer.next_frame() {
+            for event in parse_frame(frame, &mut state)? {
                 if tx.send(Ok(event)).is_err() {
                     return Ok(());
                 }
@@ -55,8 +54,9 @@ async fn forward_events(
         }
     }
 
-    if !buffer.is_empty() {
-        for event in parse_frame(&buffer, &mut state)? {
+    let tail = buffer.tail();
+    if !tail.is_empty() {
+        for event in parse_frame(tail, &mut state)? {
             let _ = tx.send(Ok(event));
         }
     }
@@ -93,26 +93,11 @@ enum StreamingBlockKind {
 }
 
 fn parse_frame(frame: &[u8], state: &mut StreamState) -> Result<Vec<ProviderEvent>, ProviderError> {
-    let frame = std::str::from_utf8(frame)
-        .map_err(|error| ProviderError::MalformedStream(error.to_string()))?;
-    let mut data_lines = Vec::new();
-
-    for raw_line in frame.lines() {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-
-        if let Some(rest) = line.strip_prefix("data:") {
-            data_lines.push(rest.trim_start().to_string());
-        }
-    }
-
-    if data_lines.is_empty() {
+    let Some(data) =
+        frame_data(frame).map_err(|error| ProviderError::MalformedStream(error.to_string()))?
+    else {
         return Ok(Vec::new());
-    }
-
-    let data = data_lines.join("\n");
+    };
     let event: AnthropicStreamEvent =
         serde_json::from_str(&data).map_err(ProviderError::Deserialize)?;
 
@@ -242,22 +227,6 @@ fn merge_usage(base: Option<TokenUsage>, update: Option<TokenUsage>) -> Option<T
         (None, Some(update)) => Some(update),
         (None, None) => None,
     }
-}
-
-fn find_frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
-    for (index, window) in buffer.windows(2).enumerate() {
-        if window == b"\n\n" {
-            return Some((index, 2));
-        }
-    }
-
-    for (index, window) in buffer.windows(4).enumerate() {
-        if window == b"\r\n\r\n" {
-            return Some((index, 4));
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]

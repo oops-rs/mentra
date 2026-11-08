@@ -13,6 +13,7 @@ mod request;
 mod request_fields;
 mod response;
 pub mod responses;
+mod sse;
 mod stream;
 mod tool;
 
