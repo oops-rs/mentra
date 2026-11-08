@@ -1481,17 +1481,20 @@ impl MemoryStore for SqliteRuntimeStore {
             .map_err(sqlite_error)?;
         let mut affected = 0usize;
         for record_id in record_ids {
-            tx.execute(
-                "DELETE FROM long_term_memory_fts WHERE record_id = ?1",
-                params![record_id],
-            )
-            .map_err(sqlite_error)?;
-            affected += tx
+            let deleted = tx
                 .execute(
                     "DELETE FROM long_term_memory WHERE record_id = ?1 AND agent_id = ?2",
                     params![record_id, agent_id],
                 )
                 .map_err(sqlite_error)?;
+            if deleted != 0 {
+                tx.execute(
+                    "DELETE FROM long_term_memory_fts WHERE record_id = ?1",
+                    params![record_id],
+                )
+                .map_err(sqlite_error)?;
+                affected += deleted;
+            }
         }
         tx.commit().map_err(sqlite_error)?;
         Ok(affected)
@@ -1879,6 +1882,52 @@ mod tests {
             .expect("search records");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].record_id, "episode:agent:1");
+    }
+
+    #[test]
+    fn forgetting_memory_preserves_records_owned_by_another_agent() {
+        let store = SqliteRuntimeStore::new(
+            std::env::temp_dir().join(format!("mentra-store-forget-{}.sqlite", now_nanos())),
+        );
+        let record = MemoryRecord {
+            record_id: "episode:owner:1".to_string(),
+            agent_id: "owner".to_string(),
+            kind: MemoryRecordKind::Episode,
+            content: "remember alpha".to_string(),
+            source_revision: 1,
+            created_at: 1,
+            metadata_json: "{}".to_string(),
+            source: None,
+            pinned: false,
+            score: None,
+        };
+        store
+            .upsert_records(std::slice::from_ref(&record))
+            .expect("seed memory");
+        let ids = std::slice::from_ref(&record.record_id);
+        assert_eq!(
+            store
+                .tombstone_records("other", ids)
+                .expect("forget as other"),
+            0
+        );
+        let hits = store
+            .search_records("owner", "alpha", 10)
+            .expect("search as owner");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record_id, record.record_id);
+        assert_eq!(
+            store
+                .tombstone_records("owner", ids)
+                .expect("forget as owner"),
+            1
+        );
+        assert!(
+            store
+                .search_records("owner", "alpha", 10)
+                .expect("search after forget")
+                .is_empty()
+        );
     }
 
     #[test]
