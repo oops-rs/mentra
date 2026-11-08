@@ -10,6 +10,7 @@
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
+    io::{BufRead, BufReader},
     path::Path,
 };
 
@@ -106,29 +107,35 @@ impl TranscriptLogIndex {
 /// of a crashed append and is skipped; damage anywhere else is corruption
 /// and is reported.
 pub(super) fn read_log(path: &Path) -> Result<HashMap<String, TranscriptItem>, RuntimeError> {
-    let Some(contents) = fs_util::read_optional(path)? else {
+    let Some(file) = fs_util::open_optional(path)? else {
         return Ok(HashMap::new());
     };
 
     let mut entries = HashMap::new();
-    let lines: Vec<&str> = contents.split('\n').collect();
-    let last_index = lines.len().saturating_sub(1);
-    for (index, line) in lines.iter().enumerate() {
-        if line.is_empty() {
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    for line_number in 1.. {
+        line.clear();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| store_error(&format!("read '{}'", path.display()), error))?;
+        if read == 0 {
+            break;
+        }
+
+        let contents = line.strip_suffix(b"\n").unwrap_or(&line);
+        if contents.is_empty() {
             continue;
         }
-        match parse_line(line) {
+        match parse_line(contents) {
             Ok(item) => {
                 entries.insert(item.id.as_str().to_string(), item);
             }
+            // A crash can cut even a UTF-8 code point in the last line.
+            Err(_) if contents.len() == read => break,
             Err(error) => {
-                let final_line = index == last_index && !contents.ends_with('\n');
-                if final_line {
-                    // The truncated tail of an append cut short by a crash.
-                    continue;
-                }
                 return Err(store_error(
-                    &format!("parse '{}' line {}", path.display(), index + 1),
+                    &format!("parse '{}' line {line_number}", path.display()),
                     error,
                 ));
             }
@@ -137,7 +144,8 @@ pub(super) fn read_log(path: &Path) -> Result<HashMap<String, TranscriptItem>, R
     Ok(entries)
 }
 
-fn parse_line(line: &str) -> Result<TranscriptItem, RuntimeError> {
+fn parse_line(line: &[u8]) -> Result<TranscriptItem, RuntimeError> {
+    let line = std::str::from_utf8(line).map_err(|error| RuntimeError::Store(error.to_string()))?;
     let parsed: LogLine =
         serde_json::from_str(line).map_err(|error| RuntimeError::Store(error.to_string()))?;
     if parsed.schema > SCHEMA_VERSION {

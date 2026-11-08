@@ -277,10 +277,10 @@ fn a_truncated_final_line_is_skipped_and_the_next_append_gets_a_fresh_line() {
         .create_agent(&agent_record("agent-1"), &memory_with(transcript.clone()))
         .expect("create agent");
 
-    // A crash mid-append: half a line, no newline.
+    // A crash mid-append can cut a UTF-8 character in the final line.
     let log_path = store.agent_dir("agent-1").join("transcript.jsonl");
     let mut contents = std::fs::read(&log_path).expect("read log");
-    contents.extend_from_slice(br#"{"schema":1,"id":"entry-trunc"#);
+    contents.extend_from_slice(b"{\"schema\":1,\"id\":\"entry-trunc-\xe4");
     std::fs::write(&log_path, contents).expect("write truncated log");
 
     // A fresh process reads past the damage and appends on a fresh line.
