@@ -5,6 +5,7 @@ use futures_util::SinkExt;
 use futures_util::StreamExt;
 use http::HeaderMap;
 use http::HeaderValue;
+use rustls::crypto::CryptoProvider;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -14,9 +15,10 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
+use tokio_tungstenite::Connector;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_tls_with_config;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -196,9 +198,14 @@ impl ResponsesWebsocketConnection {
             .map_err(|error| ProviderError::InvalidRequest(error.to_string()))?;
         request.headers_mut().extend(headers);
 
-        let (stream, response) = connect_async(request)
-            .await
-            .map_err(|error| map_ws_error(error, &url))?;
+        let connector = match url.scheme() {
+            "wss" => websocket_tls_connector()?,
+            _ => Connector::Plain,
+        };
+        let (stream, response) =
+            connect_async_tls_with_config(request, None, false, Some(connector))
+                .await
+                .map_err(|error| map_ws_error(error, &url))?;
 
         let header_value = response
             .headers()
@@ -346,6 +353,26 @@ impl ResponsesWebsocketConnection {
 
         Ok(rx_event)
     }
+}
+
+fn websocket_tls_connector() -> Result<Connector, ProviderError> {
+    // Cargo can unify multiple crypto backends in the host's graph. Pick
+    // explicitly when the host has not installed a process-wide provider.
+    let provider = CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
+    let roots = webpki_roots::TLS_SERVER_ROOTS
+        .iter()
+        .cloned()
+        .collect::<rustls::RootCertStore>();
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            ProviderError::InvalidRequest(format!("invalid websocket TLS configuration ({error})"))
+        })?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
 }
 
 /// A request frame that could not be sent. A closed or broken connection
@@ -617,6 +644,42 @@ fn json_header_value(value: Value) -> Option<HeaderValue> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn wss_connection_starts_with_a_tls_client_hello() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("read loopback address");
+        let url = Url::parse(&format!("wss://{addr}/v1/responses")).expect("wss URL");
+
+        let server = async {
+            let (mut socket, _) = listener.accept().await.expect("accept TCP connection");
+            // A TLS handshake record has a five-byte header followed by a
+            // message type. The server closes after reading the ClientHello
+            // prefix, so the test needs no certificate or external endpoint.
+            let mut prefix = [0; 6];
+            socket.read_exact(&mut prefix).await.expect("TLS record");
+            assert_eq!(prefix[0], 0x16, "TLS handshake record");
+            assert_eq!(prefix[1], 0x03, "TLS record protocol major version");
+            assert_eq!(prefix[5], 0x01, "TLS ClientHello");
+        };
+        let client = ResponsesWebsocketConnection::connect(
+            url,
+            HeaderMap::new(),
+            None,
+            Duration::from_secs(2),
+            None,
+        );
+        let ((), result) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(server, client)
+        })
+        .await
+        .expect("handshake peers finish");
+        assert!(result.is_err(), "server closes before certificate exchange");
+    }
 
     #[test]
     fn merge_request_headers_matches_http_precedence() {
