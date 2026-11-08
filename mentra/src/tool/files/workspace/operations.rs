@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use regex::RegexBuilder;
 
 use super::{EntryKind, IgnoreFilter, OverlayEntry, SearchOptions, Walk, WorkspaceEditor};
@@ -100,20 +102,17 @@ impl WorkspaceEditor {
                 self.display_path(&path)
             )
         })?;
-        let lines = content.lines().collect::<Vec<_>>();
-        let start = offset.saturating_sub(1).min(lines.len());
-        let end = start.saturating_add(limit).min(lines.len());
-        let numbered = lines[start..end]
-            .iter()
-            .enumerate()
-            .map(|(index, line)| format!("L{}: {}", start + index + 1, line))
-            .collect::<Vec<_>>();
-
-        let body = if numbered.is_empty() {
-            "(no lines)".to_string()
-        } else {
-            numbered.join("\n")
-        };
+        let start = offset - 1;
+        let mut body = String::new();
+        for (index, line) in content.lines().skip(start).take(limit).enumerate() {
+            if index != 0 {
+                body.push('\n');
+            }
+            write!(body, "L{}: {}", start + index + 1, line).expect("format into string");
+        }
+        if body.is_empty() {
+            body.push_str("(no lines)");
+        }
         Ok(format!("read {}\n{}", self.display_path(&path), body).into())
     }
 

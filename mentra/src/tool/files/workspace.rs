@@ -561,6 +561,31 @@ impl WorkspaceEditor {
         matches: &mut Vec<String>,
     ) -> Result<(), String> {
         let content = self.load_text_file(path)?;
+        let remaining = limit.saturating_sub(matches.len());
+        let mut render_line = |index, line: &str, separator| {
+            matches.push(format!(
+                "{}:{}{} {}",
+                self.display_path(path),
+                index + 1,
+                separator,
+                options.max_line_chars.map_or_else(
+                    || line.to_string(),
+                    |max_chars| cap_search_line(line, max_chars),
+                )
+            ));
+        };
+        if !options.multiline && options.context == 0 {
+            for (index, line) in content
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| regex.is_match(line))
+                .take(remaining)
+            {
+                render_line(index, line, ':');
+            }
+            return Ok(());
+        }
+
         let lines = content.lines().collect::<Vec<_>>();
         if lines.is_empty() {
             return Ok(());
@@ -595,25 +620,13 @@ impl WorkspaceEditor {
             rendered_lines.extend(start..end);
         }
 
-        for index in rendered_lines {
-            if matches.len() >= limit {
-                break;
-            }
+        for index in rendered_lines.into_iter().take(remaining) {
             let separator = if matched_lines.contains(&index) {
                 ':'
             } else {
                 '-'
             };
-            matches.push(format!(
-                "{}:{}{} {}",
-                self.display_path(path),
-                index + 1,
-                separator,
-                options.max_line_chars.map_or_else(
-                    || lines[index].to_string(),
-                    |max_chars| cap_search_line(lines[index], max_chars),
-                )
-            ));
+            render_line(index, lines[index], separator);
         }
         Ok(())
     }
