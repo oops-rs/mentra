@@ -2,7 +2,7 @@ mod common;
 
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -76,7 +76,7 @@ impl ToolDefinition for SaveArtifactTool {
                 "properties": {
                     "filename": {
                         "type": "string",
-                        "description": "Name of the artifact file to create"
+                        "description": "Single filename for the artifact"
                     },
                     "content": {
                         "type": "string",
@@ -105,17 +105,23 @@ impl ToolExecutor for SaveArtifactTool {
             .and_then(Value::as_str)
             .ok_or_else(|| "content is required".to_string())?;
 
-        fs::create_dir_all(&state.output_dir)
-            .map_err(|error| format!("failed to create output dir: {error}"))?;
-        let artifact_path = state.output_dir.join(filename);
-        fs::write(&artifact_path, content)
-            .map_err(|error| format!("failed to write artifact: {error}"))?;
+        let path = artifact_path(&state.output_dir, filename)?;
+        let path = path.to_str().ok_or("artifact path must be UTF-8")?;
+        let artifact_path = ctx.write_file_bytes(path, content.as_bytes())?;
 
         Ok(json!({
             "saved": artifact_path,
             "bytes": content.len(),
         })
         .to_string())
+    }
+}
+
+fn artifact_path(output_dir: &Path, filename: &str) -> Result<PathBuf, &'static str> {
+    let path = Path::new(filename);
+    match path.components().next() {
+        Some(Component::Normal(name)) if name == path.as_os_str() => Ok(output_dir.join(name)),
+        _ => Err("filename must be a single filename"),
     }
 }
 
@@ -126,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
     let workspace_root = std::env::current_dir()?;
     let output_dir = workspace_root.join(".mentra-output");
-    let runtime = build_runtime(&workspace_root, &output_dir)?;
+    let runtime = build_runtime(&workspace_root, &output_dir, cli.mode)?;
     let model = common::openai_model(&runtime).await?;
     let mut agent = runtime.spawn_with_config(
         "CLI Runtime Demo",
@@ -154,17 +160,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn build_runtime(
     workspace_root: &Path,
     output_dir: &Path,
+    mode: Mode,
 ) -> Result<Runtime, Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY must be set before running this example")?;
+    // Grant writes to a real output directory or let the tool create it.
+    match fs::symlink_metadata(output_dir) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!("'{}' must be a real directory", output_dir.display()).into());
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let enable_shell = mode == Mode::Queue;
 
     Ok(Runtime::builder()
         .with_provider(mentra::BuiltinProvider::OpenAI, api_key)
         .with_policy(
-            RuntimePolicy::permissive()
-                .with_allowed_working_root(workspace_root)
-                .with_allowed_read_root(workspace_root)
-                .with_allowed_write_root(output_dir),
+            RuntimePolicy::read_only(workspace_root)
+                .with_allowed_write_root(output_dir)
+                .allow_shell_commands(enable_shell)
+                .allow_background_commands(enable_shell),
         )
         .with_context(Arc::new(ExampleState {
             workspace_root: workspace_root.to_path_buf(),
@@ -261,6 +277,35 @@ fn print_transcript_summary(history: &[mentra::Message]) {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_paths_require_a_single_filename() {
+        let output_dir = Path::new("artifacts");
+        assert_eq!(
+            artifact_path(output_dir, "review.md").unwrap(),
+            output_dir.join("review.md")
+        );
+        for filename in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "subdir/file",
+            "/escape",
+            "file/",
+        ] {
+            assert!(artifact_path(output_dir, filename).is_err(), "{filename}");
+        }
+        #[cfg(windows)]
+        for filename in [r"C:\escape", r"C:escape", r"subdir\file"] {
+            assert!(artifact_path(output_dir, filename).is_err(), "{filename}");
         }
     }
 }

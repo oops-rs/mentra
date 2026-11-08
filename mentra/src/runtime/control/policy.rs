@@ -76,6 +76,7 @@ impl ShellValidation {
 pub struct RuntimePolicy {
     allow_shell_commands: bool,
     allow_background_commands: bool,
+    allow_workspace_writes: bool,
     allowed_working_roots: Vec<PathBuf>,
     allowed_read_roots: Vec<PathBuf>,
     allowed_write_roots: Vec<PathBuf>,
@@ -96,6 +97,7 @@ impl Default for RuntimePolicy {
         Self {
             allow_shell_commands: false,
             allow_background_commands: false,
+            allow_workspace_writes: true,
             allowed_working_roots: Vec::new(),
             allowed_read_roots: Vec::new(),
             allowed_write_roots: Vec::new(),
@@ -163,18 +165,18 @@ impl RuntimePolicy {
         }
     }
 
-    /// Returns a policy that allows builtin file reads but blocks builtin file
-    /// writes and host shell execution.
+    /// Returns a policy that allows builtin file reads and disables writes
+    /// and shell execution by default.
     ///
-    /// A host may opt into shell execution only after installing an executor
-    /// that enforces read-only filesystem and network policy at the OS boundary.
+    /// Grant writes to an explicit root with [`Self::with_allowed_write_root`].
+    /// Filesystem and network restrictions for shell commands require an
+    /// OS-enforced executor.
     pub fn read_only(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
         Self {
-            allow_background_commands: false,
+            allow_workspace_writes: false,
             allowed_working_roots: vec![workspace.clone()],
             allowed_read_roots: vec![workspace],
-            allowed_write_roots: Vec::new(),
             ..Self::default()
         }
     }
@@ -354,7 +356,7 @@ impl RuntimePolicy {
 
         if path_is_allowed(
             resolved.as_path(),
-            base_dir,
+            Some(base_dir),
             self.allowed_read_roots.as_slice(),
         ) {
             Ok(resolved)
@@ -386,7 +388,7 @@ impl RuntimePolicy {
 
         if path_is_allowed(
             resolved.as_path(),
-            base_dir,
+            self.allow_workspace_writes.then_some(base_dir),
             self.allowed_write_roots.as_slice(),
         ) {
             Ok(resolved)
@@ -416,7 +418,7 @@ impl RuntimePolicy {
             );
         }
 
-        if !path_is_allowed(cwd, base_dir, self.allowed_working_roots.as_slice()) {
+        if !path_is_allowed(cwd, Some(base_dir), self.allowed_working_roots.as_slice()) {
             return Err(format!(
                 "Working directory '{}' is outside the runtime policy roots",
                 cwd.display()
@@ -439,10 +441,9 @@ fn path_is_under_any(path: &Path, roots: &[PathBuf]) -> bool {
         .any(|root| candidate.starts_with(root))
 }
 
-fn path_is_allowed(path: &Path, default_root: &Path, extra_roots: &[PathBuf]) -> bool {
+fn path_is_allowed(path: &Path, default_root: Option<&Path>, extra_roots: &[PathBuf]) -> bool {
     let candidate_path = normalize_policy_root(path);
-    let default_root = normalize_policy_root(default_root);
-    candidate_path.starts_with(&default_root)
+    default_root.is_some_and(|root| candidate_path.starts_with(normalize_policy_root(root)))
         || extra_roots
             .iter()
             .map(|root| normalize_policy_root(root))

@@ -357,6 +357,98 @@ async fn batched_and_split_file_writes_use_the_session_policy() {
 }
 
 #[tokio::test]
+async fn read_only_policy_requires_explicit_write_roots() {
+    let directory = TestDirectory::new("read-only");
+    let workspace = directory.path().join("workspace");
+    let base_dir = directory.path().join("agent");
+    let artifacts = base_dir.join("artifacts");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    fs::create_dir_all(&base_dir).expect("create agent directory");
+    let source = workspace.join("source.txt");
+    fs::write(&source, "readable source").expect("write test input");
+
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let turns = [
+        ("read", "read", json!({"path": source})),
+        (
+            "workspace-write",
+            "write",
+            json!({"path": "source-copy.txt", "content": "denied"}),
+        ),
+        (
+            "artifact-write",
+            "write",
+            json!({"path": "artifacts/report.txt", "content": "report"}),
+        ),
+        (
+            "protected-write",
+            "files",
+            json!({"operations": [{"op": "create", "path": "artifacts/private/secret.txt", "content": "denied"}]}),
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(id, tool, input)| {
+        [
+            tool_use_stream(&model.id, id, tool, &input.to_string()),
+            text_stream(&model.id, "done"),
+        ]
+    })
+    .collect();
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], turns);
+    let runtime = Runtime::builder()
+        .with_store(VolatileRuntimeStore::new())
+        .with_provider_instance(provider)
+        .with_file_tools(FileToolProfile::Both)
+        .with_policy(
+            RuntimePolicy::read_only(&workspace)
+                .with_allowed_write_root(&artifacts)
+                .with_denied_write_root(artifacts.join("private")),
+        )
+        .build()
+        .expect("build runtime");
+    let mut session = runtime
+        .create_session_with_options(
+            "read-only",
+            model,
+            SessionOptions {
+                config: workspace_config(&base_dir),
+                ..Default::default()
+            },
+        )
+        .expect("create session");
+
+    for prompt in [
+        "read source",
+        "write a copy",
+        "save report",
+        "save protected file",
+    ] {
+        append_turn(&mut session, prompt).await;
+    }
+
+    let (read, is_error) = result_for(session.history(), "read");
+    assert!(!is_error && read.contains("readable source"), "{read}");
+    let (outside, is_error) = result_for(session.history(), "workspace-write");
+    assert!(
+        is_error && outside.contains("outside the runtime policy write roots"),
+        "{outside}"
+    );
+    assert!(!base_dir.join("source-copy.txt").exists());
+    let (artifact, is_error) = result_for(session.history(), "artifact-write");
+    assert!(!is_error, "{artifact}");
+    assert_eq!(
+        fs::read_to_string(artifacts.join("report.txt")).unwrap(),
+        "report"
+    );
+    let (protected, is_error) = result_for(session.history(), "protected-write");
+    assert!(
+        is_error && protected.contains("denied write root"),
+        "{protected}"
+    );
+    assert!(!artifacts.join("private/secret.txt").exists());
+}
+
+#[tokio::test]
 async fn tool_result_caps_use_the_session_policy() {
     const FULL_OUTPUT: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
 
