@@ -14,18 +14,19 @@ impl Transport {
     /// The POST carrying `operation` as a JSON-RPC request with id `id`.
     pub(super) fn jsonrpc_request(
         &self,
-        operation: &Operation,
+        operation: Operation,
         id: i64,
         accept: &'static str,
     ) -> reqwest::RequestBuilder {
+        let headers = self.operation_headers(&operation);
         let request = JsonRpcRequest::new(
             JsonRpcId::Number(id),
             operation.method,
-            Some(operation.params.clone()),
+            Some(operation.params),
         );
         self.http
             .post(self.endpoint.clone())
-            .headers(self.operation_headers(operation))
+            .headers(headers)
             .header(ACCEPT, accept)
             .json(&request)
     }

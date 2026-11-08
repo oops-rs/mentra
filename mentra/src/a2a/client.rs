@@ -531,17 +531,18 @@ impl Transport {
     /// Sends one operation and returns the JSON it answered with, `Null` when
     /// it answered with none.
     async fn call_value(&self, operation: Operation) -> Result<Value, A2aError> {
+        let method = operation.method;
         match self.binding {
             A2aBinding::JsonRpc => {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                let request = self.jsonrpc_request(&operation, id, JSON);
+                let request = self.jsonrpc_request(operation, id, JSON);
                 let (status, body) = http::exchange(request, &self.limits).await?;
-                jsonrpc::decode_reply(operation.method, id, status, &body)
+                jsonrpc::decode_reply(method, id, status, &body)
             }
             A2aBinding::HttpJson => {
                 let request = self.rest_request(&operation, JSON)?;
                 let (status, body) = http::exchange(request, &self.limits).await?;
-                rest::decode_reply(operation.method, status, &body)
+                rest::decode_reply(method, status, &body)
             }
         }
     }
@@ -562,7 +563,7 @@ impl Transport {
         let (request, format) = match self.binding {
             A2aBinding::JsonRpc => {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                let request = self.jsonrpc_request(&operation, id, EVENT_STREAM);
+                let request = self.jsonrpc_request(operation, id, EVENT_STREAM);
                 (request, EventFormat::JsonRpc { id })
             }
             A2aBinding::HttpJson => (
