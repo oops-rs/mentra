@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fmt::Display;
+use std::{fmt::Display, io};
 use time::OffsetDateTime;
 
 /// Metadata describing a model available from a provider.
@@ -129,15 +129,21 @@ impl ToolResultContent {
         Self::Text(value.into())
     }
 
+    /// Returns the UTF-8 byte length of text or compact JSON.
     pub fn len(&self) -> usize {
         match self {
             Self::Text(text) => text.len(),
-            Self::Structured(value) => value.to_string().len(),
+            Self::Structured(value) => {
+                let mut count = ByteCount(0);
+                serde_json::to_writer(&mut count, value)
+                    .expect("JSON value always serializes to the byte counter");
+                count.0
+            }
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        matches!(self, Self::Text(text) if text.is_empty())
     }
 
     pub fn clear(&mut self) {
@@ -181,6 +187,19 @@ impl ToolResultContent {
             Self::Text(text) => text.clone(),
             Self::Structured(value) => value.to_string(),
         }
+    }
+}
+
+struct ByteCount(usize);
+
+impl io::Write for ByteCount {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -403,6 +422,25 @@ impl ContentBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_result_length_matches_compact_json_bytes() {
+        use serde_json::json;
+
+        for value in [
+            Value::Null,
+            json!(""),
+            json!(["🧪", "\n", "\u{0000}", true]),
+            json!({"\"escaped": {"field": -1.25}, "empty": []}),
+        ] {
+            let compact_length = value.to_string().len();
+            let content = ToolResultContent::Structured(value);
+            assert_eq!(content.len(), compact_length);
+            assert!(!content.is_empty());
+        }
+        assert!(ToolResultContent::text("").is_empty());
+        assert_eq!(ToolResultContent::text("🧪").len(), 4);
+    }
 
     #[test]
     fn thinking_serde_is_externally_tagged_and_omits_empty_optional_fields() {
