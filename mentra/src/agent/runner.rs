@@ -384,7 +384,7 @@ impl<'a> TurnRunner<'a> {
         });
         let mut request_history = projection.messages;
         if let Some(recalled) = self.recalled_memory_message(&request_history).await {
-            request_history.push(recalled);
+            request_history.to_mut().push(recalled);
         }
         self.agent.inject_teammate_identity(&mut request_history);
         let mut provider_request_options = self.agent.config.provider_request_options.clone();
@@ -403,7 +403,9 @@ impl<'a> TurnRunner<'a> {
         let request = Request {
             model: self.agent.model.as_str().into(),
             system: self.agent.effective_system_prompt(),
-            messages: request_history.into(),
+            // Keep the projection alive here so retries can clone the request
+            // without cloning its messages, even when the projection is owned.
+            messages: Cow::Borrowed(&request_history),
             tools: tools.as_ref().into(),
             tool_choice: self.agent.tool_choice(),
             temperature: self.agent.config.temperature,

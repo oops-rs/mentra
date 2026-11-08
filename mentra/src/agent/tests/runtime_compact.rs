@@ -335,8 +335,8 @@ async fn byte_budget_projects_once_per_logical_request_and_never_registers_a_rea
 }
 
 // M3 test 5: micro-compaction rewrites old tool results only in the
-// *request projection* (`projected_tool_result_history`, a fresh clone of the
-// transcript's `Message`s built on every `stream_turn`) — it never touches
+// *request projection* (a copy of the transcript's `Message`s when elision is
+// needed) — it never touches
 // the canonical `TranscriptItem`s themselves, so the details a host attached
 // to the collapsed call survive on the stored item even though the outgoing
 // request no longer carries the original content.

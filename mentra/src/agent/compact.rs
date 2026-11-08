@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::memory::journal::CompactionOutcome;
 use crate::{
     ContentBlock, Message,
@@ -17,7 +19,7 @@ const AUTO_COMPACT_MAX_ATTEMPTS: u32 = 3;
 const AUTO_COMPACT_RETRY_DELAY_MS: u64 = 500;
 
 impl Agent {
-    pub(crate) fn projected_tool_result_history(&self) -> ProjectedToolResultHistory {
+    pub(crate) fn projected_tool_result_history(&self) -> ProjectedToolResultHistory<'_> {
         project_tool_result_history(
             self.history(),
             self.config.compaction.keep_recent_tool_results,
@@ -271,7 +273,7 @@ impl Agent {
         Ok(Some(details))
     }
 
-    pub(crate) fn inject_teammate_identity(&self, messages: &mut Vec<Message>) {
+    pub(crate) fn inject_teammate_identity(&self, messages: &mut Cow<'_, [Message]>) {
         let Some(identity) = &self.teammate_identity else {
             return;
         };
@@ -279,6 +281,7 @@ impl Agent {
             return;
         }
 
+        let messages = messages.to_mut();
         messages.insert(
             0,
             Message::user(ContentBlock::Text {

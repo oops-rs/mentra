@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use crate::{
     ContentBlock, Message, Role,
@@ -22,8 +22,8 @@ pub(crate) struct ToolResultProjectionReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProjectedToolResultHistory {
-    pub(crate) messages: Vec<Message>,
+pub(crate) struct ProjectedToolResultHistory<'a> {
+    pub(crate) messages: Cow<'a, [Message]>,
     pub(crate) report: Option<ToolResultProjectionReport>,
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn project_tool_result_history(
     history: &[Message],
     keep_recent: usize,
     budget: Option<ProjectedToolResultBudget>,
-) -> ProjectedToolResultHistory {
+) -> ProjectedToolResultHistory<'_> {
     match budget {
         Some(budget) => budget_tool_result_history(history, budget),
         None => micro_compact_history(history, keep_recent),
@@ -50,21 +50,17 @@ pub(crate) fn project_tool_result_history(
 pub(crate) fn micro_compact_history(
     history: &[Message],
     keep_recent: usize,
-) -> ProjectedToolResultHistory {
+) -> ProjectedToolResultHistory<'_> {
     if keep_recent == usize::MAX {
         return ProjectedToolResultHistory {
-            messages: history.to_vec(),
+            messages: Cow::Borrowed(history),
             report: None,
         };
     }
 
-    let mut compacted = history.to_vec();
-    let tool_names = tool_name_index(&compacted);
     let mut tool_results = Vec::new();
-    let mut elided_tool_results = Vec::new();
-    let canonical_tool_result_content_bytes = tool_result_content_bytes(history);
 
-    for (message_index, message) in compacted.iter().enumerate() {
+    for (message_index, message) in history.iter().enumerate() {
         if message.role != Role::User {
             continue;
         }
@@ -78,12 +74,15 @@ pub(crate) fn micro_compact_history(
 
     if tool_results.len() <= keep_recent {
         return ProjectedToolResultHistory {
-            messages: compacted,
+            messages: Cow::Borrowed(history),
             report: None,
         };
     }
 
     let compact_count = tool_results.len() - keep_recent;
+    let mut compacted = history.to_vec();
+    let tool_names = tool_name_index(history);
+    let mut elided_tool_results = Vec::new();
     for (message_index, block_index) in tool_results.into_iter().take(compact_count) {
         let Some(ContentBlock::ToolResult {
             tool_use_id,
@@ -121,13 +120,13 @@ pub(crate) fn micro_compact_history(
         policy: RequestToolResultElisionPolicy::KeepRecent {
             configured_keep_recent_tool_results: keep_recent,
         },
-        canonical_tool_result_content_bytes,
+        canonical_tool_result_content_bytes: tool_result_content_bytes(history),
         projected_tool_result_content_bytes: tool_result_content_bytes(&compacted),
         results: elided_tool_results,
     });
 
     ProjectedToolResultHistory {
-        messages: compacted,
+        messages: Cow::Owned(compacted),
         report,
     }
 }
@@ -135,19 +134,19 @@ pub(crate) fn micro_compact_history(
 fn budget_tool_result_history(
     history: &[Message],
     budget: ProjectedToolResultBudget,
-) -> ProjectedToolResultHistory {
-    let mut projected = history.to_vec();
+) -> ProjectedToolResultHistory<'_> {
     let locations = tool_result_locations(history);
     let canonical_tool_result_content_bytes = locations.iter().fold(0usize, |total, location| {
         total.saturating_add(canonical_content(history, location).len())
     });
     if canonical_tool_result_content_bytes <= budget.max_bytes {
         return ProjectedToolResultHistory {
-            messages: projected,
+            messages: Cow::Borrowed(history),
             report: None,
         };
     }
 
+    let mut projected = history.to_vec();
     let mut remaining = budget.max_bytes;
     let mut actions = vec![None; locations.len()];
 
@@ -240,7 +239,7 @@ fn budget_tool_result_history(
         .collect::<Vec<_>>();
 
     ProjectedToolResultHistory {
-        messages: projected,
+        messages: Cow::Owned(projected),
         report: Some(ToolResultProjectionReport {
             policy: RequestToolResultElisionPolicy::ByteBudget {
                 configured_max_bytes: budget.max_bytes,
@@ -509,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn keeping_every_tool_result_copies_the_history_unchanged() {
+    fn keeping_every_tool_result_borrows_the_history_unchanged() {
         let history = vec![
             Message::user(ContentBlock::text("go")),
             Message::user(ContentBlock::ToolResult {
@@ -521,7 +520,9 @@ mod tests {
 
         let projected = micro_compact_history(&history, usize::MAX);
 
-        assert_eq!(projected.messages, history);
+        assert!(
+            matches!(projected.messages, Cow::Borrowed(messages) if std::ptr::eq(messages, history.as_slice()))
+        );
         assert!(projected.report.is_none());
     }
 
@@ -650,7 +651,9 @@ mod tests {
 
         let projected = project_tool_result_history(&history, 0, Some(budget(20, 0, 0)));
 
-        assert_eq!(projected.messages, history);
+        assert!(
+            matches!(projected.messages, Cow::Borrowed(messages) if std::ptr::eq(messages, history.as_slice()))
+        );
         assert!(projected.report.is_none());
     }
 
