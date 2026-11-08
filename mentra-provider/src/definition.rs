@@ -8,15 +8,12 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::time::Duration;
-use strum::Display as StrumDisplay;
-use strum::IntoStaticStr;
 use url::Url;
 
 use crate::request::SessionRequestOptions;
 
 /// Builtin provider families Mentra can construct from presets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, StrumDisplay, IntoStaticStr)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinProvider {
     Anthropic,
     Gemini,
@@ -24,6 +21,37 @@ pub enum BuiltinProvider {
     OpenRouter,
     Ollama,
     LmStudio,
+}
+
+impl BuiltinProvider {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
+            Self::OpenAI => "openai",
+            Self::OpenRouter => "openrouter",
+            Self::Ollama => "ollama",
+            Self::LmStudio => "lmstudio",
+        }
+    }
+}
+
+impl Display for BuiltinProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+impl From<BuiltinProvider> for &'static str {
+    fn from(value: BuiltinProvider) -> Self {
+        value.as_str()
+    }
+}
+
+impl From<&BuiltinProvider> for &'static str {
+    fn from(value: &BuiltinProvider) -> Self {
+        value.as_str()
+    }
 }
 
 impl From<BuiltinProvider> for ProviderId {
@@ -416,6 +444,26 @@ fn required_auth_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_provider_text_contract() {
+        for (provider, expected) in [
+            (BuiltinProvider::Anthropic, "anthropic"),
+            (BuiltinProvider::Gemini, "gemini"),
+            (BuiltinProvider::OpenAI, "openai"),
+            (BuiltinProvider::OpenRouter, "openrouter"),
+            (BuiltinProvider::Ollama, "ollama"),
+            (BuiltinProvider::LmStudio, "lmstudio"),
+        ] {
+            let owned: &'static str = provider.into();
+            let borrowed: &'static str = (&provider).into();
+            assert_eq!(owned, expected);
+            assert_eq!(borrowed, expected);
+            assert_eq!(provider.to_string(), expected);
+            assert_eq!(format!("{provider:>12.3}"), format!("{expected:>12.3}"));
+            assert_eq!(ProviderId::from(provider).as_str(), expected);
+        }
+    }
 
     #[test]
     fn build_headers_applies_bearer_auth_and_static_headers() {
