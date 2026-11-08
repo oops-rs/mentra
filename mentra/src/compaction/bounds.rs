@@ -105,10 +105,10 @@ impl CompactionBounds {
     where
         F: Future,
     {
-        self.check()?;
         if !self.is_bounded() {
             return Ok(future.await);
         }
+        self.check()?;
 
         tokio::pin!(future);
         loop {
@@ -117,7 +117,8 @@ impl CompactionBounds {
                 // worth discarding over a bound reached in the same instant.
                 biased;
                 output = &mut future => return Ok(output),
-                () = tokio::time::sleep(self.poll_delay()) => self.check()?,
+                // Create a timer only when the work is pending.
+                () = async { tokio::time::sleep(self.poll_delay()).await } => self.check()?,
             }
         }
     }

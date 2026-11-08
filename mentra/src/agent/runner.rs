@@ -543,39 +543,30 @@ impl<'a> TurnRunner<'a> {
             .update_pending_turn(Self::pending_state(&pending))?;
         self.agent.sync_memory_snapshot();
 
-        let mut first_event = true;
         loop {
-            let event = if first_event {
-                first_event = false;
-                match compaction_bounds.guard(stream.recv()).await {
-                    Ok(event) => event,
-                    Err(error) => {
-                        self.emit_model_response_finished(
-                            attempt,
-                            false,
-                            Some(error.to_string()),
-                            None,
-                            None,
-                        )?;
-                        return Err(error);
+            let event = compaction_bounds
+                .guard(stream.recv())
+                .await
+                .and_then(|event| {
+                    if event.is_some() {
+                        self.options.check_limits()?;
                     }
+                    Ok(event)
+                });
+            let event = match event {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(error) => {
+                    self.emit_model_response_finished(
+                        attempt,
+                        false,
+                        Some(error.to_string()),
+                        None,
+                        None,
+                    )?;
+                    return Err(error);
                 }
-            } else {
-                stream.recv().await
             };
-            let Some(event) = event else {
-                break;
-            };
-            if let Err(error) = self.options.check_limits() {
-                self.emit_model_response_finished(
-                    attempt,
-                    false,
-                    Some(error.to_string()),
-                    None,
-                    None,
-                )?;
-                return Err(error);
-            }
             let event = match event {
                 Ok(event) => event,
                 Err(error) => {
