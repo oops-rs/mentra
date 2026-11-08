@@ -1,12 +1,45 @@
 use tokio::sync::mpsc;
 
 use crate::{
-    ReasoningProvenance, model::HostedToolSearchCall, model::HostedWebSearchCall,
+    ProviderError, ReasoningProvenance, model::HostedToolSearchCall, model::HostedWebSearchCall,
     model::ImageGenerationCall, model::ImageGenerationResult, model::ImageSource, model::Role,
     model::TokenUsage, model::ToolResultContent, model::WebSearchAction,
 };
 
 pub type ProviderEventStream = mpsc::UnboundedReceiver<Result<ProviderEvent, crate::ProviderError>>;
+
+pub(crate) async fn receive_while_open(
+    stream: &mut ProviderEventStream,
+    output: &mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
+) -> Option<Result<ProviderEvent, ProviderError>> {
+    tokio::select! {
+        biased;
+        _ = output.closed() => None,
+        item = stream.recv() => item,
+    }
+}
+
+/// Puts the items already read back at the front of the stream in order.
+pub(crate) fn replay_stream(
+    read: Vec<Result<ProviderEvent, ProviderError>>,
+    mut stream: ProviderEventStream,
+) -> ProviderEventStream {
+    if read.is_empty() {
+        return stream;
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    for item in read {
+        let _ = tx.send(item);
+    }
+    tokio::spawn(async move {
+        while let Some(item) = receive_while_open(&mut stream, &tx).await {
+            if tx.send(item).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResponseHeaders {

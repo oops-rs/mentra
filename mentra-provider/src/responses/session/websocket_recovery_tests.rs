@@ -276,6 +276,107 @@ async fn a_send_on_a_closed_connection_is_a_retryable_error_of_the_call() {
     assert!(connection.is_closed().await, "the dead socket is dropped");
 }
 
+#[tokio::test]
+async fn dropping_an_idle_websocket_response_allows_the_next_turn_to_redial() {
+    let (base_url, mut frames) =
+        spawn_websocket_server(vec![Reply::Silent, Reply::Complete("resp_next")]).await;
+    let session = websocket_session(base_url);
+    let mut cancelled = session
+        .stream_response(transcript_request(ResponsesStateMode::ReplayOnly))
+        .await
+        .expect("the abandoned request is sent");
+    assert!(matches!(
+        cancelled.recv().await,
+        Some(Ok(ProviderEvent::ResponseHeaders(_)))
+    ));
+    drop(cancelled);
+
+    let events = tokio::time::timeout(Duration::from_secs(1), async {
+        collect(
+            session
+                .stream_response(transcript_request(ResponsesStateMode::ReplayOnly))
+                .await
+                .expect("the next turn opens a fresh connection"),
+        )
+        .await
+    })
+    .await
+    .expect("closing the receiver releases the socket before its idle timeout");
+    assert!(events.iter().all(Result::is_ok), "{events:?}");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Ok(ProviderEvent::MessageStarted { id, .. }) if id == "resp_next"
+    )));
+    let captured = drain(&mut frames);
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0].connection, 1);
+    assert_eq!(captured[1].connection, 2);
+}
+
+#[tokio::test]
+async fn a_dropped_started_turn_cannot_replace_the_last_completed_websocket_chain_head() {
+    for mode in [ResponsesStateMode::Stateful, ResponsesStateMode::Hybrid] {
+        let (base_url, mut frames) = spawn_websocket_server(vec![
+            Reply::Complete("resp_kept"),
+            Reply::Frame(serde_json::json!({
+                "type": "response.created",
+                "response": {"id": "resp_cancelled", "model": "gpt-5", "status": "in_progress"}
+            })),
+            Reply::Complete("resp_next"),
+        ])
+        .await;
+        let session = websocket_session(base_url);
+        consume(
+            session
+                .stream_response(transcript_request(mode))
+                .await
+                .expect("the first turn opens"),
+        )
+        .await;
+        assert_eq!(session.latest_response_id().as_deref(), Some("resp_kept"));
+
+        let mut cancelled = session
+            .stream_response(transcript_request(mode))
+            .await
+            .expect("the abandoned turn opens");
+        loop {
+            let event = cancelled.recv().await.expect("the turn has a start");
+            if matches!(
+                event,
+                Ok(ProviderEvent::MessageStarted { id, .. }) if id == "resp_cancelled"
+            ) {
+                break;
+            }
+        }
+        drop(cancelled);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            consume(
+                session
+                    .stream_response(transcript_request(mode))
+                    .await
+                    .expect("the next turn opens after cancellation"),
+            )
+            .await;
+        })
+        .await
+        .expect("closing the receiver releases the socket before its idle timeout");
+
+        let captured = drain(&mut frames);
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[0].connection, 1);
+        assert_eq!(
+            captured[1].connection, 1,
+            "a completed socket remains reusable"
+        );
+        assert_eq!(captured[1].frame["previous_response_id"], "resp_kept");
+        assert_eq!(captured[2].connection, 2, "the abandoned socket is retired");
+        assert_eq!(captured[2].frame["previous_response_id"], "resp_kept");
+        assert_eq!(captured[2].frame["input"], captured[1].frame["input"]);
+        assert_eq!(session.latest_response_id().as_deref(), Some("resp_next"));
+    }
+}
+
 fn websocket_session(base_url: String) -> ResponsesSession<StaticCredentialSource> {
     let mut definition = super::super::openai_definition();
     definition.base_url = Some(base_url);
@@ -329,6 +430,8 @@ async fn consume(stream: ProviderEventStream) {
 
 /// What the server answers to the next `response.create` frame it reads.
 enum Reply {
+    /// Keep the connection alive without emitting an event.
+    Silent,
     /// Send this one frame and nothing else.
     Frame(serde_json::Value),
     /// Create and complete a response with this id.
@@ -341,6 +444,7 @@ enum Reply {
 impl Reply {
     fn frames(self) -> Vec<serde_json::Value> {
         match self {
+            Self::Silent => Vec::new(),
             Self::Frame(frame) => vec![frame],
             Self::Complete(id) | Self::CompleteThenClose(id) => {
                 ["response.created", "response.completed"]

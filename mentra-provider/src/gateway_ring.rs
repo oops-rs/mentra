@@ -96,7 +96,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
-use tokio::sync::mpsc;
 
 use crate::definition::{ProviderDefinition, WireApi};
 use crate::error::ProviderError;
@@ -104,7 +103,7 @@ use crate::model::ModelInfo;
 use crate::registry::{Provider, ProviderSession, ProviderSessionScope};
 use crate::request::{CompactionRequest, MemorySummarizeRequest, Request};
 use crate::response::{CompactionResponse, MemorySummarizeResponse};
-use crate::stream::{ProviderEvent, ProviderEventStream};
+use crate::stream::{ProviderEvent, ProviderEventStream, replay_stream};
 
 pub use self::health::{FailureKind, GatewayRingPolicy};
 use self::health::{RingHealth, Selection};
@@ -609,7 +608,7 @@ async fn first_event(
                 None => break,
             }
         }
-        Ok(replayed(read, stream))
+        Ok(replay_stream(read, stream))
     };
     let Some(limit) = limit else {
         return Ok(started.await?);
@@ -627,29 +626,6 @@ async fn first_event(
             kind: FailureKind::Immediate,
         }),
     }
-}
-
-/// `stream` with the items already read from it put back in front, in order.
-fn replayed(
-    read: Vec<Result<ProviderEvent, ProviderError>>,
-    mut stream: ProviderEventStream,
-) -> ProviderEventStream {
-    if read.is_empty() {
-        return stream;
-    }
-    let (tx, rx) = mpsc::unbounded_channel();
-    for item in read {
-        // `rx` is still in hand, so the channel cannot be closed yet.
-        let _ = tx.send(item);
-    }
-    tokio::spawn(async move {
-        while let Some(item) = stream.recv().await {
-            if tx.send(item).is_err() {
-                break;
-            }
-        }
-    });
-    rx
 }
 
 /// A session over the ring. Every call goes back through the ring so the

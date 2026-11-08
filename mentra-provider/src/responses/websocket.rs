@@ -286,7 +286,7 @@ impl ResponsesWebsocketConnection {
             serde_json::to_string(&request_body).map_err(ProviderError::Serialize)?;
 
         let mut guard = Arc::clone(&self.stream).lock_owned().await;
-        let Some(ws_stream) = guard.as_mut() else {
+        let Some(mut ws_stream) = guard.take() else {
             return Err(closed_before_send(
                 "websocket connection is closed".to_string(),
             ));
@@ -302,8 +302,6 @@ impl ResponsesWebsocketConnection {
             );
         }
         if let Some(error) = send_error {
-            // The socket that refused the frame carries nothing more.
-            guard.take();
             return Err(error);
         }
 
@@ -321,25 +319,28 @@ impl ResponsesWebsocketConnection {
                 return;
             }
 
-            let result = {
-                let ws_stream = guard
-                    .as_mut()
-                    .expect("the connection the frame was sent on is held by this guard");
-                read_websocket_response_stream(
-                    ws_stream,
-                    tx_event.clone(),
+            // The socket stays out of the cache until its terminal frame. A
+            // cancelled send or read can otherwise leave this turn's frames
+            // queued on a connection the next request thinks is idle.
+            let result = tokio::select! {
+                biased;
+                _ = tx_event.closed() => return,
+                result = read_websocket_response_stream(
+                    &mut ws_stream,
+                    &tx_event,
                     idle_timeout,
                     telemetry,
                     StreamState::new(provenance.provider, provenance.model),
-                )
-                .await
+                ) => result,
             };
-
-            if let Err(err) = result {
-                let failed_stream = guard.take();
-                drop(guard);
-                drop(failed_stream);
-                let _ = tx_event.send(Err(err));
+            match result {
+                Ok(true) => *guard = Some(ws_stream),
+                Ok(false) => {}
+                Err(error) => {
+                    drop(ws_stream);
+                    drop(guard);
+                    let _ = tx_event.send(Err(error));
+                }
             }
         });
 
@@ -400,13 +401,14 @@ pub(crate) fn response_create_frame(mut response: Value) -> Value {
     response
 }
 
+/// Returns true only when the terminal response frame has been read.
 async fn read_websocket_response_stream(
     ws_stream: &mut WsStream,
-    tx_event: mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
+    tx_event: &mpsc::UnboundedSender<Result<ProviderEvent, ProviderError>>,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn ResponsesWebsocketTelemetry>>,
     mut state: StreamState,
-) -> Result<(), ProviderError> {
+) -> Result<bool, ProviderError> {
     loop {
         let poll_start = Instant::now();
         let message_result = tokio::time::timeout(idle_timeout, ws_stream.next())
@@ -442,7 +444,7 @@ async fn read_websocket_response_stream(
                         })
                         .unwrap_or(false);
                     if receiver_closed {
-                        return Ok(());
+                        return Ok(false);
                     }
                     return Err(mapped.error);
                 }
@@ -453,11 +455,11 @@ async fn read_websocket_response_stream(
                         saw_message_stopped = true;
                     }
                     if tx_event.send(Ok(event)).is_err() {
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
                 if saw_message_stopped {
-                    break;
+                    return Ok(true);
                 }
             }
             Message::Binary(_) => {
@@ -474,8 +476,6 @@ async fn read_websocket_response_stream(
             Message::Ping(_) | Message::Pong(_) => {}
         }
     }
-
-    Ok(())
 }
 
 /// Delay hint for connection-level websocket failures. Short enough that a

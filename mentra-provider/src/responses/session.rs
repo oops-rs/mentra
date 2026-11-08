@@ -32,6 +32,9 @@ use crate::ResponsesTransport;
 use crate::SessionRequestOptions;
 use crate::request::ResponsesRequestCompression;
 use crate::request_fields::body_with_request_fields;
+use crate::stream::receive_while_open;
+#[cfg(feature = "responses-websocket")]
+use crate::stream::replay_stream;
 
 use super::SharedTurnState;
 use super::model::ResponsesModelsPage;
@@ -630,6 +633,7 @@ where
                     reasoning_provenance.model,
                 ),
                 None,
+                ResponsesTransport::HttpSse,
             ));
         }
 
@@ -648,6 +652,7 @@ where
                 reasoning_provenance.model,
             ),
             request.previous_response_id().map(str::to_string),
+            ResponsesTransport::HttpSse,
         ))
     }
 
@@ -675,7 +680,13 @@ where
             // Nothing to recover, or Stateful, which stays strict: a refusal
             // reaches the caller, and the tracker forgets the refused id on
             // its way past.
-            chained_from => return Ok(self.track_response_state(stream, chained_from)),
+            chained_from => {
+                return Ok(self.track_response_state(
+                    stream,
+                    chained_from,
+                    ResponsesTransport::WebSocket,
+                ));
+            }
         };
 
         // Over HTTP a refusal is the response's own status, known before any
@@ -685,9 +696,11 @@ where
         // `ResponseHeaders`. So Hybrid waits for the first item that is not
         // headers before deciding, as HTTP waits for the status line.
         match websocket_response_start(stream).await {
-            WebsocketResponseStart::Started(stream) => {
-                Ok(self.track_response_state(stream, Some(chained_from)))
-            }
+            WebsocketResponseStart::Started(stream) => Ok(self.track_response_state(
+                stream,
+                Some(chained_from),
+                ResponsesTransport::WebSocket,
+            )),
             WebsocketResponseStart::PreviousResponseRejected => {
                 // `ParameterUnsupported` is not recorded: that cache only ever
                 // skips HTTP+SSE probes (see `stream_response`).
@@ -704,7 +717,7 @@ where
                 let stream = self
                     .send_websocket_request(&request, credentials, session, reasoning_provenance)
                     .await?;
-                Ok(self.track_response_state(stream, None))
+                Ok(self.track_response_state(stream, None, ResponsesTransport::WebSocket))
             }
         }
     }
@@ -817,7 +830,9 @@ where
         }
     }
 
-    /// Forwards `stream`, recording each response it starts as the chain head.
+    /// Forwards `stream` and records the chain head. A websocket response
+    /// becomes the head only after its terminal frame, so dropping the stream
+    /// while it is in flight leaves the prior head available to the next turn.
     ///
     /// `chained_from` is the `previous_response_id` the request carried. If the
     /// stream reports that the endpoint refused it, the id is forgotten before
@@ -827,15 +842,23 @@ where
         &self,
         mut stream: ProviderEventStream,
         chained_from: Option<String>,
+        transport: ResponsesTransport,
     ) -> ProviderEventStream {
         let (tx, rx) = mpsc::unbounded_channel();
         let state = Arc::clone(&self.state);
 
         tokio::spawn(async move {
-            while let Some(event) = stream.recv().await {
+            let mut pending_response_id = None;
+            while let Some(event) = receive_while_open(&mut stream, &tx).await {
                 match &event {
-                    Ok(ProviderEvent::MessageStarted { id, .. }) => {
-                        state.set_latest_response_id(id.clone());
+                    Ok(ProviderEvent::MessageStarted { id, .. }) => match transport {
+                        ResponsesTransport::HttpSse => state.set_latest_response_id(id.clone()),
+                        ResponsesTransport::WebSocket => pending_response_id = Some(id.clone()),
+                    },
+                    Ok(ProviderEvent::MessageStopped) => {
+                        if let Some(id) = pending_response_id.take() {
+                            state.set_latest_response_id(id);
+                        }
                     }
                     Err(error) => {
                         if let Some(rejected) = chained_from.as_deref()
@@ -1012,19 +1035,7 @@ async fn websocket_response_start(mut stream: ProviderEventStream) -> WebsocketR
         }
     }
 
-    let (tx, rx) = mpsc::unbounded_channel();
-    for item in read {
-        // `rx` is still in hand, so the channel cannot be closed yet.
-        let _ = tx.send(item);
-    }
-    tokio::spawn(async move {
-        while let Some(item) = stream.recv().await {
-            if tx.send(item).is_err() {
-                break;
-            }
-        }
-    });
-    WebsocketResponseStart::Started(rx)
+    WebsocketResponseStart::Started(replay_stream(read, stream))
 }
 
 #[async_trait::async_trait]
