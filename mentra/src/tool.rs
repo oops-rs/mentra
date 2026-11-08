@@ -6,6 +6,7 @@ mod coding;
 mod descriptor;
 mod files;
 mod forwarding;
+mod function;
 pub(crate) mod internal;
 mod model;
 mod orchestrator;
@@ -32,6 +33,7 @@ pub use descriptor::{
     ProviderToolSpec, RuntimeToolDescriptor, RuntimeToolDescriptorBuilder, ToolApprovalCategory,
     ToolCapability, ToolDurability, ToolExecutionCategory, ToolLoadingPolicy, ToolSideEffectLevel,
 };
+pub use function::tool_fn;
 pub use mentra_provider::ToolResultContent;
 pub use model::{
     ExecutableTool, ParallelToolContext, ToolCall, ToolContext, ToolDefinition, ToolExecutor,

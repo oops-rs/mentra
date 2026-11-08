@@ -10,7 +10,7 @@ MSRV: Rust 1.88.
 - provider-neutral token usage reporting across OpenAI, OpenRouter, Anthropic, Gemini, Ollama, and LM Studio
 - optional tool authorization with structured previews and fail-closed execution blocking
 - recoverable malformed tool-call input handling that feeds retry guidance back to the model
-- custom tool execution through `ToolDefinition + ToolExecutor`, with `ToolSpec::builder(...)` as the convenience metadata API
+- typed async custom tools through `tool_fn`, with `ToolDefinition + ToolExecutor` for advanced execution
 - builtin `shell`, `background_run`, `check_background`, and `files` tools
 - builtin `task` subagents with isolated child context and parent-side tracking
 - persistent agent teams with `team_spawn`, `team_send`, `broadcast`, `team_read_inbox`, and generic request-response protocols via `team_request`, `team_respond`, and `team_list_requests`
@@ -470,52 +470,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Custom Tools
 
-Use `ToolSpec::builder(...)` to define custom tools without hand-assembling the metadata struct:
+Use `tool_fn` to register an async function or closure that receives typed arguments and returns text. Set the provider-visible input schema on the descriptor. Mentra checks the supported schema rules before deserializing the arguments into the handler's input type.
 
 ```rust,no_run
-use async_trait::async_trait;
-use mentra::tool::{
-    ParallelToolContext, ToolCapability, ToolDefinition, ToolDurability, ToolExecutor,
-    ToolResult, ToolSideEffectLevel, ToolSpec,
+use mentra::{
+    Runtime,
+    tool::{ToolCapability, ToolDurability, ToolSpec, tool_fn},
 };
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 
-struct UppercaseTool;
-
-impl ToolDefinition for UppercaseTool {
-    fn descriptor(&self) -> ToolSpec {
-        ToolSpec::builder("uppercase_text")
-            .description("Uppercase the provided text")
-            .input_schema(json!({
-                "type": "object",
-                "properties": {
-                    "text": { "type": "string" }
-                },
-                "required": ["text"]
-            }))
-            .capability(ToolCapability::ReadOnly)
-            .side_effect_level(ToolSideEffectLevel::None)
-            .durability(ToolDurability::ReplaySafe)
-            .execution_timeout(std::time::Duration::from_secs(5))
-            .build()
-    }
+#[derive(Deserialize)]
+struct UppercaseInput {
+    text: String,
 }
 
-#[async_trait]
-impl ToolExecutor for UppercaseTool {
-    async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
-        let text = input
-            .get("text")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "text is required".to_string())?;
-        Ok(text.to_uppercase())
-    }
-}
+let uppercase = tool_fn(
+    ToolSpec::builder("uppercase_text")
+        .description("Uppercase the provided text")
+        .input_schema(json!({
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        }))
+        .capability(ToolCapability::ReadOnly)
+        .durability(ToolDurability::ReplaySafe)
+        .execution_timeout(std::time::Duration::from_secs(5))
+        .build(),
+    async |_, input: UppercaseInput| Ok(input.text.to_uppercase()),
+);
+let runtime = Runtime::empty_builder().with_tool(uppercase).build()?;
+# Ok::<(), mentra::error::RuntimeError>(())
 ```
 
-`ToolSpec::execution_timeout(...)` is enforced by Mentra around the tool future itself, which is useful for network-backed tools that need a tighter budget than the overall agent run.
-
-Internally, Mentra translates `ToolSpec` into a runtime-only `RuntimeToolDescriptor`, but custom runtime integrations should continue to treat `ToolSpec::builder(...)` as the supported public metadata surface. `ExecutableTool` remains available in this release as a compatibility trait alias over `ToolDefinition + ToolExecutor`.
+The descriptor's execution timeout applies to the tool future. The handler receives `ParallelToolContext` in both parallel and exclusive scheduling lanes. Implement `ToolDefinition` and `ToolExecutor` when a tool needs mutable agent access, structured outputs, or a custom authorization preview. `ToolSpec` is the runtime descriptor, and any type that implements both traits is an `ExecutableTool`.
 
 When a tool needs disposable delegated work, `ParallelToolContext::spawn_subagent()` can create a child agent that inherits the current runtime and model defaults. See the `subagent_tool` example in the workspace examples crate for a complete usage pattern.
 
@@ -677,7 +665,7 @@ Mentra now separates tool contracts into explicit layers:
 - `RuntimeToolDescriptor` in Mentra for scheduling, approval, and durability metadata
 - `ToolDefinition + ToolExecutor` for executable runtime tools
 
-Provider adapters should serialize provider-facing tool specs only. Runtime integrations should continue to implement custom tools with `ToolSpec::builder(...)`, `ToolDefinition`, and `ToolExecutor`.
+Provider adapters serialize provider-facing tool specs. Runtime integrations use `ToolSpec::builder(...)` to describe tools built with `tool_fn` or implemented through `ToolDefinition + ToolExecutor`.
 
 ## Hosted Tool Search
 

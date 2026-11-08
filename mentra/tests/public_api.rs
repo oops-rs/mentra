@@ -1755,3 +1755,77 @@ fn an_openai_compatible_endpoint_can_be_registered_before_the_runtime_exists() {
         "{registered:?}"
     );
 }
+
+#[tokio::test]
+async fn function_tools_decode_arguments_on_both_scheduling_lanes() {
+    use mentra::tool::{ToolExecutionCategory, tool_fn};
+
+    #[derive(serde::Deserialize)]
+    struct Input {
+        text: String,
+    }
+
+    for category in [
+        ToolExecutionCategory::ExclusiveLocalMutation,
+        ToolExecutionCategory::ReadOnlyParallel,
+    ] {
+        let harness = Harness::new(vec![
+            Turn::ToolCalls(vec![
+                ScriptedToolCall::new("uppercase", json!({"text": "mentra"})),
+                ScriptedToolCall::new("uppercase", json!({"text": 42})),
+            ]),
+            Turn::Text("done".into()),
+        ]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tool: Arc<dyn ExecutableTool> = Arc::new(tool_fn(
+            ToolSpec::builder("uppercase")
+                .description("Uppercase a string")
+                // Leave the property untyped so the adapter handles the malformed value.
+                .input_schema(json!({
+                    "type": "object",
+                    "properties": {"text": {}},
+                    "required": ["text"],
+                }))
+                .execution_category(category)
+                .build(),
+            {
+                let calls = Arc::clone(&calls);
+                move |ctx, input: Input| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(ctx.tool_name, "uppercase");
+                        Ok(input.text.to_uppercase())
+                    }
+                }
+            },
+        ));
+        assert_eq!(tool.execution_category(&Value::Null), category);
+        harness.runtime.register_tool(tool);
+        let mut agent = harness.spawn("tool adapter test");
+        agent
+            .send(vec![ContentBlock::text("call both tools")])
+            .await
+            .unwrap();
+
+        let results = agent
+            .history()
+            .iter()
+            .flat_map(|msg| &msg.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => Some((content.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], ("MENTRA", false));
+        assert!(results[1].1);
+        assert!(
+            results[1].0.contains("Invalid uppercase input:"),
+            "{results:?}"
+        );
+    }
+}

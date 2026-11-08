@@ -1,19 +1,21 @@
 mod common;
 
-use async_trait::async_trait;
 use mentra::{
     ContentBlock,
-    tool::{
-        ParallelToolContext, ToolCapability, ToolDefinition, ToolDurability, ToolExecutor,
-        ToolResult, ToolSideEffectLevel, ToolSpec,
-    },
+    tool::{ToolCapability, ToolDurability, ToolSpec, tool_fn},
 };
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 
-struct UppercaseTool;
+#[derive(Deserialize)]
+struct UppercaseInput {
+    text: String,
+}
 
-impl ToolDefinition for UppercaseTool {
-    fn descriptor(&self) -> ToolSpec {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = common::openai_runtime()?;
+    runtime.register_tool(tool_fn(
         ToolSpec::builder("uppercase_text")
             .description("Uppercase the provided text and return the transformed value.")
             .input_schema(json!({
@@ -27,28 +29,10 @@ impl ToolDefinition for UppercaseTool {
                 "required": ["text"]
             }))
             .capability(ToolCapability::ReadOnly)
-            .side_effect_level(ToolSideEffectLevel::None)
             .durability(ToolDurability::ReplaySafe)
-            .build()
-    }
-}
-
-#[async_trait]
-impl ToolExecutor for UppercaseTool {
-    async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
-        let text = input
-            .get("text")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "text is required".to_string())?;
-
-        Ok(text.to_uppercase())
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = common::openai_runtime()?;
-    runtime.register_tool(UppercaseTool);
+            .build(),
+        async |_, input: UppercaseInput| Ok(input.text.to_uppercase()),
+    ));
 
     let model = common::openai_model(&runtime).await?;
     let prompt = common::first_arg_or(
