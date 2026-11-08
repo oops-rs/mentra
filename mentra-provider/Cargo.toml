@@ -29,7 +29,7 @@ async-trait = "0.1.89"
 base64 = "0.22.1"
 # `sink` only for the websocket transport's send half; the SSE readers need
 # nothing but `StreamExt`.
-futures-util = "0.3.31"
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 http = "1.3.1"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
@@ -44,4 +44,6 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.53.3", features = ["macros", "rt", "sync", "time"] }
 tokio-tungstenite = { version = "0.28", optional = true }
 url = "2.5"
-zstd = "0.14.3"
+# Responses only encodes request bodies, so it needs no legacy decoder or
+# dictionary builder.
+zstd = { version = "0.14.3", default-features = false }

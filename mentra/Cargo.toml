@@ -40,7 +40,9 @@ test-utils = []
 
 [dependencies]
 mentra-provider = { version = "0.9.10", path = "../mentra-provider", default-features = false }
-tokio = { version = "1.53.3", features = ["full"] }
+tokio = { version = "1.53.3", features = [
+    "fs", "io-util", "macros", "net", "parking_lot", "process", "rt-multi-thread", "sync", "time",
+] }
 reqwest = { version = "0.12.23", default-features = false, features = [
     "json",
     "rustls-tls",
@@ -50,7 +52,7 @@ url = "2.5"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 async-trait = "0.1.89"
-futures-util = "0.3.31"
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 base64 = "0.22.1"
 directories = "6.0.0"
@@ -79,9 +81,7 @@ unicode-normalization = "0.1.24"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
-# Tests only: `start_paused` lets a retry schedule measured in tens of seconds
-# be asserted without waiting them out. Not enabled for the library build, so
-# nothing a dependant links changes.
+# `start_paused` lets retry tests assert long schedules without waiting them out.
 tokio = { version = "1.50.0", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
