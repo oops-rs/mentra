@@ -104,8 +104,9 @@ impl Completion {
 /// - **Output is capped while it is read.** Neither stream can cost more than
 ///   the configured stdout/stderr cap, however much the program prints, and both
 ///   are still drained so the program is never blocked on a full pipe.
-/// - **A dropped run kills the child.** The command is spawned with
-///   `kill_on_drop`, so a cancelled future does not leak a process.
+/// - **A dropped run starts process and pipe cleanup.** The process guard
+///   kills the group on Unix and stops the child tree on Windows while its
+///   leader is still live. The pipe tasks are aborted as well.
 ///
 /// Both bounds are constructor arguments rather than options with defaults:
 /// there is no way to spell an unbounded run of this type, which is the whole
@@ -162,8 +163,8 @@ pub(crate) fn baseline_environment() -> Vec<(OsString, OsString)> {
         .collect()
 }
 
-/// A child started with the process discipline, kept alive for a bidirectional
-/// protocol such as MCP rather than consumed by [`BoundedCommand::run`].
+/// A supervised child. Owns process cleanup on drop and an optional stderr
+/// drain for interactive protocols such as MCP.
 pub(crate) struct BoundedChild {
     child: Child,
     group: Option<u32>,
@@ -172,6 +173,15 @@ pub(crate) struct BoundedChild {
 }
 
 impl BoundedChild {
+    fn new(child: Child) -> Self {
+        Self {
+            group: child.id(),
+            child,
+            stderr_task: None,
+            armed: true,
+        }
+    }
+
     pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
         self.child.stdin.take()
     }
@@ -393,16 +403,15 @@ impl BoundedCommand {
     /// contract is the one-shot [`run`](Self::run) operation; protocol clients
     /// own their request deadlines separately.
     pub(crate) fn spawn_piped(&self) -> io::Result<BoundedChild> {
-        let mut child = self.spawn_with_stdio(Stdio::piped(), Stdio::piped(), Stdio::piped())?;
-        let group = child.id();
-        let stderr = child.stderr.take().ok_or_else(|| missing_pipe("stderr"))?;
-        let stderr_task = tokio::spawn(read_capped(stderr, self.max_stderr_bytes));
-        Ok(BoundedChild {
-            child,
-            group,
-            stderr_task: Some(stderr_task),
-            armed: true,
-        })
+        let child = self.spawn_with_stdio(Stdio::piped(), Stdio::piped(), Stdio::piped())?;
+        let mut child = BoundedChild::new(child);
+        let stderr = child
+            .child
+            .stderr
+            .take()
+            .ok_or_else(|| missing_pipe("stderr"))?;
+        child.stderr_task = Some(tokio::spawn(read_capped(stderr, self.max_stderr_bytes)));
+        Ok(child)
     }
 
     /// Spawns the program and waits for it, inside the budget.
@@ -415,15 +424,14 @@ impl BoundedCommand {
         // Started before the spawn, because forking a process is part of what
         // the program is being given time for.
         let deadline = Instant::now() + self.timeout;
-        let mut child = self.spawn()?;
-        // Recorded now because a reaped child has no id left to ask for, and
-        // the group kill below can outlive the program that led the group.
-        let group = child.id();
+        let mut running = BoundedChild::new(self.spawn()?);
+        let group = running.group;
+        let child = &mut running.child;
 
-        let stdin_task = match self.stdin {
+        let _stdin_task = match self.stdin {
             Some(payload) => {
                 let mut pipe = child.stdin.take().ok_or_else(|| missing_pipe("stdin"))?;
-                Some(tokio::spawn(async move {
+                Some(ScopedTask(tokio::spawn(async move {
                     // A broken pipe here is not an error: a program that
                     // answers without reading is legitimate, and this only
                     // offers the payload. Dropping the handle at the end of the
@@ -431,7 +439,7 @@ impl BoundedCommand {
                     // payload stopped.
                     let _ = pipe.write_all(&payload).await;
                     let _ = pipe.shutdown().await;
-                }))
+                })))
             }
             None => None,
         };
@@ -449,7 +457,7 @@ impl BoundedCommand {
         let code = match waited {
             Ok(status) => status?.code(),
             Err(_) => {
-                kill_tree_and_reap(&mut child, group).await?;
+                kill_tree_and_reap(child, group).await?;
                 None
             }
         };
@@ -466,7 +474,7 @@ impl BoundedCommand {
         };
         if !streams.drained_by(drain_deadline).await? {
             timed_out = true;
-            kill_tree_and_reap(&mut child, group).await?;
+            kill_tree_and_reap(child, group).await?;
             if !streams.drained_by(Instant::now() + CLEANUP_GRACE).await? {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -475,13 +483,8 @@ impl BoundedCommand {
             }
         }
 
-        // The payload is no longer wanted by anyone: a program that read it has
-        // exited, and one that did not was killed.
-        if let Some(task) = stdin_task {
-            task.abort();
-        }
-
         let (stdout, stderr) = streams.into_captures();
+        running.armed = false;
         Ok(if timed_out {
             Completion::TimedOut { stdout, stderr }
         } else {
@@ -539,19 +542,28 @@ impl BoundedCommand {
     }
 }
 
+/// A pipe task belongs to the command, even if its caller cancels the run.
+struct ScopedTask<T>(JoinHandle<T>);
+
+impl<T> Drop for ScopedTask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// One output stream being read into a [`CapturedStream`].
 ///
 /// Holds the finished capture once the reader task has produced it, so a drain
 /// that has to be retried after a kill never polls a completed task again.
 struct DrainingStream {
-    task: JoinHandle<io::Result<CapturedStream>>,
+    task: ScopedTask<io::Result<CapturedStream>>,
     captured: Option<CapturedStream>,
 }
 
 impl DrainingStream {
     fn new(task: JoinHandle<io::Result<CapturedStream>>) -> Self {
         Self {
-            task,
+            task: ScopedTask(task),
             captured: None,
         }
     }
@@ -564,7 +576,7 @@ impl DrainingStream {
         if self.captured.is_some() {
             return Ok(true);
         }
-        match tokio::time::timeout_at(deadline, &mut self.task).await {
+        match tokio::time::timeout_at(deadline, &mut self.task.0).await {
             Ok(joined) => {
                 let captured = joined.map_err(|error| {
                     io::Error::other(format!("command output task failed: {error}"))
@@ -904,6 +916,59 @@ mod tests {
                 wait_until_dead(pid).await,
                 "the backgrounded descendant {pid} outlived the deadline"
             );
+        }
+
+        #[tokio::test]
+        async fn cancelling_a_run_kills_its_descendants() {
+            async fn wait_for(path: &Path, budget: Duration) -> bool {
+                tokio::time::timeout(budget, async {
+                    while !path.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok()
+            }
+
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "mentra-cancelled-command-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let task = tokio::spawn(
+                BoundedCommand::shell(
+                    r#"(
+                        printf ready > ready
+                        tries=0
+                        while [ ! -f release ]; do
+                            tries=$((tries + 1))
+                            [ "$tries" -lt 100 ] || exit
+                            sleep 0.05
+                        done
+                        printf survived > survived
+                    ) & wait"#,
+                    seconds(15),
+                    CAP,
+                )
+                .current_dir(&dir)
+                .envs(minimal_shell_env())
+                .run(),
+            );
+
+            let started = wait_for(&dir.join("ready"), seconds(5)).await;
+            task.abort();
+            let aborted = task.await;
+            std::fs::write(dir.join("release"), "").unwrap();
+            let survived = wait_for(&dir.join("survived"), Duration::from_millis(500)).await;
+            std::fs::remove_dir_all(&dir).unwrap();
+
+            assert!(started, "the descendant published its readiness");
+            assert!(aborted.expect_err("the run was cancelled").is_cancelled());
+            assert!(!survived, "the descendant kept running after cancellation");
         }
 
         #[tokio::test]
