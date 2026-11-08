@@ -53,7 +53,7 @@ impl MemoryStore for VolatileRuntimeStore {
         }
 
         let state = self.lock();
-        let mut matches: Vec<MemoryRecord> = state
+        let mut matches: Vec<&MemoryRecord> = state
             .memory
             .records
             .values()
@@ -64,11 +64,9 @@ impl MemoryStore for VolatileRuntimeStore {
                 let content = record.content.to_lowercase();
                 tokens.iter().any(|token| content.contains(token))
             })
-            .cloned()
             .collect();
         matches.sort_by_key(|record| std::cmp::Reverse(record.created_at));
-        matches.truncate(request.limit);
-        Ok(matches)
+        Ok(matches.into_iter().take(request.limit).cloned().collect())
     }
 
     fn delete_records(&self, record_ids: &[String]) -> Result<(), RuntimeError> {
