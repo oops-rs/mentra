@@ -403,6 +403,95 @@ async fn completed_background_results_are_injected_on_next_send() {
     assert!(injected.contains("output=\"bg-done"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restored_agents_keep_existing_background_jobs_when_starting_new_ones() {
+    use crate::background::BackgroundStore;
+
+    let store = temp_store("restored-background-task-ids");
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let build_runtime = || {
+        Runtime::builder()
+            .with_store(store.clone())
+            .with_policy(RuntimePolicy::permissive())
+            .with_provider_instance(ScriptedProvider::new(
+                BuiltinProvider::Anthropic,
+                vec![model.clone()],
+                vec![],
+            ))
+            .build()
+            .expect("build runtime")
+    };
+    let start = |agent: &Agent, output| {
+        agent
+            .runtime
+            .start_background_task(
+                agent.id(),
+                background_success_command(output, 0),
+                None,
+                None,
+                agent.config().workspace.base_dir.clone(),
+            )
+            .expect("start background task")
+    };
+    let restored = {
+        let runtime = build_runtime();
+        let mut restored = Vec::new();
+        for name in ["first", "second"] {
+            let agent = runtime.spawn(name, model.clone()).expect("spawn agent");
+            let mut prior = Vec::new();
+            for output in ["old one", "old two"] {
+                let started = start(&agent, output);
+                wait_for_background_task_status(
+                    &store,
+                    agent.id(),
+                    &started.id,
+                    BackgroundTaskStatus::Finished,
+                )
+                .await;
+                prior.push(started.id);
+            }
+            restored.push((agent.id().to_string(), prior));
+        }
+        restored
+    };
+
+    let runtime = Arc::new(build_runtime());
+    let mut jobs = tokio::task::JoinSet::new();
+    for (agent_id, prior) in restored {
+        let runtime = Arc::clone(&runtime);
+        jobs.spawn(async move {
+            let agent = runtime.resume_agent(&agent_id).expect("resume agent");
+            (agent_id, prior, start(&agent, "new job").id)
+        });
+    }
+
+    let mut new_ids = Vec::new();
+    while let Some(job) = jobs.join_next().await {
+        let (agent_id, prior, new_id) = job.expect("start task after resume");
+        assert!(!prior.contains(&new_id), "reused a persisted id {new_id}");
+        wait_for_background_task_status(&store, &agent_id, &new_id, BackgroundTaskStatus::Finished)
+            .await;
+        let stored = store.load_background_tasks(&agent_id).expect("load jobs");
+        assert_eq!(stored.len(), prior.len() + 1);
+        assert!(
+            prior
+                .iter()
+                .all(|id| stored.iter().any(|job| &job.id == id))
+        );
+        let notifications = store
+            .drain_background_notifications(&agent_id)
+            .expect("load job notifications");
+        assert_eq!(notifications.len(), prior.len() + 1);
+        assert!(prior.iter().chain(std::iter::once(&new_id)).all(|id| {
+            notifications
+                .iter()
+                .any(|notification| &notification.task_id == id)
+        }));
+        new_ids.push(new_id);
+    }
+    assert_ne!(new_ids[0], new_ids[1]);
+}
+
 #[tokio::test]
 async fn teammate_auto_wakes_after_background_task_finishes() {
     let command = background_success_command("bg-done", 50);

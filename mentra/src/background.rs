@@ -65,7 +65,7 @@ struct BackgroundTaskManagerInner {
     store: Arc<dyn RuntimeStore>,
     executor: Arc<dyn RuntimeExecutor>,
     hooks: Arc<dyn BackgroundHookSink>,
-    next_task_id: AtomicU64,
+    last_task_id: AtomicU64,
     state: Mutex<BackgroundTaskManagerState>,
 }
 
@@ -77,6 +77,7 @@ struct BackgroundTaskManagerState {
 #[derive(Default)]
 struct AgentBackgroundState {
     tasks: Vec<BackgroundTaskSummary>,
+    restore_error: Option<String>,
     observer: Option<BackgroundObserver>,
 }
 
@@ -96,7 +97,7 @@ impl BackgroundTaskManager {
                 store,
                 executor,
                 hooks,
-                next_task_id: AtomicU64::default(),
+                last_task_id: AtomicU64::default(),
                 state: Mutex::new(BackgroundTaskManagerState::default()),
             }),
         }
@@ -111,11 +112,26 @@ impl BackgroundTaskManager {
                 .lock()
                 .expect("background manager poisoned");
             let agent = state.agents.entry(agent_id.clone()).or_default();
-            agent.tasks = self
-                .inner
-                .store
-                .load_background_tasks(&agent_id)
-                .unwrap_or_default();
+            match self.inner.store.load_background_tasks(&agent_id) {
+                Ok(tasks) => {
+                    // The store keys jobs by agent and task ID. Reserve every
+                    // previously used sequence number before this agent starts
+                    // another job, including one whose old executor may finish
+                    // after resume.
+                    if let Some(last_id) = tasks
+                        .iter()
+                        .filter_map(|task| task.id.strip_prefix("bg-")?.parse::<u64>().ok())
+                        .max()
+                    {
+                        self.inner
+                            .last_task_id
+                            .fetch_max(last_id, Ordering::Relaxed);
+                    }
+                    agent.tasks = tasks;
+                    agent.restore_error = None;
+                }
+                Err(error) => agent.restore_error = Some(error.to_string()),
+            }
             agent.observer = Some(BackgroundObserver {
                 sink: observer.clone(),
             });
@@ -130,10 +146,24 @@ impl BackgroundTaskManager {
         agent_id: &str,
         request: CommandRequest,
     ) -> Result<BackgroundTaskSummary, String> {
-        let task_id = format!(
-            "bg-{}",
-            self.inner.next_task_id.fetch_add(1, Ordering::Relaxed) + 1
-        );
+        if let Some(error) = self
+            .inner
+            .state
+            .lock()
+            .expect("background manager poisoned")
+            .agents
+            .get(agent_id)
+            .and_then(|agent| agent.restore_error.as_deref())
+        {
+            return Err(format!("Could not restore background tasks: {error}"));
+        }
+
+        let last_id = self
+            .inner
+            .last_task_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| "Background task IDs are exhausted".to_string())?;
+        let task_id = format!("bg-{}", last_id + 1);
         let summary = BackgroundTaskSummary {
             id: task_id.clone(),
             command: request.spec.display().to_string(),
@@ -141,10 +171,12 @@ impl BackgroundTaskManager {
             status: BackgroundTaskStatus::Running,
             output_preview: None,
         };
-        let _ = self
-            .inner
+        // Reserve the ID in the store before launching work that can outlive
+        // this runtime and report its result after another runtime resumes.
+        self.inner
             .store
-            .upsert_background_task(agent_id, &summary, NOTIFICATION_ACKED);
+            .upsert_background_task(agent_id, &summary, NOTIFICATION_ACKED)
+            .map_err(|error| format!("Could not save background task {task_id}: {error}"))?;
 
         let (observer, tasks) = {
             let mut state = self
