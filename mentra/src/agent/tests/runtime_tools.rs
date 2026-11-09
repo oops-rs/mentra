@@ -38,9 +38,9 @@ use crate::{
 
 use super::support::{
     PersistentStore, ProbeTool, ScriptedProvider, StaticTool, StopTrippingTool, StreamScript,
-    background_failure_command, background_success_command, command_input_json,
-    command_input_with_working_directory_json, controlled_stream, erroring_stream, model_info,
-    ok_stream, shell_pwd_command,
+    background_failure_command, background_gated_command, background_success_command,
+    command_input_json, command_input_with_working_directory_json, controlled_stream,
+    erroring_stream, model_info, ok_stream, shell_pwd_command,
 };
 
 #[tokio::test]
@@ -2239,15 +2239,12 @@ async fn set_reasoning_updates_the_configured_reasoning_for_future_turns() {
 
 #[tokio::test]
 async fn completed_background_results_are_batched_in_completion_order() {
-    // The Windows fixture implements delays with `ping`, whose resolution is
-    // one second. Keep the fast millisecond separation on Unix, but cross a
-    // full tick on Windows so the test actually establishes an order there.
-    #[cfg(unix)]
-    let (first_delay_ms, second_delay_ms) = (20, 50);
-    #[cfg(windows)]
-    let (first_delay_ms, second_delay_ms) = (0, 1_000);
-    let first_command = background_success_command("first", first_delay_ms);
-    let second_command = background_success_command("second", second_delay_ms);
+    // Each command waits for its own gate file, so the test fixes the
+    // completion order instead of racing sleeps on a loaded runner. bg-2 is
+    // released and observed finished before bg-1 is released, so completion
+    // order is the reverse of launch (and ID) order.
+    let first_command = background_gated_command("first", "release-first");
+    let second_command = background_gated_command("second", "release-second");
     let first_input = command_input_json(&first_command);
     let second_input = command_input_json(&second_command);
     let model = model_info("model", BuiltinProvider::Anthropic);
@@ -2268,13 +2265,24 @@ async fn completed_background_results_are_batched_in_completion_order() {
     );
     let provider_handle = provider.clone();
 
+    let workspace_dir = temp_team_dir("bg-results-completion-order");
+    let workspace_dir = fs::canonicalize(&workspace_dir).expect("canonicalize workspace dir");
     let runtime = Runtime::builder()
         .with_store(temp_store("bg-results-batched-order"))
-        .with_policy(RuntimePolicy::permissive())
+        .with_policy(RuntimePolicy::permissive().with_allowed_working_root(std::env::temp_dir()))
         .with_provider_instance(provider)
         .build()
         .expect("build runtime");
-    let mut agent = runtime.spawn("agent", model).unwrap();
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                workspace: workspace_config(&workspace_dir),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
     agent
         .send(vec![ContentBlock::Text {
@@ -2283,6 +2291,15 @@ async fn completed_background_results_are_batched_in_completion_order() {
         .await
         .unwrap();
     wait_for_background_task_count(&agent, 2).await;
+
+    fs::write(workspace_dir.join("release-second"), "").expect("release second task");
+    wait_for_snapshot_task_status(&agent, "bg-2", BackgroundTaskStatus::Finished).await;
+    assert_eq!(
+        background_task_status(&agent, "bg-1"),
+        Some(BackgroundTaskStatus::Running),
+        "bg-1 must still be gated when bg-2 finishes"
+    );
+    fs::write(workspace_dir.join("release-first"), "").expect("release first task");
     wait_for_background_tasks(&agent, 2, BackgroundTaskStatus::Finished).await;
 
     agent
@@ -2296,7 +2313,10 @@ async fn completed_background_results_are_batched_in_completion_order() {
     let injected = latest_background_results_text(&requests[2]).expect("background results");
     let first = injected.find("[bg:bg-1]").expect("first task line");
     let second = injected.find("[bg:bg-2]").expect("second task line");
-    assert!(first < second);
+    assert!(
+        second < first,
+        "results follow completion order, not launch order: {injected}"
+    );
     assert!(injected.contains("output=\"first"));
     assert!(injected.contains("output=\"second"));
 }
@@ -5210,6 +5230,27 @@ async fn wait_for_background_tasks(
     }
 
     panic!("timed out waiting for {expected_count} background tasks to reach {status:?}");
+}
+
+fn background_task_status(agent: &Agent, task_id: &str) -> Option<BackgroundTaskStatus> {
+    agent
+        .watch_snapshot()
+        .borrow()
+        .background_tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .map(|task| task.status.clone())
+}
+
+async fn wait_for_snapshot_task_status(agent: &Agent, task_id: &str, status: BackgroundTaskStatus) {
+    for _ in 0..BACKGROUND_WAIT_ATTEMPTS {
+        if background_task_status(agent, task_id).as_ref() == Some(&status) {
+            return;
+        }
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+
+    panic!("timed out waiting for background task {task_id} to reach {status:?}");
 }
 
 fn latest_background_results_text<'a>(request: &'a Request<'a>) -> Option<&'a str> {

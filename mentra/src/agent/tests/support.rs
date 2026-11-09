@@ -183,6 +183,28 @@ pub(super) fn background_success_command(output: &str, delay_ms: u64) -> String 
     }
 }
 
+/// A background command that prints `output` only once a file named
+/// `gate_file` exists in its working directory, so a test decides when it
+/// finishes instead of racing a sleep. `gate_file` must be a plain name with
+/// no spaces or shell metacharacters; it is left unquoted on both platforms.
+pub(super) fn background_gated_command(output: &str, gate_file: &str) -> String {
+    #[cfg(unix)]
+    {
+        format!(
+            "while [ ! -e {gate_file} ]; do sleep 0.01; done; printf {}",
+            shell_single_quoted(output)
+        )
+    }
+
+    #[cfg(windows)]
+    {
+        format!(
+            "for /L %i in (0,0,1) do @if exist {gate_file} (echo {output}& exit 0) else ping -n 2 127.0.0.1 >NUL",
+            output = cmd_echo_literal(output)
+        )
+    }
+}
+
 pub(super) fn background_failure_command(stderr: &str, exit_code: i32, delay_ms: u64) -> String {
     #[cfg(unix)]
     {
