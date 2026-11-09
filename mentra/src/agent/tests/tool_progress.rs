@@ -11,7 +11,7 @@ use crate::{
     BuiltinProvider, ContentBlock, Role, Runtime,
     agent::AgentEvent,
     provider::{ContentBlockDelta, ContentBlockStart, ProviderEvent},
-    runtime::RunOptions,
+    runtime::{RunOptions, VolatileRuntimeStore},
     tool::{
         ParallelToolContext, ToolContext, ToolDefinition, ToolExecutionCategory, ToolExecutor,
         ToolProgress, ToolResult, ToolSpec,
@@ -66,6 +66,7 @@ async fn background_progress(category: ToolExecutionCategory) {
     let provider_handle = provider.clone();
     let (handles, mut handle_rx) = mpsc::unbounded_channel();
     let runtime = Runtime::empty_builder()
+        .with_store(VolatileRuntimeStore::new())
         .with_provider_instance(provider)
         .with_tool(BackgroundTool { category, handles })
         .build()
@@ -74,6 +75,7 @@ async fn background_progress(category: ToolExecutionCategory) {
     let other_agent = runtime.spawn("other", model.clone()).expect("other agent");
     let mut other_events = other_agent.subscribe_events();
     let mut events = agent.subscribe_events();
+    let mut snapshots = agent.watch_snapshot();
     let tapped = Arc::new(Mutex::new(Vec::new()));
     let tapped_events = Arc::clone(&tapped);
     let _tap = agent.register_event_tap(move |event| {
@@ -92,7 +94,7 @@ async fn background_progress(category: ToolExecutionCategory) {
         // The next request proves the tool returned. The runner cannot reach
         // another round boundary until we complete this controlled stream.
         while provider_handle.recorded_requests().await.len() < 2 {
-            tokio::task::yield_now().await;
+            snapshots.changed().await.expect("agent snapshot updates");
         }
         let progress = handle_rx.recv().await.expect("owned progress handle");
         let mut before = Vec::new();
@@ -188,12 +190,12 @@ async fn background_progress(category: ToolExecutionCategory) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn mutable_tool_progress_outlives_its_call() {
     background_progress(ToolExecutionCategory::ExclusiveLocalMutation).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn parallel_tool_progress_outlives_its_call() {
     background_progress(ToolExecutionCategory::ReadOnlyParallel).await;
 }
