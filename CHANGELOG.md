@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.34.6 — 2026-11-09
+
+- MCP stdio request deadlines now cover the writer queue, pipe write, flush,
+  and reply. Cancelled calls release their waiters, and an interrupted write
+  retires the connection so later requests cannot reuse a partial frame.
+- Concurrent MCP Streamable HTTP calls that receive a 404 for the same expired
+  session share a replacement handshake. A replacement becomes available after
+  `notifications/initialized` completes.
+- Resumed agents allocate background task IDs beyond their restored jobs,
+  preserving prior tasks and pending notifications.
+- `mentra::tool::tool_fn` registers typed async functions and closures as tools.
+- Run deadlines and cancellation cover stalled provider streams after partial
+  output. Dropping a command cleans up its pipe tasks and process tree.
+- File-store replay recovers torn UTF-8 appends, and SQLite memory deletion
+  preserves search entries belonging to other agents. The `read_only` runtime
+  policy now requires an explicit write root for file writes.
+- History projection, capped file search and paging, volatile memory ranking,
+  and A2A request assembly do less copying or scanning.
+- Require mentra-provider 0.9.11.
+
+## mentra-provider 0.9.11 — 2026-11-09
+
+- Decode HTTP event streams incrementally and borrow single-line SSE payloads.
+- Dropping a Responses WebSocket stream retires an unfinished connection.
+  Stateful and Hybrid requests chain from the last completed response.
+- Enable TLS for Responses WebSockets while honoring a host-installed rustls
+  crypto provider.
+- Count compact structured tool-result bytes without building a JSON string.
+- Drop Strum from the standalone provider and trim unused dependency features.
+
 ## 0.34.5 — 2026-11-05
 
 No breaking changes. mentra-provider 0.9.10.
