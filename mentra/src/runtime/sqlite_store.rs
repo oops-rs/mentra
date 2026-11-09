@@ -251,11 +251,12 @@ impl BackgroundStore for SqliteRuntimeStore {
         let conn = self.open()?;
         conn.execute(
             r#"
-            INSERT INTO background_jobs (agent_id, id, payload_json, notification_state, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            INSERT INTO background_jobs (agent_id, id, payload_json, notification_state, notification_seq, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(notification_seq), 0) + 1 FROM background_jobs), ?5, ?5)
             ON CONFLICT(agent_id, id) DO UPDATE SET
                 payload_json = excluded.payload_json,
                 notification_state = excluded.notification_state,
+                notification_seq = excluded.notification_seq,
                 updated_at = excluded.updated_at
             "#,
             params![agent_id, task.id, to_json(task)?, notification_state, now_secs()],
@@ -275,7 +276,7 @@ impl BackgroundStore for SqliteRuntimeStore {
         let jobs = {
             let mut stmt = tx
                 .prepare(
-                    "SELECT id, payload_json FROM background_jobs WHERE agent_id = ?1 AND notification_state = ?2 ORDER BY updated_at, id",
+                    "SELECT id, payload_json FROM background_jobs WHERE agent_id = ?1 AND notification_state = ?2 ORDER BY notification_seq, updated_at, id",
                 )
                 .map_err(sqlite_error)?;
             stmt.query_map(params![agent_id, DELIVERY_PENDING], |row| {
@@ -511,6 +512,7 @@ impl SqliteRuntimeStore {
                 id TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 notification_state INTEGER NOT NULL,
+                notification_seq INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (agent_id, id)
@@ -613,12 +615,31 @@ impl SqliteRuntimeStore {
             return Ok(());
         };
 
-        if schema_sql.contains("PRIMARY KEY (agent_id, id)")
-            || schema_sql.contains("PRIMARY KEY(agent_id, id)")
+        if !(schema_sql.contains("PRIMARY KEY (agent_id, id)")
+            || schema_sql.contains("PRIMARY KEY(agent_id, id)"))
         {
-            return Ok(());
+            Self::rekey_legacy_background_jobs(conn)?;
         }
 
+        // Notifications drain in the order their rows were written. The
+        // second-resolution `updated_at` cannot order two completions in the
+        // same second, so a monotonic sequence does; rows written before the
+        // column existed keep 0 and fall back to `updated_at, id`.
+        let has_notification_seq = conn
+            .prepare("SELECT 1 FROM pragma_table_info('background_jobs') WHERE name = 'notification_seq'")
+            .and_then(|mut stmt| stmt.exists([]))
+            .map_err(sqlite_error)?;
+        if !has_notification_seq {
+            conn.execute_batch(
+                "ALTER TABLE background_jobs ADD COLUMN notification_seq INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(sqlite_error)?;
+        }
+
+        Ok(())
+    }
+
+    fn rekey_legacy_background_jobs(conn: &Connection) -> Result<(), RuntimeError> {
         conn.execute_batch(
             r#"
             ALTER TABLE background_jobs RENAME TO background_jobs_legacy;
@@ -771,7 +792,7 @@ impl AgentStore for SqliteRuntimeStore {
                 if task.status == BackgroundTaskStatus::Running {
                     task.status = BackgroundTaskStatus::Interrupted;
                     tx.execute(
-                        "UPDATE background_jobs SET payload_json = ?3, notification_state = ?4, updated_at = ?5 WHERE agent_id = ?1 AND id = ?2",
+                        "UPDATE background_jobs SET payload_json = ?3, notification_state = ?4, notification_seq = (SELECT COALESCE(MAX(notification_seq), 0) + 1 FROM background_jobs), updated_at = ?5 WHERE agent_id = ?1 AND id = ?2",
                         params![agent_id, id, to_json(&task)?, DELIVERY_PENDING, now_secs()],
                     )
                     .map_err(sqlite_error)?;
@@ -1850,6 +1871,81 @@ mod tests {
         assert_eq!(agent_b_tasks.len(), 1);
         assert_eq!(agent_b_tasks[0].command, "echo b");
         assert_eq!(agent_b_tasks[0].status, BackgroundTaskStatus::Finished);
+    }
+
+    fn finished_task(id: &str) -> BackgroundTaskSummary {
+        BackgroundTaskSummary {
+            id: id.to_string(),
+            command: format!("echo {id}"),
+            cwd: std::env::temp_dir(),
+            status: BackgroundTaskStatus::Finished,
+            output_preview: Some(id.to_string()),
+        }
+    }
+
+    #[test]
+    fn same_second_completions_drain_in_the_order_they_were_written() {
+        // `updated_at` has one-second resolution, so ordering by it fell back
+        // to the id's string order for completions inside one second, which
+        // puts bg-10 before bg-9 and bg-1 before a bg-2 that finished first.
+        let store = SqliteRuntimeStore::new(
+            std::env::temp_dir().join(format!("mentra-store-bg-order-{}.sqlite", now_nanos())),
+        );
+        for id in ["bg-2", "bg-10", "bg-9", "bg-1"] {
+            store
+                .upsert_background_task("agent", &finished_task(id), DELIVERY_PENDING)
+                .expect("record completion");
+        }
+
+        let drained = store
+            .drain_background_notifications("agent")
+            .expect("drain notifications");
+        let ids: Vec<_> = drained.iter().map(|n| n.task_id.as_str()).collect();
+        assert_eq!(ids, ["bg-2", "bg-10", "bg-9", "bg-1"]);
+    }
+
+    #[test]
+    fn a_background_jobs_table_without_a_notification_sequence_is_migrated() {
+        let store = SqliteRuntimeStore::new(
+            std::env::temp_dir().join(format!("mentra-store-bg-legacy-{}.sqlite", now_nanos())),
+        );
+        let conn = Connection::open(store.path()).expect("open store");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE background_jobs (
+                agent_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                notification_state INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (agent_id, id)
+            );
+            "#,
+        )
+        .expect("create pre-sequence table");
+        conn.execute(
+            "INSERT INTO background_jobs (agent_id, id, payload_json, notification_state, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![
+                "agent",
+                "bg-1",
+                to_json(&finished_task("bg-1")).expect("encode task"),
+                DELIVERY_PENDING,
+                now_secs()
+            ],
+        )
+        .expect("seed a pending notification from before the migration");
+        drop(conn);
+
+        store
+            .upsert_background_task("agent", &finished_task("bg-2"), DELIVERY_PENDING)
+            .expect("record completion after migration");
+
+        let drained = store
+            .drain_background_notifications("agent")
+            .expect("drain notifications");
+        let ids: Vec<_> = drained.iter().map(|n| n.task_id.as_str()).collect();
+        assert_eq!(ids, ["bg-1", "bg-2"]);
     }
 
     #[test]
