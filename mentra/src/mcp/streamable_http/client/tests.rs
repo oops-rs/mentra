@@ -1,5 +1,8 @@
 use super::*;
-use crate::mcp::streamable_http::testing::{ReplyMode, ServerBehavior, StreamableHttpFixture};
+use crate::mcp::streamable_http::testing::{
+    ExpiredSession, ReplyMode, ServerBehavior, StreamableHttpFixture,
+};
+use crate::mcp::testing::CapturedRequest;
 
 /// Connects to a fixture, failing the test with the transport's own error.
 async fn connect(fixture: &StreamableHttpFixture) -> McpStreamableHttpClient {
@@ -796,6 +799,142 @@ async fn a_forgotten_session_is_replaced_and_the_call_goes_through() {
         .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
         .count();
     assert_eq!(calls, 2, "one rejected before dispatch, one that ran");
+}
+
+#[tokio::test]
+async fn concurrent_calls_share_one_replacement_session() {
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            session_id: Some("sess".to_string()),
+            rotate_session: true,
+            replacement_protocol_version: Some("2025-03-26"),
+            expired_session: Some(Arc::new(ExpiredSession::new("sess-1", 2))),
+            ..ServerBehavior::default()
+        },
+    );
+    let client = connect(&fixture).await;
+    let (first, second) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            client.call_tool("echo", None),
+            client.call_tool("echo", None)
+        )
+    })
+    .await
+    .expect("both calls finish");
+    assert_eq!(
+        first.expect("first call survives expiry").content[0]
+            .text
+            .as_deref(),
+        Some("echoed")
+    );
+    assert_eq!(
+        second.expect("second call survives expiry").content[0]
+            .text
+            .as_deref(),
+        Some("echoed")
+    );
+    assert_eq!(client.session_id().as_deref(), Some("sess-2"));
+
+    let requests = fixture.requests();
+    let renewal = requests
+        .iter()
+        .skip(1)
+        .position(|request| request.rpc_method().as_deref() == Some("initialize"))
+        .expect("replacement initialize")
+        + 1;
+    let (before, after) = requests.split_at(renewal);
+    let stale = before
+        .iter()
+        .filter(|request| request.rpc_method().as_deref() == Some("tools/call"))
+        .collect::<Vec<_>>();
+    assert_eq!(stale.len(), 2);
+    for request in stale {
+        assert_eq!(request.header(SESSION_HEADER), Some("sess-1"));
+        assert_eq!(request.header(PROTOCOL_HEADER), Some("2025-06-18"));
+    }
+    assert_eq!(
+        after
+            .iter()
+            .filter_map(|request| request.rpc_method())
+            .collect::<Vec<_>>(),
+        [
+            "initialize",
+            "notifications/initialized",
+            "tools/call",
+            "tools/call"
+        ],
+        "one replacement handshake, completed before either retry"
+    );
+    assert_eq!(after[0].header(SESSION_HEADER), None);
+    assert_eq!(after[0].header(PROTOCOL_HEADER), None);
+    for request in &after[1..] {
+        assert_eq!(request.header(SESSION_HEADER), Some("sess-2"));
+        assert_eq!(request.header(PROTOCOL_HEADER), Some("2025-03-26"));
+    }
+
+    let mut ids = requests
+        .iter()
+        .filter_map(|request| request.rpc_id())
+        .collect::<Vec<_>>();
+    let len = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), len, "retried calls carry fresh request IDs");
+}
+
+#[tokio::test]
+async fn a_cancelled_renewal_leaves_no_partial_session() {
+    let fixture = StreamableHttpFixture::start_with(
+        ReplyMode::Json,
+        ServerBehavior {
+            session_id: Some("sess".to_string()),
+            rotate_session: true,
+            expired_session: Some(Arc::new(ExpiredSession::new("sess-1", 1))),
+            stall_after_headers_on: Some("notifications/initialized".to_string()),
+            stall_after_headers_on_session: Some("sess-2"),
+            ..ServerBehavior::default()
+        },
+    );
+    let client = connect(&fixture).await;
+    let mut abandoned = Box::pin(client.call_tool("echo", None));
+    tokio::select! {
+        result = &mut abandoned => panic!("the notification should be stalled: {result:?}"),
+        () = wait_for_request(&fixture, |request| {
+            request.rpc_method().as_deref() == Some("notifications/initialized")
+                && request.header(SESSION_HEADER) == Some("sess-2")
+        }) => {}
+    }
+    assert_eq!(
+        client.session_id().as_deref(),
+        Some("sess-1"),
+        "a session must remain private until the notification completes"
+    );
+    drop(abandoned);
+    wait_for_request(&fixture, |request| {
+        request.method == "DELETE" && request.header(SESSION_HEADER) == Some("sess-2")
+    })
+    .await;
+
+    let result = tokio::time::timeout(Duration::from_secs(10), client.call_tool("echo", None))
+        .await
+        .expect("the abandoned handshake releases the renewal lock")
+        .expect("the next call can renew the session");
+    assert_eq!(result.content[0].text.as_deref(), Some("echoed"));
+    assert_eq!(client.session_id().as_deref(), Some("sess-3"));
+}
+
+async fn wait_for_request(
+    fixture: &StreamableHttpFixture,
+    matches: impl Fn(&CapturedRequest) -> bool,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.requests().iter().any(&matches) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture receives the expected request");
 }
 
 #[tokio::test]

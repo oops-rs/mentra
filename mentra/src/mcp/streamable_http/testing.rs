@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -53,18 +54,23 @@ impl StreamableHttpFixture {
         let captured = Arc::clone(&requests);
 
         thread::spawn(move || {
+            let behavior = Arc::new(behavior);
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                // Keep-alive: one connection may carry the whole handshake.
-                while let Some(request) = read_request(&mut stream) {
-                    captured
-                        .lock()
-                        .expect("fixture request log")
-                        .push(request.clone());
-                    if !answer(&mut stream, &request, mode, &behavior) {
-                        break;
+                let captured = Arc::clone(&captured);
+                let behavior = Arc::clone(&behavior);
+                thread::spawn(move || {
+                    // Keep-alive: one connection may carry the whole handshake.
+                    while let Some(request) = read_request(&mut stream) {
+                        captured
+                            .lock()
+                            .expect("fixture request log")
+                            .push(request.clone());
+                        if !answer(&mut stream, &request, mode, &behavior) {
+                            break;
+                        }
                     }
-                }
+                });
             }
         });
 
@@ -119,6 +125,8 @@ pub(crate) struct ServerBehavior {
     /// head, so any read of the body afterwards that is not itself bounded
     /// waits forever.
     pub(crate) stall_after_headers_on: Option<String>,
+    /// Optionally restrict the stall to a particular session.
+    pub(crate) stall_after_headers_on_session: Option<&'static str>,
     /// Serve `tools/list` as this many pages, chained by `nextCursor`.
     ///
     /// `None` serves one page with no cursor. The walk was previously untested
@@ -138,6 +146,10 @@ pub(crate) struct ServerBehavior {
     /// A recovery that could start another recovery would never return against
     /// this server.
     pub(crate) expire_every_tool_call: bool,
+    /// Reject calls carrying this session once the expected callers arrive.
+    pub(crate) expired_session: Option<Arc<ExpiredSession>>,
+    /// An alternate protocol revision for replacement handshakes.
+    pub(crate) replacement_protocol_version: Option<&'static str>,
     /// Issue a distinct session id per `initialize`, so a rotation is visible.
     pub(crate) rotate_session: bool,
     /// Whether the one-shot expiry above has already fired.
@@ -162,6 +174,42 @@ impl ServerBehavior {
     }
 }
 
+/// Can hold original tool POSTs so they all observe the same expired session.
+#[derive(Debug)]
+pub(crate) struct ExpiredSession {
+    session_id: &'static str,
+    expected_calls: usize,
+    arrivals: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl ExpiredSession {
+    pub(crate) fn new(session_id: &'static str, expected_calls: usize) -> Self {
+        Self {
+            session_id,
+            expected_calls,
+            arrivals: Mutex::new(0),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn wait_for_expected_calls(&self) {
+        let mut arrivals = self.arrivals.lock().expect("fixture expiry arrivals");
+        *arrivals += 1;
+        self.ready.notify_all();
+        let (arrivals, _) = self
+            .ready
+            .wait_timeout_while(arrivals, Duration::from_secs(5), |arrivals| {
+                *arrivals < self.expected_calls
+            })
+            .expect("wait for both requests");
+        assert!(
+            *arrivals >= self.expected_calls,
+            "expected calls must present the expired session"
+        );
+    }
+}
+
 /// Writes one response. Returns whether the connection stays usable.
 fn answer(
     stream: &mut TcpStream,
@@ -175,6 +223,9 @@ fn answer(
 
     if let Some(stall_on) = &behavior.stall_after_headers_on
         && request.rpc_method().as_deref() == Some(stall_on.as_str())
+        && behavior
+            .stall_after_headers_on_session
+            .is_none_or(|session| request.header("mcp-session-id") == Some(session))
     {
         // A head promising a body, and then silence. The connection is left
         // open deliberately: closing it would give the client an EOF, which is
@@ -211,6 +262,14 @@ fn answer(
         return write_raw(stream, status, "text/plain", "", &HashMap::new());
     }
 
+    if method == "tools/call"
+        && let Some(expiry) = &behavior.expired_session
+        && request.header("mcp-session-id") == Some(expiry.session_id)
+    {
+        expiry.wait_for_expected_calls();
+        return write_raw(stream, 404, "text/plain", "", &HashMap::new());
+    }
+
     if behavior.expire_every_tool_call
         && method == "tools/call"
         && request.header("mcp-session-id").is_some()
@@ -229,10 +288,11 @@ fn answer(
 
     let result = match method.as_str() {
         "initialize" => json!({
-            "protocolVersion": behavior
-                .protocol_version
-                .clone()
-                .unwrap_or_else(|| "2025-06-18".to_string()),
+            "protocolVersion": if behavior.sessions_issued.load(Ordering::SeqCst) > 0 {
+                behavior.replacement_protocol_version.or(behavior.protocol_version.as_deref())
+            } else {
+                behavior.protocol_version.as_deref()
+            }.unwrap_or("2025-06-18"),
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "fixture", "version": "9.9.9"},
         }),

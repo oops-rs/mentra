@@ -43,18 +43,16 @@
 //!
 //! # Failure behavior
 //!
-//! Nothing is retried and nothing is replayed. A `tools/call` whose request may
-//! have reached the server but whose reply never arrived is reported as
-//! [`McpStreamableHttpError::RequestIndeterminate`] rather than as a plain
-//! failure, so a caller can tell "may have run" apart from "definitely did
-//! not". An MCP tool can send mail, charge a card, or write a file, and this
-//! client never makes that decision on a caller's behalf.
+//! The only automatic replay follows a 404 that rejected the request's expired
+//! session before dispatch. A `tools/call` that may have reached the server
+//! without an answer returns [`McpStreamableHttpError::RequestIndeterminate`],
+//! since the tool may already have acted.
 
 #[cfg(test)]
 mod tests;
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -216,7 +214,7 @@ pub enum McpStreamableHttpError {
 /// Both values are assigned by the server during `initialize` and then echoed
 /// on every later request. They are replaced as a unit rather than mutated
 /// field by field, so a half-updated session cannot be observed.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct Session {
     /// The `Mcp-Session-Id` the server assigned, when it assigned one.
     id: Option<HeaderValue>,
@@ -248,7 +246,10 @@ pub struct McpStreamableHttpClient {
     headers: HeaderMap,
     limits: McpStreamableHttpLimits,
     next_id: AtomicU64,
-    session: Mutex<Session>,
+    /// Each allocation identifies one completed handshake, even if the server
+    /// happens to reuse a wire session id.
+    session: Mutex<Arc<Session>>,
+    renewal: tokio::sync::Mutex<()>,
     server_info: Option<McpServerInfo>,
     tools: Vec<McpToolDefinition>,
     server_name: String,
@@ -270,20 +271,16 @@ impl McpStreamableHttpClient {
             headers,
             limits: config.limits.clone(),
             next_id: AtomicU64::new(1),
-            session: Mutex::new(Session::default()),
+            session: Mutex::new(Arc::default()),
+            renewal: tokio::sync::Mutex::new(()),
             server_info: None,
             tools: Vec::new(),
             server_name: config.name.clone(),
         };
 
-        // A failure after `initialize` has to hand the session back. The
-        // server has already allocated one by then, and dropping the client
-        // sends no DELETE, so the session would sit on the server until it
-        // timed out on its own.
-        if let Err(error) = client.initialize().await {
-            client.shutdown().await;
-            return Err(error);
-        }
+        let (result, session) = client.handshake().await?;
+        client.server_info = Some(result.server_info);
+        *lock_session(&client.session) = Arc::new(session);
         if let Err(error) = client.discover_tools().await {
             client.shutdown().await;
             return Err(error);
@@ -353,27 +350,52 @@ impl McpStreamableHttpClient {
     /// that declines to forget a session, and a shutdown path that can fail is
     /// a shutdown path that gets skipped.
     pub async fn shutdown(&self) {
-        if lock_session(&self.session).id.is_none() {
+        let _renewal = self.renewal.lock().await;
+        let session = self.session_snapshot();
+        if session.id.is_none() {
             return;
         }
 
-        let _ = tokio::time::timeout(
-            self.limits.connect_timeout,
-            self.http
-                .delete(self.endpoint.clone())
-                .headers(self.request_headers())
-                .send(),
-        )
-        .await;
+        self.end_session(&session).await;
 
-        // Forget the id whatever the server said. Keeping it would let a
-        // second shutdown re-DELETE a session that is already gone, and would
-        // let a later call present credentials for one that no longer exists.
-        let mut session = lock_session(&self.session);
-        *session = Session {
+        // Forget the id whatever the server said. The renewal lock ensures
+        // this cannot clear a session established while DELETE was in flight.
+        *lock_session(&self.session) = Arc::new(Session {
             id: None,
             protocol_version: session.protocol_version.clone(),
+        });
+    }
+
+    fn session_snapshot(&self) -> Arc<Session> {
+        Arc::clone(&lock_session(&self.session))
+    }
+
+    fn end_session_request(&self, session: &Session) -> Option<reqwest::RequestBuilder> {
+        session.id.as_ref()?;
+        Some(
+            self.http
+                .delete(self.endpoint.clone())
+                .headers(self.request_headers(session)),
+        )
+    }
+
+    async fn end_session(&self, session: &Session) {
+        if let Some(request) = self.end_session_request(session) {
+            let _ = tokio::time::timeout(self.limits.connect_timeout, request.send()).await;
+        }
+    }
+
+    fn end_session_detached(&self, session: &Session) {
+        let Some(request) = self.end_session_request(session) else {
+            return;
         };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let timeout = self.limits.connect_timeout;
+        runtime.spawn(async move {
+            let _ = tokio::time::timeout(timeout, request.send()).await;
+        });
     }
 
     /// Sends a JSON-RPC request, restarting the session if the server forgot it.
@@ -398,10 +420,14 @@ impl McpStreamableHttpClient {
         // unknown session is refused before the message is dispatched, so the
         // tool did not run. The replacement carries a fresh id, because it is
         // a request in a new session rather than a repeat within the old one.
-        let result = match self.attempt(method, params.clone(), timeout).await {
+        let session = self.session_snapshot();
+        let result = match self
+            .attempt(&session, method, params.clone(), timeout)
+            .await
+        {
             Err(McpStreamableHttpError::SessionExpired) => {
-                self.reestablish_session().await?;
-                self.attempt(method, params, timeout).await?
+                let replacement = self.reestablish_session(&session).await?;
+                self.attempt(&replacement, method, params, timeout).await?
             }
             other => other?,
         };
@@ -411,15 +437,10 @@ impl McpStreamableHttpClient {
         })
     }
 
-    /// One attempt at a request, with no session recovery.
-    ///
-    /// The recovery path in [`request`](Self::request) runs its replacement
-    /// handshake through this rather than through `request`, so a server that
-    /// answers the recovery itself with a session error cannot start the
-    /// recovery again. The impossibility is structural rather than a guard on
-    /// the method name.
+    /// One attempt at a request on the session that supplied its headers.
     async fn attempt(
         &self,
+        session: &Session,
         method: &'static str,
         params: Option<JsonValue>,
         timeout: Duration,
@@ -427,42 +448,22 @@ impl McpStreamableHttpClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = JsonRpcRequest::new(id, method, params);
 
-        // One deadline covers this whole attempt, so a peer cannot evade
-        // `call_tool_timeout` by accepting the connection and withholding
-        // either the response head or the stream it promised.
-        match tokio::time::timeout(timeout, self.exchange(method, &request, id)).await {
+        // One deadline covers the response head and its streamed body.
+        let operation = async {
+            let response = self
+                .post(session, method, &request)
+                .await
+                .map_err(|error| classify_failure(method, error))?;
+            // A 2xx means a tool may already have run even if the reply fails.
+            self.read_reply(method, response, id)
+                .await
+                .map_err(|error| reply_failure(method, error))
+        };
+
+        match tokio::time::timeout(timeout, operation).await {
             Ok(result) => result,
             Err(_) => Err(request_timeout(method, timeout)),
         }
-    }
-
-    /// Posts one request and returns the JSON-RPC result it answered with.
-    async fn exchange(
-        &self,
-        method: &'static str,
-        request: &JsonRpcRequest,
-        id: u64,
-    ) -> Result<JsonValue, McpStreamableHttpError> {
-        let response = self
-            .post(method, request)
-            .await
-            .map_err(|error| classify_failure(method, error))?;
-
-        // The session is assigned during the handshake and only then. Reading
-        // it from a later response would let a server rotate the session
-        // mid-conversation, silently moving in-flight work to a new one.
-        if method == "initialize" {
-            self.adopt_session(response.headers());
-        }
-
-        // Past this point the server has answered 2xx: the request reached the
-        // application and a `tools/call` may already have run. Everything that
-        // can go wrong between here and a parsed reply therefore leaves the
-        // caller unable to tell whether the tool ran, so it is classified once,
-        // here, rather than at each of the seven places it can fail.
-        self.read_reply(method, response, id)
-            .await
-            .map_err(|error| reply_failure(method, error))
     }
 
     /// Reads the reply the server put on this response.
@@ -492,7 +493,12 @@ impl McpStreamableHttpClient {
     }
 
     /// Sends a JSON-RPC notification, which expects no reply.
-    async fn notify(&self, method: &str, timeout: Duration) -> Result<(), McpStreamableHttpError> {
+    async fn notify(
+        &self,
+        session: &Session,
+        method: &str,
+        timeout: Duration,
+    ) -> Result<(), McpStreamableHttpError> {
         let notification = serde_json::json!({"jsonrpc": "2.0", "method": method});
 
         // The deadline must cover the drain, not just the POST. `send()`
@@ -503,7 +509,7 @@ impl McpStreamableHttpClient {
         // in `RuntimeBuilder::build_async`. One such server would hang the
         // whole runtime build rather than degrade its own connection.
         let operation = async {
-            let response = self.post("POST", &notification).await?;
+            let response = self.post(session, "POST", &notification).await?;
             // A notification's 202 carries no body, but draining keeps the
             // connection reusable for the rest of the handshake.
             drain_bounded(response).await;
@@ -518,13 +524,14 @@ impl McpStreamableHttpClient {
     /// `POST`s one JSON-RPC message and returns the accepted response.
     async fn post<T: serde::Serialize>(
         &self,
+        session: &Session,
         method: &'static str,
         message: &T,
     ) -> Result<reqwest::Response, McpStreamableHttpError> {
         let response = self
             .http
             .post(self.endpoint.clone())
-            .headers(self.request_headers())
+            .headers(self.request_headers(session))
             .header(reqwest::header::ACCEPT, ACCEPT_BOTH)
             .json(message)
             .send()
@@ -536,14 +543,13 @@ impl McpStreamableHttpClient {
             return Err(McpStreamableHttpError::RedirectRefused);
         }
         if !status.is_success() {
-            let had_session = lock_session(&self.session).id.is_some();
             // Read a bounded prefix so the connection returns to the pool, then
             // discard it: the body is attacker-controlled and never surfaces.
             drain_bounded(response).await;
 
             // A 404 against an established session is how the specification
             // says a session has been forgotten.
-            if status == reqwest::StatusCode::NOT_FOUND && had_session {
+            if status == reqwest::StatusCode::NOT_FOUND && session.id.is_some() {
                 return Err(McpStreamableHttpError::SessionExpired);
             }
             return Err(McpStreamableHttpError::HttpStatus { method, status });
@@ -553,29 +559,28 @@ impl McpStreamableHttpClient {
     }
 
     /// The headers every request carries: the configured ones plus session state.
-    fn request_headers(&self) -> HeaderMap {
+    fn request_headers(&self, session: &Session) -> HeaderMap {
         let mut headers = self.headers.clone();
-        let session = lock_session(&self.session).clone();
 
-        if let Some(id) = session.id {
-            headers.insert(HeaderName::from_static(SESSION_HEADER), id);
+        if let Some(id) = &session.id {
+            headers.insert(HeaderName::from_static(SESSION_HEADER), id.clone());
         }
-        if let Some(version) = session.protocol_version {
-            headers.insert(HeaderName::from_static(PROTOCOL_HEADER), version);
+        if let Some(version) = &session.protocol_version {
+            headers.insert(HeaderName::from_static(PROTOCOL_HEADER), version.clone());
         }
 
         headers
     }
 
-    /// Records the session id from the `initialize` response, if it is usable.
+    /// Extracts the session id from the `initialize` response, if it is usable.
     ///
     /// The value is server-controlled and is echoed on every later request, so
     /// it is length-bounded and required to be a valid header value. An
     /// unusable id is ignored rather than fatal: a server that sends one is
     /// misbehaving, but the session is optional in the first place, so the
     /// conversation can continue without it.
-    fn adopt_session(&self, headers: &reqwest::header::HeaderMap) {
-        let id = headers
+    fn session_id_header(headers: &HeaderMap) -> Option<HeaderValue> {
+        headers
             .get(SESSION_HEADER)
             .filter(|value| !value.is_empty() && value.len() <= MAX_SESSION_ID_BYTES)
             // The specification restricts a session id to visible ASCII. The
@@ -596,16 +601,10 @@ impl McpStreamableHttpClient {
                 let mut value = value.clone();
                 value.set_sensitive(true);
                 value
-            });
-
-        let mut session = lock_session(&self.session);
-        *session = Session {
-            id,
-            protocol_version: session.protocol_version.clone(),
-        };
+            })
     }
 
-    /// Records the negotiated protocol revision reported by `initialize`.
+    /// Validates the negotiated protocol revision reported by `initialize`.
     ///
     /// The reported revision has to match one this client actually implements,
     /// or there is nothing honest to do with it: sending it back on every later
@@ -615,7 +614,7 @@ impl McpStreamableHttpClient {
     /// Because the match is against `&'static` constants, the value that ends up
     /// in the header is one of ours rather than the server's text. No
     /// server-controlled bytes reach a request header on this path at all.
-    fn adopt_protocol_version(&self, reported: &str) -> Result<(), McpStreamableHttpError> {
+    fn protocol_version_header(reported: &str) -> Result<HeaderValue, McpStreamableHttpError> {
         let negotiated = SUPPORTED_PROTOCOL_VERSIONS
             .into_iter()
             .find(|supported| *supported == reported)
@@ -623,12 +622,7 @@ impl McpStreamableHttpClient {
                 supported: SUPPORTED_PROTOCOL_VERSIONS.join(", "),
             })?;
 
-        let mut session = lock_session(&self.session);
-        *session = Session {
-            id: session.id.clone(),
-            protocol_version: Some(HeaderValue::from_static(negotiated)),
-        };
-        Ok(())
+        Ok(HeaderValue::from_static(negotiated))
     }
 
     /// Reads a whole `application/json` reply, bounded by the configured limit.
@@ -727,18 +721,26 @@ impl McpStreamableHttpClient {
         Err(McpStreamableHttpError::StreamClosed { method })
     }
 
-    /// Performs the `initialize` handshake and the follow-up notification.
-    async fn initialize(&mut self) -> Result<(), McpStreamableHttpError> {
-        let result = self.handshake().await?;
-        self.server_info = Some(result.server_info);
-        Ok(())
+    /// Holds a replacement locally until both handshake messages complete.
+    async fn handshake(&self) -> Result<(McpInitializeResult, Session), McpStreamableHttpError> {
+        let mut pending = PendingSession {
+            client: self,
+            session: Session::default(),
+        };
+        match self.initialize_exchange(&mut pending.session).await {
+            Ok(result) => Ok((result, std::mem::take(&mut pending.session))),
+            Err(error) => {
+                self.end_session(&pending.session).await;
+                pending.session.id = None;
+                Err(error)
+            }
+        }
     }
 
-    /// Runs the handshake exchange and reports what the server said.
-    ///
-    /// Takes `&self` because it runs again mid-conversation when a server
-    /// forgets the session, at which point nothing is holding a mutable borrow.
-    async fn handshake(&self) -> Result<McpInitializeResult, McpStreamableHttpError> {
+    async fn initialize_exchange(
+        &self,
+        pending: &mut Session,
+    ) -> Result<McpInitializeResult, McpStreamableHttpError> {
         let params = McpInitializeParams {
             protocol_version: PROTOCOL_VERSION.to_string(),
             capabilities: serde_json::json!({}),
@@ -747,34 +749,53 @@ impl McpStreamableHttpClient {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
         };
-
         let params = serde_json::to_value(params)
             .map_err(|error| McpStreamableHttpError::ParseError(error.to_string()))?;
-        let raw = self
-            .attempt("initialize", Some(params), self.limits.initialize_timeout)
-            .await?;
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = JsonRpcRequest::new(id, "initialize", Some(params));
+        let timeout = self.limits.initialize_timeout;
+        let raw = tokio::time::timeout(timeout, async {
+            // An initialize starts a new conversation with no session or
+            // negotiated protocol headers.
+            let response = self
+                .post(&Session::default(), "initialize", &request)
+                .await?;
+            // Capture an allocated id before reading the body, so an invalid
+            // or interrupted reply can still terminate that session.
+            pending.id = Self::session_id_header(response.headers());
+            self.read_reply("initialize", response, id).await
+        })
+        .await
+        .map_err(|_| McpStreamableHttpError::Timeout(timeout))??;
         let result: McpInitializeResult = serde_json::from_value(raw).map_err(|_| {
             McpStreamableHttpError::ParseError("response shape did not match MCP".to_string())
         })?;
 
-        self.adopt_protocol_version(&result.protocol_version)?;
-        self.notify("notifications/initialized", self.limits.initialize_timeout)
+        pending.protocol_version = Some(Self::protocol_version_header(&result.protocol_version)?);
+        self.notify(pending, "notifications/initialized", timeout)
             .await?;
-
         Ok(result)
     }
 
-    /// Starts a new session after the server said it no longer knows the old one.
-    ///
-    /// The specification requires the replacement `initialize` to carry no
-    /// session at all, so the forgotten id is dropped first rather than sent to
-    /// a server that has already rejected it.
-    async fn reestablish_session(&self) -> Result<(), McpStreamableHttpError> {
-        {
-            let mut session = lock_session(&self.session);
-            *session = Session::default();
+    /// Renews the generation rejected by the server, or reuses a replacement
+    /// already negotiated by another call.
+    async fn reestablish_session(
+        &self,
+        rejected: &Arc<Session>,
+    ) -> Result<Arc<Session>, McpStreamableHttpError> {
+        let _renewal = self.renewal.lock().await;
+        let current = self.session_snapshot();
+        if !Arc::ptr_eq(&current, rejected) {
+            return Ok(current);
         }
-        self.handshake().await.map(|_| ())
+
+        // Leave the published generation alone on cancellation or failure, so
+        // another call can try again without observing a partial handshake.
+        let (_, session) = self.handshake().await?;
+        let session = Arc::new(session);
+        *lock_session(&self.session) = Arc::clone(&session);
+        Ok(session)
     }
 
     /// Walks the paginated `tools/list` cursor to the end.
@@ -844,25 +865,19 @@ impl McpStreamableHttpClient {
 /// this is documented as best-effort rather than presented as cleanup.
 impl Drop for McpStreamableHttpClient {
     fn drop(&mut self) {
-        // Nothing to end: no session, or `shutdown` already cleared it.
-        if lock_session(&self.session).id.is_none() {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
+        self.end_session_detached(&self.session_snapshot());
+    }
+}
 
-        // Built here rather than in the task: `request_headers` borrows `self`,
-        // which is about to be gone.
-        let request = self
-            .http
-            .delete(self.endpoint.clone())
-            .headers(self.request_headers());
-        let timeout = self.limits.connect_timeout;
+/// Ends an allocated but uncommitted session if its handshake future is dropped.
+struct PendingSession<'a> {
+    client: &'a McpStreamableHttpClient,
+    session: Session,
+}
 
-        runtime.spawn(async move {
-            let _ = tokio::time::timeout(timeout, request.send()).await;
-        });
+impl Drop for PendingSession<'_> {
+    fn drop(&mut self) {
+        self.client.end_session_detached(&self.session);
     }
 }
 
@@ -1001,7 +1016,7 @@ fn request_timeout(method: &str, timeout: Duration) -> McpStreamableHttpError {
 /// No critical section runs user code or performs I/O, so recovering the
 /// contained value is safe, and losing the session on poison would strand a
 /// client that is otherwise still usable.
-fn lock_session(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
+fn lock_session(session: &Mutex<Arc<Session>>) -> std::sync::MutexGuard<'_, Arc<Session>> {
     session
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
