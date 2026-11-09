@@ -535,7 +535,7 @@ read()
     assert!(matches!(timed_out, McpClientError::Timeout(_)));
 
     assert_eq!(
-        client.pending_len().await,
+        client.pending_len(),
         0,
         "a timed-out request must not leave an entry behind"
     );
@@ -568,4 +568,117 @@ async fn every_pending_call_fails_when_the_process_exits() {
         matches!(error, McpClientError::ProcessExited),
         "got {error:?}"
     );
+}
+
+#[tokio::test]
+async fn blocked_stdio_write_times_out_and_retires_the_connection() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python interpreter available");
+        return;
+    };
+
+    // The server keeps stdin open without reading. A frame larger than the
+    // pipe buffer cannot finish, even though the process remains alive.
+    let source = handshake_server("import time; time.sleep(60)");
+    let client = McpStdioClient::connect(&scripted_server(python, &source))
+        .await
+        .expect("connect before the server stops reading");
+    let timeout = Duration::from_millis(150);
+    let arguments = serde_json::json!({"text": "x".repeat(2 * 1024 * 1024)});
+    let (blocked, queued) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            biased;
+            client.call_tool_with_timeout("echo", Some(arguments), timeout),
+            client.call_tool_with_timeout("echo", None, Duration::from_secs(10)),
+        )
+    })
+    .await
+    .expect("the request timeout must cover the blocked write and wake the queued writer");
+    let error = blocked.expect_err("the server does not read the request");
+    assert!(matches!(error, McpClientError::Timeout(actual) if actual == timeout));
+    let error = queued.expect_err("the next writer cannot use a partial frame");
+    assert!(matches!(error, McpClientError::ProcessExited), "{error:?}");
+    assert_eq!(client.pending_len(), 0);
+
+    let error = client
+        .call_tool_with_timeout("echo", None, timeout)
+        .await
+        .expect_err("a partial frame makes the stream unusable");
+    assert!(matches!(error, McpClientError::ProcessExited), "{error:?}");
+    tokio::time::timeout(Duration::from_secs(5), client.shutdown())
+        .await
+        .expect("shutdown can complete after a blocked write");
+}
+
+#[tokio::test]
+async fn timing_out_before_taking_the_writer_keeps_the_connection_usable() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python interpreter available");
+        return;
+    };
+
+    let source = handshake_server(
+        r#"
+request = read()
+send({"jsonrpc": "2.0", "id": request["id"], "result": {"content": []}})
+read()
+"#,
+    );
+    let client = McpStdioClient::connect(&scripted_server(python, &source))
+        .await
+        .expect("handshake");
+    let writer = client.connection.stdin.lock().await;
+    let timeout = Duration::from_millis(150);
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.call_tool_with_timeout("echo", None, timeout),
+    )
+    .await
+    .expect("the deadline includes waiting for the writer")
+    .expect_err("the writer is held");
+    assert!(matches!(error, McpClientError::Timeout(actual) if actual == timeout));
+    assert_eq!(client.pending_len(), 0);
+
+    drop(writer);
+    client
+        .call_tool_with_timeout("echo", None, Duration::from_secs(5))
+        .await
+        .expect("a request that wrote no bytes leaves the stream usable");
+}
+
+#[tokio::test]
+async fn dropping_a_request_waiting_for_its_reply_removes_its_registration() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no Python interpreter available");
+        return;
+    };
+
+    let source = handshake_server(
+        r#"
+read()
+for _ in range(2):
+    request = read()
+    send({"jsonrpc": "2.0", "id": request["id"], "result": {"content": []}})
+read()
+"#,
+    );
+    let client = McpStdioClient::connect(&scripted_server(python, &source))
+        .await
+        .expect("handshake");
+    let mut abandoned = Box::pin(client.call_tool("echo", None));
+    tokio::select! {
+        biased;
+        result = &mut abandoned => panic!("the server withheld the first reply: {result:?}"),
+        result = client.call_tool_with_timeout("echo", None, Duration::from_secs(5)) => {
+            result.expect("the server answered the second request after reading the first");
+        }
+    }
+    assert_eq!(client.pending_len(), 1);
+    drop(abandoned);
+    assert_eq!(client.pending_len(), 0);
+
+    client
+        .call_tool_with_timeout("echo", None, Duration::from_secs(5))
+        .await
+        .expect("a fully written frame leaves the stream usable");
 }

@@ -4,15 +4,15 @@
 mod tests;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::ChildStdin;
-use tokio::sync::{Mutex, oneshot};
+use tokio::process::{ChildStdin, ChildStdout};
+use tokio::sync::{Mutex, Notify, oneshot};
 
 use crate::process::{BoundedChild, BoundedCommand, baseline_environment};
 
@@ -60,7 +60,7 @@ pub enum McpClientError {
     #[error("MCP server returned JSON-RPC error: {0}")]
     JsonRpc(JsonRpcError),
 
-    #[error("timeout waiting for MCP response ({0:?})")]
+    #[error("MCP request timed out ({0:?})")]
     Timeout(Duration),
 
     #[error("MCP server process exited unexpectedly")]
@@ -82,18 +82,113 @@ pub enum McpClientError {
     InvalidServerName(#[from] super::bridge::McpServerNameError),
 }
 
-type PendingMap = HashMap<u64, oneshot::Sender<Result<JsonValue, McpClientError>>>;
+type Reply = Result<JsonValue, McpClientError>;
+type PendingMap = HashMap<u64, oneshot::Sender<Reply>>;
+
+struct PendingRequests {
+    // None is terminal. Closing and registering under the same lock prevents
+    // a new waiter from being inserted after the reader has stopped.
+    waiters: StdMutex<Option<PendingMap>>,
+    closed: Notify,
+}
+
+impl PendingRequests {
+    fn new() -> Self {
+        Self {
+            waiters: StdMutex::new(Some(HashMap::new())),
+            closed: Notify::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<PendingMap>> {
+        self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn register(
+        &self,
+        id: u64,
+        reply: oneshot::Sender<Reply>,
+    ) -> Result<PendingRegistration<'_>, McpClientError> {
+        self.lock()
+            .as_mut()
+            .ok_or(McpClientError::ProcessExited)?
+            .insert(id, reply);
+        Ok(PendingRegistration { pending: self, id })
+    }
+
+    fn remove(&self, id: u64) -> Option<oneshot::Sender<Reply>> {
+        self.lock().as_mut()?.remove(&id)
+    }
+
+    fn close(&self) {
+        let waiters = self.lock().take();
+        if waiters.is_some() {
+            // Dropping the senders wakes reply waiters. Notify also wakes
+            // the reader and requests still in the write phase.
+            drop(waiters);
+            self.closed.notify_waiters();
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.lock().is_none()
+    }
+
+    async fn closed(&self) {
+        // notify_waiters also wakes Notified futures that have been created
+        // but not yet polled, so closure cannot be lost between check and await.
+        let closed = self.closed.notified();
+        if !self.is_closed() {
+            closed.await;
+        }
+    }
+}
+
+struct PendingRegistration<'a> {
+    pending: &'a PendingRequests,
+    id: u64,
+}
+
+impl Drop for PendingRegistration<'_> {
+    fn drop(&mut self) {
+        self.pending.remove(self.id);
+    }
+}
+
+/// Retires a pipe that may contain part of an NDJSON frame.
+struct WritingFrame<'a>(Option<&'a PendingRequests>);
+
+impl Drop for WritingFrame<'_> {
+    fn drop(&mut self) {
+        if let Some(pending) = self.0 {
+            pending.close();
+        }
+    }
+}
+
+struct ProcessConnection {
+    // Drop the supervised child before stdin signals EOF. On Windows,
+    // taskkill /T needs the leader to find and terminate its descendants.
+    child: Mutex<BoundedChild>,
+    stdin: Mutex<Option<ChildStdin>>,
+}
+
+impl ProcessConnection {
+    async fn terminate(&self) {
+        drop(self.child.lock().await.terminate().await);
+        // An externally owned request future can hold the writer guard
+        // without being polled. Cleanup must not wait for that future.
+        if let Ok(mut stdin) = self.stdin.try_lock() {
+            stdin.take();
+        }
+    }
+}
 
 /// A running MCP stdio client connected to one server process.
 pub struct McpStdioClient {
-    // Struct fields drop in declaration order. Keep the supervised child
-    // first: Windows `taskkill /T` needs the direct process to still exist in
-    // order to find its descendants, so stdin must not signal EOF before the
-    // process tree is terminated.
-    child: Arc<Mutex<BoundedChild>>,
-    stdin: Mutex<ChildStdin>,
+    connection: Arc<ProcessConnection>,
     next_id: AtomicU64,
-    pending: Arc<Mutex<PendingMap>>,
+    pending: Arc<PendingRequests>,
     server_info: Option<McpServerInfo>,
     tools: Vec<McpToolDefinition>,
     server_name: String,
@@ -145,70 +240,32 @@ impl McpStdioClient {
 
         let stdin = child.take_stdin().ok_or(McpClientError::NoStdin)?;
         let stdout = child.take_stdout().ok_or(McpClientError::NoStdout)?;
-        let child = Arc::new(Mutex::new(child));
+        let connection = Arc::new(ProcessConnection {
+            child: Mutex::new(child),
+            stdin: Mutex::new(Some(stdin)),
+        });
+        let pending = Arc::new(PendingRequests::new());
 
-        let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
-
-        // Spawn the reader task that routes responses to pending callers.
-        let pending_clone = pending.clone();
-        let child_weak = Arc::downgrade(&child);
+        // Route replies until the pipe ends or a write leaves its framing
+        // indeterminate. The reader holds only a weak process reference
+        // while receiving so client drop still terminates the process tree.
+        let pending_clone = Arc::clone(&pending);
+        let connection_weak = Arc::downgrade(&connection);
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
-            loop {
-                let line = match read_bounded_line(&mut reader, MAX_SERVER_MESSAGE_BYTES).await {
-                    Ok(Some(line)) => line,
-                    Ok(None) | Err(_) => break,
-                };
-                let Ok(line) = String::from_utf8(line) else {
-                    break;
-                };
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
-                    // A response carries a result or an error. A server-initiated
-                    // request such as `ping` also has an id, and without this
-                    // check it would resolve the caller holding that id with a
-                    // null result.
-                    if resp.result.is_none() && resp.error.is_none() {
-                        continue;
-                    }
-                    let id = match &resp.id {
-                        JsonRpcId::Number(n) => *n,
-                        _ => continue,
-                    };
-                    let mut pending = pending_clone.lock().await;
-                    if let Some(tx) = pending.remove(&id) {
-                        let result = if let Some(err) = resp.error {
-                            Err(McpClientError::JsonRpc(err))
-                        } else {
-                            Ok(resp.result.unwrap_or(JsonValue::Null))
-                        };
-                        let _ = tx.send(result);
-                    }
-                }
+            tokio::select! {
+                biased;
+                () = pending_clone.closed() => {}
+                () = read_replies(&mut reader, &pending_clone) => {}
             }
-
-            // EOF, an I/O error, an oversized frame, or invalid UTF-8 makes
-            // this protocol stream unusable. A strong child owner remains in
-            // the client, while this task holds only a Weak reference so it
-            // cannot keep the process alive after the client is dropped.
-            if let Some(child) = child_weak.upgrade() {
-                let mut child = child.lock().await;
-                drop(child.terminate().await);
-            }
-
-            // When the reader exits, signal all pending callers.
-            let mut pending = pending_clone.lock().await;
-            for (_, tx) in pending.drain() {
-                let _ = tx.send(Err(McpClientError::ProcessExited));
+            pending_clone.close();
+            if let Some(connection) = connection_weak.upgrade() {
+                connection.terminate().await;
             }
         });
 
         let mut client = Self {
-            child,
-            stdin: Mutex::new(stdin),
+            connection,
             next_id: AtomicU64::new(1),
             pending,
             server_info: None,
@@ -257,32 +314,15 @@ impl McpStdioClient {
         let mut line = serde_json::to_string(&request).expect("serialize request");
         line.push('\n');
 
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
-        }
-
-        {
-            let mut stdin = self.stdin.lock().await;
-            if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
-                // The request never reached the server, so drop its
-                // registration rather than leaving it to time out.
-                self.pending.lock().await.remove(&id);
-                return Err(McpClientError::ProcessExited);
-            }
-        }
-
-        let result = match tokio::time::timeout(timeout_duration, rx).await {
-            Ok(Ok(result)) => result?,
-            Ok(Err(_)) => return Err(McpClientError::ProcessExited),
-            Err(_) => {
-                // Remove the registration so a timed-out request cannot leak an
-                // entry for the lifetime of the connection.
-                self.pending.lock().await.remove(&id);
-                return Err(McpClientError::Timeout(timeout_duration));
-            }
+        let operation = async {
+            let (tx, rx) = oneshot::channel();
+            let _registration = self.pending.register(id, tx)?;
+            self.write_line(&line).await?;
+            rx.await.map_err(|_| McpClientError::ProcessExited)?
         };
+        let result = tokio::time::timeout(timeout_duration, operation)
+            .await
+            .map_err(|_| McpClientError::Timeout(timeout_duration))??;
 
         serde_json::from_value(result)
             .map_err(|e| McpClientError::ParseError(format!("deserialize response: {e}")))
@@ -305,16 +345,40 @@ impl McpStdioClient {
         let mut line = serde_json::to_string(&obj).expect("serialize notification");
         line.push('\n');
 
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(line.as_bytes())
+        tokio::time::timeout(INITIALIZE_TIMEOUT, self.write_line(&line))
             .await
-            .map_err(|_| McpClientError::ProcessExited)?;
-        stdin
-            .flush()
-            .await
-            .map_err(|_| McpClientError::ProcessExited)?;
-        Ok(())
+            .map_err(|_| McpClientError::Timeout(INITIALIZE_TIMEOUT))?
+    }
+
+    async fn write_line(&self, line: &str) -> Result<(), McpClientError> {
+        let write = async {
+            let mut stdin = self.connection.stdin.lock().await;
+            // The previous writer can retire the transport between the
+            // select checking closure and this lock becoming available.
+            if self.pending.is_closed() {
+                return Err(McpClientError::ProcessExited);
+            }
+            let stdin = stdin.as_mut().ok_or(McpClientError::ProcessExited)?;
+            // A timeout or cancellation waiting for the lock cannot affect
+            // framing. After the lock is taken, a dropped write can leave
+            // bytes on the pipe, so retire it before another writer runs.
+            let mut frame = WritingFrame(Some(&self.pending));
+            stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|_| McpClientError::ProcessExited)?;
+            stdin
+                .flush()
+                .await
+                .map_err(|_| McpClientError::ProcessExited)?;
+            frame.0 = None;
+            Ok(())
+        };
+        tokio::select! {
+            biased;
+            () = self.pending.closed() => Err(McpClientError::ProcessExited),
+            result = write => result,
+        }
     }
 
     async fn initialize(&mut self) -> Result<(), McpClientError> {
@@ -394,7 +458,8 @@ impl McpStdioClient {
             .await
     }
 
-    /// Call a tool on this server, bounding the wait explicitly.
+    /// Call a tool on this server with one timeout for writing and waiting
+    /// for the reply. A write interrupted mid-frame retires the connection.
     pub async fn call_tool_with_timeout(
         &self,
         tool_name: &str,
@@ -410,27 +475,48 @@ impl McpStdioClient {
 
     /// The number of requests still awaiting a response.
     #[cfg(test)]
-    pub(crate) async fn pending_len(&self) -> usize {
-        self.pending.lock().await.len()
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.lock().as_ref().map_or(0, HashMap::len)
     }
 
     #[cfg(test)]
     pub(crate) async fn drains_stderr(&self) -> bool {
-        self.child.lock().await.drains_stderr()
+        self.connection.child.lock().await.drains_stderr()
     }
 
     /// Shut down the MCP server process and its descendants.
     pub async fn shutdown(&self) {
-        // Terminate while stdin still keeps the direct server alive. On
-        // Windows, `taskkill /T` cannot find descendants through a parent that
-        // has already observed EOF and exited.
-        let mut child = self.child.lock().await;
-        drop(child.terminate().await);
-        drop(child);
+        self.pending.close();
+        self.connection.terminate().await;
+    }
+}
 
-        // Best-effort: close the now-unused protocol input as well.
-        let mut stdin = self.stdin.lock().await;
-        drop(stdin.shutdown().await);
+async fn read_replies(reader: &mut BufReader<ChildStdout>, pending: &PendingRequests) {
+    while let Ok(Some(line)) = read_bounded_line(reader, MAX_SERVER_MESSAGE_BYTES).await {
+        let Ok(line) = String::from_utf8(line) else {
+            break;
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(line) else {
+            continue;
+        };
+        // A server-initiated request such as ping may also have an id.
+        if resp.result.is_none() && resp.error.is_none() {
+            continue;
+        }
+        let JsonRpcId::Number(id) = resp.id else {
+            continue;
+        };
+        if let Some(tx) = pending.remove(id) {
+            let result = match resp.error {
+                Some(error) => Err(McpClientError::JsonRpc(error)),
+                None => Ok(resp.result.unwrap_or(JsonValue::Null)),
+            };
+            let _ = tx.send(result);
+        }
     }
 }
 
