@@ -136,14 +136,11 @@ impl A2aClient {
             .get(card_url.clone())
             .headers(headers.clone())
             .header(ACCEPT, JSON);
-        let (status, body) = http::exchange(request, &config.limits).await?;
-        if !status.is_success() {
-            return Err(A2aError::HttpStatus {
-                operation: "the agent card request",
-                status,
-            });
+        let reply = http::exchange(request, &config.limits).await?;
+        if !reply.status.is_success() {
+            return Err(reply.into_status_error("the agent card request"));
         }
-        let card = serde_json::from_slice(&body)
+        let card = serde_json::from_slice(&reply.body)
             .map_err(|_| A2aError::InvalidCard("it is not a JSON Agent Card"))
             .and_then(card::decode)?;
 
@@ -536,13 +533,13 @@ impl Transport {
             A2aBinding::JsonRpc => {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                 let request = self.jsonrpc_request(operation, id, JSON);
-                let (status, body) = http::exchange(request, &self.limits).await?;
-                jsonrpc::decode_reply(method, id, status, &body)
+                let reply = http::exchange(request, &self.limits).await?;
+                jsonrpc::decode_reply(method, id, reply)
             }
             A2aBinding::HttpJson => {
                 let request = self.rest_request(&operation, JSON)?;
-                let (status, body) = http::exchange(request, &self.limits).await?;
-                rest::decode_reply(method, status, &body)
+                let reply = http::exchange(request, &self.limits).await?;
+                rest::decode_reply(method, reply)
             }
         }
     }
@@ -591,13 +588,13 @@ impl Transport {
             ));
         }
 
-        let read = http::read_bounded(response, self.limits.max_response_bytes);
-        let body = tokio::time::timeout_at(deadline, read)
+        let read = http::read_reply(response, self.limits.max_response_bytes);
+        let reply = tokio::time::timeout_at(deadline, read)
             .await
             .map_err(|_| A2aError::Timeout(timeout))??;
         match format {
-            EventFormat::JsonRpc { id } => jsonrpc::decode_reply(method, id, status, &body),
-            EventFormat::HttpJson => rest::decode_reply(method, status, &body),
+            EventFormat::JsonRpc { id } => jsonrpc::decode_reply(method, id, reply),
+            EventFormat::HttpJson => rest::decode_reply(method, reply),
         }?;
         Err(A2aError::NotAStream { method })
     }

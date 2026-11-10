@@ -3,19 +3,27 @@
 use std::time::Duration;
 
 use a2a_lf::error_code;
+use reqwest::header::HeaderMap;
+use serde::de::DeserializeOwned;
 
 use super::config::{A2aConfigError, A2aUrlError};
 
 /// Errors from the A2A client.
 ///
-/// No variant produced from a server response carries a response body, a
-/// JSON-RPC error message, or any other server text, and no variant carries a
-/// configured header value. Server text is never interpolated into an error,
-/// because a malicious agent would otherwise be able to write arbitrary
-/// content — forged log lines, terminal escape sequences, instructions — into
-/// an operator's logs or a model's context. Fixed metadata such as an HTTP
-/// status or a JSON-RPC code remains available. This is the rule the MCP
-/// clients follow, for the same reason.
+/// No variant's message carries a response body, a JSON-RPC error message,
+/// or any other server text, and no variant carries a configured header
+/// value. Server text is never interpolated into an error's `Display` or
+/// `Debug`, because a malicious agent would otherwise be able to write
+/// arbitrary content — forged log lines, terminal escape sequences,
+/// instructions — into an operator's logs or a model's context. Fixed
+/// metadata such as an HTTP status or a JSON-RPC code remains available.
+/// This is the rule the MCP clients follow, for the same reason.
+///
+/// One variant keeps what the server sent, apart from its message:
+/// [`HttpStatus`](Self::HttpStatus) holds the refused reply's headers and
+/// body in an [`A2aHttpReply`], for a caller that knows whose they are — a
+/// gateway of its own in front of the agent, say — and reads them on
+/// purpose. Printing the error never shows them.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum A2aError {
@@ -29,10 +37,17 @@ pub enum A2aError {
     #[error("the A2A agent exchange failed: {0}")]
     Transport(&'static str),
 
+    /// A reply with a failing HTTP status that is not an A2A error: the
+    /// agent's own, or one from whatever stands in front of it.
+    ///
+    /// The message names the operation and the status only. `reply` is what
+    /// was answered, kept for a caller to read deliberately; see
+    /// [`A2aHttpReply`].
     #[error("the A2A agent answered {operation} with HTTP {status}")]
     HttpStatus {
         operation: &'static str,
         status: reqwest::StatusCode,
+        reply: Box<A2aHttpReply>,
     },
 
     #[error(
@@ -141,6 +156,123 @@ pub enum A2aError {
          working on it, so it must not be resent automatically"
     )]
     SendIndeterminate,
+}
+
+/// The headers and body of a reply refused with a failing HTTP status, as
+/// [`A2aError::HttpStatus`] keeps them.
+///
+/// Everything here was written by the far end. It is never part of an
+/// error's `Display` or `Debug`: a caller that trusts the sender — a gateway
+/// it is configured to call through, which names its refusals in a header
+/// and explains them in a JSON body — reads it on purpose, and one that does
+/// not leaves it alone. Text taken from it belongs in front of a person or a
+/// model only when the caller would show that sender's words anyway.
+///
+/// The body is bounded twice: by the client's `max_response_bytes` when it
+/// is read, and to [`MAX_BODY`](Self::MAX_BODY) bytes when it is kept, since
+/// an explanation is short and an error value should stay small.
+#[derive(Clone, Default)]
+pub struct A2aHttpReply {
+    headers: HeaderMap,
+    body: Vec<u8>,
+    truncated: bool,
+}
+
+impl A2aHttpReply {
+    /// The most of a refused reply's body that is kept, in bytes.
+    pub const MAX_BODY: usize = 64 * 1024;
+
+    pub(crate) fn new(headers: HeaderMap, mut body: Vec<u8>) -> Self {
+        let truncated = body.len() > Self::MAX_BODY;
+        body.truncate(Self::MAX_BODY);
+        Self {
+            headers,
+            body,
+            truncated,
+        }
+    }
+
+    /// The reply's headers.
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    /// The value of the header `name`, when the reply carried it once as
+    /// visible ASCII. Names compare without regard to case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name)?.to_str().ok()
+    }
+
+    /// The reply's body, cut to [`MAX_BODY`](Self::MAX_BODY) bytes.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Whether the body was longer than what is kept.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// The body decoded as JSON into `T`; `None` when it is not that, or
+    /// was cut short.
+    pub fn json<T: DeserializeOwned>(&self) -> Option<T> {
+        if self.truncated {
+            return None;
+        }
+        serde_json::from_slice(&self.body).ok()
+    }
+}
+
+impl std::fmt::Debug for A2aHttpReply {
+    /// Sizes only: the contents are the far end's words.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("A2aHttpReply")
+            .field("headers", &self.headers.len())
+            .field("body_bytes", &self.body.len())
+            .field("truncated", &self.truncated)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    use serde_json::{Value, json};
+
+    use super::A2aHttpReply;
+
+    #[test]
+    fn a_reply_reads_its_header_and_its_json_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("dial-error", HeaderValue::from_static("workflow-denied"));
+        let reply = A2aHttpReply::new(headers, br#"{"message":"closed"}"#.to_vec());
+
+        assert_eq!(reply.header("Dial-Error"), Some("workflow-denied"));
+        assert_eq!(reply.header("absent"), None);
+        assert_eq!(reply.json::<Value>(), Some(json!({"message": "closed"})));
+        assert!(!reply.is_truncated());
+    }
+
+    #[test]
+    fn a_long_body_is_cut_and_then_is_not_json() {
+        let body = format!("\"{}\"", "x".repeat(A2aHttpReply::MAX_BODY));
+        let reply = A2aHttpReply::new(HeaderMap::new(), body.into_bytes());
+
+        assert_eq!(reply.body().len(), A2aHttpReply::MAX_BODY);
+        assert!(reply.is_truncated());
+        assert_eq!(reply.json::<Value>(), None);
+    }
+
+    #[test]
+    fn debug_shows_sizes_and_none_of_what_was_sent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-note", HeaderValue::from_static("server words"));
+        let reply = A2aHttpReply::new(headers, b"server body".to_vec());
+
+        let shown = format!("{reply:?}");
+        assert!(!shown.contains("server"), "{shown}");
+        assert!(shown.contains("body_bytes: 11"), "{shown}");
+    }
 }
 
 /// An error an A2A agent answered with, by its JSON-RPC code.

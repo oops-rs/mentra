@@ -11,13 +11,13 @@
 mod tests;
 
 use a2a_lf::{ERROR_INFO_TYPE, PROTOCOL_DOMAIN, reason_to_error_code};
-use reqwest::StatusCode;
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::Transport;
 use super::binding::{Operation, is_dot_segment};
+use super::http::Reply;
 use crate::a2a::config::A2aUrlError;
 use crate::a2a::error::{A2aError, A2aRpcError};
 
@@ -79,24 +79,17 @@ impl Transport {
 
 /// Decodes a reply: the body of a success (`Null` when empty), or the error a
 /// failure names.
-pub(super) fn decode_reply(
-    method: &'static str,
-    status: StatusCode,
-    body: &[u8],
-) -> Result<Value, A2aError> {
-    if !status.is_success() {
-        return Err(match a2a_error(body) {
+pub(super) fn decode_reply(method: &'static str, reply: Reply) -> Result<Value, A2aError> {
+    if !reply.status.is_success() {
+        return Err(match a2a_error(&reply.body) {
             Some(error) => A2aError::Rpc { method, error },
-            None => A2aError::HttpStatus {
-                operation: method,
-                status,
-            },
+            None => reply.into_status_error(method),
         });
     }
-    if body.iter().all(u8::is_ascii_whitespace) {
+    if reply.body.iter().all(u8::is_ascii_whitespace) {
         return Ok(Value::Null);
     }
-    serde_json::from_slice(body).map_err(|_| A2aError::Decode { method })
+    serde_json::from_slice(&reply.body).map_err(|_| A2aError::Decode { method })
 }
 
 /// The A2A error a `google.rpc.Status` body names by its `ErrorInfo` reason.

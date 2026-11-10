@@ -7,10 +7,47 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::A2A_PROTOCOL_VERSION;
 use crate::a2a::config::{A2aAgentConfig, A2aConfigError, A2aLimits};
-use crate::a2a::error::A2aError;
+use crate::a2a::error::{A2aError, A2aHttpReply};
 
 /// The header naming the protocol version.
 const VERSION_HEADER: &str = "a2a-version";
+
+/// One reply read whole: its status, headers and body.
+#[derive(Debug)]
+pub(super) struct Reply {
+    pub(super) status: StatusCode,
+    pub(super) headers: HeaderMap,
+    pub(super) body: Vec<u8>,
+}
+
+impl Reply {
+    /// The error for a reply whose failing status is all that can be said of
+    /// it: `operation` and the status in its message, the headers and body
+    /// kept beside them.
+    pub(super) fn into_status_error(self, operation: &'static str) -> A2aError {
+        A2aError::HttpStatus {
+            operation,
+            status: self.status,
+            reply: Box::new(A2aHttpReply::new(self.headers, self.body)),
+        }
+    }
+}
+
+/// Reads the rest of `response` into a [`Reply`], refusing a body larger
+/// than `limit`.
+pub(super) async fn read_reply(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Reply, A2aError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = read_bounded(response, limit).await?;
+    Ok(Reply {
+        status,
+        headers,
+        body,
+    })
+}
 
 /// Sends one request and reads the whole reply, bounded in time and size.
 ///
@@ -19,12 +56,10 @@ const VERSION_HEADER: &str = "a2a-version";
 pub(super) async fn exchange(
     request: reqwest::RequestBuilder,
     limits: &A2aLimits,
-) -> Result<(StatusCode, Vec<u8>), A2aError> {
+) -> Result<Reply, A2aError> {
     let operation = async {
         let response = send(request).await?;
-        let status = response.status();
-        let body = read_bounded(response, limits.max_response_bytes).await?;
-        Ok((status, body))
+        read_reply(response, limits.max_response_bytes).await
     };
     tokio::time::timeout(limits.request_timeout, operation)
         .await
@@ -42,10 +77,7 @@ pub(super) async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Re
 }
 
 /// Reads a response body, refusing one larger than `limit`.
-pub(super) async fn read_bounded(
-    response: reqwest::Response,
-    limit: usize,
-) -> Result<Vec<u8>, A2aError> {
+async fn read_bounded(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, A2aError> {
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)

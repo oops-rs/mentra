@@ -2,12 +2,12 @@
 //! interface's URL.
 
 use a2a_lf::{JsonRpcId, JsonRpcRequest, JsonRpcResponse};
-use reqwest::StatusCode;
 use reqwest::header::ACCEPT;
 use serde_json::Value;
 
 use super::Transport;
 use super::binding::Operation;
+use super::http::Reply;
 use crate::a2a::error::{A2aError, A2aRpcError};
 
 impl Transport {
@@ -34,29 +34,19 @@ impl Transport {
 
 /// Decodes the reply to the request with id `id`, returning its `result`
 /// (`Null` when it has none).
-pub(super) fn decode_reply(
-    method: &'static str,
-    id: i64,
-    status: StatusCode,
-    body: &[u8],
-) -> Result<Value, A2aError> {
-    let Ok(reply) = serde_json::from_slice::<JsonRpcResponse>(body) else {
+pub(super) fn decode_reply(method: &'static str, id: i64, reply: Reply) -> Result<Value, A2aError> {
+    let Ok(envelope) = serde_json::from_slice::<JsonRpcResponse>(&reply.body) else {
         // A gateway in front of the agent answers in its own terms; only a
-        // body that is not JSON-RPC at all is reported by its status.
-        if !status.is_success() {
-            return Err(A2aError::HttpStatus {
-                operation: method,
-                status,
-            });
+        // body that is not JSON-RPC at all is reported by its status, with
+        // what it said kept for a caller that knows the gateway.
+        if !reply.status.is_success() {
+            return Err(reply.into_status_error(method));
         }
         return Err(A2aError::Decode { method });
     };
-    let result = decode_envelope(method, id, reply)?;
-    if !status.is_success() {
-        return Err(A2aError::HttpStatus {
-            operation: method,
-            status,
-        });
+    let result = decode_envelope(method, id, envelope)?;
+    if !reply.status.is_success() {
+        return Err(reply.into_status_error(method));
     }
     Ok(result)
 }

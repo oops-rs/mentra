@@ -1,11 +1,13 @@
 use a2a_lf::{ListTasksRequest, Part, Role, TaskState};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::binding::speaks_version;
 use super::*;
 use crate::a2a::A2aRpcError;
 use crate::a2a::config::A2aConfigError;
-use crate::a2a::testing::{A2aFixture, RpcAnswer, Script, standard_card, task_json};
+use crate::a2a::testing::{
+    A2aFixture, FIXTURE_HEADER, FIXTURE_HEADER_VALUE, RpcAnswer, Script, standard_card, task_json,
+};
 
 const SECRET: &str = "sekrit-token-value";
 
@@ -399,6 +401,50 @@ async fn http_failures_never_show_credentials_or_server_bodies() {
                 .to_string(),
         ] {
             assert!(!text.contains(SECRET), "{text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_refused_reply_keeps_its_headers_and_body_beside_the_message() {
+    // What a gateway in front of an agent answers a call it refuses with: a
+    // status, a header naming the refusal, and a JSON body explaining it.
+    const WORDS: &str = "\u{1b}[31mThe workflow `build` is open only to +ios";
+    let body = json!({"error": "workflow-denied", "message": WORDS}).to_string();
+    for binding in BINDINGS {
+        let fixture = A2aFixture::start(Script {
+            send: RpcAnswer::Http(403, body.clone()),
+            get: vec![RpcAnswer::Http(403, body.clone())],
+            ..Script::over(binding)
+        });
+        let client = connect(&fixture).await;
+
+        for error in [
+            client
+                .send_message(user_message("hello"), immediately())
+                .await
+                .expect_err("refused"),
+            client.get_task("t1", None).await.expect_err("refused"),
+        ] {
+            let A2aError::HttpStatus { status, reply, .. } = &error else {
+                panic!("a refusal the agent never accepted is reported as itself: {error}");
+            };
+            assert_eq!(*status, 403);
+            assert_eq!(
+                reply.header(&FIXTURE_HEADER.to_ascii_lowercase()),
+                Some(FIXTURE_HEADER_VALUE),
+                "header names compare without case"
+            );
+            assert_eq!(reply.body(), body.as_bytes());
+            let said: Value = reply.json().expect("a JSON body");
+            assert_eq!(said["error"], "workflow-denied");
+            assert_eq!(said["message"], WORDS);
+            // Kept, and never printed: the far end does not write into logs.
+            for text in [error.to_string(), format!("{error:?}")] {
+                assert!(!text.contains("workflow"), "{text}");
+                assert!(!text.contains('\u{1b}'), "{text}");
+                assert!(!text.contains(FIXTURE_HEADER_VALUE), "{text}");
+            }
         }
     }
 }

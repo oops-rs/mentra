@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicI64;
 
-use reqwest::Method;
 use reqwest::header::HeaderMap;
+use reqwest::{Method, StatusCode};
 use serde_json::json;
 
 use super::*;
@@ -19,6 +19,15 @@ fn transport(endpoint: &str, tenant: Option<&str>) -> Transport {
         headers: HeaderMap::new(),
         limits: A2aLimits::default(),
         next_id: AtomicI64::new(1),
+    }
+}
+
+/// A reply with `status` and `body`, and no headers.
+fn reply(status: StatusCode, body: &[u8]) -> Reply {
+    Reply {
+        status,
+        headers: HeaderMap::new(),
+        body: body.to_vec(),
     }
 }
 
@@ -168,7 +177,8 @@ fn only_an_object_with_a_status_field_is_a_status() {
 fn a_failure_is_its_a2a_error_or_else_its_status() {
     let method = "GetTask";
     let body = rest_error(-32001).to_string();
-    let error = decode_reply(method, StatusCode::NOT_FOUND, body.as_bytes()).expect_err("failed");
+    let error =
+        decode_reply(method, reply(StatusCode::NOT_FOUND, body.as_bytes())).expect_err("failed");
     assert!(
         matches!(
             error,
@@ -182,7 +192,7 @@ fn a_failure_is_its_a2a_error_or_else_its_status() {
     assert!(!error.to_string().contains("server text"));
 
     for body in [&b"<html>gateway</html>"[..], b"", b"{\"error\": {}}"] {
-        let error = decode_reply(method, StatusCode::BAD_GATEWAY, body).expect_err("failed");
+        let error = decode_reply(method, reply(StatusCode::BAD_GATEWAY, body)).expect_err("failed");
         assert!(
             matches!(error, A2aError::HttpStatus { status, .. } if status == 502),
             "{error}"
@@ -192,15 +202,18 @@ fn a_failure_is_its_a2a_error_or_else_its_status() {
 
 #[test]
 fn a_success_is_its_json_body() {
-    let value = decode_reply("GetTask", StatusCode::OK, br#"{"id": "t1"}"#).expect("json");
+    let value = decode_reply("GetTask", reply(StatusCode::OK, br#"{"id": "t1"}"#)).expect("json");
     assert_eq!(value, json!({"id": "t1"}));
-    let error = decode_reply("GetTask", StatusCode::OK, b"not json").expect_err("not json");
+    let error = decode_reply("GetTask", reply(StatusCode::OK, b"not json")).expect_err("not json");
     assert!(matches!(error, A2aError::Decode { method: "GetTask" }));
 }
 
 #[test]
 fn an_empty_success_is_null() {
-    let value = decode_reply("DeleteTaskPushNotificationConfig", StatusCode::OK, b"  \n")
-        .expect("empty body");
+    let value = decode_reply(
+        "DeleteTaskPushNotificationConfig",
+        reply(StatusCode::OK, b"  \n"),
+    )
+    .expect("empty body");
     assert_eq!(value, Value::Null);
 }

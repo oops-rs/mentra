@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.36.0 — unreleased
+
+Breaking: `AgentConfig` gains the field `skill_profile`, so a struct literal
+without `..Default::default()` needs it. `A2aError::HttpStatus` gains the
+field `reply`; match it with `..`. `RuntimeHandle::skill_descriptions` and
+`RuntimeHandle::load_skill` take the asking agent's `SkillProfile`.
+mentra-provider is unchanged at 0.10.0.
+
+### An agent may be allowed only some skills
+
+- `AgentConfig::skill_profile` (`SkillProfile::all`, `SkillProfile::only`)
+  narrows which registered skills one agent's model may reach, beside
+  `tool_profile`. A skill outside it is left out of the list in the system
+  prompt, and `load_skill` refuses it in the words it refuses an unregistered
+  one. An empty allow-list also withdraws `load_skill` from that agent.
+- Subagents and teammates start from their parent's profile;
+  `DisposableSubagentTemplate::with_skill_profile` replaces a child's.
+- `Runtime::skills` and `Runtime::skill_body` are a host's readers and still
+  see every skill.
+- A stored agent config from before this release allows every skill.
+
+### A resumed session can restate what its agent may use
+
+- `Session::set_tool_profile`, `set_skill_profile` and `set_profiles` (and the
+  same on `Agent`) replace the stored profiles from the next request on.
+  `set_profiles` writes both at once. A host that decides an agent's tools and
+  skills per run calls it after `resume_session`, which by itself keeps what
+  the first run stored.
+
+### The A2A client keeps what a refusal said
+
+- `A2aError::HttpStatus` carries the refused reply in `reply`, an
+  `A2aHttpReply`: its headers (`header`, `headers`) and its body (`body`,
+  `json`), the body cut to 64 KiB. A caller behind a gateway that names its
+  refusals in a header and explains them in a JSON body can now show them.
+- The error's `Display` and `Debug` are unchanged and still show no server
+  text; `A2aHttpReply`'s `Debug` prints sizes only. What a far end wrote
+  reaches a log or a model only when a caller reads it on purpose.
+
 ## 0.35.0 — 2026-11-12
 
 No breaking changes. Requires mentra-provider 0.10.0.

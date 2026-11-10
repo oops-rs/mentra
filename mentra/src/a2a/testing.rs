@@ -190,6 +190,11 @@ struct State {
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
 }
 
+/// A header every whole reply of the fixture carries, standing for the one a
+/// gateway names its own refusals with.
+pub(crate) const FIXTURE_HEADER: &str = "Fixture-Error";
+pub(crate) const FIXTURE_HEADER_VALUE: &str = "fixture-refusal";
+
 /// One reply the fixture writes.
 enum Reply {
     /// A whole reply with this status and JSON body.
@@ -500,7 +505,7 @@ fn write_events(stream: &mut TcpStream, body: &str, end: StreamEnd) {
 
 fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> bool {
     let head = format!(
-        "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n{FIXTURE_HEADER}: {FIXTURE_HEADER_VALUE}\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).is_ok()

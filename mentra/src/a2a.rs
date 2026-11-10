@@ -88,7 +88,7 @@ pub use client::{
     A2A_PROTOCOL_VERSION, A2aBinding, A2aClient, A2aEventStream, A2aExtendedCardStatus,
 };
 pub use config::{A2aAgentConfig, A2aConfigError, A2aLimits, A2aUrlError};
-pub use error::{A2aError, A2aRpcError};
+pub use error::{A2aError, A2aHttpReply, A2aRpcError};
 pub use exchange::{
     A2aExchange, A2aExchangeError, A2aRequest, A2aSend, A2aStillWorking, A2aSubmitted, exchange,
     is_settled, settle, state_name, submit,
