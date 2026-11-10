@@ -46,7 +46,7 @@ pub(crate) use team::parse_task_input;
 
 pub use config::{
     AgentConfig, AutoCompactTrigger, CompactionConfig, MemoryConfig, ProjectedToolResultBudget,
-    TaskConfig, TeamAutonomyConfig, TeamConfig, ToolProfile, ToolResultPagingConfig,
+    SkillProfile, TaskConfig, TeamAutonomyConfig, TeamConfig, ToolProfile, ToolResultPagingConfig,
     WorkspaceConfig,
 };
 pub(crate) use deferred::DeferredQueue;
@@ -493,6 +493,49 @@ impl Agent {
         self.config.provider_request_options.reasoning.as_ref()
     }
 
+    /// Replaces which tools this agent's model is offered from its next
+    /// request on, then persists the agent record so a resumed session keeps
+    /// the same roster.
+    ///
+    /// The setter a host needs when what an agent may use is decided per run
+    /// rather than once: a conversation resumed for a caller with different
+    /// rights restates its profile here instead of keeping the one its first
+    /// run was created with. It replaces `config.tool_profile` wholesale;
+    /// the spawn-level hidden tools and registrations are untouched.
+    /// Subagents spawned afterwards start from the new profile; ones already
+    /// running keep theirs.
+    pub fn set_tool_profile(&mut self, tool_profile: ToolProfile) -> Result<(), RuntimeError> {
+        self.set_profiles(tool_profile, self.config.skill_profile.clone())
+    }
+
+    /// Replaces which skills this agent's model may list and load from its
+    /// next request on, then persists the agent record. The counterpart of
+    /// [`set_tool_profile`](Self::set_tool_profile), with the same reach.
+    ///
+    /// A skill body the model already loaded stays in the transcript: this
+    /// decides what may be loaded from now on, not what was read before.
+    pub fn set_skill_profile(&mut self, skill_profile: SkillProfile) -> Result<(), RuntimeError> {
+        self.set_profiles(self.config.tool_profile.clone(), skill_profile)
+    }
+
+    /// Replaces the tool and skill profiles together, in one persisted write,
+    /// so no stored record ever pairs one run's tools with another's skills.
+    /// If the write fails neither is changed.
+    pub fn set_profiles(
+        &mut self,
+        tool_profile: ToolProfile,
+        skill_profile: SkillProfile,
+    ) -> Result<(), RuntimeError> {
+        let previous_tools = std::mem::replace(&mut self.config.tool_profile, tool_profile);
+        let previous_skills = std::mem::replace(&mut self.config.skill_profile, skill_profile);
+        if let Err(error) = self.persist_agent_record() {
+            self.config.tool_profile = previous_tools;
+            self.config.skill_profile = previous_skills;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Renames the agent and persists the new name.
     pub fn set_name(&mut self, name: impl Into<String>) -> Result<(), RuntimeError> {
         self.name = name.into();
@@ -712,6 +755,12 @@ impl Agent {
         }
 
         if !self.config.tool_profile.allows(name) {
+            return false;
+        }
+
+        // An agent allowed no skill has nothing `load_skill` could return:
+        // offering it would be an invitation followed by a refusal.
+        if name == crate::tool::LOAD_SKILL_TOOL_NAME && self.config.skill_profile.allows_none() {
             return false;
         }
 

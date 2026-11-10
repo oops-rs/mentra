@@ -17,6 +17,7 @@ mod runtime_snapshot;
 mod runtime_tasks;
 mod runtime_tools;
 mod runtime_volatile_store;
+mod skill_profile;
 mod steering;
 mod stream_startup;
 mod subagent_template;

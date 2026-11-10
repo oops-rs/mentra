@@ -37,7 +37,7 @@ impl Agent {
             sections.push(system.clone());
         }
 
-        if let Some(skills) = self.runtime.skill_descriptions() {
+        if let Some(skills) = self.runtime.skill_descriptions(&self.config.skill_profile) {
             sections.push(skills);
         }
 

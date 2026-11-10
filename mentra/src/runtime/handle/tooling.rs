@@ -313,13 +313,20 @@ impl RuntimeHandle {
         &self.persisted_runtime_identifier
     }
 
-    pub fn skill_descriptions(&self) -> Option<String> {
-        let descriptions = self.skill_registry().get_descriptions();
+    /// The skill list an agent holding `profile` shows its model; `None`
+    /// when no skill it may reach is registered.
+    pub fn skill_descriptions(&self, profile: &crate::agent::SkillProfile) -> Option<String> {
+        let descriptions = self.skill_registry().get_descriptions(profile);
         Some(descriptions).filter(|descriptions| !descriptions.is_empty())
     }
 
-    pub fn load_skill(&self, name: &str) -> Result<String, String> {
-        self.skill_registry().get_content(name)
+    /// A skill's body, for the model of an agent holding `profile`.
+    pub fn load_skill(
+        &self,
+        name: &str,
+        profile: &crate::agent::SkillProfile,
+    ) -> Result<String, String> {
+        self.skill_registry().get_content(name, profile)
     }
 
     /// Returns a skill's body whether or not the model may invoke it.

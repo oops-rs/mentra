@@ -15,6 +15,7 @@ use std::{
 };
 
 use super::{SkillEntry, SkillInfo, SkillLoadError, SkillLoader, render_skill, skill_root_key};
+use crate::agent::SkillProfile;
 
 /// Returned when nothing is registered at all, to separate "this runtime has
 /// no skills" from "that name is not one of them".
@@ -141,16 +142,16 @@ impl SkillRegistry {
             .collect()
     }
 
-    /// The skill list shown to the model.
+    /// The skill list shown to an agent's model.
     ///
-    /// Skills whose frontmatter disabled model invocation are left out: naming
-    /// one here and refusing it in `load_skill` would be an invitation
-    /// followed by a refusal.
-    pub(crate) fn get_descriptions(&self) -> String {
+    /// Skills whose frontmatter disabled model invocation are left out, and
+    /// so are those outside `profile`: naming one here and refusing it in
+    /// `load_skill` would be an invitation followed by a refusal.
+    pub(crate) fn get_descriptions(&self, profile: &SkillProfile) -> String {
         let invocable = self
             .visible()
             .into_iter()
-            .filter(|(_, (_, entry))| entry.model_invocable)
+            .filter(|(name, (_, entry))| entry.model_invocable && profile.allows(name))
             .collect::<Vec<_>>();
         if invocable.is_empty() {
             return String::new();
@@ -177,8 +178,16 @@ impl SkillRegistry {
         Ok(render_skill(name, &entry.body))
     }
 
-    /// Returns a skill's body for the model, refusing one it may not invoke.
-    pub(crate) fn get_content(&self, name: &str) -> Result<String, String> {
+    /// Returns a skill's body for an agent's model, refusing one it may not
+    /// invoke.
+    ///
+    /// A skill outside `profile` is refused in the words an unregistered one
+    /// is: for that agent it does not exist, and the refusal must not say
+    /// otherwise.
+    pub(crate) fn get_content(&self, name: &str, profile: &SkillProfile) -> Result<String, String> {
+        if !self.roots.is_empty() && !profile.allows(name) {
+            return Err(unknown_skill(name));
+        }
         let (_, entry) = self.lookup(name)?;
         if !entry.model_invocable {
             return Err(format!("Skill '{name}' cannot be invoked by the model"));
@@ -190,9 +199,12 @@ impl SkillRegistry {
         if self.roots.is_empty() {
             return Err(NO_LOADER.to_string());
         }
-        self.resolve(name)
-            .ok_or_else(|| format!("Unknown skill '{name}'"))
+        self.resolve(name).ok_or_else(|| unknown_skill(name))
     }
+}
+
+fn unknown_skill(name: &str) -> String {
+    format!("Unknown skill '{name}'")
 }
 
 #[cfg(test)]
@@ -222,11 +234,11 @@ mod tests {
 
         assert!(
             registry
-                .get_content("review")
+                .get_content("review", &SkillProfile::all())
                 .expect("review resolves")
                 .contains("Project rules")
         );
-        assert!(registry.get_content("deploy").is_ok());
+        assert!(registry.get_content("deploy", &SkillProfile::all()).is_ok());
     }
 
     #[test]
@@ -243,7 +255,7 @@ mod tests {
 
         assert!(
             registry
-                .get_content("review")
+                .get_content("review", &SkillProfile::all())
                 .expect("the weaker root answers now")
                 .contains("Personal rules")
         );
@@ -260,8 +272,11 @@ mod tests {
 
         assert!(registry.is_empty());
         assert!(registry.infos().is_empty());
-        assert_eq!(registry.get_descriptions(), "");
-        assert_eq!(registry.get_content("one"), Err(NO_LOADER.to_string()));
+        assert_eq!(registry.get_descriptions(&SkillProfile::all()), "");
+        assert_eq!(
+            registry.get_content("one", &SkillProfile::all()),
+            Err(NO_LOADER.to_string())
+        );
         assert!(!registry.remove(&root), "a second removal finds nothing");
     }
 
@@ -302,7 +317,7 @@ mod tests {
         assert_eq!(registry.roots.len(), 2, "no stacked copy of the same root");
         assert!(
             registry
-                .get_content("review")
+                .get_content("review", &SkillProfile::all())
                 .expect("review resolves")
                 .contains("Second"),
             "the reloaded root kept its precedence"
@@ -310,7 +325,7 @@ mod tests {
         assert!(registry.remove(&strong));
         assert!(
             registry
-                .get_content("review")
+                .get_content("review", &SkillProfile::all())
                 .expect("review resolves")
                 .contains("Personal")
         );
@@ -364,10 +379,62 @@ mod tests {
         let registry = registry(&[&root]);
 
         assert_eq!(
-            registry.get_descriptions(),
+            registry.get_descriptions(&SkillProfile::all()),
             "Skills available:\n  - git: Git helpers\nUse the load_skill tool only when one of these skills is relevant to the task."
         );
-        assert!(registry.get_content("release").is_err());
+        assert!(
+            registry
+                .get_content("release", &SkillProfile::all())
+                .is_err()
+        );
         assert!(registry.get_body("release").is_ok());
+    }
+
+    #[test]
+    fn a_profile_leaves_other_skills_out_of_the_list_and_out_of_reach() {
+        let root = temp_skills_dir("registry-profile");
+        write_skill(
+            &root,
+            "build",
+            "---\nname: build\ndescription: Runs builds\n---\nBuild steps\n",
+        );
+        write_skill(
+            &root,
+            "ask",
+            "---\nname: ask\ndescription: Answers questions\n---\nAsk steps\n",
+        );
+        let registry = registry(&[&root]);
+        let profile = SkillProfile::only(["ask"]);
+
+        assert_eq!(
+            registry.get_descriptions(&profile),
+            "Skills available:\n  - ask: Answers questions\nUse the load_skill tool only when one of these skills is relevant to the task."
+        );
+        assert!(registry.get_content("ask", &profile).is_ok());
+        // Refused in the words a skill that was never registered is.
+        assert_eq!(
+            registry.get_content("build", &profile),
+            registry
+                .get_content("never-registered", &SkillProfile::all())
+                .map_err(|error| error.replace("never-registered", "build"))
+        );
+        // The host's own reader is not the model's: it still sees the body.
+        assert!(registry.get_body("build").is_ok());
+    }
+
+    #[test]
+    fn a_profile_allowing_nothing_lists_nothing() {
+        let root = temp_skills_dir("registry-profile-none");
+        write_skill(
+            &root,
+            "build",
+            "---\nname: build\ndescription: Runs builds\n---\nBuild steps\n",
+        );
+        let registry = registry(&[&root]);
+        let none = SkillProfile::only(Vec::<String>::new());
+
+        assert!(none.allows_none());
+        assert_eq!(registry.get_descriptions(&none), "");
+        assert!(registry.get_content("build", &none).is_err());
     }
 }

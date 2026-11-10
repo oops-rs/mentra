@@ -483,6 +483,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Skills are registered for every agent on the runtime. `AgentConfig::skill_profile`
+narrows what one agent's model is told about and may load, as
+`AgentConfig::tool_profile` does for tools:
+
+```rust,no_run
+use mentra::agent::{AgentConfig, SkillProfile};
+
+let config = AgentConfig {
+    skill_profile: SkillProfile::only(["review"]),
+    ..Default::default()
+};
+# let _ = config;
+```
+
+A skill outside the profile is left out of the list in the system prompt, and
+`load_skill` refuses it in the words it refuses an unregistered one. An empty
+allow-list also withdraws `load_skill`. Subagents and teammates start from
+their parent's profile. A host reading `Runtime::skills` or
+`Runtime::skill_body` still sees every skill.
+
+When what an agent may use is decided per run, restate both profiles on a
+resumed session with `Session::set_profiles` (or `set_tool_profile` /
+`set_skill_profile`): they replace the stored ones from the next request on,
+in one persisted write.
+
 ## App Context
 
 If your tools need access to typed host-side state, register it on the runtime and retrieve it from `ToolContext` or `ParallelToolContext`:

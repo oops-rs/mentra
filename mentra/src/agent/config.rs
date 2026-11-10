@@ -400,6 +400,55 @@ impl ToolProfile {
     }
 }
 
+/// Which registered skills one agent's model may reach.
+///
+/// The counterpart of [`ToolProfile`] for skills. Skills are registered on
+/// the runtime, for every agent on it; this narrows what one agent is told
+/// about and may load. A skill outside the profile is left out of the list
+/// in the system prompt and refused by `load_skill` in the words an
+/// unregistered one is, so for that agent it does not exist. Subagents and
+/// teammates start from their parent's profile, as they do from its
+/// [`ToolProfile`].
+///
+/// It governs the model's reach only. A host reading
+/// [`Runtime::skills`](crate::Runtime::skills) or
+/// [`Runtime::skill_body`](crate::Runtime::skill_body) sees every skill.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillProfile {
+    /// `None` allows every registered skill. `Some` allows exactly the names
+    /// in it; an empty set allows none, and withdraws `load_skill` from the
+    /// agent's tools.
+    #[serde(default)]
+    pub allowed_skills: Option<BTreeSet<String>>,
+}
+
+impl SkillProfile {
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    pub fn only<I, S>(skills: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            allowed_skills: Some(skills.into_iter().map(Into::into).collect()),
+        }
+    }
+
+    pub fn allows(&self, skill_name: &str) -> bool {
+        self.allowed_skills
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(skill_name))
+    }
+
+    /// Whether no skill at all can pass: an allow-list with nothing in it.
+    pub fn allows_none(&self) -> bool {
+        self.allowed_skills.as_ref().is_some_and(BTreeSet::is_empty)
+    }
+}
+
 #[cfg(not(test))]
 fn default_team_dir() -> PathBuf {
     crate::default_paths::workspace_default_paths().team_dir
@@ -445,6 +494,10 @@ pub struct AgentConfig {
     pub tool_choice: Option<ToolChoice>,
     #[serde(default)]
     pub tool_profile: ToolProfile,
+    /// Which registered skills this agent's model may list and load. Absent
+    /// in a record written before it existed, which allowed every skill.
+    #[serde(default)]
+    pub skill_profile: SkillProfile,
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
     pub metadata: BTreeMap<String, String>,
@@ -470,6 +523,7 @@ impl Default for AgentConfig {
             system: None,
             tool_choice: Some(ToolChoice::default()),
             tool_profile: ToolProfile::default(),
+            skill_profile: SkillProfile::default(),
             temperature: None,
             max_output_tokens: Some(8192),
             metadata: BTreeMap::new(),

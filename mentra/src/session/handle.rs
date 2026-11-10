@@ -394,6 +394,36 @@ impl Session {
         self.agent.set_reasoning(reasoning)
     }
 
+    /// Replaces which tools the session's agent offers its model and persists
+    /// the setting; see [`Agent::set_tool_profile`](crate::agent::Agent::set_tool_profile).
+    pub fn set_tool_profile(
+        &mut self,
+        tool_profile: crate::agent::ToolProfile,
+    ) -> Result<(), RuntimeError> {
+        self.agent.set_tool_profile(tool_profile)
+    }
+
+    /// Replaces which skills the session's agent may list and load and
+    /// persists the setting; see
+    /// [`Agent::set_skill_profile`](crate::agent::Agent::set_skill_profile).
+    pub fn set_skill_profile(
+        &mut self,
+        skill_profile: crate::agent::SkillProfile,
+    ) -> Result<(), RuntimeError> {
+        self.agent.set_skill_profile(skill_profile)
+    }
+
+    /// Replaces the tool and skill profiles together in one persisted write;
+    /// see [`Agent::set_profiles`](crate::agent::Agent::set_profiles). What a
+    /// host calls on a resumed session whose rights are decided per run.
+    pub fn set_profiles(
+        &mut self,
+        tool_profile: crate::agent::ToolProfile,
+        skill_profile: crate::agent::SkillProfile,
+    ) -> Result<(), RuntimeError> {
+        self.agent.set_profiles(tool_profile, skill_profile)
+    }
+
     /// Returns how many tokens this session's model accepts, when known.
     ///
     /// Reads the agent directly rather than making a host mirror the

@@ -180,8 +180,11 @@ impl ToolContext<'_> {
             .resolve_working_directory(&self.agent_id, working_directory)
     }
 
+    /// A skill's body, when this agent's
+    /// [`SkillProfile`](crate::agent::SkillProfile) allows it.
     pub fn load_skill(&self, name: &str) -> Result<String, String> {
-        self.runtime.load_skill(name)
+        self.runtime
+            .load_skill(name, &self.agent.config().skill_profile)
     }
 
     /// Reads `path` — relative to the agent's working directory, or absolute —
@@ -208,8 +211,10 @@ impl ToolContext<'_> {
         )
     }
 
+    /// The skill list this agent's model is shown.
     pub fn skill_descriptions(&self) -> Option<String> {
-        self.runtime.skill_descriptions()
+        self.runtime
+            .skill_descriptions(&self.agent.config().skill_profile)
     }
 
     pub fn app_context<T>(&self) -> Result<Arc<T>, String>
@@ -624,8 +629,10 @@ impl ParallelToolContext {
         self.runtime.shell_validation(&self.agent_id, command)
     }
 
+    /// The parallel-lane counterpart of [`ToolContext::load_skill`].
     pub fn load_skill(&self, name: &str) -> Result<String, String> {
-        self.runtime.load_skill(name)
+        self.runtime
+            .load_skill(name, self.subagent_template.skill_profile())
     }
 
     /// Reads `path` — relative to the agent's working directory, or absolute —
@@ -652,8 +659,10 @@ impl ParallelToolContext {
         )
     }
 
+    /// The parallel-lane counterpart of [`ToolContext::skill_descriptions`].
     pub fn skill_descriptions(&self) -> Option<String> {
-        self.runtime.skill_descriptions()
+        self.runtime
+            .skill_descriptions(self.subagent_template.skill_profile())
     }
 
     pub fn app_context<T>(&self) -> Result<Arc<T>, String>

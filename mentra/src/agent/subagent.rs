@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-    Agent, AgentConfig, AgentSpawnOptions, SpawnedAgentStatus, SpawnedAgentSummary,
+    Agent, AgentConfig, AgentSpawnOptions, SkillProfile, SpawnedAgentStatus, SpawnedAgentSummary,
     TeammateIdentity, ToolProfile,
 };
 
@@ -124,6 +124,23 @@ impl DisposableSubagentTemplate {
     pub fn with_tool_profile(mut self, tool_profile: ToolProfile) -> Self {
         self.config.tool_profile = tool_profile;
         self
+    }
+
+    /// Replaces the skill profile the spawned child's config carries. Like
+    /// [`with_tool_profile`](Self::with_tool_profile) it replaces rather than
+    /// narrows: a wider profile than the parent's hands the child skills the
+    /// parent cannot load.
+    #[must_use = "with_skill_profile returns a new template rather than mutating in place; \
+                  a discarded return value leaves the override applied to nothing"]
+    pub fn with_skill_profile(mut self, skill_profile: SkillProfile) -> Self {
+        self.config.skill_profile = skill_profile;
+        self
+    }
+
+    /// The skill profile a child spawned from this template would carry: its
+    /// source agent's, unless overridden.
+    pub(crate) fn skill_profile(&self) -> &SkillProfile {
+        &self.config.skill_profile
     }
 
     /// Replaces the model (and, if it names a different provider, the
