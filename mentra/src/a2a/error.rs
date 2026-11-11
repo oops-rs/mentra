@@ -182,7 +182,10 @@ impl A2aHttpReply {
     /// The most of a refused reply's body that is kept, in bytes.
     pub const MAX_BODY: usize = 64 * 1024;
 
-    pub(crate) fn new(headers: HeaderMap, mut body: Vec<u8>) -> Self {
+    /// A reply with these headers and this body, the body cut to
+    /// [`MAX_BODY`](Self::MAX_BODY). The client builds one for every refused
+    /// reply; a caller builds one to test what it does with a refusal.
+    pub fn new(headers: HeaderMap, mut body: Vec<u8>) -> Self {
         let truncated = body.len() > Self::MAX_BODY;
         body.truncate(Self::MAX_BODY);
         Self {

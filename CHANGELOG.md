@@ -35,6 +35,7 @@ mentra-provider is unchanged at 0.10.0.
   `A2aHttpReply`: its headers (`header`, `headers`) and its body (`body`,
   `json`), the body cut to 64 KiB. A caller behind a gateway that names its
   refusals in a header and explains them in a JSON body can now show them.
+  `A2aHttpReply::new` builds one, for a caller's own tests.
 - The error's `Display` and `Debug` are unchanged and still show no server
   text; `A2aHttpReply`'s `Debug` prints sizes only. What a far end wrote
   reaches a log or a model only when a caller reads it on purpose.
