@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.36.0 — unreleased
+## 0.36.0 — 2026-11-12
 
 Breaking: `AgentConfig` gains the field `skill_profile`, so a struct literal
 without `..Default::default()` needs it. `A2aError::HttpStatus` gains the
