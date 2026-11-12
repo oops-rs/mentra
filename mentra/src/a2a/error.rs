@@ -203,7 +203,12 @@ impl A2aHttpReply {
     /// The value of the header `name`, when the reply carried it once as
     /// visible ASCII. Names compare without regard to case.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(name)?.to_str().ok()
+        let mut values = self.headers.get_all(name).iter();
+        let value = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        value.to_str().ok()
     }
 
     /// The reply's body, cut to [`MAX_BODY`](Self::MAX_BODY) bytes.
@@ -254,6 +259,19 @@ mod reply_tests {
         assert_eq!(reply.header("absent"), None);
         assert_eq!(reply.json::<Value>(), Some(json!({"message": "closed"})));
         assert!(!reply.is_truncated());
+    }
+
+    #[test]
+    fn header_refuses_multiple_or_non_ascii_values() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-many", HeaderValue::from_static("first"));
+        headers.append("x-many", HeaderValue::from_static("second"));
+        headers.insert("x-binary", HeaderValue::from_bytes(&[0x80]).unwrap());
+        let reply = A2aHttpReply::new(headers, Vec::new());
+
+        assert_eq!(reply.header("X-Many"), None);
+        assert_eq!(reply.headers().get_all("x-many").iter().count(), 2);
+        assert_eq!(reply.header("x-binary"), None);
     }
 
     #[test]
