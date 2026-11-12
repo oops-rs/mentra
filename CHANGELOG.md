@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.35.0 — 2026-11-12
+
+No breaking changes. Requires mentra-provider 0.10.0.
+
+- Hosts can call OpenAI Decisions and TypeSafe System One (Jev) through
+  `mentra::provider_core` for typed classification and scoring. These calls
+  are explicit and remain outside agent-run budgets.
+- SQLite background notifications drain in completion order even when jobs
+  finish in the same second. Existing rows retain their previous ordering.
+
+## mentra-provider 0.10.0 — 2026-11-12
+
+- Add an OpenAI Decisions client with typed predicate, choice, and score
+  questions, conversation and multimodal inputs, per-question refusals, and
+  token-usage reporting.
+- Add a TypeSafe System One client with Noul, Choice, Score, and Box questions,
+  model discovery, structured state, and inline image assets. Images and long
+  context require explicit opt-in; multipart image uploads are not supported.
+- Both clients use caller-supplied credentials and expose request errors and
+  retry hints without automatically retrying.
+
 ## 0.34.6 — 2026-11-09
 
 - MCP stdio request deadlines now cover the writer queue, pipe write, flush,

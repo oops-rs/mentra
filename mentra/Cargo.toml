@@ -1,6 +1,6 @@
 [package]
 name = "mentra"
-version = "0.34.6"
+version = "0.35.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "An agent runtime for tool-using LLM applications"
@@ -39,7 +39,7 @@ a2a = ["dep:a2a_lf"]
 test-utils = []
 
 [dependencies]
-mentra-provider = { version = "0.9.11", path = "../mentra-provider", default-features = false }
+mentra-provider = { version = "0.10.0", path = "../mentra-provider", default-features = false }
 tokio = { version = "1.53.3", features = [
     "fs", "io-util", "macros", "net", "parking_lot", "process", "rt-multi-thread", "sync", "time",
 ] }

@@ -65,7 +65,7 @@ Add Mentra and Tokio to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mentra = "0.34.6"
+mentra = "0.35.0"
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
 ```
 
