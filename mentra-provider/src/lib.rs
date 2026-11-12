@@ -18,6 +18,8 @@ pub mod responses;
 mod sse;
 mod stream;
 mod tool;
+/// TypeSafe's independently invoked System One API, including Jev.
+pub mod typesafe;
 
 pub use auth::AuthScheme;
 pub use auth::CredentialSource;

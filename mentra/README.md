@@ -62,6 +62,40 @@ Callers choose thresholds and handle refusals and errors. Use
 `DecisionsClient::with_http_client` to provide a client with a timeout when
 needed; the client does not automatically retry.
 
+## TypeSafe System One (Jev)
+
+The independent System One client supports Jev's Noul, Choice, Score, and Box
+questions, structured state and criteria, inline image assets, and model
+discovery. It does not run inside the agent loop or count against run budgets.
+
+```rust,no_run
+use std::collections::BTreeMap;
+use mentra::provider_core::typesafe::{
+    SystemOneAnswer, SystemOneClient, SystemOneQuestion, SystemOneRequest,
+    DEFAULT_JEV_MODEL,
+};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = SystemOneClient::new(std::env::var("TYPESAFE_API_KEY")?);
+let request = SystemOneRequest::new(
+    DEFAULT_JEV_MODEL,
+    "The order arrived damaged.",
+    BTreeMap::from([("damaged".to_string(), SystemOneQuestion::noul("Is it damaged?"))]),
+);
+let response = client.evaluate(&request).await?;
+if let SystemOneAnswer::Noul { noul } = &response.answers["damaged"] {
+    println!("{noul}");
+}
+# Ok(())
+# }
+```
+
+Images and Box questions require `with_images_enabled()` and are experimental
+according to [TypeSafe's image documentation](https://docs.typesafe.ai/images).
+Long context requires `with_long_context_enabled()`. Images are sent as inline
+base64 JSON; multipart uploads are not supported. Callers provide any timeout
+through `with_http_client` and choose their own retry and threshold policy.
+
 ## Quickstart Example
 
 Clone the repository and run the workspace quickstart example:
