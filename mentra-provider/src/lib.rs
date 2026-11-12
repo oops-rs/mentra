@@ -1,6 +1,8 @@
 pub mod anthropic;
 mod auth;
 pub mod chat_completions;
+/// OpenAI's independently invoked Decisions API.
+pub mod decisions;
 mod definition;
 pub mod embedding;
 mod error;

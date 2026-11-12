@@ -27,6 +27,41 @@ MSRV: Rust 1.88.
 - LM Studio provider support via the OpenAI-compatible Responses API
 - image inputs for OpenAI and Anthropic, plus inline image bytes for Gemini
 
+## OpenAI Decisions
+
+Use the independently invoked Decisions client for classification and scoring.
+It does not participate in the agent loop or its run budgets. The example uses
+the model currently documented by OpenAI; the request accepts an explicit model
+name. See the [Decisions API guide](https://developers.openai.com/api/docs/guides/decisions)
+for supported inputs, limits, and answer interpretation.
+
+```rust,no_run
+use mentra::provider_core::decisions::{
+    DecisionAnswer, DecisionQuestion, DecisionRequest, DecisionsClient,
+    DEFAULT_DECISIONS_MODEL,
+};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = DecisionsClient::new(std::env::var("OPENAI_API_KEY")?);
+let request = DecisionRequest::new(
+    DEFAULT_DECISIONS_MODEL,
+    "The order arrived damaged.",
+    vec![DecisionQuestion::predicate("damaged", "Does the order have damage?")],
+);
+let response = client.create(&request).await?;
+match &response.answers[0] {
+    DecisionAnswer::Predicate { probability, .. } => println!("{probability}"),
+    DecisionAnswer::Refusal { .. } => println!("The question was refused"),
+    _ => unreachable!("the answer type is checked against the question"),
+}
+# Ok(())
+# }
+```
+
+Callers choose thresholds and handle refusals and errors. Use
+`DecisionsClient::with_http_client` to provide a client with a timeout when
+needed; the client does not automatically retry.
+
 ## Quickstart Example
 
 Clone the repository and run the workspace quickstart example:
