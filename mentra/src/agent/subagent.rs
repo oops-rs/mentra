@@ -69,6 +69,10 @@ pub struct DisposableSubagentTemplate {
     /// reports for the same lookup, kept here rather than in `with_model`
     /// itself so the builder chain stays infallible.
     model_override: Option<ModelInfo>,
+    /// How many model rounds the child may take before its run fails with
+    /// [`RuntimeError::MaxRoundsExceeded`]: [`SUBAGENT_MAX_ROUNDS`] unless
+    /// [`with_max_rounds`](Self::with_max_rounds) replaced it.
+    max_rounds: usize,
 }
 
 impl DisposableSubagentTemplate {
@@ -84,6 +88,7 @@ impl DisposableSubagentTemplate {
             hidden_tools: agent.hidden_tools.clone(),
             teammate_identity: agent.teammate_identity.clone(),
             model_override: None,
+            max_rounds: SUBAGENT_MAX_ROUNDS,
         }
     }
 
@@ -182,6 +187,20 @@ impl DisposableSubagentTemplate {
         self
     }
 
+    /// Replaces how many model rounds the spawned child may take — thirty
+    /// unless replaced. A child that reaches the limit ends its run with
+    /// [`RuntimeError::MaxRoundsExceeded`] and returns no answer, so a host
+    /// that delegates long reading work (a code review across a large change,
+    /// say) raises it for exactly those children. It bounds one child's
+    /// rounds, not the delegation: the parent's deadline and shared token
+    /// budget still apply. A value of zero is read as one.
+    #[must_use = "with_max_rounds returns a new template rather than mutating in place; \
+                  a discarded return value leaves the override applied to nothing"]
+    pub fn with_max_rounds(mut self, max_rounds: usize) -> Self {
+        self.max_rounds = max_rounds.max(1);
+        self
+    }
+
     pub(crate) fn spawn(&self) -> Result<Agent, RuntimeError> {
         self.build_agent(self.model_override.clone())
     }
@@ -258,7 +277,7 @@ impl DisposableSubagentTemplate {
             provider,
             AgentSpawnOptions {
                 hidden_tools,
-                max_rounds: Some(SUBAGENT_MAX_ROUNDS),
+                max_rounds: Some(self.max_rounds),
                 teammate_identity: self.teammate_identity.clone(),
             },
         )

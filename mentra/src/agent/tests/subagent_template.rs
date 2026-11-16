@@ -1,5 +1,5 @@
 //! `DisposableSubagentTemplate`'s builder: `with_tool_profile`, `with_model`,
-//! and `with_system` each override one field of the parent clone, and
+//! `with_system` and `with_max_rounds` each override one field of the parent clone, and
 //! `spawn`/`Agent::spawn_subagent_from` must apply the same depth-guard,
 //! hidden-tool, and subagent-system-prompt treatment regardless of which
 //! fields were overridden.
@@ -192,6 +192,37 @@ async fn overridden_system_still_carries_the_subagent_suffix() {
         overridden.config().system.as_deref(),
         Some(format!("You are a narrow triage worker.\n\n{suffix}").as_str())
     );
+}
+
+#[tokio::test]
+async fn overridden_max_rounds_reaches_the_child_and_nothing_else() {
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let provider = ScriptedProvider::new(BuiltinProvider::Anthropic, vec![model.clone()], vec![]);
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider)
+        .build()
+        .expect("build runtime");
+    let parent = runtime.spawn("parent", model).expect("spawn parent");
+
+    let baseline = parent.spawn_subagent().expect("spawn baseline child");
+    assert_eq!(baseline.max_rounds(), Some(30));
+
+    let raised = parent
+        .spawn_subagent_from(parent.disposable_subagent_template().with_max_rounds(120))
+        .await
+        .expect("spawn from a template with more rounds");
+    assert_eq!(raised.max_rounds(), Some(120));
+    assert_eq!(
+        serde_json::to_value(baseline.config()).expect("serialize config"),
+        serde_json::to_value(raised.config()).expect("serialize config")
+    );
+    assert!(!raised.can_use_tool("task"));
+
+    let zero = parent
+        .spawn_subagent_from(parent.disposable_subagent_template().with_max_rounds(0))
+        .await
+        .expect("spawn from a template with zero rounds");
+    assert_eq!(zero.max_rounds(), Some(1));
 }
 
 #[tokio::test]

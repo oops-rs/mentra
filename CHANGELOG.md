@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.36.1 — 2026-11-16
+
+Additive. mentra-provider is unchanged at 0.10.0.
+
+### A delegating host can give a child more rounds
+
+- `DisposableSubagentTemplate::with_max_rounds` replaces the thirty model
+  rounds a disposable subagent may take before its run fails with
+  `MaxRoundsExceeded`. Thirty is right for a quick errand and too few for a
+  child that reads a large change file by file: it ran out mid-read and
+  returned nothing. The override bounds that child only; the parent's
+  deadline, cancellation and shared token budget still apply. Zero is read
+  as one. An un-overridden template still spawns exactly as
+  `spawn_subagent` does.
+
 ## 0.36.0 — 2026-11-12
 
 Breaking: `AgentConfig` gains the field `skill_profile`, so a struct literal
