@@ -754,6 +754,9 @@ async fn a_deadline_interrupts_a_pending_child_and_drops_the_evaluator() {
     let started = Arc::new(Notify::new());
     let ran = Arc::new(AtomicUsize::new(0));
     let runtime = Runtime::empty_builder()
+        // Expiration here measures a pending handler, independently of the
+        // file-store writes exercised by the durable interruption test.
+        .with_store(crate::runtime::VolatileRuntimeStore::new())
         .with_provider_instance(provider(vec![script_stream()]))
         .with_tool(InFlight {
             ran: ran.clone(),
