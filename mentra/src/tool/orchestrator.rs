@@ -195,35 +195,14 @@ impl ToolRuntime {
             .into_iter();
 
         while let Some(batch) = batches.next() {
-            options.check_limits()?;
-            let execution_count = batch.execution_count();
-            if self.tool_calls + execution_count > options.tool_budget() {
-                return Err(RuntimeError::ToolBudgetExceeded(options.tool_budget()));
-            }
-            self.tool_calls += execution_count;
-
-            let executions = match batch {
-                ToolCallBatch::Exclusive(call) => {
-                    vec![self.execute_one_tool(agent, options, *call).await?]
-                }
-                ToolCallBatch::Parallel(calls) => {
-                    self.execute_parallel_batch(agent, options, calls).await?
-                }
-            };
+            let executions = self.execute_batch(agent, options, batch).await?;
 
             let mut terminator = None;
             for execution in executions {
                 successful_task |= execution.task_succeeded;
                 end_turn |= execution.should_end_turn;
-                let reviewed = self
-                    .review_result(
-                        &execution.tool_name,
-                        &execution.input_json,
-                        execution.result,
-                        execution.execution_hooks,
-                    )
-                    .await?;
-                let result = self.page_result(agent, &execution.tool_name, reviewed);
+                let execution = self.review_execution(agent, execution).await?;
+                let result = execution.result;
                 if execution.terminated {
                     terminator.get_or_insert(execution.tool_name);
                 }
@@ -274,6 +253,47 @@ impl ToolRuntime {
             end_turn,
             details,
         })
+    }
+
+    async fn execute_batch(
+        &mut self,
+        agent: &mut Agent,
+        options: &RunOptions,
+        batch: ToolCallBatch,
+    ) -> Result<Vec<CompletedToolExecution>, RuntimeError> {
+        options.check_limits()?;
+        let count = batch.execution_count();
+        let budget = options.tool_budget();
+        if count > budget.saturating_sub(self.tool_calls) {
+            return Err(RuntimeError::ToolBudgetExceeded(budget));
+        }
+        self.tool_calls += count;
+
+        match batch {
+            ToolCallBatch::Exclusive(call) => {
+                Ok(vec![self.execute_one_tool(agent, options, *call).await?])
+            }
+            ToolCallBatch::Parallel(calls) => {
+                self.execute_parallel_batch(agent, options, calls).await
+            }
+        }
+    }
+
+    async fn review_execution(
+        &mut self,
+        agent: &Agent,
+        mut execution: CompletedToolExecution,
+    ) -> Result<CompletedToolExecution, RuntimeError> {
+        let reviewed = self
+            .review_result(
+                &execution.tool_name,
+                &execution.input_json,
+                execution.result,
+                execution.execution_hooks.take(),
+            )
+            .await?;
+        execution.result = self.page_result(agent, &execution.tool_name, reviewed);
+        Ok(execution)
     }
 
     /// Replaces an oversized text result with its first window, retaining the
