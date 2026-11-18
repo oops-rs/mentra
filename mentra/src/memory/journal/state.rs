@@ -34,6 +34,8 @@ pub struct RunMemoryState {
     #[serde(default, deserialize_with = "deserialize_transcript")]
     pub baseline_transcript: AgentTranscript,
     pub assistant_committed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub child_dispatch_started: bool,
 }
 
 fn deserialize_transcript<'de, D>(deserializer: D) -> Result<AgentTranscript, D::Error>

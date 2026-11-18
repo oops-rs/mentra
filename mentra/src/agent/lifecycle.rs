@@ -36,7 +36,7 @@ impl Agent {
     /// Cleared once any run finishes, or by
     /// [`branch_from`](Self::branch_from).
     pub fn has_interrupted_turn(&self) -> bool {
-        self.memory.has_interrupted_turn()
+        self.memory.has_interrupted_turn() || self.memory.has_open_child_dispatch()
     }
 
     /// Continues an interrupted turn from the transcript's end, without
@@ -55,9 +55,6 @@ impl Agent {
         &mut self,
         options: RunOptions,
     ) -> Result<Message, RuntimeError> {
-        if !self.memory.has_interrupted_turn() {
-            return Err(RuntimeError::NoInterruptedTurn);
-        }
         self.drive_run(RunStart::Continuation, options).await
     }
 
@@ -102,6 +99,15 @@ impl Agent {
         options: RunOptions,
     ) -> Result<Message, RuntimeError> {
         self.idle_requested = false;
+        // The caller can drop the run future while keeping this Agent. The
+        // next run must repair its open composition before opening a new one.
+        if self.memory.has_open_child_dispatch() {
+            self.recover_interrupted_composition()?;
+            self.fail_run_checkpoint("Interrupted during tool composition")?;
+        }
+        if matches!(start, RunStart::Continuation) && !self.memory.has_interrupted_turn() {
+            return Err(RuntimeError::NoInterruptedTurn);
+        }
         self.refresh_tasks_from_disk()?;
         let tasks_before_run = self.tasks.clone();
         let rounds_before_run = self.rounds_since_task;
@@ -152,11 +158,15 @@ impl Agent {
             }
             Err(error) => {
                 self.idle_requested = false;
-                self.requeue_inflight_steering();
-                self.requeue_inflight_team_messages()?;
-                self.requeue_inflight_background_notifications();
-                self.restore_task_state(tasks_before_run, rounds_before_run, &task_disk_state)?;
-                self.memory.rollback_failed_run()?;
+                if self.memory.has_open_child_dispatch() {
+                    self.recover_interrupted_composition()?;
+                } else {
+                    self.requeue_inflight_steering();
+                    self.requeue_inflight_team_messages()?;
+                    self.requeue_inflight_background_notifications();
+                    self.restore_task_state(tasks_before_run, rounds_before_run, &task_disk_state)?;
+                    self.memory.rollback_failed_run()?;
+                }
                 self.sync_memory_snapshot();
                 let message = error.to_string();
                 self.set_status(AgentStatus::Failed(message.clone()));
@@ -166,6 +176,17 @@ impl Agent {
                 Err(error)
             }
         }
+    }
+
+    fn recover_interrupted_composition(&mut self) -> Result<(), RuntimeError> {
+        // Effects may have escaped the process. Keep the committed transcript
+        // and close unresolved calls through the same path as crash recovery.
+        self.memory.recover()?;
+        self.sync_memory_snapshot();
+        self.clear_inflight_steering();
+        self.clear_inflight_team_messages();
+        self.clear_inflight_background_notifications();
+        Ok(())
     }
 
     fn handle_finalization_error(&mut self, error: RuntimeError) -> RuntimeError {

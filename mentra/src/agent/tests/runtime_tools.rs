@@ -5355,7 +5355,7 @@ fn tool_use_stream(model: &str, id: &str, name: &str, input_json: &str) -> Strea
     ])
 }
 
-fn multi_tool_use_stream(model: &str, calls: &[(&str, &str, &str)]) -> StreamScript {
+pub(super) fn multi_tool_use_stream(model: &str, calls: &[(&str, &str, &str)]) -> StreamScript {
     let mut events = vec![ProviderEvent::MessageStarted {
         id: "msg-multi-tool".to_string(),
         model: model.to_string(),

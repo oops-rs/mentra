@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{ContentBlock, Message, Role};
+use crate::{ContentBlock, Message, Role, tool::ToolCall};
 
 static NEXT_ENTRY_SUFFIX: AtomicU64 = AtomicU64::new(0);
 
@@ -319,7 +319,47 @@ pub struct TranscriptItem {
     details: Option<BTreeMap<String, Value>>,
 }
 
+#[derive(Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub(crate) enum ChildToolEvent {
+    Started,
+    Finished { is_error: bool },
+}
+
 impl TranscriptItem {
+    /// Journal a child call without creating a provider message. A start
+    /// without a finish leaves the effect unknown after an interruption.
+    pub(crate) fn child_tool_event(
+        parent_id: &str,
+        call: &ToolCall,
+        event: ChildToolEvent,
+    ) -> Self {
+        #[derive(Serialize)]
+        struct ChildEvent<'a> {
+            parent_tool_use_id: &'a str,
+            tool_name: &'a str,
+            #[serde(flatten)]
+            event: ChildToolEvent,
+        }
+
+        let is_error = matches!(event, ChildToolEvent::Finished { is_error: true });
+        let detail = serde_json::json!(ChildEvent {
+            parent_tool_use_id: parent_id,
+            tool_name: &call.name,
+            event,
+        });
+        Self {
+            id: EntryId::new(),
+            parent_id: None,
+            kind: TranscriptKind::ToolExchange {
+                tool_use_id: Some(call.id.clone()),
+                is_error,
+            },
+            message: None,
+            details: Some(BTreeMap::from([(call.id.clone(), detail)])),
+        }
+    }
+
     pub fn user_turn(message: Message) -> Self {
         Self {
             id: EntryId::new(),

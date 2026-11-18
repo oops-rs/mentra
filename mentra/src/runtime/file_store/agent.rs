@@ -71,6 +71,8 @@ struct TranscriptShape {
 struct RunFile {
     run_id: String,
     assistant_committed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    child_dispatch_started: bool,
     baseline: TranscriptShape,
 }
 
@@ -338,6 +340,7 @@ fn decompose_memory(memory: &AgentMemoryState) -> StateFile {
         run: memory.run.as_ref().map(|run| RunFile {
             run_id: run.run_id.clone(),
             assistant_committed: run.assistant_committed,
+            child_dispatch_started: run.child_dispatch_started,
             baseline: shape_of(&run.baseline_transcript),
         }),
         interrupted_turn: memory.interrupted_turn,
@@ -360,6 +363,7 @@ fn compose_memory(
                     run_id: run.run_id,
                     baseline_transcript: transcript_from(&run.baseline, entries)?,
                     assistant_committed: run.assistant_committed,
+                    child_dispatch_started: run.child_dispatch_started,
                 })
             })
             .transpose()?,

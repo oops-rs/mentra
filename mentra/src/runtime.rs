@@ -52,6 +52,7 @@ pub(crate) use intrinsic::RuntimeIntrinsicTool;
 pub use skill::{SkillInfo, SkillLoadError, skill_root_key};
 #[cfg(feature = "store-sqlite")]
 pub use sqlite_store::SqliteRuntimeStore;
+pub(crate) use store::next_id;
 pub use store::{
     AgentStore, AuditStore, LeaseStore, PermissionRuleContext, PermissionRuleStore, RunStore,
     RuntimeStore, TaskStore,

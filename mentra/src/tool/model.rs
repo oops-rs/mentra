@@ -17,7 +17,10 @@ use crate::runtime::{RuntimeError, TaskIntrinsicTool, TaskItem};
 use crate::team::{TeamMemberSummary, TeamMessage, TeamProtocolRequestSummary};
 use crate::tool::ToolAuthorizationPreview;
 
-use super::descriptor::RuntimeToolDescriptor;
+use super::{
+    descriptor::{ProviderToolSpec, RuntimeToolDescriptor},
+    orchestrator::ChildDispatch,
+};
 
 #[allow(unused_imports)]
 pub use mentra_provider::ToolLoadingPolicy;
@@ -84,6 +87,7 @@ pub struct ToolContext<'a> {
     pub(crate) working_directory: PathBuf,
     pub(crate) runtime: crate::runtime::RuntimeHandle,
     pub(crate) agent: &'a mut crate::agent::Agent,
+    pub(crate) dispatch: ChildDispatch<'a>,
     pub(crate) event_tx: crate::agent::AgentEventBus,
     /// The options of the `Agent::run` call this execution is a step of.
     /// Reachable only as [`child_run_options`](Self::child_run_options), so a
@@ -93,6 +97,34 @@ pub struct ToolContext<'a> {
 }
 
 impl ToolContext<'_> {
+    /// The effective tool definitions used to build this agent's provider requests.
+    ///
+    /// Discovery is a snapshot. Each invocation resolves the tool again under
+    /// the same agent's current profile and audience. Using the composition
+    /// API also makes this evaluation interruptible by the active run's limits.
+    pub fn visible_tool_specs(&self) -> Arc<[ProviderToolSpec]> {
+        self.dispatch.activate();
+        self.agent.tools()
+    }
+
+    /// Invokes one child call through the active turn's dispatcher.
+    ///
+    /// Tool failures, including refusals, return a reviewed result with
+    /// `is_error` set. Mentra drops the enclosing evaluation on a terminal
+    /// action, run stop, or hard run failure. In those cases this future
+    /// does not return to the caller. The mutable borrow serializes child
+    /// calls and keeps them within the lifetime of this exclusive execution.
+    ///
+    /// Child results enter provider history only through the public output
+    /// selected by the enclosing tool or through a terminal action. The
+    /// local transcript records each child start and reviewed outcome under
+    /// its parent call. An unmatched start has an unknown outcome.
+    pub async fn invoke_child(&mut self, name: &str, input: Value) -> ReviewedToolResult {
+        self.dispatch
+            .invoke(self.agent, &self.run_options, name, input)
+            .await
+    }
+
     pub fn working_directory(&self) -> &Path {
         self.working_directory.as_path()
     }
@@ -797,6 +829,13 @@ impl ParallelToolContext {
             self.agent_id.clone(),
         )
     }
+}
+
+/// A child call's public result after the turn's result review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewedToolResult {
+    pub content: ToolResultContent,
+    pub is_error: bool,
 }
 
 /// String result returned by Mentra tools.

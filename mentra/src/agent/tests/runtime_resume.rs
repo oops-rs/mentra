@@ -1327,7 +1327,7 @@ fn persisted_agent_ids(runtime: &Runtime, runtime_identifier: &str) -> Vec<Strin
         .collect()
 }
 
-fn temp_store(label: &str) -> PersistentStore {
+pub(super) fn temp_store(label: &str) -> PersistentStore {
     let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1365,14 +1365,14 @@ fn team_config(team_dir: std::path::PathBuf) -> TeamConfig {
 /// the same store can resume: a SQL DELETE for the SQLite store, dropping
 /// the held OS locks for the file store.
 #[cfg(feature = "store-sqlite")]
-fn clear_leases(store: &PersistentStore) {
+pub(super) fn clear_leases(store: &PersistentStore) {
     let conn = rusqlite::Connection::open(store.path()).expect("open store");
     conn.execute("DELETE FROM leases", [])
         .expect("clear leases");
 }
 
 #[cfg(not(feature = "store-sqlite"))]
-fn clear_leases(store: &PersistentStore) {
+pub(super) fn clear_leases(store: &PersistentStore) {
     store.release_all_leases();
 }
 

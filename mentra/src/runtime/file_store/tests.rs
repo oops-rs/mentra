@@ -168,6 +168,7 @@ fn a_run_baseline_round_trips_and_rolls_back_identically() {
             run_id: "run-1".to_string(),
             baseline_transcript: baseline.clone(),
             assistant_committed: false,
+            child_dispatch_started: false,
         }),
         revision: 9,
         ..AgentMemoryState::default()
