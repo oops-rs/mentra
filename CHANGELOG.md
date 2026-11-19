@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.36.3 — 2026-11-19
+
+Fix. mentra-provider is unchanged at 0.10.0.
+
+### A turn that is over the threshold on its own keeps its steps
+
+- Auto-compaction keeps the latest user turn and the open tool exchange
+  verbatim. When those alone were over the threshold, no compaction could get
+  under it, so one ran before every model request. Each one summarized away
+  the step just taken, and the model repeated its last tool call until its
+  deadline. Now, once an automatic compaction leaves the history over the
+  threshold, the next waits until half a threshold more has built up.
+  Dropping back under the threshold clears the wait. Compaction after the
+  provider refuses a request as too long is unchanged.
+
 ## 0.36.2 — 2026-11-19
 
 Fix. mentra-provider is unchanged at 0.10.0.

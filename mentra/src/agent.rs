@@ -114,6 +114,13 @@ pub struct Agent {
     /// Exact-agent registrations a host made with
     /// [`register_tool`](Self::register_tool), retained for the same span.
     agent_tools: Vec<crate::tool::AgentToolRegistration>,
+    /// The estimate an automatic compaction left behind when it could not get
+    /// under the threshold — the part it must keep (the latest user turn,
+    /// the open tool exchange) is itself over budget. Until the history has
+    /// grown well past it there is nothing new to summarize, and compacting
+    /// anyway would summarize away the steps the current turn just took.
+    /// Not persisted: a resumed agent pays at most one extra compaction.
+    auto_compact_floor: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +313,7 @@ impl Agent {
             paged_tool_results: Default::default(),
             _tool_result_reader: None,
             agent_tools: Vec::new(),
+            auto_compact_floor: None,
         };
         agent
             .runtime
@@ -404,6 +412,7 @@ impl Agent {
             paged_tool_results: Default::default(),
             _tool_result_reader: None,
             agent_tools: Vec::new(),
+            auto_compact_floor: None,
         };
         let execution_config = AgentExecutionConfig {
             name: agent.name.clone(),

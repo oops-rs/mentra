@@ -51,8 +51,19 @@ impl Agent {
             return Ok(());
         };
 
-        let projection = self.projected_tool_result_history();
-        if self.estimated_request_tokens(&projection.messages) <= threshold {
+        let estimated =
+            self.estimated_request_tokens(&self.projected_tool_result_history().messages);
+        if estimated <= threshold {
+            self.auto_compact_floor = None;
+            return Ok(());
+        }
+        // A compaction that could not get under the threshold left this much
+        // behind; summarize again only once half a threshold more has built
+        // up. Doing it every step lost each step to the summary, and the model
+        // repeated its last tool call until the run's deadline.
+        if let Some(floor) = self.auto_compact_floor
+            && estimated <= floor.saturating_add(threshold / 2)
+        {
             return Ok(());
         }
 
@@ -63,7 +74,12 @@ impl Agent {
                 .compact_history(preserve_from, CompactionTrigger::Auto, bounds, run_options)
                 .await
             {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    let after = self
+                        .estimated_request_tokens(&self.projected_tool_result_history().messages);
+                    self.auto_compact_floor = (after > threshold).then_some(after);
+                    return Ok(());
+                }
                 // Ahead of every other arm: a run bound is not a compaction
                 // failure to degrade past. Swallowing it the way the arm
                 // below swallows a summarizer outage would let the turn
