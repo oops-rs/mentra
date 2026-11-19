@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.37.0 — 2026-11-19
+
+Additive. Requires mentra-provider 0.10.0.
+
+### Tools can dispatch child calls in an active turn
+
+- `ToolContext::visible_tool_specs()` lists the active turn's visible tools.
+  Exclusive tools can use `ToolContext::invoke_child()` to dispatch child calls
+  through the same scheduling, authorization, budgets, and result review as
+  direct calls.
+- `ReviewedToolResult` preserves text and structured JSON. Child starts and
+  outcomes are recorded outside provider history. Terminal calls and stops end
+  the enclosing evaluation. Interrupted compositions continue without replaying
+  child calls.
+
 ## 0.36.1 — 2026-11-16
 
 Additive. mentra-provider is unchanged at 0.10.0.
