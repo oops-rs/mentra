@@ -201,15 +201,19 @@ pub fn parse(block: &str) -> Result<Fields, ParseError> {
 }
 
 /// Reads a block another tool may have written for itself as well: [`parse`],
-/// except that a list or a mapping nested under a key with no value of its
-/// own is skipped and that key reads as null.
+/// with two more shapes read.
 ///
-/// A `SKILL.md` is shared between harnesses, and one of them may keep a
-/// `metadata:` mapping beside the flat fields every harness reads. Nothing
-/// here reads what is nested, so refusing the file for it would refuse a
-/// skill over a field that is not this reader's. A value that is itself not
-/// flat, such as a block scalar or a `[list]`, is still refused: that is a
-/// field this reader was asked for and cannot read.
+/// A list or a mapping nested under a key with no value of its own is
+/// skipped, and that key reads as null. A `SKILL.md` is shared between
+/// harnesses, and one of them may keep a `metadata:` mapping beside the flat
+/// fields every harness reads. Nothing here reads what is nested, so refusing
+/// the file for it would refuse a skill over a field that is not this
+/// reader's.
+///
+/// A block scalar is text: `key: |` keeps its indented lines as lines, and
+/// `key: >` folds them into one line with a blank line for a break, each with
+/// YAML's `-` and `+` chomping. That is how a long `description` is commonly
+/// written. An inline `[list]` or `{mapping}` is still refused.
 pub fn parse_flat_fields(block: &str) -> Result<Fields, ParseError> {
     read(block, Nested::Skip)
 }
@@ -220,14 +224,107 @@ enum Nested {
     Skip,
 }
 
+/// A `|` or `>` value being collected from the lines under its key.
+struct BlockScalar {
+    key: String,
+    folded: bool,
+    chomp: Option<char>,
+    lines: Vec<String>,
+}
+
+impl BlockScalar {
+    /// The header after a key's colon, if it opens a block scalar.
+    fn open(key: &str, header: &str) -> Option<Self> {
+        let header = match header.find(" #") {
+            Some(at) => header[..at].trim_end(),
+            None => header,
+        };
+        let mut chars = header.chars();
+        let folded = match chars.next()? {
+            '>' => true,
+            '|' => false,
+            _ => return None,
+        };
+        let chomp = chars.next();
+        if !matches!(chomp, None | Some('-' | '+')) || chars.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            key: key.to_string(),
+            folded,
+            chomp,
+            lines: Vec::new(),
+        })
+    }
+
+    fn text(mut self) -> String {
+        let trailing = self
+            .lines
+            .iter()
+            .rev()
+            .take_while(|line| line.trim().is_empty())
+            .count();
+        self.lines.truncate(self.lines.len() - trailing);
+        let indent = self
+            .lines
+            .iter()
+            .find(|line| !line.trim().is_empty())
+            .map_or(0, |line| line.len() - line.trim_start().len());
+        let mut text = String::new();
+        let mut breaks = 0usize;
+        for (index, line) in self.lines.iter().enumerate() {
+            let content = if line.trim().is_empty() {
+                ""
+            } else {
+                &line[indent.min(line.len() - line.trim_start().len())..]
+            };
+            if !self.folded {
+                if index > 0 {
+                    text.push('\n');
+                }
+                text.push_str(content);
+            } else if content.is_empty() {
+                breaks += 1;
+            } else {
+                if !text.is_empty() {
+                    if breaks == 0 {
+                        text.push(' ');
+                    } else {
+                        text.push_str(&"\n".repeat(breaks));
+                    }
+                }
+                breaks = 0;
+                text.push_str(content);
+            }
+        }
+        match self.chomp {
+            Some('-') => {}
+            Some(_) => text.push_str(&"\n".repeat(trailing + 1)),
+            None if text.is_empty() => {}
+            None => text.push('\n'),
+        }
+        text
+    }
+}
+
 fn read(block: &str, nested: Nested) -> Result<Fields, ParseError> {
     let mut fields = Fields::default();
     // Whether the last key had no value, so that what follows may be its.
     let mut under_empty_key = false;
+    let mut block_scalar: Option<BlockScalar> = None;
     for (index, raw) in block.lines().enumerate() {
         let number = index + 1;
         let line = raw.trim_end_matches('\r');
         let trimmed = line.trim();
+        if let Some(open) = &mut block_scalar {
+            if trimmed.is_empty() || line.starts_with([' ', '\t']) {
+                open.lines.push(line.to_string());
+                continue;
+            }
+            let closed = block_scalar.take().expect("open block scalar");
+            let key = closed.key.clone();
+            fields.entries.push((key, Scalar::Text(closed.text())));
+        }
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
@@ -280,9 +377,20 @@ fn read(block: &str, nested: Nested) -> Result<Fields, ParseError> {
                 message: format!("`{key}` is given twice"),
             });
         }
+        if nested == Nested::Skip
+            && let Some(open) = BlockScalar::open(key, rest.trim())
+        {
+            under_empty_key = false;
+            block_scalar = Some(open);
+            continue;
+        }
         let value = scalar(rest.trim(), number)?;
         under_empty_key = rest.trim().is_empty();
         fields.entries.push((key.to_string(), value));
+    }
+    if let Some(closed) = block_scalar {
+        let key = closed.key.clone();
+        fields.entries.push((key, Scalar::Text(closed.text())));
     }
     Ok(fields)
 }
@@ -564,12 +672,34 @@ mod tests {
 
         for (block, expected) in [
             ("name: a\n  continued\n", "indented"),
-            ("description: |\n  block\n", "quote it"),
+            ("items: [a, b]\n", "quote it"),
             ("- a\n", "list item"),
         ] {
             let error = parse_flat_fields(block).expect_err(block);
             assert!(error.to_string().contains(expected), "{block:?}: {error}");
         }
+    }
+
+    #[test]
+    fn a_block_scalar_is_text_where_shared_files_are_read() {
+        let fields = parse_flat_fields(
+            "description: >\n  Draws a board\n  from a prompt.\n\n  Use it for diagrams.\n\
+             name: board\n\
+             steps: |-\n    one\n      two\n\n\
+             kept: |+\n  tail\n\n\
+             empty: >\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            fields.text("description"),
+            Some("Draws a board from a prompt.\nUse it for diagrams.\n")
+        );
+        assert_eq!(fields.text("name"), Some("board"));
+        assert_eq!(fields.text("steps"), Some("one\n  two"));
+        assert_eq!(fields.text("kept"), Some("tail\n\n"));
+        assert_eq!(fields.text("empty"), Some(""));
+        assert!(parse_flat_fields("description: >\n  a\ndescription: b\n").is_err());
+        assert!(parse("description: >\n  a\n").is_err());
     }
 
     #[test]
