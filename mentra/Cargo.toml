@@ -1,6 +1,6 @@
 [package]
 name = "mentra"
-version = "0.37.0"
+version = "0.38.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "An agent runtime for tool-using LLM applications"
@@ -40,7 +40,7 @@ test-utils = []
 
 [dependencies]
 jiff.workspace = true
-mentra-provider = { version = "0.10.0", path = "../mentra-provider", default-features = false }
+mentra-provider = { version = "0.11.0", path = "../mentra-provider", default-features = false }
 tokio = { version = "1.53.3", features = [
     "fs", "io-util", "macros", "net", "parking_lot", "process", "rt-multi-thread", "sync", "time",
 ] }

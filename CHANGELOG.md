@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.38.0 — 2026-11-19
+
+Breaking Rust API changes. Requires mentra-provider 0.11.0.
+
+### Timestamps use Jiff
+
+- `OpenAITokenSet.expires_at` uses `jiff::Timestamp`.
+  `OpenAITokenSet::is_expired` and
+  `OpenAIOAuthCredentialSource::with_refresh_skew` take
+  `jiff::SignedDuration`. Refresh responses still calculate expiry from the
+  returned token lifetime, and the refresh skew still applies.
+- Saved credentials and model metadata accept legacy tuples and text
+  timestamps within Jiff's supported range. Serialization writes the existing
+  tuple format in UTC. Instants outside Jiff's range return a decode error.
+- The A2A task-list REST filter takes `statusTimestampAfter` from the
+  serialized request. The A2A client uses the existing crates.io `a2a-lf`
+  requirement.
+
+### Compaction keeps large turns moving
+
+- Include the image token estimation fix from 0.36.2. Images and generated
+  image results count as 1,600 tokens each instead of counting their
+  serialized bytes.
+- Include the repeated auto-compaction fix from 0.36.3. If the retained tail
+  remains over budget after compaction, the next automatic compaction waits
+  for half a threshold of new material.
+
+## mentra-provider 0.11.0 — 2026-11-19
+
+- `ModelInfo.created_at` changes to `Option<jiff::Timestamp>`. Existing
+  serialized model metadata uses the compatibility described above.
+- HTTP `Retry-After` dates use Jiff and retain the previous IMF-fixdate
+  parsing rules, fractional waits, and immediate retry for dates in the past.
+
 ## 0.36.3 — 2026-11-19
 
 Fix. mentra-provider is unchanged at 0.10.0.
