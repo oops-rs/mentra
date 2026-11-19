@@ -197,12 +197,42 @@ impl std::error::Error for ParseError {}
 /// item, an indented continuation or a nested mapping is an error that says
 /// what it found.
 pub fn parse(block: &str) -> Result<Fields, ParseError> {
+    read(block, Nested::Refuse)
+}
+
+/// Reads a block another tool may have written for itself as well: [`parse`],
+/// except that a list or a mapping nested under a key with no value of its
+/// own is skipped and that key reads as null.
+///
+/// A `SKILL.md` is shared between harnesses, and one of them may keep a
+/// `metadata:` mapping beside the flat fields every harness reads. Nothing
+/// here reads what is nested, so refusing the file for it would refuse a
+/// skill over a field that is not this reader's. A value that is itself not
+/// flat, such as a block scalar or a `[list]`, is still refused: that is a
+/// field this reader was asked for and cannot read.
+pub fn parse_flat_fields(block: &str) -> Result<Fields, ParseError> {
+    read(block, Nested::Skip)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nested {
+    Refuse,
+    Skip,
+}
+
+fn read(block: &str, nested: Nested) -> Result<Fields, ParseError> {
     let mut fields = Fields::default();
+    // Whether the last key had no value, so that what follows may be its.
+    let mut under_empty_key = false;
     for (index, raw) in block.lines().enumerate() {
         let number = index + 1;
         let line = raw.trim_end_matches('\r');
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let is_item = trimmed.starts_with("- ") || trimmed == "-";
+        if nested == Nested::Skip && under_empty_key && (is_item || line.starts_with([' ', '\t'])) {
             continue;
         }
         if line.starts_with([' ', '\t']) {
@@ -213,7 +243,7 @@ pub fn parse(block: &str) -> Result<Fields, ParseError> {
                     .to_string(),
             });
         }
-        if trimmed.starts_with("- ") || trimmed == "-" {
+        if is_item {
             return Err(ParseError {
                 line: number,
                 message: "a list item; frontmatter here is one `key: value` per line".to_string(),
@@ -251,6 +281,7 @@ pub fn parse(block: &str) -> Result<Fields, ParseError> {
             });
         }
         let value = scalar(rest.trim(), number)?;
+        under_empty_key = rest.trim().is_empty();
         fields.entries.push((key.to_string(), value));
     }
     Ok(fields)
@@ -516,6 +547,29 @@ mod tests {
                 .message,
             "`flag` must be true or false, not `maybe`"
         );
+    }
+
+    #[test]
+    fn what_is_nested_under_an_empty_key_can_be_skipped() {
+        let block = "name: approval\n\
+                     metadata:\n  requires:\n    bins: [\"cli\"]\n  help: \"cli --help\"\n\
+                     tags:\n- a\n- b\n\
+                     description: approves things\n";
+        assert!(parse(block).is_err());
+        let fields = parse_flat_fields(block).expect("parses");
+        assert_eq!(fields.text("name"), Some("approval"));
+        assert_eq!(fields.get("metadata"), Some(&Scalar::Null));
+        assert_eq!(fields.get("tags"), Some(&Scalar::Null));
+        assert_eq!(fields.text("description"), Some("approves things"));
+
+        for (block, expected) in [
+            ("name: a\n  continued\n", "indented"),
+            ("description: |\n  block\n", "quote it"),
+            ("- a\n", "list item"),
+        ] {
+            let error = parse_flat_fields(block).expect_err(block);
+            assert!(error.to_string().contains(expected), "{block:?}: {error}");
+        }
     }
 
     #[test]

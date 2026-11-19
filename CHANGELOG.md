@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+Additive.
+
+### A skill may carry frontmatter another harness nests
+
+- A `SKILL.md` whose frontmatter nests a mapping or a list under a key with
+  no value, such as a `metadata:` block, loads. The nested lines are skipped
+  and the key reads as null. Such a file used to fail with
+  `InvalidFrontmatter`, and one such file failed every skill load.
+  `frontmatter::parse_flat_fields` is the reader. `frontmatter::parse` is
+  unchanged and still refuses nesting.
+
 ## 0.38.0 — 2026-11-19
 
 Breaking Rust API changes. Requires mentra-provider 0.11.0.
