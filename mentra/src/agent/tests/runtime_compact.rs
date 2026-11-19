@@ -2044,3 +2044,116 @@ async fn a_cancellation_between_compaction_attempts_ends_the_run_instead_of_degr
          does not spend the remaining two"
     );
 }
+
+/// Calls `echo_tool` `steps` times and then answers; summarizes whenever it is
+/// asked to. Records how many summaries it wrote and the tool calls each turn
+/// request could see.
+struct StepsThenAnswerProvider {
+    model: crate::ModelInfo,
+    steps: u64,
+    turns: AtomicU64,
+    summaries: Arc<AtomicU64>,
+    seen_calls: Arc<std::sync::Mutex<Vec<usize>>>,
+}
+
+#[async_trait]
+impl crate::provider::Provider for StepsThenAnswerProvider {
+    fn descriptor(&self) -> crate::provider::ProviderDescriptor {
+        crate::provider::ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<crate::ModelInfo>, ProviderError> {
+        Ok(vec![self.model.clone()])
+    }
+
+    async fn stream(
+        &self,
+        request: Request<'_>,
+    ) -> Result<crate::provider::ProviderEventStream, ProviderError> {
+        let content = if request.tools.is_empty() {
+            self.summaries.fetch_add(1, Ordering::SeqCst);
+            ContentBlock::text("summary")
+        } else {
+            let calls = request
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+                .count();
+            self.seen_calls.lock().unwrap().push(calls);
+            let turn = self.turns.fetch_add(1, Ordering::SeqCst);
+            if turn < self.steps {
+                ContentBlock::ToolUse {
+                    id: format!("step-{turn}"),
+                    name: "echo_tool".to_string(),
+                    input: json!({"value": turn}),
+                }
+            } else {
+                ContentBlock::text("done")
+            }
+        };
+        Ok(crate::provider::provider_event_stream_from_response(
+            crate::provider::Response {
+                id: "response".to_string(),
+                model: self.model.id.clone(),
+                role: Role::Assistant,
+                content: vec![content],
+                stop_reason: None,
+                usage: None,
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn a_turn_over_the_threshold_on_its_own_keeps_its_steps() {
+    // The latest user turn is preserved verbatim, so when it alone is over the
+    // threshold no compaction can get under it. Compacting before every step
+    // anyway summarized each step away and the model repeated it until its
+    // deadline. Once a compaction has left the history over the threshold,
+    // the next waits for half a threshold of new material.
+    let model = model_info("model", BuiltinProvider::Anthropic);
+    let summaries = Arc::new(AtomicU64::new(0));
+    let seen_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(StepsThenAnswerProvider {
+            model: model.clone(),
+            steps: 4,
+            turns: AtomicU64::new(0),
+            summaries: summaries.clone(),
+            seen_calls: seen_calls.clone(),
+        })
+        .with_tool(StaticTool::success("echo_tool", "ok"))
+        .build()
+        .expect("build runtime");
+    let mut agent = runtime
+        .spawn_with_config(
+            "agent",
+            model,
+            AgentConfig {
+                compaction: CompactionConfig {
+                    auto_compact_threshold_tokens: Some(1_000),
+                    transcript_dir: temp_dir("over-threshold-turn"),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    agent
+        .send(vec![ContentBlock::text("x".repeat(8_000))])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *seen_calls.lock().unwrap(),
+        vec![0, 1, 2, 3, 4],
+        "every turn request sees every step taken before it"
+    );
+    assert!(
+        summaries.load(Ordering::SeqCst) <= 1,
+        "summarized {} times",
+        summaries.load(Ordering::SeqCst)
+    );
+}
