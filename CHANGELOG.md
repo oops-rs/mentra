@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.38.1 — 2026-11-19
 
-Additive.
+Additive. mentra-provider is unchanged at 0.11.0.
 
 ### A composing tool can dispatch several child calls at once
 
@@ -12,6 +12,15 @@ Additive.
   order. Results come back in call order. Each call keeps its own admission,
   budget charge, result review and transcript record.
   `invoke_child()` is unchanged.
+
+### A skill may carry frontmatter another harness nests
+
+- A `SKILL.md` whose frontmatter nests a mapping or a list under a key with
+  no value, such as a `metadata:` block, loads. The nested lines are skipped
+  and the key reads as null. Such a file used to fail with
+  `InvalidFrontmatter`, and one such file failed every skill load.
+  `frontmatter::parse_flat_fields` is the reader. `frontmatter::parse` is
+  unchanged and still refuses nesting.
 
 ## 0.38.0 — 2026-11-19
 

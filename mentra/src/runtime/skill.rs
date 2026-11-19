@@ -217,7 +217,8 @@ fn parse_skill_file(path: &Path, raw: &str) -> Result<(SkillFrontmatter, String)
     let Some(block) = scanned.frontmatter else {
         return Ok((SkillFrontmatter::default(), raw.to_string()));
     };
-    let fields = frontmatter::parse(block).map_err(|error| invalid(error.to_string()))?;
+    let fields =
+        frontmatter::parse_flat_fields(block).map_err(|error| invalid(error.to_string()))?;
     let meta = SkillFrontmatter {
         name: fields.text("name").map(str::to_string),
         description: fields.text("description").map(str::to_string),
