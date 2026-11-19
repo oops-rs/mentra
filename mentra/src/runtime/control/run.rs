@@ -129,8 +129,7 @@ impl ProviderRetry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EarlyEnd {
-    /// The run ended at a round boundary because [`RunOptions::stop`] was
-    /// tripped.
+    /// The run ended because [`RunOptions::stop`] was tripped.
     ///
     /// Reported in preference to [`TokenBudget`](Self::TokenBudget) when both
     /// were true at that boundary. A stop is an instruction the caller issued,
@@ -180,13 +179,11 @@ pub struct RunOptions {
     pub cancellation: Option<CancellationToken>,
     /// A **graceful** stop signal, distinct from [`cancellation`](Self::cancellation).
     ///
-    /// When this token is tripped (via [`CancellationToken::cancel`]) the run ends
-    /// **successfully** at the next round boundary — the committed transcript is
-    /// kept (the run resolves like the model self-terminating with no further tool
-    /// calls), rather than failing and rolling the run back the way `cancellation`
-    /// does. Use it to stop gathering once enough work is done while preserving the
-    /// gathered context for a follow-up turn on the same agent. `None` (the default)
-    /// never stops the run.
+    /// When this token is tripped (via [`CancellationToken::cancel`]), the
+    /// run ends gracefully with the committed transcript intact. The runner
+    /// stops at the next round boundary or interrupts an active tool
+    /// composition and closes its parent call. A follow-up turn can use the
+    /// context gathered so far. `None` (the default) disables this signal.
     pub stop: Option<CancellationToken>,
     pub deadline: Option<SystemTime>,
     /// How many times one provider request may be re-attempted after a
@@ -440,8 +437,8 @@ impl RunOptions {
     }
 
     /// Whether a graceful stop has been requested via [`stop`](Self::stop). The
-    /// runner checks this at each round boundary, where the transcript is at a
-    /// consistent point, and ends the run successfully when it is set.
+    /// runner checks this at round boundaries and during active tool
+    /// composition. It closes any outstanding provider calls before ending.
     pub(crate) fn stop_requested(&self) -> bool {
         self.stop
             .as_ref()

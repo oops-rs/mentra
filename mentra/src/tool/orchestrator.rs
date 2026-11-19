@@ -2,6 +2,10 @@
 
 use std::{collections::BTreeMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
+pub(super) mod child;
+
+pub(crate) use child::ChildDispatch;
+use child::{ActiveToolCall, CompositionControl, CompositionExit, check_before_child_handler};
 use tokio::task::JoinSet;
 
 use crate::{
@@ -12,7 +16,7 @@ use crate::{
         AfterDecision, BeforeDecision, ExecutionHookSnapshot, HookDecision, PostExecutionContext,
         PreExecutionContext, ResultDecision,
     },
-    runtime::{RunOptions, RuntimeHookEvent},
+    runtime::{EarlyEnd, RunOptions, RuntimeHookEvent},
     tool::{
         ExecutableTool, ParallelToolContext, ResolvedTool, RuntimeToolDescriptor,
         ToolAuthorizationOutcome, ToolAuthorizationRequest, ToolCall, ToolCapability, ToolContext,
@@ -42,6 +46,7 @@ pub(crate) struct ToolRuntime {
     runtime: crate::runtime::handle::RuntimeHandle,
     agent_id: String,
     tool_calls: usize,
+    child_task_succeeded: bool,
     working_directory: Option<PathBuf>,
     output_limiter: ToolOutputLimiter,
     /// `Some` only when this agent enables tool-result paging; `None` leaves
@@ -69,8 +74,7 @@ struct ScheduledToolCall {
 #[derive(Clone)]
 enum ScheduledTool {
     Resolved(Box<ResolvedTool>),
-    Unavailable,
-    Missing,
+    Refused(String),
 }
 
 /// What the pre-execution hooks left of a call.
@@ -113,18 +117,7 @@ struct AdmittedToolCall {
 struct CompletedToolExecution {
     result: ContentBlock,
     task_succeeded: bool,
-    /// Ends the current round: true when this execution consumed
-    /// [`crate::tool::ToolContext::request_idle`] (exclusive lane) or its
-    /// [`crate::tool::ToolOutput::terminate`] successor. Controls whether
-    /// `TurnRunner::run` issues another model round.
-    should_end_turn: bool,
-    /// True only when `should_end_turn` came from `ToolOutput::terminate`
-    /// specifically (never from the pre-existing idle-request signal).
-    /// Distinct from `should_end_turn` because it additionally drives
-    /// skipping not-yet-executed batches later in the same round — a new
-    /// behavior scoped to genuine termination, not to idle requests, so
-    /// existing `request_idle` callers see unchanged behavior.
-    terminated: bool,
+    effect: RoundEffect,
     tool_name: String,
     /// The input the tool actually ran with, as JSON — after any pre-execution
     /// hook rewrote it, so a post-execution hook judges what happened rather
@@ -141,13 +134,16 @@ struct CompletedToolExecution {
     execution_hooks: Option<ExecutionHookSnapshot>,
 }
 
-/// How a single execution affects the current round — bundled so
-/// [`ToolRuntime::completed_execution`] stays within a reasonable argument
-/// count. `Default` is "continues": neither ends the round nor terminates.
-#[derive(Debug, Clone, Copy, Default)]
-struct RoundEffect {
-    should_end_turn: bool,
-    terminated: bool,
+/// The control effect of a completed invocation. Idle ends the run after
+/// the round, whereas a terminal tool or a stopped composition also skips
+/// the remaining batches in the round.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RoundEffect {
+    #[default]
+    Continue,
+    Idle,
+    Terminate,
+    Stop,
 }
 
 impl ToolRuntime {
@@ -170,6 +166,7 @@ impl ToolRuntime {
             runtime,
             agent_id: agent.id().to_string(),
             tool_calls: 0,
+            child_task_succeeded: false,
             working_directory: None,
             output_limiter,
             pager: agent.config().tool_result_paging.map(ToolResultPager::new),
@@ -195,37 +192,25 @@ impl ToolRuntime {
             .into_iter();
 
         while let Some(batch) = batches.next() {
-            options.check_limits()?;
-            let execution_count = batch.execution_count();
-            if self.tool_calls + execution_count > options.tool_budget() {
-                return Err(RuntimeError::ToolBudgetExceeded(options.tool_budget()));
-            }
-            self.tool_calls += execution_count;
+            self.reserve_tool_calls(options, batch.execution_count())?;
+            let executions = self.execute_batch(agent, options, batch, None).await?;
 
-            let executions = match batch {
-                ToolCallBatch::Exclusive(call) => {
-                    vec![self.execute_one_tool(agent, options, *call).await?]
-                }
-                ToolCallBatch::Parallel(calls) => {
-                    self.execute_parallel_batch(agent, options, calls).await?
-                }
-            };
-
-            let mut terminator = None;
+            let mut skip_reason = None;
             for execution in executions {
                 successful_task |= execution.task_succeeded;
-                end_turn |= execution.should_end_turn;
-                let reviewed = self
-                    .review_result(
-                        &execution.tool_name,
-                        &execution.input_json,
-                        execution.result,
-                        execution.execution_hooks,
-                    )
-                    .await?;
-                let result = self.page_result(agent, &execution.tool_name, reviewed);
-                if execution.terminated {
-                    terminator.get_or_insert(execution.tool_name);
+                end_turn |= execution.effect != RoundEffect::Continue;
+                let execution = self.review_execution(agent, execution).await?;
+                let result = execution.result;
+                match execution.effect {
+                    RoundEffect::Terminate => {
+                        skip_reason.get_or_insert_with(|| {
+                            format!("run terminated by '{}'", execution.tool_name)
+                        });
+                    }
+                    RoundEffect::Stop => {
+                        skip_reason.get_or_insert_with(|| "run stop requested".to_string());
+                    }
+                    RoundEffect::Continue | RoundEffect::Idle => {}
                 }
                 if let (Some(value), ContentBlock::ToolResult { tool_use_id, .. }) =
                     (execution.details, &result)
@@ -256,10 +241,10 @@ impl ToolRuntime {
             // round are never executed. Each still gets an explicit
             // is_error result so the transcript always has one result block
             // per tool_use — never a silent drop.
-            if let Some(terminator) = terminator {
+            if let Some(reason) = skip_reason {
                 for remaining_batch in batches {
                     for call in remaining_batch.into_calls() {
-                        let result = not_executed_result(&call, &terminator);
+                        let result = not_executed_result(&call, &reason);
                         results.push(self.page_result(agent, &call.name, result));
                     }
                 }
@@ -267,6 +252,7 @@ impl ToolRuntime {
             }
         }
         results.extend(images);
+        successful_task |= std::mem::take(&mut self.child_task_succeeded);
 
         Ok(ToolExecutionOutcome {
             results,
@@ -274,6 +260,55 @@ impl ToolRuntime {
             end_turn,
             details,
         })
+    }
+
+    fn reserve_tool_calls(
+        &mut self,
+        options: &RunOptions,
+        count: usize,
+    ) -> Result<(), RuntimeError> {
+        options.check_limits()?;
+        let budget = options.tool_budget();
+        if count > budget.saturating_sub(self.tool_calls) {
+            return Err(RuntimeError::ToolBudgetExceeded(budget));
+        }
+        self.tool_calls += count;
+        Ok(())
+    }
+
+    async fn execute_batch(
+        &mut self,
+        agent: &mut Agent,
+        options: &RunOptions,
+        batch: ToolCallBatch,
+        parent: Option<&ActiveToolCall<'_>>,
+    ) -> Result<Vec<CompletedToolExecution>, RuntimeError> {
+        match batch {
+            ToolCallBatch::Exclusive(call) => Ok(vec![
+                self.execute_one_tool(agent, options, *call, parent).await?,
+            ]),
+            ToolCallBatch::Parallel(calls) => {
+                self.execute_parallel_batch(agent, options, calls, parent.is_some())
+                    .await
+            }
+        }
+    }
+
+    async fn review_execution(
+        &mut self,
+        agent: &Agent,
+        mut execution: CompletedToolExecution,
+    ) -> Result<CompletedToolExecution, RuntimeError> {
+        let reviewed = self
+            .review_result(
+                &execution.tool_name,
+                &execution.input_json,
+                execution.result,
+                execution.execution_hooks.take(),
+            )
+            .await?;
+        execution.result = self.page_result(agent, &execution.tool_name, reviewed);
+        Ok(execution)
     }
 
     /// Replaces an oversized text result with its first window, retaining the
@@ -323,18 +358,11 @@ impl ToolRuntime {
         let tool = match agent.resolve_tool(&call.name) {
             crate::tool::ToolResolution::Visible(tool) => tool,
             crate::tool::ToolResolution::Hidden => {
-                return ScheduledToolCall {
-                    call,
-                    tool: ScheduledTool::Unavailable,
-                    execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
-                };
+                let reason = format!("Tool '{}' is not available for this agent", call.name);
+                return ScheduledToolCall::refused(call, reason);
             }
             crate::tool::ToolResolution::Missing => {
-                return ScheduledToolCall {
-                    call,
-                    tool: ScheduledTool::Missing,
-                    execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
-                };
+                return ScheduledToolCall::refused(call, "Tool not found");
             }
         };
 
@@ -885,8 +913,7 @@ impl ToolRuntime {
         CompletedToolExecution {
             result,
             task_succeeded: false,
-            should_end_turn: false,
-            terminated: false,
+            effect: RoundEffect::Continue,
             tool_name: call.name.clone(),
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details: None,
@@ -934,36 +961,15 @@ impl ToolRuntime {
             .map(|error| error.to_string())
     }
 
-    fn unavailable_tool_result(&self, call: ToolCall) -> ContentBlock {
-        ContentBlock::ToolResult {
-            tool_use_id: call.id,
-            content: format!("Tool '{}' is not available for this agent", call.name).into(),
-            is_error: true,
-        }
-    }
-
-    fn unavailable_tool_execution(&self, agent: &Agent, call: ToolCall) -> CompletedToolExecution {
-        let result = self.unavailable_tool_result(call.clone());
-        agent.emit_event(AgentEvent::ToolExecutionFinished {
-            result: result.clone(),
-        });
-        CompletedToolExecution {
-            result,
-            task_succeeded: false,
-            should_end_turn: false,
-            terminated: false,
-            tool_name: call.name,
-            input_json: serde_json::to_string(&call.input).unwrap_or_default(),
-            details: None,
-            execution_hooks: None,
-            images: Vec::new(),
-        }
-    }
-
-    fn missing_tool_execution(&self, agent: &Agent, call: ToolCall) -> CompletedToolExecution {
+    fn refused_tool_execution(
+        &self,
+        agent: &Agent,
+        call: ToolCall,
+        reason: String,
+    ) -> CompletedToolExecution {
         let result = ContentBlock::ToolResult {
-            tool_use_id: call.id.clone(),
-            content: "Tool not found".into(),
+            tool_use_id: call.id,
+            content: reason.into(),
             is_error: true,
         };
         agent.emit_event(AgentEvent::ToolExecutionFinished {
@@ -972,8 +978,7 @@ impl ToolRuntime {
         CompletedToolExecution {
             result,
             task_succeeded: false,
-            should_end_turn: false,
-            terminated: false,
+            effect: RoundEffect::Continue,
             tool_name: call.name,
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details: None,
@@ -1094,8 +1099,7 @@ impl ToolRuntime {
         CompletedToolExecution {
             result,
             task_succeeded,
-            should_end_turn: effect.should_end_turn,
-            terminated: effect.terminated,
+            effect,
             tool_name: call.name.clone(),
             input_json: serde_json::to_string(&call.input).unwrap_or_default(),
             details,
@@ -1255,6 +1259,7 @@ impl ToolRuntime {
         agent: &mut Agent,
         options: &RunOptions,
         scheduled: ScheduledToolCall,
+        parent: Option<&ActiveToolCall<'_>>,
     ) -> Result<CompletedToolExecution, RuntimeError> {
         let ScheduledToolCall {
             call,
@@ -1263,11 +1268,18 @@ impl ToolRuntime {
         } = scheduled;
         self.note_tool_started(agent, &call)?;
         match tool {
-            ScheduledTool::Unavailable => Ok(self.unavailable_tool_execution(agent, call)),
-            ScheduledTool::Missing => Ok(self.missing_tool_execution(agent, call)),
-            ScheduledTool::Resolved(tool) => Ok(self
-                .execute_registered_tool(agent, options, call, *tool, execution_category)
-                .await),
+            ScheduledTool::Refused(reason) => Ok(self.refused_tool_execution(agent, call, reason)),
+            ScheduledTool::Resolved(tool) => {
+                self.execute_registered_tool(
+                    agent,
+                    options,
+                    call,
+                    *tool,
+                    execution_category,
+                    parent,
+                )
+                .await
+            }
         }
     }
 
@@ -1276,6 +1288,7 @@ impl ToolRuntime {
         agent: &mut Agent,
         options: &RunOptions,
         calls: Vec<ScheduledToolCall>,
+        is_child: bool,
     ) -> Result<Vec<CompletedToolExecution>, RuntimeError> {
         let len = calls.len();
         let mut results = (0..len).map(|_| None).collect::<Vec<_>>();
@@ -1294,12 +1307,8 @@ impl ToolRuntime {
 
             let resolved = match tool {
                 ScheduledTool::Resolved(tool) => *tool,
-                ScheduledTool::Unavailable => {
-                    results[index] = Some(self.unavailable_tool_execution(agent, call));
-                    continue;
-                }
-                ScheduledTool::Missing => {
-                    results[index] = Some(self.missing_tool_execution(agent, call));
+                ScheduledTool::Refused(reason) => {
+                    results[index] = Some(self.refused_tool_execution(agent, call, reason));
                     continue;
                 }
             };
@@ -1329,6 +1338,7 @@ impl ToolRuntime {
                 rewrite_source,
             } = admitted;
 
+            check_before_child_handler(options, is_child).await?;
             if let Err(error) = self.emit_tool_runtime_started(&call) {
                 let result = self.blocked_tool_result(&call, error);
                 let execution = self.completed_execution(
@@ -1438,7 +1448,8 @@ impl ToolRuntime {
         mut call: ToolCall,
         resolved: ResolvedTool,
         execution_category: ToolExecutionCategory,
-    ) -> CompletedToolExecution {
+        parent: Option<&ActiveToolCall<'_>>,
+    ) -> Result<CompletedToolExecution, RuntimeError> {
         let descriptor = resolved.descriptor().clone();
         let tool = resolved.handler;
 
@@ -1454,17 +1465,17 @@ impl ToolRuntime {
             .await
         {
             Ok(Admission::Run(admitted)) => *admitted,
-            Ok(Admission::Refused(execution)) => return *execution,
+            Ok(Admission::Refused(execution)) => return Ok(*execution),
             Err(error) => {
                 let result = self.blocked_tool_result(&call, error);
-                return self.completed_execution(
+                return Ok(self.completed_execution(
                     agent,
                     &call,
                     &descriptor,
                     result,
-                    RoundEffect::default(),
+                    RoundEffect::Continue,
                     None,
-                );
+                ));
             }
         };
         let AdmittedToolCall {
@@ -1473,24 +1484,30 @@ impl ToolRuntime {
             rewrite_source,
         } = admitted;
 
+        check_before_child_handler(options, parent.is_some()).await?;
         if let Err(error) = self.emit_tool_runtime_started(&call) {
             let result = self.blocked_tool_result(&call, error);
-            return self.completed_execution(
+            return Ok(self.completed_execution(
                 agent,
                 &call,
                 &descriptor,
                 result,
-                RoundEffect::default(),
+                RoundEffect::Continue,
                 None,
-            );
+            ));
         }
 
         let working_directory = authorization_ctx.working_directory.clone();
         let runtime = authorization_ctx.runtime.clone();
         let event_tx = agent.event_sender();
-        let (result, details, terminate, images) = self
-            .tool_output_block(
-                &call,
+        let active = ActiveToolCall {
+            call: &call,
+            parent,
+        };
+        let control = CompositionControl::default();
+        let output = control
+            .run(
+                options,
                 execute_tool_future(
                     &call.name,
                     descriptor.execution_timeout,
@@ -1504,23 +1521,59 @@ impl ToolRuntime {
                             agent,
                             event_tx,
                             run_options: options.clone(),
+                            dispatch: ChildDispatch::new(self, &active, &control),
                         },
                         call.input.clone(),
                     ),
-                )
-                .await,
-                rewrite_source.as_deref(),
+                ),
             )
             .await;
-        let effect = RoundEffect {
-            should_end_turn: agent.take_idle_requested() || terminate,
-            terminated: terminate,
+
+        let idle_requested = agent.take_idle_requested();
+        let (result, details, effect, images) = match output {
+            Ok(output) => {
+                let (result, details, terminate, images) = self
+                    .tool_output_block(&call, output, rewrite_source.as_deref())
+                    .await;
+                let effect = if terminate {
+                    RoundEffect::Terminate
+                } else if idle_requested {
+                    RoundEffect::Idle
+                } else {
+                    RoundEffect::Continue
+                };
+                (result, details, effect, images)
+            }
+            Err(CompositionExit::EndTurn { result, effect }) => (
+                ContentBlock::ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: result.content,
+                    is_error: result.is_error,
+                },
+                None,
+                effect,
+                Vec::new(),
+            ),
+            Err(CompositionExit::Stop) => {
+                options.record_early_end(EarlyEnd::StopRequested);
+                (
+                    ContentBlock::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: "Run stopped during tool composition".into(),
+                        is_error: true,
+                    },
+                    None,
+                    RoundEffect::Stop,
+                    Vec::new(),
+                )
+            }
+            Err(CompositionExit::Abort(error)) => return Err(error),
         };
         let mut execution =
             self.completed_execution(agent, &call, &descriptor, result, effect, details);
         execution.execution_hooks = execution_hooks;
         execution.images = images;
-        execution
+        Ok(execution)
     }
 }
 
@@ -1571,6 +1624,16 @@ impl ToolCallSchedule {
     }
 }
 
+impl ScheduledToolCall {
+    fn refused(call: ToolCall, reason: impl Into<String>) -> Self {
+        Self {
+            call,
+            tool: ScheduledTool::Refused(reason.into()),
+            execution_category: ToolExecutionCategory::ExclusiveLocalMutation,
+        }
+    }
+}
+
 impl ToolCallBatch {
     fn execution_count(&self) -> usize {
         match self {
@@ -1591,12 +1654,11 @@ impl ToolCallBatch {
     }
 }
 
-/// Builds the is_error result for a call that was never executed because an
-/// earlier call in the same round terminated the run.
-fn not_executed_result(call: &ToolCall, terminated_by: &str) -> ContentBlock {
+/// Result for a scheduled call skipped when the run ended.
+fn not_executed_result(call: &ToolCall, reason: &str) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_use_id: call.id.clone(),
-        content: format!("not executed: run terminated by '{terminated_by}'").into(),
+        content: format!("not executed: {reason}").into(),
         is_error: true,
     }
 }

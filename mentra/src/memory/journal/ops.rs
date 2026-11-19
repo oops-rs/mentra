@@ -46,6 +46,7 @@ impl AgentMemory {
             run_id,
             baseline_transcript: self.state.transcript.clone(),
             assistant_committed: false,
+            child_dispatch_started: false,
         });
         self.state.pending_turn = None;
         self.state.resumable_user_message = Some(user_message.clone());
@@ -67,6 +68,28 @@ impl AgentMemory {
         details: BTreeMap<String, serde_json::Value>,
     ) -> Result<(), RuntimeError> {
         self.append_transcript_item(transcript_item_from_message(message).with_details(details))
+    }
+
+    /// Commit the replay guard and the audit entry before a child can run.
+    pub fn start_child_tool_call(&mut self, item: TranscriptItem) -> Result<(), RuntimeError> {
+        let run = self
+            .state
+            .run
+            .as_mut()
+            .filter(|run| run.assistant_committed)
+            .ok_or_else(|| {
+                RuntimeError::Store("child tool call requires a committed turn".into())
+            })?;
+        run.child_dispatch_started = true;
+        self.state.resumable_user_message = None;
+        self.append_transcript_item(item)
+    }
+
+    pub fn has_open_child_dispatch(&self) -> bool {
+        self.state
+            .run
+            .as_ref()
+            .is_some_and(|run| run.child_dispatch_started)
     }
 
     pub fn append_transcript_item(&mut self, item: TranscriptItem) -> Result<(), RuntimeError> {
@@ -122,6 +145,7 @@ impl AgentMemory {
             run_id,
             baseline_transcript: self.state.transcript.clone(),
             assistant_committed: false,
+            child_dispatch_started: false,
         });
         self.state.pending_turn = None;
         self.persist()

@@ -590,8 +590,18 @@ impl Agent {
         self.transcript().children(entry)
     }
 
-    fn append_transcript_item(&mut self, item: TranscriptItem) -> Result<(), RuntimeError> {
+    pub(crate) fn append_transcript_item(
+        &mut self,
+        item: TranscriptItem,
+    ) -> Result<(), RuntimeError> {
         self.memory.append_transcript_item(item)
+    }
+
+    pub(crate) fn start_child_tool_call(
+        &mut self,
+        item: TranscriptItem,
+    ) -> Result<(), RuntimeError> {
+        self.memory.start_child_tool_call(item)
     }
 
     pub(crate) fn record_canonical_context(

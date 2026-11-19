@@ -256,7 +256,10 @@ mod tests {
         }
     }
 
-    fn exclusive_context(agent: &mut Agent) -> ToolContext<'_> {
+    fn exclusive_context<'a>(
+        agent: &'a mut Agent,
+        dispatch: crate::tool::orchestrator::ChildDispatch<'a>,
+    ) -> ToolContext<'a> {
         let agent_id = agent.id().to_string();
         let runtime = agent.runtime_handle();
         let event_tx = agent.event_sender();
@@ -267,6 +270,7 @@ mod tests {
             working_directory: std::env::temp_dir(),
             runtime,
             agent,
+            dispatch,
             event_tx,
             run_options: crate::runtime::RunOptions::default(),
         }
@@ -327,16 +331,47 @@ mod tests {
         assert_eq!(output.details, Some(json!({ "lane": "parallel" })));
         assert!(!output.terminate);
 
+        use crate::tool::{
+            ToolCall, ToolRuntime,
+            orchestrator::{
+                ChildDispatch,
+                child::{ActiveToolCall, CompositionControl},
+            },
+        };
+        let mut dispatch_runtime = ToolRuntime::new(agent);
+        let call = ToolCall {
+            id: "probe-call".to_string(),
+            name: PROBE_TOOL_NAME.to_string(),
+            input: input.clone(),
+        };
+        let active = ActiveToolCall {
+            call: &call,
+            parent: None,
+        };
+        let control = CompositionControl::default();
+
         // 6. ToolExecutor::execute_mut — `&self` despite the name.
         assert_eq!(
-            tool.execute_mut(exclusive_context(agent), input.clone())
-                .await,
+            tool.execute_mut(
+                exclusive_context(
+                    agent,
+                    ChildDispatch::new(&mut dispatch_runtime, &active, &control)
+                ),
+                input.clone()
+            )
+            .await,
             Ok("probe::execute_mut".to_string())
         );
 
         // 7. ToolExecutor::execute_mut_output
         let output = tool
-            .execute_mut_output(exclusive_context(agent), input.clone())
+            .execute_mut_output(
+                exclusive_context(
+                    agent,
+                    ChildDispatch::new(&mut dispatch_runtime, &active, &control),
+                ),
+                input.clone(),
+            )
             .await
             .expect("forwarded exclusive structured output");
         assert_eq!(

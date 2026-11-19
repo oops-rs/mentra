@@ -31,6 +31,7 @@ fn crash_mid_tool_round(store: &VolatileRuntimeStore, agent_id: &str) {
         run_id: "run-crashed".to_string(),
         baseline_transcript: baseline,
         assistant_committed: true,
+        child_dispatch_started: false,
     });
     store.save_agent_memory(agent_id, &memory).unwrap();
 }
