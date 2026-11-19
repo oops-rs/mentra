@@ -425,11 +425,6 @@ impl A2aClient {
         mut request: ListTasksRequest,
     ) -> Result<ListTasksResponse, A2aError> {
         request.tenant = self.transport.tenant.clone();
-        let status = request
-            .status
-            .as_ref()
-            .and_then(|status| serde_json::to_value(status).ok())
-            .and_then(|status| status.as_str().map(str::to_string));
         let operation = Operation::new(
             methods::LIST_TASKS,
             &request,
@@ -437,16 +432,11 @@ impl A2aClient {
             segments(["tasks"]),
         )?
         .query("contextId", request.context_id.as_ref())
-        .query("status", status)
+        .query_wire_string("status")?
         .query("pageSize", request.page_size)
         .query("pageToken", request.page_token.as_ref())
         .query("historyLength", request.history_length)
-        .query(
-            "statusTimestampAfter",
-            request
-                .status_timestamp_after
-                .map(|after| after.to_rfc3339()),
-        )
+        .query_wire_string("statusTimestampAfter")?
         .query("includeArtifacts", request.include_artifacts);
         let mut listed = self.transport.call_value(operation).await?;
         // ProtoJSON leaves out a field at its default value — the last page's

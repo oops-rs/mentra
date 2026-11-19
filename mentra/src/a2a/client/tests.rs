@@ -623,7 +623,10 @@ async fn list_tasks_sends_its_filters_and_reads_a_last_page() {
                 page_size: Some(10),
                 page_token: None,
                 history_length: None,
-                status_timestamp_after: None,
+                status_timestamp_after: Some(
+                    serde_json::from_value(json!("2026-01-01T01:30:00.5+01:30"))
+                        .expect("A2A timestamp"),
+                ),
                 include_artifacts: Some(false),
                 tenant: Some("ignored".to_string()),
             })
@@ -637,6 +640,7 @@ async fn list_tasks_sends_its_filters_and_reads_a_last_page() {
                 targets(&fixture),
                 [
                     "GET /rest/tasks?contextId=c1&status=TASK_STATE_WORKING&pageSize=10\
+                     &statusTimestampAfter=2026-01-01T00%3A00%3A00.500Z\
                      &includeArtifacts=false"
                 ]
             ),
@@ -644,6 +648,10 @@ async fn list_tasks_sends_its_filters_and_reads_a_last_page() {
                 let params = &fixture.params_of("ListTasks")[0];
                 assert_eq!(params["contextId"], json!("c1"));
                 assert_eq!(params["status"], json!("TASK_STATE_WORKING"));
+                assert_eq!(
+                    params["statusTimestampAfter"],
+                    json!("2026-01-01T00:00:00.500Z")
+                );
                 assert_eq!(params.get("tenant"), None, "the client's tenant wins");
             }
         }

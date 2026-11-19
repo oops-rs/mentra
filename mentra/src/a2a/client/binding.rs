@@ -144,6 +144,20 @@ impl Operation {
         self
     }
 
+    /// Copies a string from the serialized request into the REST query.
+    pub(super) fn query_wire_string(mut self, key: &'static str) -> Result<Self, A2aError> {
+        match self.params.get(key) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(value)) => self.query.push((key, value.clone())),
+            Some(_) => {
+                return Err(A2aError::Decode {
+                    method: self.method,
+                });
+            }
+        }
+        Ok(self)
+    }
+
     /// Activates `extensions` for this request, as the comma-separated list
     /// `A2A-Extensions` carries.
     ///
