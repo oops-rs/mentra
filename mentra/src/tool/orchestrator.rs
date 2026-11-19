@@ -1595,11 +1595,19 @@ fn rewritten_call_failure(rewrite_source: Option<&str>, failure: String) -> Stri
 
 impl ToolCallSchedule {
     fn new(runtime: &ToolRuntime, agent: &Agent, calls: Vec<ToolCall>) -> Self {
+        Self::group(
+            calls
+                .into_iter()
+                .map(|call| runtime.schedule_call(agent, call)),
+        )
+    }
+
+    /// Adjacent parallel-lane calls share a batch. Every other call runs alone.
+    fn group(calls: impl IntoIterator<Item = ScheduledToolCall>) -> Self {
         let mut batches = Vec::new();
         let mut pending_parallel = Vec::new();
 
-        for call in calls {
-            let scheduled = runtime.schedule_call(agent, call);
+        for scheduled in calls {
             match scheduled.execution_category {
                 ToolExecutionCategory::ReadOnlyParallel => pending_parallel.push(scheduled),
                 ToolExecutionCategory::ExclusiveLocalMutation

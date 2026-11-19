@@ -20,7 +20,8 @@ use crate::{
 };
 
 use super::{
-    PARALLEL_JOIN_POLL_INTERVAL, RoundEffect, ScheduledToolCall, ToolCallBatch, ToolRuntime,
+    PARALLEL_JOIN_POLL_INTERVAL, RoundEffect, ScheduledToolCall, ToolCallBatch, ToolCallSchedule,
+    ToolRuntime,
 };
 
 pub(in crate::tool) struct ActiveToolCall<'a> {
@@ -65,21 +66,21 @@ impl<'a> ChildDispatch<'a> {
         self.control.active.store(true, Ordering::Relaxed);
     }
 
+    /// Runs the calls as the dispatcher runs one response's calls: adjacent
+    /// parallel-lane calls together, every other call alone, in order.
     pub(in crate::tool) async fn invoke(
         &mut self,
         agent: &mut Agent,
         options: &RunOptions,
-        name: &str,
-        input: Value,
-    ) -> ReviewedToolResult {
+        calls: Vec<(String, Value)>,
+    ) -> Vec<ReviewedToolResult> {
         self.activate();
         if self.control.is_halting() {
             return pending().await;
         }
 
-        let exit = match self.invoke_inner(agent, options, name, input).await {
-            Ok((result, RoundEffect::Continue)) => return result,
-            Ok((result, effect)) => CompositionExit::EndTurn { result, effect },
+        let exit = match self.invoke_inner(agent, options, calls).await {
+            Ok(results) => return results,
             Err(exit) => exit,
         };
         self.control.halt(exit).await
@@ -89,66 +90,107 @@ impl<'a> ChildDispatch<'a> {
         &mut self,
         agent: &mut Agent,
         options: &RunOptions,
-        name: &str,
-        input: Value,
-    ) -> Result<(ReviewedToolResult, RoundEffect), CompositionExit> {
+        calls: Vec<(String, Value)>,
+    ) -> Result<Vec<ReviewedToolResult>, CompositionExit> {
+        let scheduled = calls
+            .into_iter()
+            .map(|(name, input)| {
+                let call = ToolCall {
+                    id: next_id("child"),
+                    name,
+                    input,
+                };
+                if self.active.contains(&call.name) {
+                    let reason = format!("Recursive tool call to '{}'", call.name);
+                    ScheduledToolCall::refused(call, reason)
+                } else {
+                    self.runtime.schedule_call(agent, call)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut results = Vec::with_capacity(scheduled.len());
+        for batch in ToolCallSchedule::group(scheduled).batches {
+            self.invoke_batch(agent, options, batch, &mut results)
+                .await?;
+        }
+        Ok(results)
+    }
+
+    async fn invoke_batch(
+        &mut self,
+        agent: &mut Agent,
+        options: &RunOptions,
+        batch: ToolCallBatch,
+        results: &mut Vec<ReviewedToolResult>,
+    ) -> Result<(), CompositionExit> {
         if let Some(exit) = CompositionExit::run_limit(options) {
             return Err(exit);
         }
-        self.runtime.reserve_tool_calls(options, 1)?;
-        let call = ToolCall {
-            id: next_id("child"),
-            name: name.to_owned(),
-            input,
-        };
+        self.runtime
+            .reserve_tool_calls(options, batch.execution_count())?;
+        let calls = batch.clone().into_calls();
         let parent_id = &self.active.call.id;
-        agent.start_child_tool_call(TranscriptItem::child_tool_event(
-            parent_id,
-            &call,
-            ChildToolEvent::Started,
-        ))?;
+        for call in &calls {
+            agent.start_child_tool_call(TranscriptItem::child_tool_event(
+                parent_id,
+                call,
+                ChildToolEvent::Started,
+            ))?;
+        }
         if let Some(exit) = CompositionExit::run_limit(options) {
             return Err(exit);
         }
 
-        let scheduled = if self.active.contains(name) {
-            ScheduledToolCall::refused(call.clone(), format!("Recursive tool call to '{name}'"))
-        } else {
-            self.runtime.schedule_call(agent, call.clone())
-        };
-        let batch = if scheduled.execution_category.allows_parallel() {
-            ToolCallBatch::Parallel(vec![scheduled])
-        } else {
-            ToolCallBatch::Exclusive(Box::new(scheduled))
-        };
-        let execution = {
+        let executions = {
             let scope = ChildAgentScope::new(agent, self.active.call);
-            let mut executions = self
+            let executions = self
                 .runtime
                 .execute_batch(scope.agent, options, batch, Some(self.active))
                 .await?;
-            self.runtime
-                .review_execution(scope.agent, executions.pop().expect("one scheduled child"))
-                .await?
-        };
-        let ContentBlock::ToolResult {
-            content, is_error, ..
-        } = execution.result
-        else {
-            unreachable!("the dispatcher returns a tool result for each call");
+            let mut reviewed = Vec::with_capacity(executions.len());
+            for execution in executions {
+                reviewed.push(
+                    self.runtime
+                        .review_execution(scope.agent, execution)
+                        .await?,
+                );
+            }
+            reviewed
         };
 
-        agent.append_transcript_item(TranscriptItem::child_tool_event(
-            parent_id,
-            &call,
-            ChildToolEvent::Finished { is_error },
-        ))?;
-        self.runtime.child_task_succeeded |= execution.task_succeeded;
+        // Only an exclusive call, alone in its batch, can end the turn.
+        let mut end_turn = None;
+        for (call, execution) in calls.iter().zip(executions) {
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = execution.result
+            else {
+                unreachable!("the dispatcher returns a tool result for each call");
+            };
+            agent.append_transcript_item(TranscriptItem::child_tool_event(
+                parent_id,
+                call,
+                ChildToolEvent::Finished { is_error },
+            ))?;
+            self.runtime.child_task_succeeded |= execution.task_succeeded;
+            let result = ReviewedToolResult { content, is_error };
+            if execution.effect == RoundEffect::Continue {
+                results.push(result);
+            } else {
+                end_turn.get_or_insert((result, execution.effect));
+            }
+        }
+
         options.check_limits()?;
-        if execution.effect != RoundEffect::Terminate && options.stop_requested() {
+        let terminated = matches!(end_turn, Some((_, RoundEffect::Terminate)));
+        if !terminated && options.stop_requested() {
             return Err(CompositionExit::Stop);
         }
-        Ok((ReviewedToolResult { content, is_error }, execution.effect))
+        match end_turn {
+            Some((result, effect)) => Err(CompositionExit::EndTurn { result, effect }),
+            None => Ok(()),
+        }
     }
 }
 
@@ -225,7 +267,7 @@ impl CompositionControl {
             .is_some()
     }
 
-    async fn halt(&self, exit: CompositionExit) -> ReviewedToolResult {
+    async fn halt<T>(&self, exit: CompositionExit) -> T {
         self.exit
             .lock()
             .expect("composition exit poisoned")

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+Additive.
+
+### A composing tool can dispatch several child calls at once
+
+- `ToolContext::invoke_children()` takes a list of child calls and runs them
+  as the dispatcher runs the calls of one model response. Adjacent calls to
+  `ReadOnlyParallel` tools run together. Every other call runs alone, in
+  order. Results come back in call order. Each call keeps its own admission,
+  budget charge, result review and transcript record.
+  `invoke_child()` is unchanged.
+
 ## 0.38.0 — 2026-11-19
 
 Breaking Rust API changes. Requires mentra-provider 0.11.0.

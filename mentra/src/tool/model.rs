@@ -120,8 +120,26 @@ impl ToolContext<'_> {
     /// local transcript records each child start and reviewed outcome under
     /// its parent call. An unmatched start has an unknown outcome.
     pub async fn invoke_child(&mut self, name: &str, input: Value) -> ReviewedToolResult {
+        self.invoke_children(vec![(name.to_owned(), input)])
+            .await
+            .pop()
+            .expect("one result for one child call")
+    }
+
+    /// Invokes several child calls as the dispatcher runs the calls of one
+    /// model response, and returns their results in call order.
+    ///
+    /// Adjacent calls to parallel-lane tools run together. Every other call
+    /// runs alone, after the calls before it. Each call is otherwise a
+    /// [`invoke_child`](Self::invoke_child) call: it has its own admission,
+    /// budget charge, review and transcript record. When one call ends the
+    /// turn, the calls after it do not start and this future does not return.
+    pub async fn invoke_children(
+        &mut self,
+        calls: Vec<(String, Value)>,
+    ) -> Vec<ReviewedToolResult> {
         self.dispatch
-            .invoke(self.agent, &self.run_options, name, input)
+            .invoke(self.agent, &self.run_options, calls)
             .await
     }
 

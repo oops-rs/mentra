@@ -823,3 +823,122 @@ async fn dropping_a_run_future_keeps_the_live_agent_from_replaying_children() {
     assert_eq!(ran.load(Ordering::SeqCst), 1);
     assert!(result(&agent, SCRIPT_CALL).is_error);
 }
+
+struct FanOut(Arc<Mutex<Vec<ReviewedToolResult>>>);
+
+impl ToolDefinition for FanOut {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("script").build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for FanOut {
+    async fn execute_mut_output(
+        &self,
+        mut ctx: ToolContext<'_>,
+        _input: Value,
+    ) -> Result<ToolOutput, String> {
+        let calls = ["meet", "meet", "alone", "meet", "meet"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| (name.to_owned(), json!({"index": index})))
+            .collect();
+        *self.0.lock().unwrap() = ctx.invoke_children(calls).await;
+        Ok(ToolOutput::text("selected result"))
+    }
+}
+
+/// Returns only once a second call is inside the handler with it.
+struct Meet(tokio::sync::Barrier);
+
+impl ToolDefinition for Meet {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("meet")
+            .execution_category(ToolExecutionCategory::ReadOnlyParallel)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for Meet {
+    async fn execute_output(
+        &self,
+        _ctx: ParallelToolContext,
+        input: Value,
+    ) -> Result<ToolOutput, String> {
+        self.0.wait().await;
+        Ok(ToolOutput::structured(input))
+    }
+}
+
+#[tokio::test]
+async fn a_batch_runs_adjacent_parallel_children_together_and_keeps_call_order() {
+    let provider = provider(vec![script_stream(), text_stream(MODEL, "after script")]);
+    let runtime = Runtime::empty_builder()
+        .with_provider_instance(provider.clone())
+        .with_tool(Meet(tokio::sync::Barrier::new(2)))
+        .build()
+        .unwrap();
+    let mut agent = runtime
+        .spawn("agent", model_info(MODEL, BuiltinProvider::Anthropic))
+        .unwrap();
+    let results = Arc::new(Mutex::new(Vec::new()));
+    agent.register_tool(FanOut(results.clone()));
+    agent.register_tool(Exclusive);
+
+    timeout(
+        Duration::from_secs(5),
+        agent.send(vec![ContentBlock::text("compose")]),
+    )
+    .await
+    .expect("parallel children overlap")
+    .unwrap();
+
+    let results = results.lock().unwrap();
+    let expected = [0, 1, 3, 4].map(|index| ToolResultContent::Structured(json!({"index": index})));
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| &result.content)
+            .collect::<Vec<_>>(),
+        [
+            &expected[0],
+            &expected[1],
+            &ToolResultContent::Text("alone".into()),
+            &expected[2],
+            &expected[3],
+        ],
+    );
+    // Starts are journalled per batch, so each batch's starts precede its finishes.
+    let phases = journal(agent.transcript())
+        .iter()
+        .map(|(_, detail)| detail["phase"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        phases,
+        [
+            "started", "started", "finished", "finished", "started", "finished", "started",
+            "started", "finished", "finished",
+        ],
+    );
+}
+
+struct Exclusive;
+
+impl ToolDefinition for Exclusive {
+    fn descriptor(&self) -> ToolSpec {
+        ToolSpec::builder("alone").build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for Exclusive {
+    async fn execute_mut_output(
+        &self,
+        _ctx: ToolContext<'_>,
+        _input: Value,
+    ) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::text("alone"))
+    }
+}
