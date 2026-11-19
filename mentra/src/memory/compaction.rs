@@ -433,9 +433,17 @@ fn tool_result_content_bytes(history: &[Message]) -> usize {
 /// bar has to say what the next turn will cost before it is sent. It is an
 /// estimate — cheap, provider-neutral, and never a substitute for the token
 /// counts a response reports.
+///
+/// An image counts as a fixed 1,600 tokens, never by its encoded bytes: a
+/// provider bills a picture by its pixels, and a screenshot's few megabytes of
+/// JPEG counted as text read as hundreds of thousands of tokens — over any
+/// threshold, before and after every compaction, so each step was summarized
+/// away and the model repeated it.
 pub fn estimated_request_tokens(messages: &[Message], system: Option<&str>) -> usize {
+    let (messages, images) = without_image_payloads(messages);
     let mut estimated =
-        estimated_tokens_for_str(&serde_json::to_string(messages).unwrap_or_default());
+        estimated_tokens_for_str(&serde_json::to_string(messages.as_ref()).unwrap_or_default())
+            .saturating_add(images.saturating_mul(IMAGE_TOKEN_ESTIMATE));
     if let Some(system) = system {
         estimated += estimated_tokens_for_str(system);
     }
@@ -484,6 +492,52 @@ fn estimated_tokens_for_str(text: &str) -> usize {
     text.chars().count().div_ceil(4)
 }
 
+/// What one image is assumed to cost: about what the major providers charge
+/// for a picture at their largest default resolution.
+const IMAGE_TOKEN_ESTIMATE: usize = 1_600;
+
+/// The history with every image's payload taken out, and how many there were.
+/// Borrows when there is no image, which is nearly always.
+fn without_image_payloads(messages: &[Message]) -> (Cow<'_, [Message]>, usize) {
+    fn carries_image(block: &ContentBlock) -> bool {
+        match block {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::ImageGeneration { call } => call.result.is_some(),
+            _ => false,
+        }
+    }
+
+    let images = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| carries_image(block))
+        .count();
+    if images == 0 {
+        return (Cow::Borrowed(messages), 0);
+    }
+    let stripped = messages
+        .iter()
+        .map(|message| Message {
+            role: message.role.clone(),
+            content: message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Image { .. } => None,
+                    ContentBlock::ImageGeneration { call } => Some(ContentBlock::ImageGeneration {
+                        call: mentra_provider::ImageGenerationCall {
+                            result: None,
+                            ..call.clone()
+                        },
+                    }),
+                    other => Some(other.clone()),
+                })
+                .collect(),
+        })
+        .collect();
+    (Cow::Owned(stripped), images)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +559,28 @@ mod tests {
             with_system > without_system,
             "the system prompt is part of what the request will cost"
         );
+    }
+
+    #[test]
+    fn an_image_is_estimated_by_what_it_costs_not_by_its_bytes() {
+        // A 1.3 MB screenshot used to estimate at hundreds of thousands of
+        // tokens: over any threshold after every compaction, so each step was
+        // summarized away and the model repeated it.
+        let text = Message::user(ContentBlock::text("look at this"));
+        let screenshot = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::text("look at this"),
+                ContentBlock::Image {
+                    source: crate::ImageSource::bytes("image/jpeg", vec![0xFF; 1_300_000]),
+                },
+            ],
+        };
+
+        let plain = estimated_request_tokens(std::slice::from_ref(&text), None);
+        let with_image = estimated_request_tokens(&[screenshot], None);
+
+        assert_eq!(with_image, plain + IMAGE_TOKEN_ESTIMATE);
     }
 
     #[test]

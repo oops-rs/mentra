@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.36.2 — 2026-11-19
+
+Fix. mentra-provider is unchanged at 0.10.0.
+
+### An image no longer reads as hundreds of thousands of tokens
+
+- `estimated_request_tokens`, which auto-compaction is checked against, now
+  counts each image (and each generated image's result) as a fixed 1,600
+  tokens instead of the JSON of its bytes. A 1.3 MB screenshot used to
+  estimate at ~440,000 tokens. Compaction keeps the latest user turn, so a
+  run holding it stayed over every threshold and compacted before each step.
+  That summarized the turn's own progress away, and the model repeated its
+  last step until its deadline. A history with no image estimates exactly as
+  before.
+
 ## 0.37.0 — 2026-11-19
 
 Additive. Requires mentra-provider 0.10.0.
