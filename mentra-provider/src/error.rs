@@ -200,7 +200,22 @@ fn parse_retry_after(value: &str, now: Timestamp) -> Option<Duration> {
 
 /// Parses an IMF-fixdate, the `Sun, 06 Nov 1994 08:49:37 GMT` spelling.
 fn parse_http_date(value: &str) -> Option<Timestamp> {
-    let date = DateTime::strptime("%a, %d %b %Y %H:%M:%S GMT", value).ok()?;
+    const DATE: &str = "%d %b %Y %H:%M:%S GMT";
+    let (weekday, value) = value.split_at_checked(5)?;
+    if !matches!(
+        weekday,
+        "Mon, " | "Tue, " | "Wed, " | "Thu, " | "Fri, " | "Sat, " | "Sun, "
+    ) {
+        return None;
+    }
+
+    // The former parser checked the weekday's spelling and took its date from
+    // the calendar fields. The round trip keeps the fixed widths and casing
+    // and rejects inputs that strptime normalizes, such as a leap second.
+    let date = DateTime::strptime(DATE, value).ok()?;
+    if date.strftime(DATE).to_string() != value {
+        return None;
+    }
     Offset::UTC.to_timestamp(date).ok()
 }
 
@@ -301,6 +316,14 @@ mod tests {
     }
 
     #[test]
+    fn an_http_date_uses_the_calendar_fields_when_the_weekday_disagrees() {
+        assert_eq!(
+            parse_retry_after("Mon, 06 Nov 1994 08:50:37 GMT", now()),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
     fn an_http_date_that_has_passed_means_retry_now() {
         assert_eq!(
             parse_retry_after("Sun, 06 Nov 1994 08:49:00 GMT", now()),
@@ -311,18 +334,21 @@ mod tests {
 
     #[test]
     fn an_unparseable_value_is_no_hint_at_all() {
-        assert_eq!(parse_retry_after("", now()), None);
-        assert_eq!(parse_retry_after("soon", now()), None);
-        assert_eq!(parse_retry_after("-5", now()), None);
-        assert_eq!(
-            parse_retry_after("Sunday, 06-Nov-94 08:50:37 GMT", now()),
-            None
-        );
-        assert_eq!(parse_retry_after("Sun Nov  6 08:50:37 1994", now()), None);
-        assert_eq!(
-            parse_retry_after("Sun, 06 Nov 1994 08:50:37 UTC", now()),
-            None
-        );
+        for value in [
+            "",
+            "soon",
+            "-5",
+            "Sunday, 06-Nov-94 08:50:37 GMT",
+            "Sun Nov  6 08:50:37 1994",
+            "Sun, 06 Nov 1994 08:50:37 UTC",
+            "sun, 06 Nov 1994 08:50:37 GMT",
+            "Sun, 06 nov 1994 08:50:37 GMT",
+            "Sun, 6 Nov 1994 08:50:37 GMT",
+            "Sun, 06 Nov 1994 8:50:37 GMT",
+            "Sun, 06 Nov 1994 08:50:60 GMT",
+        ] {
+            assert_eq!(parse_retry_after(value, now()), None, "{value:?}");
+        }
     }
 
     #[test]
