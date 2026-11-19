@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, net::SocketAddr, time::Duration as StdDuration};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use jiff::{SignedDuration, Timestamp};
 use rand::RngCore;
 use reqwest::StatusCode;
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
-use time::{Duration, OffsetDateTime};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -59,12 +59,15 @@ pub struct OpenAITokenSet {
     pub refresh_token: String,
     pub id_token: Option<String>,
     pub api_key: Option<String>,
-    pub expires_at: OffsetDateTime,
+    /// The token expiry instant. Saved credentials use the legacy timestamp
+    /// tuple with a UTC offset.
+    #[serde(with = "mentra_provider::legacy_timestamp")]
+    pub expires_at: Timestamp,
 }
 
 impl OpenAITokenSet {
-    pub fn is_expired(&self, refresh_skew: Duration) -> bool {
-        self.expires_at <= OffsetDateTime::now_utc() + refresh_skew
+    pub fn is_expired(&self, refresh_skew: SignedDuration) -> bool {
+        self.expires_at.duration_since(Timestamp::now()) <= refresh_skew
     }
 
     pub fn require_api_key(&self) -> Result<&str, OpenAIOAuthError> {
@@ -86,13 +89,15 @@ struct TokenResponse {
 }
 
 impl TokenResponse {
-    fn into_tokens(self) -> OpenAITokenSet {
+    fn into_tokens(self, received_at: Timestamp) -> OpenAITokenSet {
         OpenAITokenSet {
             access_token: self.access_token,
             refresh_token: self.refresh_token,
             id_token: self.id_token,
             api_key: self.api_key,
-            expires_at: OffsetDateTime::now_utc() + Duration::seconds(self.expires_in_seconds),
+            expires_at: received_at
+                .saturating_add(SignedDuration::from_secs(self.expires_in_seconds))
+                .expect("signed duration arithmetic saturates"),
         }
     }
 }
@@ -233,7 +238,7 @@ async fn parse_token_response(
     }
 
     let body = response.json::<TokenResponse>().await?;
-    Ok(body.into_tokens())
+    Ok(body.into_tokens(Timestamp::now()))
 }
 
 async fn receive_code(
@@ -317,11 +322,26 @@ mod tests {
             refresh_token: "refresh".into(),
             id_token: None,
             api_key: Some("api".into()),
-            expires_at: OffsetDateTime::now_utc() + Duration::seconds(30),
+            expires_at: Timestamp::now()
+                .checked_add(SignedDuration::from_secs(30))
+                .expect("valid expiry"),
         };
 
-        assert!(tokens.is_expired(Duration::seconds(60)));
-        assert!(!tokens.is_expired(Duration::seconds(5)));
+        assert!(tokens.is_expired(SignedDuration::from_secs(60)));
+        assert!(!tokens.is_expired(SignedDuration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_refresh_response_calculates_expiry_from_its_lifetime() {
+        let response: TokenResponse = serde_json::from_str(
+            r#"{"access_token":"new-access","refresh_token":"new-refresh",
+                "api_key":"new-api-key","expires_in_seconds":120}"#,
+        )
+        .expect("valid token response");
+        let tokens = response.into_tokens("2025-01-01T23:59:00Z".parse().unwrap());
+        assert_eq!(tokens.expires_at, "2025-01-02T00:01:00Z".parse().unwrap());
+        assert_eq!(tokens.refresh_token, "new-refresh");
+        assert_eq!(tokens.require_api_key().unwrap(), "new-api-key");
     }
 
     #[test]

@@ -281,7 +281,7 @@ fn command_error(output: std::process::Output, command: &'static str) -> OpenAIO
 mod tests {
     use std::sync::Mutex;
 
-    use time::{Duration, OffsetDateTime};
+    use jiff::{SignedDuration, Timestamp};
 
     use super::*;
 
@@ -324,7 +324,9 @@ mod tests {
             refresh_token: "refresh".into(),
             id_token: Some("id".into()),
             api_key: Some("api".into()),
-            expires_at: OffsetDateTime::now_utc() + Duration::seconds(60),
+            expires_at: Timestamp::now()
+                .checked_add(SignedDuration::from_secs(60))
+                .expect("valid expiry"),
         };
 
         store.save(&tokens).expect("save tokens");
@@ -336,6 +338,38 @@ mod tests {
                 .api_key,
             Some("api".into())
         );
+    }
+
+    #[test]
+    fn file_store_reads_and_resaves_legacy_credentials() {
+        use serde_json::json;
+
+        let path = std::env::temp_dir().join(format!(
+            "{}.json",
+            crate::runtime::next_id("mentra-legacy-oauth")
+        ));
+        let store = FileTokenStore::new(path);
+        let legacy = json!({
+            "access_token": "legacy-access",
+            "refresh_token": "legacy-refresh",
+            "api_key": "legacy-api-key",
+            "expires_at": [2020, 60, 22, 50, 30, 1, -1, -15, -20]
+        });
+        fs::write(store.path(), legacy.to_string()).expect("write legacy fixture");
+
+        let tokens = store.load().expect("load legacy file").expect("tokens");
+        assert_eq!(
+            tokens.expires_at,
+            "2020-03-01T00:05:50.000000001Z".parse().unwrap()
+        );
+        assert_eq!(tokens.refresh_token, "legacy-refresh");
+        assert_eq!(tokens.require_api_key().unwrap(), "legacy-api-key");
+
+        store.save(&tokens).expect("save migrated tokens");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).expect("read tokens")).expect("json");
+        assert_eq!(saved["expires_at"], json!([2020, 61, 0, 5, 50, 1, 0, 0, 0]));
+        store.clear().expect("remove test file");
     }
 
     #[test]

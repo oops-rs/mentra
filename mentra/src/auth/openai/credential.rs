@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use time::Duration;
+use jiff::SignedDuration;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -16,7 +16,7 @@ pub struct OpenAIOAuthCredentialSource {
     client: OpenAIOAuthClient,
     tokens: Mutex<OpenAITokenSet>,
     store: Option<Arc<dyn TokenStore>>,
-    refresh_skew: Duration,
+    refresh_skew: SignedDuration,
 }
 
 impl OpenAIOAuthCredentialSource {
@@ -25,7 +25,7 @@ impl OpenAIOAuthCredentialSource {
             client,
             tokens: Mutex::new(tokens),
             store: None,
-            refresh_skew: Duration::seconds(60),
+            refresh_skew: SignedDuration::from_secs(60),
         }
     }
 
@@ -34,7 +34,7 @@ impl OpenAIOAuthCredentialSource {
         self
     }
 
-    pub fn with_refresh_skew(mut self, refresh_skew: Duration) -> Self {
+    pub fn with_refresh_skew(mut self, refresh_skew: SignedDuration) -> Self {
         self.refresh_skew = refresh_skew;
         self
     }
