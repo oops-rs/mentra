@@ -9,7 +9,6 @@ publish = false
 mentra = { path = "../mentra", features = ["openai-oauth"] }
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
 dotenvy = "0.15"
-time = { version = "0.3", features = ["formatting"] }
 async-trait = "0.1.89"
 serde_json = "1.0.149"
 serde = { version = "1.0.228", features = ["derive"] }

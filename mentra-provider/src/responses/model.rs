@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
 
 use crate::ProviderId;
 use crate::{
@@ -68,7 +68,8 @@ impl ResponsesModel {
                 .or_else(|| self.owned_by.map(|owner| format!("Owned by {owner}"))),
             created_at: self
                 .created
-                .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp as i64).ok()),
+                .and_then(|timestamp| i64::try_from(timestamp).ok())
+                .and_then(|timestamp| Timestamp::from_second(timestamp).ok()),
             // Neither OpenAI's listing nor any Responses-compatible one reports
             // a context window.
             context_window: None,
@@ -786,8 +787,8 @@ impl From<ToolChoice> for ResponsesToolChoice {
 mod tests {
     use std::{borrow::Cow, collections::BTreeMap};
 
+    use jiff::Timestamp;
     use serde_json::json;
-    use time::OffsetDateTime;
 
     use crate::{
         ContentBlock, HostedToolSearchCall, HostedWebSearchCall, ImageGenerationCall,
@@ -1246,7 +1247,7 @@ mod tests {
 
         assert_eq!(
             info.created_at,
-            Some(OffsetDateTime::from_unix_timestamp(1_741_049_700).expect("valid timestamp"))
+            Some(Timestamp::from_second(1_741_049_700).expect("valid timestamp"))
         );
     }
 

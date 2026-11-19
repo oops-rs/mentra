@@ -11,3 +11,4 @@ homepage = "https://github.com/oops-rs/mentra"
 
 [workspace.dependencies]
 glob-match = "0.2"
+jiff = { version = "0.2.46", default-features = false, features = ["std"] }

@@ -1718,10 +1718,8 @@ fn spawn_models_server(response_body: &str) -> (String, thread::JoinHandle<Strin
 
 fn model_with_created_at(id: &str, provider: BuiltinProvider, unix_timestamp: i64) -> ModelInfo {
     let mut model = ModelInfo::new(id, provider);
-    model.created_at = Some(
-        time::OffsetDateTime::from_unix_timestamp(unix_timestamp)
-            .expect("timestamp should be valid"),
-    );
+    model.created_at =
+        Some(jiff::Timestamp::from_second(unix_timestamp).expect("timestamp should be valid"));
     model
 }
 

@@ -216,7 +216,7 @@ where
                 let mut info = ModelInfo::new(model.id, provider.clone());
                 info.created_at = model
                     .created
-                    .and_then(|created| time::OffsetDateTime::from_unix_timestamp(created).ok());
+                    .and_then(|created| jiff::Timestamp::from_second(created).ok());
                 info
             })
             .collect())

@@ -9,7 +9,6 @@ use mentra::{
     runtime::{SqliteRuntimeStore, TaskItem, TaskStatus},
     tool::ToolCall,
 };
-use time::format_description::well_known::Rfc3339;
 
 #[tokio::main]
 async fn main() {
@@ -288,9 +287,6 @@ async fn pick_model(runtime: &mentra::Runtime) -> mentra::ModelInfo {
         }
 
         if let Some(created_at) = model.created_at {
-            let created_at = created_at
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| created_at.unix_timestamp().to_string());
             println!("     created_at: {created_at}");
         }
     }

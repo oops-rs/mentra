@@ -39,6 +39,7 @@ a2a = ["dep:a2a_lf"]
 test-utils = []
 
 [dependencies]
+jiff.workspace = true
 mentra-provider = { version = "0.10.0", path = "../mentra-provider", default-features = false }
 tokio = { version = "1.53.3", features = [
     "fs", "io-util", "macros", "net", "parking_lot", "process", "rt-multi-thread", "sync", "time",

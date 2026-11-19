@@ -1,7 +1,7 @@
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fmt::Display, io};
-use time::OffsetDateTime;
 
 /// Metadata describing a model available from a provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,7 +10,10 @@ pub struct ModelInfo {
     pub provider: crate::ProviderId,
     pub display_name: Option<String>,
     pub description: Option<String>,
-    pub created_at: Option<OffsetDateTime>,
+    /// When the model was created, as an instant in the Jiff timestamp range.
+    /// Serialized values retain the legacy tuple format with a UTC offset.
+    #[serde(default, with = "crate::legacy_timestamp::option")]
+    pub created_at: Option<Timestamp>,
     /// How many tokens the model accepts in one request, when the provider
     /// says so.
     ///
@@ -422,6 +425,34 @@ impl ContentBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_existing_model_timestamp_keeps_its_instant_and_tuple_encoding() {
+        use serde_json::json;
+
+        let mut fixture =
+            serde_json::to_value(ModelInfo::new("legacy", crate::BuiltinProvider::OpenAI))
+                .expect("model fixture");
+        for legacy in [
+            json!([1970, 1, 0, 30, 0, 123456789, 1, 0, 0]),
+            json!("1970-01-01 00:30:00.123456789 +01:00:00"),
+        ] {
+            fixture["created_at"] = legacy;
+            let model: ModelInfo = serde_json::from_value(fixture.clone()).expect("legacy model");
+            assert_eq!(
+                model.created_at,
+                Some("1969-12-31T23:30:00.123456789Z".parse().unwrap())
+            );
+            let serialized = serde_json::to_value(model).expect("serialize model");
+            assert_eq!(
+                serialized["created_at"],
+                json!([1969, 365, 23, 30, 0, 123456789, 0, 0, 0])
+            );
+        }
+        fixture.as_object_mut().unwrap().remove("created_at");
+        let absent: ModelInfo = serde_json::from_value(fixture).expect("model without timestamp");
+        assert_eq!(absent.created_at, None);
+    }
 
     #[test]
     fn tool_result_length_matches_compact_json_bytes() {

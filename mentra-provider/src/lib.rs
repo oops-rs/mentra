@@ -8,6 +8,8 @@ pub mod embedding;
 mod error;
 pub mod gateway_ring;
 pub mod gemini;
+#[doc(hidden)]
+pub mod legacy_timestamp;
 mod model;
 mod model_prefix;
 mod registry;

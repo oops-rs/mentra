@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use jiff::{Timestamp, civil::DateTime, tz::Offset};
 use thiserror::Error;
-use time::{OffsetDateTime, PrimitiveDateTime};
 
 /// Errors returned by provider implementations and stream adapters.
 #[derive(Debug, Error)]
@@ -163,7 +163,7 @@ pub(crate) fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> 
 /// Reads one already-extracted `Retry-After` value, for transports that carry
 /// their headers as something other than a [`HeaderMap`](reqwest::header::HeaderMap).
 pub(crate) fn retry_after_from_header_value(value: &str) -> Option<Duration> {
-    parse_retry_after(value, OffsetDateTime::now_utc())
+    parse_retry_after(value, Timestamp::now())
 }
 
 /// Parses a `Retry-After` value against a known `now`.
@@ -179,7 +179,7 @@ pub(crate) fn retry_after_from_header_value(value: &str) -> Option<Duration> {
 /// is understood; the two obsolete formats it only requires recipients to
 /// tolerate are read as no hint at all, which costs nothing but the schedule's
 /// own delay.
-fn parse_retry_after(value: &str, now: OffsetDateTime) -> Option<Duration> {
+fn parse_retry_after(value: &str, now: Timestamp) -> Option<Duration> {
     let value = value.trim();
     if value.is_empty() {
         return None;
@@ -190,22 +190,18 @@ fn parse_retry_after(value: &str, now: OffsetDateTime) -> Option<Duration> {
     }
 
     let deadline = parse_http_date(value)?;
-    Some((deadline - now).try_into().unwrap_or(Duration::ZERO))
+    Some(
+        deadline
+            .duration_since(now)
+            .try_into()
+            .unwrap_or(Duration::ZERO),
+    )
 }
 
 /// Parses an IMF-fixdate, the `Sun, 06 Nov 1994 08:49:37 GMT` spelling.
-fn parse_http_date(value: &str) -> Option<OffsetDateTime> {
-    // `parse_borrowed` rather than `parse`: the latter is deprecated from
-    // time 0.3.55 and a downstream resolving a newer `time` would see the
-    // warning in this crate. Version 2 of the description syntax, which the
-    // spelling below is already written in.
-    let format = time::format_description::parse_borrowed::<2>(
-        "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT",
-    )
-    .ok()?;
-    PrimitiveDateTime::parse(value, format.as_slice())
-        .ok()
-        .map(PrimitiveDateTime::assume_utc)
+fn parse_http_date(value: &str) -> Option<Timestamp> {
+    let date = DateTime::strptime("%a, %d %b %Y %H:%M:%S GMT", value).ok()?;
+    Offset::UTC.to_timestamp(date).ok()
 }
 
 #[cfg(test)]
@@ -264,14 +260,9 @@ mod tests {
 
     use super::*;
 
-    /// The instant in RFC 9110's own `Retry-After` example, built without the
-    /// `time` macros feature so the crate's dependency set stays as it is.
-    fn now() -> OffsetDateTime {
-        time::Date::from_calendar_date(1994, time::Month::November, 6)
-            .expect("a real date")
-            .with_hms(8, 49, 37)
-            .expect("a real time")
-            .assume_utc()
+    /// The instant in RFC 9110's own `Retry-After` example.
+    fn now() -> Timestamp {
+        "1994-11-06T08:49:37Z".parse().expect("valid timestamp")
     }
 
     #[test]
@@ -299,6 +290,17 @@ mod tests {
     }
 
     #[test]
+    fn an_http_date_preserves_the_fractional_wait() {
+        let now = now()
+            .checked_add(jiff::SignedDuration::from_millis(250))
+            .expect("valid timestamp");
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:50:37 GMT", now),
+            Some(Duration::from_millis(59_750))
+        );
+    }
+
+    #[test]
     fn an_http_date_that_has_passed_means_retry_now() {
         assert_eq!(
             parse_retry_after("Sun, 06 Nov 1994 08:49:00 GMT", now()),
@@ -312,6 +314,15 @@ mod tests {
         assert_eq!(parse_retry_after("", now()), None);
         assert_eq!(parse_retry_after("soon", now()), None);
         assert_eq!(parse_retry_after("-5", now()), None);
+        assert_eq!(
+            parse_retry_after("Sunday, 06-Nov-94 08:50:37 GMT", now()),
+            None
+        );
+        assert_eq!(parse_retry_after("Sun Nov  6 08:50:37 1994", now()), None);
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:50:37 UTC", now()),
+            None
+        );
     }
 
     #[test]

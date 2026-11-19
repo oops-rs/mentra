@@ -1,7 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     BuiltinProvider, ContentBlock, ImageSource, Message, ModelInfo, ProviderError, ProviderId,
@@ -35,7 +34,7 @@ impl From<AnthropicModel> for ModelInfo {
             created_at: model
                 .created_at
                 .as_deref()
-                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
+                .and_then(|value| value.parse().ok()),
             // Anthropic's model listing does not report a context window.
             context_window: None,
         }
@@ -834,8 +833,6 @@ fn message_has_image(message: &Message) -> bool {
 mod tests {
     use std::{borrow::Cow, collections::BTreeMap};
 
-    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-
     use crate::{
         AnthropicRequestOptions, ContentBlock, ImageSource, Message, ModelInfo, ProviderError,
         ProviderId, ProviderRequestOptions, ReasoningEffort, ReasoningFormat, ReasoningOptions,
@@ -949,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_rfc3339_timestamp_to_offset_datetime() {
+    fn converts_rfc3339_to_timestamp() {
         let raw = "2025-03-04T12:34:56Z";
         let model = AnthropicModel {
             id: "claude-test".to_string(),
@@ -959,10 +956,7 @@ mod tests {
 
         let info = ModelInfo::from(model);
 
-        assert_eq!(
-            info.created_at,
-            Some(OffsetDateTime::parse(raw, &Rfc3339).expect("valid rfc3339"))
-        );
+        assert_eq!(info.created_at, Some(raw.parse().expect("valid rfc3339")));
     }
 
     #[test]
